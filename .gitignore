@@ -1,0 +1,61 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+.env
+
+# typescript
+*.tsbuildinfo
+
+# generated native folders
+/ios
+/android
+
+# Example / template folders
+app-example
+
+# Firebase / Google secrets - NEVER commit service account keys
+# Specific leaked key (from previous incident)
+bonded-app-c8483-7f5b8d18e9ce.json
+
+# Common Firebase / Google Cloud service account key patterns
+*.iam.gserviceaccount.com.json
+firebase-adminsdk-*.json
+serviceAccount*.json
+*-service-account.json
+service-account-key.json
+
+# Your custom import script folder (if it contains secrets or large data)
+# firestore-student-import/
+
+# End of .gitignore
