@@ -1,7 +1,0 @@
-node_modules
-
-# Expo
-.expo/
-
-# Firebase Admin SDK
-firestore-student-import/serviceAccountKey.json
