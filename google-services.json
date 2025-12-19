@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "577448221286",
+    "project_id": "bonded-app-c8483",
+    "storage_bucket": "bonded-app-c8483.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:577448221286:android:ae938382403ed8859c2ba7",
+        "android_client_info": {
+          "package_name": "com.encabo.bondedapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDDYZ5ecs7MZo9ogEtgLiA0Z9T1paek__Q"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
