@@ -10,8 +10,7 @@ export default function RootLayout() {
   const [initializing, setInitializing] = useState(true);
   const segments = useSegments();
   const router = useRouter();
-  const navigationTimeoutRef = useRef<number | null>(null);
-
+const navigationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       console.log("Auth state changed:", currentUser ? "Logged in" : "Logged out");
