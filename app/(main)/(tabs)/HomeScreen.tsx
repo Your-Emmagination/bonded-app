@@ -39,8 +39,6 @@ import { auth, db } from "../../../Firebase_configure";
 import PollCard from "../components/PollCard";
 import PostCard from "../components/PostCard";
 import { useNetworkStatus } from "../../../utils/networkUtils";
-import { OfflineBanner } from "../components/OfflineBanner";
-
 export const tabBarTranslateY = new Animated.Value(0);
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -752,9 +750,7 @@ const renderFeedItem = ({ item }: { item: FeedItem }) => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      {isOffline && <OfflineBanner />}
-      
+    <SafeAreaView style={styles.container}>      
       <View style={styles.header}>
         <TouchableOpacity>
           <Ionicons name="menu" size={24} color="#b8c7ff" />

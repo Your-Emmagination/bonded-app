@@ -14,6 +14,7 @@ import {
   Alert,
   Linking,
   Dimensions,
+  Animated,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
@@ -37,28 +38,6 @@ import CommentComposer from "./CommentComposer";
 import { getUserData, getRoleColor, getRoleDisplayName } from "@/utils/rbac";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
-
-// Simple keyboard height hook
-const useKeyboard = () => {
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
-
-  useEffect(() => {
-    const show = Keyboard.addListener(
-      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
-      (e) => setKeyboardHeight(e.endCoordinates.height)
-    );
-    const hide = Keyboard.addListener(
-      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
-      () => setKeyboardHeight(0)
-    );
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
-
-  return keyboardHeight;
-};
 
 type Reply = {
   id: string;
@@ -88,6 +67,353 @@ type ReplyThreadProps = {
   currentUser: any;
 };
 
+// ─── Role helpers ────────────────────────────────────────────────────────────
+const ROLE_PRIORITY = ["admin", "moderator", "teacher", "student"];
+
+function getAuthorRole(authorData: any, itemRole?: string) {
+  return authorData?.role || itemRole || "student";
+}
+
+// ─── Single reply bubble ──────────────────────────────────────────────────────
+const ReplyBubble: React.FC<{
+  item: Reply;
+  currentUser: any;
+  prevItem?: Reply;
+  onLike: (id: string, likedBy: string[]) => void;
+  onReplyClick: (id: string, name: string, text: string) => void;
+  onLongPress: (item: Reply) => void;
+  onProfileClick: (item: Reply) => void;
+  onTagClick: (userId: string) => void;
+  onLinkPress: (url: string) => void;
+  onFilePress: (url: string, name: string) => void;
+  onImagePress: (images: string[], index: number) => void;
+  getTimeAgo: (ts: any) => string;
+  getFileDisplayName: (f: { url: string; mimeType: string; name?: string }) => string;
+}> = ({
+  item,
+  currentUser,
+  prevItem,
+  onLike,
+  onReplyClick,
+  onLongPress,
+  onProfileClick,
+  onTagClick,
+  onLinkPress,
+  onFilePress,
+  onImagePress,
+  getTimeAgo,
+  getFileDisplayName,
+}) => {
+  const [authorData, setAuthorData] = useState<any>(null);
+  const [revealed, setRevealed] = useState(false);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  const isCurrentUser =
+    (item.realUserId && item.realUserId === currentUser?.uid) ||
+    item.userId === currentUser?.uid;
+  const isAnon = item.isAnonymous ?? false;
+
+  // Determine if we show avatar/name (group consecutive messages from same sender)
+  const isSameSenderAsPrev =
+    prevItem &&
+    (prevItem.realUserId || prevItem.userId) === (item.realUserId || item.userId) &&
+    prevItem.isAnonymous === item.isAnonymous;
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, []);
+
+  useEffect(() => {
+    const fetchAuthor = async () => {
+      const uid = item.realUserId || item.userId;
+      if (uid && uid !== "anonymous") {
+        try {
+          const data = await getUserData(uid);
+          setAuthorData(data);
+        } catch {}
+      }
+    };
+    fetchAuthor();
+  }, [item.realUserId, item.userId]);
+
+  const authorRole = getAuthorRole(authorData, item.role);
+  const roleColor = getRoleColor(authorRole);
+  const roleDisplayName = getRoleDisplayName(authorRole);
+  const isPrivileged = authorRole !== "student";
+
+  const canReveal =
+    isAnon &&
+    (currentUser?.role === "admin" ||
+      currentUser?.role === "moderator" ||
+      (currentUser?.role === "teacher" && authorRole === "student"));
+
+  const isIdentityVisible = !isAnon || (revealed && canReveal);
+
+  const displayName = isIdentityVisible
+    ? authorData
+      ? `${authorData.firstname} ${authorData.lastname}`
+      : item.username || "User"
+    : "Anonymous";
+
+  const initial = isIdentityVisible
+    ? (authorData?.firstname?.[0] || displayName[0] || "A").toUpperCase()
+    : "?";
+
+  const isLiked = (item.likedBy || []).includes(currentUser?.uid || "");
+
+  const imageFiles = (item.files || []).filter(
+    (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif")
+  );
+  const gifFiles = (item.files || []).filter((f) => f.mimeType.includes("gif"));
+  const docFiles = (item.files || []).filter((f) => !f.mimeType.startsWith("image/"));
+  const taggedUsers = item.taggedUsers ?? [];
+
+  const showHeader = !isSameSenderAsPrev;
+
+  return (
+    <Animated.View
+      style={[
+        styles.messageRow,
+        isCurrentUser ? styles.messageRowRight : styles.messageRowLeft,
+        { opacity: fadeAnim },
+        isSameSenderAsPrev ? { marginTop: 2 } : { marginTop: 10 },
+      ]}
+    >
+      {/* Avatar — only for others, only when not grouped */}
+      {!isCurrentUser && (
+        <View style={styles.avatarColumn}>
+          {showHeader ? (
+            <TouchableOpacity
+              onPress={() => onProfileClick(item)}
+              disabled={!isIdentityVisible}
+              activeOpacity={0.8}
+            >
+              <View
+                style={[
+                  styles.avatar,
+                  isIdentityVisible && isPrivileged
+                    ? { borderColor: roleColor, borderWidth: 2 }
+                    : { borderColor: "#243054", borderWidth: 1 },
+                ]}
+              >
+                {isIdentityVisible && item.profilePic ? (
+                  <Image source={{ uri: item.profilePic }} style={styles.avatarImg} />
+                ) : isIdentityVisible ? (
+                  <Text style={[styles.avatarInitial, { color: roleColor }]}>{initial}</Text>
+                ) : (
+                  <Ionicons name="person" size={13} color="#8ea0d0" />
+                )}
+              </View>
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.avatarPlaceholder} />
+          )}
+        </View>
+      )}
+
+      {/* Bubble */}
+      <TouchableOpacity
+        onLongPress={() => onLongPress(item)}
+        activeOpacity={0.88}
+        style={[styles.bubbleWrapper, isCurrentUser ? styles.bubbleWrapperRight : styles.bubbleWrapperLeft]}
+      >
+        {/* Sender name + role chip — only show on first in group, only for others */}
+        {!isCurrentUser && showHeader && (
+          <View style={styles.senderRow}>
+            <TouchableOpacity onPress={() => onProfileClick(item)} disabled={!isIdentityVisible}>
+              <Text style={[styles.senderName, { color: isIdentityVisible ? roleColor : "#8ea0d0" }]}>
+                {displayName}
+              </Text>
+            </TouchableOpacity>
+
+            {isIdentityVisible && isPrivileged && (
+              <View style={[styles.roleChip, { backgroundColor: roleColor + "22", borderColor: roleColor }]}>
+                <Text style={[styles.roleChipText, { color: roleColor }]}>{roleDisplayName}</Text>
+              </View>
+            )}
+
+            {canReveal && (
+              <TouchableOpacity onPress={() => setRevealed(!revealed)} style={styles.eyeBtn}>
+                <Ionicons
+                  name={revealed ? "eye-off-outline" : "eye-outline"}
+                  size={13}
+                  color={revealed ? "#ff5c93" : "#8ea0d0"}
+                />
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {/* Reply-to preview */}
+        {item.replyingTo && (
+          <View style={[styles.replyPreview, isCurrentUser && styles.replyPreviewRight]}>
+            <View style={styles.replyPreviewBar} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.replyPreviewAuthor, isCurrentUser && { color: "#ffaad0" }]}>
+                {item.replyingTo.name}
+              </Text>
+              <Text
+                style={[styles.replyPreviewText, isCurrentUser && { color: "#ffffff99" }]}
+                numberOfLines={2}
+              >
+                {item.replyingTo.text || "Message"}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* Bubble body */}
+        <View style={[styles.bubble, isCurrentUser ? styles.bubbleRight : styles.bubbleLeft]}>
+          {/* Text */}
+          {!!item.text && (
+            <Text style={[styles.bubbleText, isCurrentUser && styles.bubbleTextRight]}>
+              {item.text}
+            </Text>
+          )}
+
+          {/* GIF */}
+          {gifFiles.length > 0 && (
+            <View style={styles.gifContainer}>
+              <Image source={{ uri: gifFiles[0].url }} style={styles.gifImage} resizeMode="cover" />
+            </View>
+          )}
+
+          {/* Images */}
+          {imageFiles.length > 0 && (
+            <TouchableOpacity
+              activeOpacity={0.9}
+              onPress={() => onImagePress(imageFiles.map((f) => f.url), 0)}
+              style={styles.imageContainer}
+            >
+              <Image source={{ uri: imageFiles[0].url }} style={styles.imagePreview} resizeMode="cover" />
+              {imageFiles.length > 1 && (
+                <View style={styles.imageCountBadge}>
+                  <Text style={styles.imageCountText}>+{imageFiles.length - 1}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          )}
+
+          {/* Docs */}
+          {docFiles.length > 0 && (
+            <View style={styles.docsContainer}>
+              {docFiles.map((file, idx) => (
+                <TouchableOpacity
+                  key={idx}
+                  style={[styles.docItem, isCurrentUser && styles.docItemRight]}
+                  onPress={() => onFilePress(file.url, getFileDisplayName(file))}
+                >
+                  <Ionicons
+                    name={file.mimeType.includes("pdf") ? "document-text" : "document"}
+                    size={14}
+                    color={isCurrentUser ? "#fff" : "#4f9cff"}
+                  />
+                  <Text
+                    style={[styles.docText, isCurrentUser && { color: "#fff" }]}
+                    numberOfLines={1}
+                  >
+                    {getFileDisplayName(file)}
+                  </Text>
+                  <Ionicons
+                    name="download-outline"
+                    size={12}
+                    color={isCurrentUser ? "#ffffff99" : "#8ea0d0"}
+                  />
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          {/* Link */}
+          {item.link && (
+            <TouchableOpacity
+              style={[styles.linkPreview, isCurrentUser && styles.linkPreviewRight]}
+              onPress={() => onLinkPress(item.link?.url ?? "")}
+            >
+              <Ionicons name="link" size={13} color={isCurrentUser ? "#fff" : "#4f9cff"} />
+              <View style={{ flex: 1, marginLeft: 6 }}>
+                <Text style={[styles.linkTitle, isCurrentUser && { color: "#fff" }]} numberOfLines={1}>
+                  {item.link?.title ?? "Link"}
+                </Text>
+                <Text
+                  style={[styles.linkUrl, isCurrentUser && { color: "#ffffff99" }]}
+                  numberOfLines={1}
+                >
+                  {item.link?.url ?? ""}
+                </Text>
+              </View>
+              <Ionicons name="open-outline" size={11} color={isCurrentUser ? "#ffffff99" : "#8ea0d0"} />
+            </TouchableOpacity>
+          )}
+
+          {/* Tagged users */}
+          {taggedUsers.length > 0 && (
+            <View style={[styles.taggedRow, isCurrentUser && styles.taggedRowRight]}>
+              <Ionicons name="people-outline" size={11} color={isCurrentUser ? "#ffaad0" : "#ff5c93"} />
+              <Text style={[styles.taggedWith, isCurrentUser && { color: "#ffaad0" }]}>with </Text>
+              <View style={styles.taggedNames}>
+                {taggedUsers.map((tag, idx) => (
+                  <React.Fragment key={tag.id}>
+                    <TouchableOpacity onPress={() => onTagClick(tag.id)}>
+                      <Text style={[styles.taggedName, isCurrentUser && { color: "#fff" }]}>
+                        {tag.name}
+                      </Text>
+                    </TouchableOpacity>
+                    {idx < taggedUsers.length - 1 && (
+                      <Text style={[styles.taggedWith, isCurrentUser && { color: "#ffaad0" }]}>, </Text>
+                    )}
+                  </React.Fragment>
+                ))}
+              </View>
+            </View>
+          )}
+        </View>
+
+        {/* Footer: time + actions */}
+        <View style={[styles.bubbleFooter, isCurrentUser && styles.bubbleFooterRight]}>
+          <Text style={[styles.timeText, isCurrentUser && styles.timeTextRight]}>
+            {getTimeAgo(item.createdAt)}
+          </Text>
+
+          <View style={styles.footerActions}>
+            <TouchableOpacity
+              onPress={() => onLike(item.id, item.likedBy || [])}
+              style={styles.footerAction}
+            >
+              <Ionicons
+                name={isLiked ? "heart" : "heart-outline"}
+                size={13}
+                color={isLiked ? "#ff5c93" : isCurrentUser ? "#ffffff99" : "#8ea0d0"}
+              />
+              {(item.likeCount || 0) > 0 && (
+                <Text style={[styles.footerActionText, isCurrentUser && { color: "#ffffff99" }]}>
+                  {item.likeCount}
+                </Text>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => onReplyClick(item.id, displayName, item.text || "")}
+              style={styles.footerAction}
+            >
+              <Ionicons
+                name="return-down-forward-outline"
+                size={13}
+                color={isCurrentUser ? "#ffffff99" : "#8ea0d0"}
+              />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+};
+
+// ─── Main component ───────────────────────────────────────────────────────────
 const ReplyThread: React.FC<ReplyThreadProps> = ({
   visible,
   onClose,
@@ -103,32 +429,29 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   const [showSeenModal, setShowSeenModal] = useState(false);
   const [selectedReplySeenBy, setSelectedReplySeenBy] = useState<string[]>([]);
   const [replyingTo, setReplyingTo] = useState<{ id: string; name: string; text: string } | null>(null);
+  const [seenUsers, setSeenUsers] = useState<{ [uid: string]: any }>({});
 
   const insets = useSafeAreaInsets();
-  const keyboardHeight = useKeyboard();
   const flatListRef = useRef<FlatList>(null);
   const router = useRouter();
 
-  const handleReplyClick = useCallback((replyId: string, authorName: string, replyText: string) => {
-    setReplyingTo({ id: replyId, name: authorName, text: replyText });
+  // Scroll to bottom when new message arrives
+  const scrollToBottom = useCallback(() => {
+    setTimeout(() => {
+      flatListRef.current?.scrollToEnd({ animated: true });
+    }, 100);
   }, []);
 
-  // Android back button handling
   useEffect(() => {
     const backHandler = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (visible) {
-        onClose();
-        return true;
-      }
+      if (visible) { onClose(); return true; }
       return false;
     });
     return () => backHandler.remove();
   }, [visible, onClose]);
 
-  // Real-time replies listener
   useEffect(() => {
     if (!commentId) return;
-
     const q = query(
       collection(db, "replies"),
       where("commentId", "==", commentId),
@@ -136,25 +459,19 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     );
 
     const unsubscribe = onSnapshot(q, async (snapshot) => {
-      const fetchedReplies = snapshot.docs.map((d) => ({
-        id: d.id,
-        ...d.data(),
-      })) as Reply[];
-
-      setReplies(fetchedReplies);
+      const fetched = snapshot.docs.map((d) => ({ id: d.id, ...d.data() })) as Reply[];
+      setReplies(fetched);
       setLoading(false);
 
       // Mark as seen
       if (currentUser?.uid) {
-        for (const reply of fetchedReplies) {
+        for (const reply of fetched) {
           if (!reply.seenBy?.includes(currentUser.uid)) {
             try {
               await updateDoc(doc(db, "replies", reply.id), {
                 seenBy: arrayUnion(currentUser.uid),
               });
-            } catch (err) {
-              console.log("Error marking reply as seen:", err);
-            }
+            } catch {}
           }
         }
       }
@@ -163,9 +480,15 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     return unsubscribe;
   }, [commentId, currentUser?.uid]);
 
+  // Scroll to bottom when replies load for the first time
+  useEffect(() => {
+    if (!loading && replies.length > 0) {
+      scrollToBottom();
+    }
+  }, [loading]);
+
   const handleSendReply = async (replyData: any) => {
     if (!currentUser) return;
-
     const newReply = {
       ...replyData,
       commentId,
@@ -175,46 +498,35 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       seenBy: [currentUser.uid],
       ...(replyingTo && { replyingTo }),
     };
-
     await addDoc(collection(db, "replies"), newReply);
-
-    // Update parent comment reply count
     await updateDoc(doc(db, "comments", commentId), {
-      replyCount: replies.length + 1,
+      replyCount: (replies.length || 0) + 1,
     });
-
     setReplyingTo(null);
-
-    setTimeout(() => {
-      flatListRef.current?.scrollToEnd({ animated: true });
-    }, 300);
+    scrollToBottom();
   };
 
   const handleLikeReply = async (replyId: string, likedBy: string[]) => {
     if (!currentUser?.uid) return;
-
     const replyRef = doc(db, "replies", replyId);
     const isLiked = likedBy.includes(currentUser.uid);
-
     try {
       if (isLiked) {
         await updateDoc(replyRef, {
           likedBy: arrayRemove(currentUser.uid),
-          likeCount: Math.max(0, (likedBy.length || 1) - 1),
+          likeCount: Math.max(0, likedBy.length - 1),
         });
       } else {
         await updateDoc(replyRef, {
           likedBy: arrayUnion(currentUser.uid),
-          likeCount: (likedBy.length || 0) + 1,
+          likeCount: likedBy.length + 1,
         });
       }
-    } catch (error) {
-      console.error("Error toggling like:", error);
-    }
+    } catch {}
   };
 
   const handleDeleteReply = async (replyId: string) => {
-    Alert.alert("Delete Reply", "Are you sure you want to delete this reply?", [
+    Alert.alert("Delete Reply", "Are you sure?", [
       { text: "Cancel", style: "cancel" },
       {
         text: "Delete",
@@ -225,22 +537,20 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             await updateDoc(doc(db, "comments", commentId), {
               replyCount: Math.max(0, replies.length - 1),
             });
-            Alert.alert("Success", "Reply deleted successfully");
-          } catch (error) {
-            console.error("Error deleting reply:", error);
-            Alert.alert("Error", "Failed to delete reply");
+          } catch {
+            Alert.alert("Error", "Failed to delete");
           }
         },
       },
     ]);
   };
 
-  const handleReportReply = async (replyId: string) => {
-    Alert.alert("Report Reply", "Why are you reporting this reply?", [
+  const handleReportReply = (replyId: string) => {
+    Alert.alert("Report Reply", "Select a reason:", [
       { text: "Cancel", style: "cancel" },
       { text: "Spam", onPress: () => submitReport(replyId, "spam") },
       { text: "Harassment", onPress: () => submitReport(replyId, "harassment") },
-      { text: "Inappropriate Content", onPress: () => submitReport(replyId, "inappropriate") },
+      { text: "Inappropriate", onPress: () => submitReport(replyId, "inappropriate") },
     ]);
   };
 
@@ -254,36 +564,91 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         createdAt: serverTimestamp(),
         status: "pending",
       });
-      Alert.alert("Success", "Reply reported successfully");
-    } catch (error) {
-      console.error("Error reporting reply:", error);
-      Alert.alert("Error", "Failed to report reply");
+      Alert.alert("Reported", "Thank you for your report");
+    } catch {
+      Alert.alert("Error", "Failed to report");
     }
   };
 
-  const handleViewSeenBy = (seenBy: string[]) => {
-    setSelectedReplySeenBy(seenBy);
-    setShowSeenModal(true);
+  const handleLongPress = (reply: Reply) => {
+    const isOwner =
+      reply.realUserId === currentUser?.uid || reply.userId === currentUser?.uid;
+    const isAdmin = currentUser?.role === "admin";
+    const canDelete = isOwner || isAdmin;
+
+    const options: { text: string; style?: any; onPress: () => void }[] = [
+      {
+        text: "Reply",
+        onPress: () => {
+          const uid = reply.realUserId || reply.userId;
+          const name =
+            !reply.isAnonymous && uid && uid !== "anonymous"
+              ? reply.username || "User"
+              : "Anonymous";
+          setReplyingTo({ id: reply.id, name, text: reply.text || "" });
+        },
+      },
+    ];
+
+    if (!isOwner) {
+      options.push({ text: "Report", onPress: () => handleReportReply(reply.id) });
+    }
+
+    options.push({
+      text: "Seen by",
+      onPress: () => {
+        setSelectedReplySeenBy(reply.seenBy || []);
+        setShowSeenModal(true);
+      },
+    });
+
+    if (canDelete) {
+      options.push({
+        text: "Delete",
+        style: "destructive",
+        onPress: () => handleDeleteReply(reply.id),
+      });
+    }
+
+    Alert.alert("Options", undefined, [
+      ...options,
+      { text: "Cancel", style: "cancel", onPress: () => {} },
+    ]);
   };
 
-  const getTimeAgo = (timestamp: any) => {
-    if (!timestamp) return "";
-    const now = new Date();
-    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-    const diffSec = Math.floor((now.getTime() - date.getTime()) / 1000);
-    if (diffSec < 60) return "Just now";
-    const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return `${diffMin}m`;
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h`;
-    const diffDay = Math.floor(diffHr / 24);
-    return `${diffDay}d`;
-  };
+  const handleProfileClick = useCallback(
+    (reply: Reply) => {
+      const isAnon = reply.isAnonymous ?? false;
+      const uid = reply.realUserId || reply.userId;
+      if (isAnon || !uid || uid === "anonymous") return;
+      try {
+        if (currentUser && uid === currentUser.uid) {
+          router.push("../../(tabs)/ProfileScreen");
+        } else {
+          router.push(`../../UserProfileScreen?userId=${uid}`);
+        }
+      } catch {}
+    },
+    [currentUser, router]
+  );
+
+  const handleTagClick = useCallback(
+    (taggedUserId: string) => {
+      try {
+        if (currentUser && taggedUserId === currentUser.uid) {
+          router.push("../../(tabs)/ProfileScreen");
+        } else {
+          router.push(`../../UserProfileScreen?userId=${taggedUserId}`);
+        }
+      } catch {}
+    },
+    [currentUser, router]
+  );
 
   const handleLinkPress = (url: string) => {
     Linking.canOpenURL(url)
-      .then((supported) => {
-        if (supported) Linking.openURL(url);
+      .then((ok) => {
+        if (ok) Linking.openURL(url);
         else Alert.alert("Invalid Link", "Cannot open this URL");
       })
       .catch(() => Alert.alert("Error", "Failed to open link"));
@@ -291,21 +656,12 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
 
   const handleFilePress = async (url: string, filename: string) => {
     try {
-      const supported = await Linking.canOpenURL(url);
-      if (supported) await Linking.openURL(url);
+      const ok = await Linking.canOpenURL(url);
+      if (ok) await Linking.openURL(url);
       else Alert.alert("Error", "Cannot open this file");
-    } catch (error) {
-      console.error("Error opening file:", error);
+    } catch {
       Alert.alert("Error", "Failed to open file");
     }
-  };
-
-  const getFileDisplayName = (file: { url: string; mimeType: string; name?: string }) => {
-    if (file.name) return file.name;
-    const urlParts = file.url.split("/");
-    const lastPart = urlParts[urlParts.length - 1];
-    const filename = lastPart.split("?")[0];
-    return decodeURIComponent(filename);
   };
 
   const handleImagePress = (images: string[], startIndex: number) => {
@@ -314,354 +670,142 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     setImageViewerVisible(true);
   };
 
-  const handleProfileClick = async (reply: Reply) => {
-    const isReplyAnonymous = reply.isAnonymous ?? true;
-    const userIdToNavigate = reply.realUserId || reply.userId;
-
-    if (isReplyAnonymous || !userIdToNavigate || userIdToNavigate === "anonymous") return;
-
-    try {
-      if (currentUser && userIdToNavigate === currentUser.uid) {
-        router.push("../../(tabs)/ProfileScreen");
-      } else {
-        router.push(`../../UserProfileScreen?userId=${userIdToNavigate}`);
-      }
-    } catch (error) {
-      console.log("Navigation error:", error);
-    }
+  const getFileDisplayName = (file: { url: string; mimeType: string; name?: string }) => {
+    if (file.name) return file.name;
+    const parts = file.url.split("/");
+    const last = parts[parts.length - 1];
+    const name = decodeURIComponent(last.split("?")[0]);
+    return name.length > 28 ? name.slice(0, 25) + "..." : name;
   };
 
-  const handleTagClick = (taggedUserId: string) => {
-    try {
-      if (currentUser && taggedUserId === currentUser.uid) {
-        router.push("../../(tabs)/ProfileScreen");
-      } else {
-        router.push(`../../UserProfileScreen?userId=${taggedUserId}`);
-      }
-    } catch (error) {
-      console.log("Navigation error:", error);
-    }
+  const getTimeAgo = (timestamp: any) => {
+    if (!timestamp) return "";
+    const now = new Date();
+    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+    const diffSec = Math.floor((now.getTime() - date.getTime()) / 1000);
+    if (diffSec < 60) return "Just now";
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    return `${Math.floor(diffSec / 86400)}d ago`;
   };
 
-  const handleLongPress = (reply: Reply) => {
-    const isCurrentUser = reply.realUserId === currentUser?.uid;
-    const options = isCurrentUser
-      ? ["Reply", "Delete", "Cancel"]
-      : ["Reply", "Report", "See who seen this reply", "Cancel"];
-
-    const destructiveButtonIndex = isCurrentUser ? 1 : 1;
-    const cancelButtonIndex = options.length - 1;
-
-    Alert.alert("Reply Options", "", options.map((option, index) => ({
-      text: option,
-      style:
-        index === cancelButtonIndex ? "cancel" :
-        index === destructiveButtonIndex ? "destructive" : "default",
-      onPress: () => {
-        if (option === "Reply") {
-          const targetName = reply.username || "Anonymous";
-          setReplyingTo({ id: reply.id, name: targetName, text: reply.text || "" });
-        } else if (option === "Report") {
-          handleReportReply(reply.id);
-        } else if (option === "See who seen this reply") {
-          handleViewSeenBy(reply.seenBy || []);
-        } else if (option === "Delete") {
-          handleDeleteReply(reply.id);
-        }
-      },
-    })), { cancelable: true });
+  // Date separator logic
+  const shouldShowDateSeparator = (item: Reply, prev?: Reply) => {
+    if (!prev) return true;
+    if (!item.createdAt || !prev.createdAt) return false;
+    const dateA = item.createdAt.toDate ? item.createdAt.toDate() : new Date(item.createdAt);
+    const dateB = prev.createdAt.toDate ? prev.createdAt.toDate() : new Date(prev.createdAt);
+    return dateA.toDateString() !== dateB.toDateString();
   };
 
-  const renderReply = ({ item }: { item: Reply }) => {
-    return <ReplyItem item={item} onReplyClick={handleReplyClick} />;
-  };
-
-  const ReplyItem: React.FC<{ item: Reply; onReplyClick: (id: string, name: string, text: string) => void }> = ({
-    item,
-    onReplyClick,
-  }) => {
-    const isCurrentUser = item.realUserId === currentUser?.uid;
-    const isAnon = item.isAnonymous ?? true;
-    const isLiked = (item.likedBy || []).includes(currentUser?.uid || "");
-
-    const [authorData, setAuthorData] = useState<any>(null);
-
-    useEffect(() => {
-      const fetchAuthor = async () => {
-        const userIdToFetch = item.realUserId || item.userId;
-        if (userIdToFetch && userIdToFetch !== "anonymous") {
-          try {
-            const data = await getUserData(userIdToFetch);
-            setAuthorData(data);
-          } catch (err) {
-            console.log("Error fetching author:", err);
-          }
-        }
-      };
-      fetchAuthor();
-    }, [item.realUserId, item.userId]);
-
-    const authorRole = authorData?.role || item.role || "student";
-    const roleColor = getRoleColor(authorRole);
-
-    const displayName = isAnon
-      ? "Anonymous"
-      : authorData
-      ? `${authorData.firstname} ${authorData.lastname}`
-      : item.username || "User";
-
-    const imageFiles = (item.files || []).filter(
-      (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif")
-    );
-    const gifFiles = (item.files || []).filter((f) => f.mimeType.includes("gif"));
-    const docFiles = (item.files || []).filter((f) => !f.mimeType.startsWith("image/"));
-
-    return (
-      <TouchableOpacity
-        onLongPress={() => handleLongPress(item)}
-        activeOpacity={0.9}
-        style={[styles.replyContainer, isCurrentUser ? styles.replyRight : styles.replyLeft]}
-      >
-        {!isCurrentUser && (
-          <TouchableOpacity onPress={() => handleProfileClick(item)} disabled={isAnon}>
-            <View
-              style={[
-                styles.avatarSmall,
-                !isAnon && authorRole !== "student" && { borderColor: roleColor, borderWidth: 2 },
-              ]}
-            >
-              {isAnon ? (
-                <Ionicons name="person" size={12} color="#8ea0d0" />
-              ) : item.profilePic ? (
-                <Image source={{ uri: item.profilePic }} style={styles.avatarImageSmall} />
-              ) : (
-                <Text style={[styles.avatarTextTiny, { color: roleColor }]}>
-                  {displayName[0]?.toUpperCase() || "U"}
-                </Text>
-              )}
-            </View>
-          </TouchableOpacity>
-        )}
-
-        <View
-          style={[
-            styles.replyBubble,
-            isCurrentUser ? styles.bubbleRight : styles.bubbleLeft,
-          ]}
-        >
-          {!isCurrentUser && (
-            <TouchableOpacity onPress={() => handleProfileClick(item)} disabled={isAnon}>
-              <Text style={[styles.replyAuthor, { color: isAnon ? "#8ea0d0" : roleColor }]}>
-                {displayName}
-              </Text>
-            </TouchableOpacity>
-          )}
-
-          {item.replyingTo && (
-            <View style={styles.replyPreviewContainer}>
-              <View style={styles.replyPreviewBar} />
-              <View style={styles.replyPreviewContent}>
-                <Text style={styles.replyPreviewAuthor}>{item.replyingTo.name}</Text>
-                <Text style={styles.replyPreviewText} numberOfLines={2}>
-                  {item.replyingTo.text || "Message"}
-                </Text>
-              </View>
-            </View>
-          )}
-
-          {item.text && (
-            <Text style={[styles.replyText, isCurrentUser && styles.replyTextRight]}>
-              {item.text}
-            </Text>
-          )}
-
-          {gifFiles.length > 0 && (
-            <View style={styles.replyGifContainer}>
-              <Image source={{ uri: gifFiles[0].url }} style={styles.replyGif} resizeMode="cover" />
-            </View>
-          )}
-
-          {imageFiles.length > 0 && (
-            <TouchableOpacity
-              activeOpacity={0.9}
-              onPress={() => {
-                const imageUrls = imageFiles.map((f) => f.url);
-                handleImagePress(imageUrls, 0);
-              }}
-              style={styles.replyImageContainer}
-            >
-              <Image source={{ uri: imageFiles[0].url }} style={styles.replyImage} resizeMode="cover" />
-              {imageFiles.length > 1 && (
-                <View style={styles.imageCountBadge}>
-                  <Text style={styles.imageCountText}>+{imageFiles.length - 1}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          )}
-
-          {docFiles.length > 0 && (
-            <View style={styles.replyDocsContainer}>
-              {docFiles.map((file, idx) => (
-                <TouchableOpacity
-                  key={idx}
-                  style={styles.replyDocItem}
-                  activeOpacity={0.7}
-                  onPress={() => handleFilePress(file.url, getFileDisplayName(file))}
-                >
-                  <Ionicons
-                    name={file.mimeType.includes("pdf") ? "document-text" : "document"}
-                    size={14}
-                    color={isCurrentUser ? "#fff" : "#4f9cff"}
-                  />
-                  <Text
-                    style={[styles.replyDocText, isCurrentUser && { color: "#fff" }]}
-                    numberOfLines={1}
-                  >
-                    {getFileDisplayName(file)}
-                  </Text>
-                  <Ionicons
-                    name="download-outline"
-                    size={12}
-                    color={isCurrentUser ? "#ffffff" : "#a0a8c0"}
-                  />
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-
-          {item.link && (
-            <TouchableOpacity
-              style={[styles.replyLinkPreview, isCurrentUser && styles.replyLinkPreviewRight]}
-              onPress={() => handleLinkPress(item.link!.url)}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="link" size={14} color={isCurrentUser ? "#fff" : "#4f9cff"} />
-              <View style={{ flex: 1, marginLeft: 6 }}>
-                <Text style={[styles.replyLinkTitle, isCurrentUser && { color: "#fff" }]} numberOfLines={1}>
-                  {item.link.title}
-                </Text>
-                <Text style={[styles.replyLinkUrl, isCurrentUser && { color: "#ffffff99" }]} numberOfLines={1}>
-                  {item.link.url}
-                </Text>
-              </View>
-              <Ionicons name="open-outline" size={12} color={isCurrentUser ? "#ffffff" : "#a0a8c0"} />
-            </TouchableOpacity>
-          )}
-
-          {item.taggedUsers && item.taggedUsers.length > 0 && (
-            <View style={[styles.replyTaggedSection, isCurrentUser && styles.replyTaggedSectionRight]}>
-              <Ionicons name="people-outline" size={11} color={isCurrentUser ? "#ffffff" : "#ff5c93"} />
-              <Text style={[styles.replyTaggedText, isCurrentUser && { color: "#ffffff" }]}>with </Text>
-              <View style={styles.taggedNamesContainer}>
-                {item.taggedUsers.map((tag, idx) => (
-                  <React.Fragment key={tag.id}>
-                    <TouchableOpacity onPress={() => handleTagClick(tag.id)}>
-                      <Text style={[styles.replyTaggedName, isCurrentUser && { color: "#fff" }]}>
-                        {tag.name}
-                      </Text>
-                    </TouchableOpacity>
-                    {idx < item.taggedUsers!.length - 1 && (
-                      <Text style={[styles.replyTaggedText, isCurrentUser && { color: "#ffffff" }]}>
-                        {", "}
-                      </Text>
-                    )}
-                  </React.Fragment>
-                ))}
-              </View>
-            </View>
-          )}
-
-          <View style={styles.replyFooter}>
-            <Text style={[styles.replyTime, isCurrentUser && styles.replyTimeRight]}>
-              {getTimeAgo(item.createdAt)}
-            </Text>
-
-            <View style={styles.replyActions}>
-              <TouchableOpacity
-                style={styles.replyActionButton}
-                onPress={() => handleLikeReply(item.id, item.likedBy || [])}
-              >
-                <Ionicons
-                  name={isLiked ? "heart" : "heart-outline"}
-                  size={14}
-                  color={isLiked ? "#ff5c93" : isCurrentUser ? "#ffffff" : "#8ea0d0"}
-                />
-                {(item.likeCount || 0) > 0 && (
-                  <Text style={[styles.replyActionText, isCurrentUser && { color: "#ffffff" }]}>
-                    {item.likeCount}
-                  </Text>
-                )}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.replyActionButton}
-                onPress={() => onReplyClick(item.id, item.username || "Anonymous", item.text || "")}
-              >
-                <Ionicons name="chatbubble-outline" size={14} color={isCurrentUser ? "#ffffff" : "#8ea0d0"} />
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </TouchableOpacity>
-    );
+  const formatDateHeader = (timestamp: any) => {
+    if (!timestamp) return "";
+    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+    const now = new Date();
+    const diffDays = Math.floor((now.getTime() - date.getTime()) / 86400000);
+    if (diffDays === 0) return "Today";
+    if (diffDays === 1) return "Yesterday";
+    return date.toLocaleDateString(undefined, { month: "long", day: "numeric", year: diffDays > 365 ? "numeric" : undefined });
   };
 
   return (
     <>
       <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-        <View style={{ flex: 1, backgroundColor: "#0f1624" }}>
-          {/* Header */}
+        <View style={styles.screen}>
+          {/* ── Header ── */}
           <View style={[styles.header, { paddingTop: insets.top + 10 }]}>
-            <TouchableOpacity onPress={onClose} hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}>
-              <Ionicons name="arrow-back" size={28} color="#ff3b7f" />
+            <TouchableOpacity
+              onPress={onClose}
+              hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
+              style={styles.backBtn}
+            >
+              <Ionicons name="arrow-back" size={24} color="#ff5c93" />
             </TouchableOpacity>
+
             <View style={styles.headerCenter}>
-              <Text style={styles.headerTitle}>Reply to {commentAuthor}</Text>
-              <Text style={styles.headerSubtitle}>
-                {replies.length} {replies.length === 1 ? "reply" : "replies"}
+              <Text style={styles.headerTitle}>Replies</Text>
+              <Text style={styles.headerSub}>
+                to <Text style={{ color: "#ff8ab2", fontWeight: "700" }}>{commentAuthor}</Text>
+                {"  ·  "}
+                <Text style={{ color: "#8ea0d0" }}>
+                  {replies.length} {replies.length === 1 ? "reply" : "replies"}
+                </Text>
               </Text>
             </View>
-            <View style={{ width: 48 }} />
+
+            <View style={{ width: 40 }} />
           </View>
 
-          {/* List or Empty State */}
+          {/* ── Body ── */}
           {loading ? (
-            <ActivityIndicator color="#ff3b7f" style={{ flex: 1, marginTop: 40 }} />
+            <View style={styles.centered}>
+              <ActivityIndicator color="#ff5c93" size="large" />
+            </View>
           ) : replies.length === 0 ? (
-            <View style={styles.emptyContainer}>
-              <Ionicons name="chatbubble-outline" size={48} color="#8ea0d0" />
-              <Text style={styles.emptyText}>No replies yet</Text>
-              <Text style={styles.emptySubText}>Start the conversation!</Text>
+            <View style={styles.centered}>
+              <Ionicons name="chatbubbles-outline" size={52} color="#243054" />
+              <Text style={styles.emptyTitle}>No replies yet</Text>
+              <Text style={styles.emptySub}>Be the first to reply!</Text>
             </View>
           ) : (
             <FlatList
               ref={flatListRef}
               data={replies}
               keyExtractor={(item) => item.id}
-              renderItem={renderReply}
-              contentContainerStyle={{ 
-                paddingHorizontal: 16, 
-                paddingTop: 12,
-                paddingBottom: 8
+              renderItem={({ item, index }) => {
+                const prev = index > 0 ? replies[index - 1] : undefined;
+                const showDate = shouldShowDateSeparator(item, prev);
+                return (
+                  <>
+                    {showDate && (
+                      <View style={styles.dateSeparator}>
+                        <View style={styles.dateLine} />
+                        <Text style={styles.dateLabel}>{formatDateHeader(item.createdAt)}</Text>
+                        <View style={styles.dateLine} />
+                      </View>
+                    )}
+                    <ReplyBubble
+                      item={item}
+                      currentUser={currentUser}
+                      prevItem={prev}
+                      onLike={handleLikeReply}
+                      onReplyClick={(id, name, text) => setReplyingTo({ id, name, text })}
+                      onLongPress={handleLongPress}
+                      onProfileClick={handleProfileClick}
+                      onTagClick={handleTagClick}
+                      onLinkPress={handleLinkPress}
+                      onFilePress={handleFilePress}
+                      onImagePress={handleImagePress}
+                      getTimeAgo={getTimeAgo}
+                      getFileDisplayName={getFileDisplayName}
+                    />
+                  </>
+                );
               }}
+              contentContainerStyle={styles.listContent}
               showsVerticalScrollIndicator={false}
+              onContentSizeChange={scrollToBottom}
             />
           )}
 
-          {/* Optimized Composer – Full-width, minimal padding, seamless */}
+          {/* ── Composer ── */}
           {currentUser && (
             <View
-              style={{
-                paddingHorizontal: 0,
-                paddingTop: 6,
-                paddingBottom: keyboardHeight > 0 ? 8 : Math.max(insets.bottom, 8),
-                backgroundColor: "#1c2535",
-              }}
+              style={[
+                styles.composerWrapper,
+                {
+                  paddingBottom: Platform.select({
+                    ios: insets.bottom + 8,
+                    android: 16,
+                    default: insets.bottom + 8,
+                  }),
+                },
+              ]}
             >
               <CommentComposer
                 currentUser={currentUser}
                 onSend={handleSendReply}
-                placeholder="Write a reply..."
+                placeholder="Reply..."
                 replyingTo={replyingTo}
                 onCancelReply={() => setReplyingTo(null)}
               />
@@ -670,45 +814,79 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         </View>
       </Modal>
 
-      {/* Seen By Modal */}
-      <SeenByModal
+      {/* ── Seen-by modal ── */}
+      <Modal
         visible={showSeenModal}
-        onClose={() => setShowSeenModal(false)}
-        seenBy={selectedReplySeenBy}
-        onProfileClick={handleProfileClick}
-        currentUserId={currentUser?.uid}
-      />
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowSeenModal(false)}
+      >
+        <TouchableOpacity
+          style={styles.overlayDark}
+          activeOpacity={1}
+          onPress={() => setShowSeenModal(false)}
+        >
+          <View style={styles.seenSheet} onStartShouldSetResponder={() => true}>
+            <View style={styles.seenHeader}>
+              <Text style={styles.seenTitle}>Seen by ({selectedReplySeenBy.length})</Text>
+              <TouchableOpacity onPress={() => setShowSeenModal(false)}>
+                <Ionicons name="close" size={22} color="#8ea0d0" />
+              </TouchableOpacity>
+            </View>
+            {selectedReplySeenBy.length === 0 ? (
+              <View style={styles.centered}>
+                <Ionicons name="eye-off-outline" size={42} color="#243054" />
+                <Text style={styles.emptySub}>No views yet</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={selectedReplySeenBy}
+                keyExtractor={(id) => id}
+                renderItem={({ item: uid }) => (
+                  <View style={styles.seenRow}>
+                    <View style={styles.seenAvatar}>
+                      <Text style={styles.seenAvatarText}>{uid[0]?.toUpperCase()}</Text>
+                    </View>
+                    <Text style={styles.seenName}>User {uid.slice(0, 8)}…</Text>
+                  </View>
+                )}
+              />
+            )}
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
-      {/* Image Viewer Modal */}
-      <Modal visible={imageViewerVisible} transparent animationType="fade" onRequestClose={() => setImageViewerVisible(false)}>
-        <View style={styles.imageViewerContainer}>
+      {/* ── Image viewer ── */}
+      <Modal
+        visible={imageViewerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setImageViewerVisible(false)}
+      >
+        <View style={styles.imageViewer}>
           <TouchableOpacity style={styles.imageViewerClose} onPress={() => setImageViewerVisible(false)}>
-            <Ionicons name="close" size={32} color="#fff" />
+            <Ionicons name="close" size={30} color="#fff" />
           </TouchableOpacity>
-
           <FlatList
             data={selectedImages}
             horizontal
             pagingEnabled
             initialScrollIndex={selectedImageIndex}
-            getItemLayout={(_, index) => ({ length: SCREEN_WIDTH, offset: SCREEN_WIDTH * index, index })}
-            onScrollToIndexFailed={() => {}}
+            getItemLayout={(_, i) => ({ length: SCREEN_WIDTH, offset: SCREEN_WIDTH * i, index: i })}
             renderItem={({ item }) => (
               <View style={styles.imageViewerPage}>
-                <Image source={{ uri: item }} style={styles.imageViewerImage} resizeMode="contain" />
+                <Image source={{ uri: item }} style={styles.imageViewerImg} resizeMode="contain" />
               </View>
             )}
-            keyExtractor={(_, index) => index.toString()}
+            keyExtractor={(_, i) => i.toString()}
             showsHorizontalScrollIndicator={false}
-            onMomentumScrollEnd={(event) => {
-              const index = Math.round(event.nativeEvent.contentOffset.x / SCREEN_WIDTH);
-              setSelectedImageIndex(index);
+            onMomentumScrollEnd={(e) => {
+              setSelectedImageIndex(Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH));
             }}
           />
-
           {selectedImages.length > 1 && (
-            <View style={styles.imageViewerCounter}>
-              <Text style={styles.imageViewerCounterText}>
+            <View style={styles.imageCounter}>
+              <Text style={styles.imageCounterText}>
                 {selectedImageIndex + 1} / {selectedImages.length}
               </Text>
             </View>
@@ -719,433 +897,251 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   );
 };
 
-// SeenByModal remains unchanged
-interface SeenByModalProps {
-  visible: boolean;
-  onClose: () => void;
-  seenBy: string[];
-  onProfileClick: (reply: any) => void;
-  currentUserId?: string;
-}
-
-const SeenByModal: React.FC<SeenByModalProps> = ({
-  visible,
-  onClose,
-  seenBy,
-  onProfileClick,
-  currentUserId,
-}) => {
-  const [usersData, setUsersData] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const fetchUsers = async () => {
-      if (!visible || seenBy.length === 0) return;
-
-      setLoading(true);
-      try {
-        const users = await Promise.all(
-          seenBy.map(async (userId) => {
-            try {
-              return await getUserData(userId);
-            } catch {
-              return null;
-            }
-          })
-        );
-        setUsersData(users.filter((u) => u !== null));
-      } catch {
-        console.error("Error fetching users");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchUsers();
-  }, [visible, seenBy]);
-
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={onClose}>
-        <View style={styles.seenModalContent} onStartShouldSetResponder={() => true}>
-          <View style={styles.seenModalHeader}>
-            <Text style={styles.seenModalTitle}>Seen by ({seenBy.length})</Text>
-            <TouchableOpacity onPress={onClose}>
-              <Ionicons name="close" size={24} color="#e9edff" />
-            </TouchableOpacity>
-          </View>
-
-          {loading ? (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color="#ff5c93" />
-            </View>
-          ) : usersData.length === 0 ? (
-            <View style={styles.emptyContainer}>
-              <Ionicons name="eye-outline" size={48} color="#8ea0d0" />
-              <Text style={styles.emptyText}>No views yet</Text>
-            </View>
-          ) : (
-            <FlatList
-              data={usersData}
-              keyExtractor={(item) => item.userId}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={styles.seenUserItem}
-                  onPress={() => {
-                    onClose();
-                    onProfileClick({ realUserId: item.userId, isAnonymous: false });
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <View
-                    style={[
-                      styles.seenUserAvatar,
-                      item.role !== "student" && {
-                        borderColor: getRoleColor(item.role),
-                        borderWidth: 2,
-                      },
-                    ]}
-                  >
-                    <Text style={[styles.seenUserAvatarText, { color: getRoleColor(item.role) }]}>
-                      {item.firstname[0].toUpperCase()}
-                    </Text>
-                  </View>
-
-                  <View style={styles.seenUserInfo}>
-                    <Text style={styles.seenUserName}>{item.firstname} {item.lastname}</Text>
-                    {item.role !== "student" && (
-                      <View
-                        style={[
-                          styles.seenUserRoleChip,
-                          { backgroundColor: getRoleColor(item.role) + "20", borderColor: getRoleColor(item.role) },
-                        ]}
-                      >
-                        <Text style={[styles.seenUserRoleText, { color: getRoleColor(item.role) }]}>
-                          {getRoleDisplayName(item.role)}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-
-                  <Ionicons name="eye" size={18} color="#8ea0d0" />
-                </TouchableOpacity>
-              )}
-              style={styles.seenUsersList}
-            />
-          )}
-        </View>
-      </TouchableOpacity>
-    </Modal>
-  );
-};
-
-export default ReplyThread;
-
+// ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: "#070c15" },
+
+  // Header
   header: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#1f2937",
+    borderBottomColor: "#1b2235",
+    backgroundColor: "#070c15",
   },
-  headerCenter: {
-    flex: 1,
-    alignItems: "center",
-    marginLeft: -32,
+  backBtn: { padding: 4, marginRight: 4 },
+  headerCenter: { flex: 1, alignItems: "center" },
+  headerTitle: { color: "#e9edff", fontSize: 17, fontWeight: "700" },
+  headerSub: { color: "#8ea0d0", fontSize: 12.5, marginTop: 2 },
+
+  // List
+  listContent: {
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 8,
+    flexGrow: 1,
   },
-  headerTitle: {
-    color: "#e9edff",
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  headerSubtitle: {
-    color: "#8ea0d0",
-    fontSize: 12,
-    marginTop: 2,
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  emptyText: {
-    color: "#e9edff",
-    fontSize: 16,
-    fontWeight: "600",
-    marginTop: 16,
-  },
-  emptySubText: {
-    color: "#8ea0d0",
-    fontSize: 14,
-    marginTop: 4,
-  },
-  replyContainer: {
+
+  // Date separator
+  dateSeparator: {
     flexDirection: "row",
-    marginBottom: 12,
+    alignItems: "center",
+    marginVertical: 14,
+    paddingHorizontal: 8,
+    gap: 8,
+  },
+  dateLine: { flex: 1, height: 1, backgroundColor: "#1b2235" },
+  dateLabel: {
+    color: "#8ea0d0",
+    fontSize: 11.5,
+    fontWeight: "600",
+    paddingHorizontal: 6,
+    backgroundColor: "#0f1623",
+    borderRadius: 8,
+    overflow: "hidden",
+    paddingVertical: 3,
+  },
+
+  // Message row
+  messageRow: {
+    flexDirection: "row",
     alignItems: "flex-end",
+    paddingHorizontal: 4,
   },
-  replyLeft: {
-    justifyContent: "flex-start",
-  },
-  replyRight: {
-    justifyContent: "flex-end",
-  },
-  avatarSmall: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: "#243054",
+  messageRowLeft: { justifyContent: "flex-start" },
+  messageRowRight: { justifyContent: "flex-end" },
+
+  // Avatar
+  avatarColumn: { width: 36, marginRight: 8, alignItems: "center" },
+  avatarPlaceholder: { width: 36 },
+  avatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#1b2235",
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
   },
-  avatarImageSmall: {
-    width: "100%",
-    height: "100%",
-  },
-  avatarTextTiny: {
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  replyBubble: {
-    maxWidth: "70%",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 18,
-    marginHorizontal: 8,
-  },
-  bubbleLeft: {
-    backgroundColor: "#1c2535",
-    borderBottomLeftRadius: 4,
-  },
-  bubbleRight: {
-    backgroundColor: "#ff3b7f",
-    borderBottomRightRadius: 4,
-  },
-  replyAuthor: {
-    fontSize: 11,
-    fontWeight: "600",
-    marginBottom: 4,
-  },
-  replyPreviewContainer: {
+  avatarImg: { width: "100%", height: "100%" },
+  avatarInitial: { fontSize: 14, fontWeight: "700" },
+
+  // Bubble wrapper
+  bubbleWrapper: { maxWidth: "76%", flexShrink: 1 },
+  bubbleWrapperLeft: { alignItems: "flex-start" },
+  bubbleWrapperRight: { alignItems: "flex-end" },
+
+  // Sender row
+  senderRow: {
     flexDirection: "row",
-    marginBottom: 8,
-    paddingLeft: 8,
-    opacity: 0.8,
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 4,
+    paddingHorizontal: 2,
   },
+  senderName: { fontSize: 12.5, fontWeight: "700" },
+  roleChip: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  roleChipText: { fontSize: 9.5, fontWeight: "700" },
+  eyeBtn: { padding: 2 },
+
+  // Reply preview
+  replyPreview: {
+    flexDirection: "row",
+    backgroundColor: "#0e1320",
+    borderRadius: 10,
+    padding: 8,
+    marginBottom: 4,
+    borderWidth: 1,
+    borderColor: "#1b2235",
+  },
+  replyPreviewRight: { backgroundColor: "#b03060" },
   replyPreviewBar: {
     width: 3,
     backgroundColor: "#ff5c93",
     borderRadius: 2,
     marginRight: 8,
   },
-  replyPreviewContent: {
-    flex: 1,
-  },
   replyPreviewAuthor: {
-    fontSize: 10,
+    color: "#ff8ab2",
+    fontSize: 11,
     fontWeight: "700",
-    color: "#ff5c93",
     marginBottom: 2,
   },
-  replyPreviewText: {
-    fontSize: 11,
-    color: "#ffffff99",
-    lineHeight: 14,
+  replyPreviewText: { color: "#8ea0d0", fontSize: 12, lineHeight: 16 },
+
+  // Bubble
+  bubble: {
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    minWidth: 60,
   },
-  replyText: {
-    color: "#e9edff",
-    fontSize: 14,
-    lineHeight: 20,
+  bubbleLeft: {
+    backgroundColor: "#1b2235",
+    borderBottomLeftRadius: 4,
+    borderWidth: 1,
+    borderColor: "#243054",
   },
-  replyTextRight: {
-    color: "#ffffff",
+  bubbleRight: {
+    backgroundColor: "#ff5c93",
+    borderBottomRightRadius: 4,
   },
-  replyGifContainer: {
-    marginTop: 6,
-    borderRadius: 8,
-    overflow: "hidden",
-  },
-  replyGif: {
-    width: 200,
-    height: 150,
-  },
-  replyImageContainer: {
-    marginTop: 6,
-    borderRadius: 8,
-    overflow: "hidden",
-    position: "relative",
-  },
-  replyImage: {
-    width: 200,
-    height: 150,
-  },
+  bubbleText: { color: "#d8deff", fontSize: 15, lineHeight: 21 },
+  bubbleTextRight: { color: "#fff" },
+
+  // GIF
+  gifContainer: { marginTop: 6, borderRadius: 12, overflow: "hidden" },
+  gifImage: { width: 220, height: 160, backgroundColor: "#0e1320" },
+
+  // Image
+  imageContainer: { marginTop: 6, borderRadius: 12, overflow: "hidden", position: "relative" },
+  imagePreview: { width: 220, height: 160, backgroundColor: "#0e1320" },
   imageCountBadge: {
     position: "absolute",
     top: 6,
     right: 6,
-    backgroundColor: "rgba(0, 0, 0, 0.75)",
+    backgroundColor: "rgba(0,0,0,0.7)",
     borderRadius: 12,
     paddingHorizontal: 8,
     paddingVertical: 3,
   },
-  imageCountText: {
-    color: "#fff",
-    fontSize: 11,
-    fontWeight: "bold",
-  },
-  replyDocsContainer: {
-    marginTop: 6,
-    gap: 4,
-  },
-  replyDocItem: {
+  imageCountText: { color: "#fff", fontSize: 11, fontWeight: "700" },
+
+  // Docs
+  docsContainer: { marginTop: 6, gap: 5 },
+  docItem: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    backgroundColor: "rgba(0,0,0,0.2)",
-    padding: 6,
-    borderRadius: 6,
-  },
-  replyDocText: {
-    flex: 1,
-    color: "#4f9cff",
-    fontSize: 11,
-    fontWeight: "500",
-  },
-  replyLinkPreview: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: "rgba(0,0,0,0.2)",
+    gap: 7,
+    backgroundColor: "#243054",
     padding: 8,
-    borderRadius: 6,
+    borderRadius: 9,
+  },
+  docItemRight: { backgroundColor: "rgba(255,255,255,0.18)" },
+  docText: { flex: 1, color: "#d8deff", fontSize: 12 },
+
+  // Link
+  linkPreview: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#243054",
+    padding: 9,
+    borderRadius: 10,
     marginTop: 6,
+    gap: 6,
   },
-  replyLinkPreviewRight: {
-    backgroundColor: "rgba(255,255,255,0.15)",
+  linkPreviewRight: {
+    backgroundColor: "rgba(255,255,255,0.18)",
+    borderColor: "rgba(255,255,255,0.2)",
   },
-  replyLinkTitle: {
-    color: "#4f9cff",
-    fontSize: 12,
-    fontWeight: "600",
-    marginBottom: 2,
-  },
-  replyLinkUrl: {
-    color: "#8ea0d0",
-    fontSize: 10,
-  },
-  replyTaggedSection: {
+  linkTitle: { color: "#e9edff", fontSize: 12.5, fontWeight: "600", marginBottom: 1 },
+  linkUrl: { color: "#8ea0d0", fontSize: 11 },
+
+  // Tagged
+  taggedRow: {
     flexDirection: "row",
     alignItems: "center",
     flexWrap: "wrap",
-    gap: 4,
-    marginTop: 6,
+    gap: 3,
+    marginTop: 7,
     backgroundColor: "#243054",
     paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    alignSelf: "flex-start",
+    paddingVertical: 5,
+    borderRadius: 8,
   },
-  replyTaggedSectionRight: {
-    backgroundColor: "rgba(255,255,255,0.15)",
-  },
-  taggedNamesContainer: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-  },
-  replyTaggedText: {
-    color: "#a0a8c0",
-    fontSize: 11,
-  },
-  replyTaggedName: {
-    color: "#ff5c93",
-    fontWeight: "600",
-    fontSize: 11,
-  },
-  replyFooter: {
+  taggedRowRight: { backgroundColor: "rgba(255,255,255,0.18)" },
+  taggedWith: { color: "#8ea0d0", fontSize: 11 },
+  taggedNames: { flexDirection: "row", flexWrap: "wrap", alignItems: "center" },
+  taggedName: { color: "#ff8ab2", fontWeight: "600", fontSize: 11.5 },
+
+  // Footer
+  bubbleFooter: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 6,
+    gap: 10,
+    marginTop: 4,
+    paddingHorizontal: 2,
   },
-  replyTime: {
-    color: "#8ea0d0",
-    fontSize: 10,
+  bubbleFooterRight: { justifyContent: "flex-end" },
+  timeText: { color: "#8ea0d0", fontSize: 11 },
+  timeTextRight: { color: "#8ea0d0" },
+  footerActions: { flexDirection: "row", alignItems: "center", gap: 12 },
+  footerAction: { flexDirection: "row", alignItems: "center", gap: 3 },
+  footerActionText: { color: "#8ea0d0", fontSize: 11 },
+
+  // Composer wrapper
+  composerWrapper: {
+    borderTopWidth: 1,
+    borderTopColor: "#1b2235",
+    backgroundColor: "#0e1320",
+    paddingHorizontal: 12,
+    paddingTop: 8,
   },
-  replyTimeRight: {
-    color: "#ffffff",
-  },
-  replyActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  replyActionButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-  },
-  replyActionText: {
-    color: "#8ea0d0",
-    fontSize: 10,
-    fontWeight: "500",
-  },
-  imageViewerContainer: {
+
+  // Seen modal
+  overlayDark: {
     flex: 1,
-    backgroundColor: "#000",
+    backgroundColor: "rgba(0,0,0,0.82)",
     justifyContent: "center",
     alignItems: "center",
   },
-  imageViewerClose: {
-    position: "absolute",
-    top: 50,
-    right: 20,
-    zIndex: 10,
-    padding: 8,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    borderRadius: 20,
-  },
-  imageViewerPage: {
-    width: SCREEN_WIDTH,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  imageViewerImage: {
-    width: "100%",
-    height: "100%",
-  },
-  imageViewerCounter: {
-    position: "absolute",
-    bottom: 40,
-    alignSelf: "center",
-    backgroundColor: "rgba(0,0,0,0.7)",
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-  },
-  imageViewerCounterText: {
-    color: "#fff",
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0, 0, 0, 0.7)",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  seenModalContent: {
+  seenSheet: {
     backgroundColor: "#1b2235",
     borderRadius: 16,
-    width: "85%",
-    maxHeight: "70%",
+    width: "86%",
+    maxHeight: "60%",
     overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "#243054",
   },
-  seenModalHeader: {
+  seenHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
@@ -1153,57 +1149,54 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "#243054",
   },
-  seenModalTitle: {
-    color: "#e9edff",
-    fontSize: 18,
-    fontWeight: "600",
-  },
-  loadingContainer: {
-    padding: 40,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  seenUsersList: {
-    maxHeight: 400,
-  },
-  seenUserItem: {
+  seenTitle: { color: "#e9edff", fontSize: 16, fontWeight: "700" },
+  seenRow: {
     flexDirection: "row",
     alignItems: "center",
+    gap: 10,
     padding: 12,
-    gap: 12,
     borderBottomWidth: 1,
     borderBottomColor: "#243054",
   },
-  seenUserAvatar: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+  seenAvatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     backgroundColor: "#243054",
     justifyContent: "center",
     alignItems: "center",
   },
-  seenUserAvatarText: {
-    fontSize: 18,
-    fontWeight: "bold",
+  seenAvatarText: { color: "#ff8ab2", fontWeight: "700", fontSize: 14 },
+  seenName: { color: "#e9edff", fontSize: 14, fontWeight: "500" },
+
+  // Centered (empty / loading)
+  centered: { flex: 1, justifyContent: "center", alignItems: "center", padding: 40 },
+  emptyTitle: { color: "#e9edff", fontSize: 17, fontWeight: "700", marginTop: 14 },
+  emptySub: { color: "#8ea0d0", fontSize: 13.5, marginTop: 6 },
+
+  // Image viewer
+  imageViewer: { flex: 1, backgroundColor: "#000" },
+  imageViewerClose: {
+    position: "absolute",
+    top: 50,
+    right: 20,
+    zIndex: 10,
+    padding: 8,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    borderRadius: 20,
   },
-  seenUserInfo: {
-    flex: 1,
+  imageViewerPage: { width: SCREEN_WIDTH, justifyContent: "center", alignItems: "center" },
+  imageViewerImg: { width: "100%", height: "100%" },
+  imageCounter: {
+    position: "absolute",
+    bottom: 42,
+    alignSelf: "center",
+    backgroundColor: "rgba(0,0,0,0.7)",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
   },
-  seenUserName: {
-    color: "#e9edff",
-    fontSize: 14,
-    fontWeight: "600",
-    marginBottom: 4,
-  },
-  seenUserRoleChip: {
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 4,
-    borderWidth: 1,
-    alignSelf: "flex-start",
-  },
-  seenUserRoleText: {
-    fontSize: 10,
-    fontWeight: "600",
-  },
+  imageCounterText: { color: "#fff", fontSize: 14, fontWeight: "600" },
 });
+
+export default ReplyThread;

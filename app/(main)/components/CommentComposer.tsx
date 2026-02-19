@@ -10,7 +10,6 @@ import {
   FlatList,
   Image,
   ActivityIndicator,
-  Keyboard,
   Alert,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -202,8 +201,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
     if (!commentText.trim() && files.length === 0 && !attachedLink && !selectedGif) return;
     if (!currentUser || !onSend) return;
 
-    // Dismiss keyboard immediately on send
-    Keyboard.dismiss();
+    // NO Keyboard.dismiss() here → keyboard stays open after send (modern social media style)
 
     setUploading(true);
     try {
@@ -254,13 +252,20 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
 
       await onSend(commentData);
 
+      // Clear input immediately → user sees instant feedback
       setCommentText("");
       setFiles([]);
       setTaggedUsers([]);
       setAttachedLink(null);
       setSelectedGif(null);
       setIsAnonymous(false);
-      setIsExpanded(false);
+
+      // Keep composer expanded so user can continue typing immediately
+      // setIsExpanded(false);  ← commented out on purpose
+
+      // Optional: re-focus the input automatically for next message
+      textInputRef.current?.focus();
+
     } catch (error: any) {
       console.error("Comment error:", error);
 
@@ -441,7 +446,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               </TouchableOpacity>
               <TouchableOpacity
                 style={composerStyles.collapseBtn}
-                onPress={() => { setIsExpanded(false); Keyboard.dismiss(); }}
+                onPress={() => { setIsExpanded(false); /* Keyboard.dismiss(); */ }}
               >
                 <Ionicons name="chevron-down" size={18} color="#8ea0d0" />
               </TouchableOpacity>
@@ -728,15 +733,13 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
 const composerStyles = StyleSheet.create({
   // ── Wrapper ─────────────────────────────────────────────
   inputWrapper: {
-    backgroundColor: "#070c15",
-    borderTopWidth: 1,
-    borderTopColor: "#0e1320",
-    paddingTop: 6,
-    paddingHorizontal: 12,
-    paddingBottom: 6,
+    backgroundColor: "transparent",
+    paddingTop: 0,
+    paddingBottom: 0,
+    paddingHorizontal: 0,
   },
 
-  // ── Reply bar (combined into one compact line) ──────────
+  // Replying bar (unchanged)
   replyingToBar: {
     flexDirection: "row",
     alignItems: "center",
@@ -771,7 +774,7 @@ const composerStyles = StyleSheet.create({
     marginLeft: 6,
   },
 
-  // ── GIF preview ─────────────────────────────────────────
+  // GIF preview (unchanged)
   gifPreviewCompact: {
     position: "relative",
     marginBottom: 4,
@@ -792,7 +795,7 @@ const composerStyles = StyleSheet.create({
     padding: 1,
   },
 
-  // ── Collapsed pill ──────────────────────────────────────
+  // Collapsed pill (unchanged)
   simpleInputContainer: {
     flexDirection: "row",
     alignItems: "center",
@@ -810,7 +813,7 @@ const composerStyles = StyleSheet.create({
     fontSize: 14,
   },
 
-  // ── Expanded box ────────────────────────────────────────
+  // ── Expanded box – now super compact ────────────────────
   expandedInputContainer: {
     backgroundColor: "#0e1320",
     borderRadius: 10,
@@ -866,7 +869,7 @@ const composerStyles = StyleSheet.create({
     padding: 3,
   },
 
-  // ── File previews ────────────────────────────────────────
+  // Previews – reduced margins
   filesPreviewRow: {
     flexDirection: "row",
     gap: 4,
@@ -910,7 +913,6 @@ const composerStyles = StyleSheet.create({
     fontSize: 10,
   },
 
-  // ── Link & tag previews ──────────────────────────────────
   linkPreviewRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -937,11 +939,13 @@ const composerStyles = StyleSheet.create({
     fontWeight: "500",
   },
 
-  // ── Input row ────────────────────────────────────────────
+  // Input row – tightest possible
   inputRow: {
     flexDirection: "row",
     alignItems: "flex-end",
     gap: 6,
+    paddingTop: 0,
+    paddingBottom: 0,
   },
   userAvatarSmall: {
     width: 24,
@@ -967,20 +971,21 @@ const composerStyles = StyleSheet.create({
   input: {
     flex: 1,
     color: "#d8deff",
-    fontSize: 14,
+    fontSize: 14.5,
     maxHeight: 80,
     paddingTop: 6,
     paddingBottom: 6,
+    paddingHorizontal: 4,
     lineHeight: 20,
   },
   sendButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     backgroundColor: "#ff5c93",
     justifyContent: "center",
     alignItems: "center",
-    marginBottom: 3,
+    marginBottom: 0,
   },
   sendButtonDisabled: {
     backgroundColor: "#1b2235",
@@ -989,10 +994,10 @@ const composerStyles = StyleSheet.create({
     color: "#8ea0d0",
     fontSize: 10,
     textAlign: "right",
-    marginTop: 2,
+    marginTop: 1,
   },
 
-  // ── Modals ───────────────────────────────────────────────
+  // Modals (unchanged – keeping your original modal styles)
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.75)",
@@ -1083,7 +1088,6 @@ const composerStyles = StyleSheet.create({
     marginTop: 20,
   },
 
-  // ── Link modal ───────────────────────────────────────────
   linkModalOverlay: {
     flex: 1,
     justifyContent: "center",
@@ -1132,7 +1136,6 @@ const composerStyles = StyleSheet.create({
     fontWeight: "600",
   },
 
-  // ── GIF modal ────────────────────────────────────────────
   gifSearchContainer: {
     flexDirection: "row",
     alignItems: "center",
