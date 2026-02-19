@@ -9,7 +9,8 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-const csvFilePath = "./firestore-student-import/students.csv";
+const csvFilePath = "./students.csv";
+
 const students = [];
 
 // Helper function to determine email domain and role based on user type
@@ -114,6 +115,7 @@ fs.createReadStream(csvFilePath)
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           },
           { merge: true }
+          
         );
 
         console.log(`✅ Synced Firestore for: ${studentID} (${userConfig.role})`);
@@ -126,7 +128,7 @@ fs.createReadStream(csvFilePath)
     console.log("\n📊 Summary:");
     console.log("- Students use: @student.csap");
     console.log("- Moderators use: @student.csap (but have moderator role)");
-    console.log("- Teachers use: @teachers.csap");
+    console.log("- Teachers use: @teacher.csap");
     console.log("- Admins use: @admin.csap");
     process.exit(0);
   })

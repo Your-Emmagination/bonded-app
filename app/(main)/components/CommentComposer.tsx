@@ -94,7 +94,6 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
     fetchStudents();
   }, []);
 
-  // Auto-expand and focus when replying to someone
   useEffect(() => {
     if (replyingTo) {
       setIsExpanded(true);
@@ -112,9 +111,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       const studentsList = studentsSnapshot.docs
         .map((doc) => {
           const data = doc.data();
-          if (!data.firstname || !data.lastname || !data.studentID) {
-            return null;
-          }
+          if (!data.firstname || !data.lastname || !data.studentID) return null;
           return {
             id: doc.id,
             firstname: String(data.firstname || "").trim(),
@@ -130,7 +127,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
           if (student.studentID === currentStudentID) return false;
           return true;
         });
-      
+
       setStudents(studentsList);
     } catch (error) {
       console.error("Error fetching students:", error);
@@ -140,10 +137,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
   const pickFiles = async () => {
     try {
       if (files.length >= maxFiles) {
-        Alert.alert(
-          "Maximum Files Reached",
-          `You can only attach up to ${maxFiles} files per comment.`
-        );
+        Alert.alert("Maximum Files Reached", `You can only attach up to ${maxFiles} files per comment.`);
         return;
       }
 
@@ -158,10 +152,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         const filesToAdd = result.assets.slice(0, remainingSlots);
 
         if (result.assets.length > remainingSlots) {
-          Alert.alert(
-            "File Limit",
-            `Only ${remainingSlots} more file(s) can be added. Maximum is ${maxFiles} files per comment.`
-          );
+          Alert.alert("File Limit", `Only ${remainingSlots} more file(s) can be added. Maximum is ${maxFiles} files per comment.`);
         }
 
         const newFiles = filesToAdd.map((picked) => ({
@@ -193,10 +184,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       formattedUrl = "https://" + formattedUrl;
     }
 
-    setAttachedLink({
-      url: formattedUrl,
-      title: linkTitle.trim() || formattedUrl,
-    });
+    setAttachedLink({ url: formattedUrl, title: linkTitle.trim() || formattedUrl });
     setShowLinkModal(false);
     setLinkUrl("");
     setLinkTitle("");
@@ -213,6 +201,9 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
   const handleSendComment = async () => {
     if (!commentText.trim() && files.length === 0 && !attachedLink && !selectedGif) return;
     if (!currentUser || !onSend) return;
+
+    // Dismiss keyboard immediately on send
+    Keyboard.dismiss();
 
     setUploading(true);
     try {
@@ -270,11 +261,9 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       setSelectedGif(null);
       setIsAnonymous(false);
       setIsExpanded(false);
-      Keyboard.dismiss();
     } catch (error: any) {
       console.error("Comment error:", error);
-      
-      // Check for network-related errors
+
       const errorMessage = error?.message?.toLowerCase() || "";
       if (
         errorMessage.includes("network") ||
@@ -283,11 +272,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         error?.code === "unavailable" ||
         error?.code === "ECONNREFUSED"
       ) {
-        Alert.alert(
-          "Connection Error",
-          "Unable to post comment. Please check your internet connection and try again.",
-          [{ text: "OK" }]
-        );
+        Alert.alert("Connection Error", "Unable to post comment. Please check your internet connection and try again.", [{ text: "OK" }]);
       } else {
         Alert.alert("Error", "Failed to post comment. Please try again.");
       }
@@ -309,20 +294,16 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       const API_KEY = "AIzaSyCFwGab5AO3lSHEBTxTDIVgOwFt4YvCWEI";
       const limit = 20;
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
 
       const response = await fetch(
-        `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(
-          query
-        )}&key=${API_KEY}&limit=${limit}&media_filter=gif`,
+        `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(query)}&key=${API_KEY}&limit=${limit}&media_filter=gif`,
         { signal: controller.signal }
       );
 
       clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        throw new Error("Failed to fetch GIFs");
-      }
+      if (!response.ok) throw new Error("Failed to fetch GIFs");
 
       const data = await response.json();
 
@@ -335,8 +316,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       }
     } catch (error: any) {
       console.error("Error searching GIFs:", error);
-      
-      // Handle different types of errors
+
       if (error.name === "AbortError") {
         setGifError("Connection timeout. Please check your internet and try again.");
       } else if (error.message?.includes("network") || error.message?.includes("Failed to fetch")) {
@@ -344,7 +324,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       } else {
         setGifError("Unable to load GIFs. Please try again later.");
       }
-      
+
       setGifResults([]);
     } finally {
       setLoadingGifs(false);
@@ -377,44 +357,27 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         {replyingTo && (
           <View style={composerStyles.replyingToBar}>
             <View style={composerStyles.replyingToContent}>
-              <Ionicons name="chevron-forward" size={16} color="#4f9cff" />
+              <Ionicons name="chevron-forward" size={14} color="#ff5c93" />
               <Text style={composerStyles.replyingToText} numberOfLines={1}>
                 Replying to <Text style={composerStyles.replyingToName}>{replyingTo.name}</Text>
+                {" · "}
+                <Text style={composerStyles.replyingToSnippet} numberOfLines={1}>
+                  {replyingTo.text.length > 40 ? replyingTo.text.slice(0, 40) + "…" : replyingTo.text}
+                </Text>
               </Text>
             </View>
             {onCancelReply && (
               <TouchableOpacity onPress={onCancelReply} style={composerStyles.cancelReplyBtn}>
-                <Ionicons name="close-circle" size={20} color="#8ea0d0" />
+                <Ionicons name="close" size={16} color="#8ea0d0" />
               </TouchableOpacity>
             )}
-          </View>
-        )}
-
-        {/* Quoted Message */}
-        {replyingTo && (
-          <View style={composerStyles.quotedMessageContainer}>
-            <Text style={composerStyles.quotedName}>{replyingTo.name}</Text>
-            <Text style={composerStyles.quotedText} numberOfLines={2} ellipsizeMode="tail">
-              {replyingTo.text}
-            </Text>
-          </View>
-        )}
-
-        {files.length > 0 && (
-          <View style={composerStyles.fileLimitInfo}>
-            <Text style={composerStyles.fileLimitText}>
-              {files.length} / {maxFiles} files attached
-            </Text>
           </View>
         )}
 
         {selectedGif && (
           <View style={composerStyles.gifPreviewCompact}>
             <Image source={{ uri: selectedGif }} style={composerStyles.gifImageCompact} />
-            <TouchableOpacity
-              style={composerStyles.removeGifBtn}
-              onPress={() => setSelectedGif(null)}
-            >
+            <TouchableOpacity style={composerStyles.removeGifBtn} onPress={() => setSelectedGif(null)}>
               <Ionicons name="close-circle" size={16} color="#ff5c93" />
             </TouchableOpacity>
           </View>
@@ -428,10 +391,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
           >
             <View style={composerStyles.userAvatarSmall}>
               {currentUser?.profilePic ? (
-                <Image
-                  source={{ uri: currentUser.profilePic }}
-                  style={composerStyles.avatarImage}
-                />
+                <Image source={{ uri: currentUser.profilePic }} style={composerStyles.avatarImage} />
               ) : (
                 <Text style={composerStyles.avatarTextSmall}>
                   {currentUser?.firstname?.[0]?.toUpperCase() || "U"}
@@ -442,40 +402,28 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
           </TouchableOpacity>
         ) : (
           <View style={composerStyles.expandedInputContainer}>
+            {/* Options row */}
             <View style={composerStyles.optionsRow}>
               <TouchableOpacity
                 style={composerStyles.optionBtn}
                 onPress={pickFiles}
                 disabled={files.length >= maxFiles}
               >
-                <Ionicons 
-                  name="images" 
-                  size={20} 
-                  color={files.length >= maxFiles ? "#5a6380" : "#4f9cff"} 
-                />
+                <Ionicons name="images" size={19} color={files.length >= maxFiles ? "#243054" : "#4f9cff"} />
               </TouchableOpacity>
-              <TouchableOpacity
-                style={composerStyles.optionBtn}
-                onPress={() => setShowTagModal(true)}
-              >
-                <Ionicons name="person-add" size={20} color="#a86fff" />
+              <TouchableOpacity style={composerStyles.optionBtn} onPress={() => setShowTagModal(true)}>
+                <Ionicons name="person-add" size={19} color="#a86fff" />
                 {taggedUsers.length > 0 && (
                   <View style={composerStyles.optionBadge}>
                     <Text style={composerStyles.optionBadgeText}>{taggedUsers.length}</Text>
                   </View>
                 )}
               </TouchableOpacity>
-              <TouchableOpacity
-                style={composerStyles.optionBtn}
-                onPress={() => setShowLinkModal(true)}
-              >
-                <Ionicons name="link" size={20} color="#4f9cff" />
+              <TouchableOpacity style={composerStyles.optionBtn} onPress={() => setShowLinkModal(true)}>
+                <Ionicons name="link" size={19} color="#4f9cff" />
               </TouchableOpacity>
-              <TouchableOpacity
-                style={composerStyles.optionBtn}
-                onPress={() => setShowGifModal(true)}
-              >
-                <Ionicons name="gift" size={20} color="#ff9f43" />
+              <TouchableOpacity style={composerStyles.optionBtn} onPress={() => setShowGifModal(true)}>
+                <Ionicons name="gift" size={19} color="#ff9f43" />
               </TouchableOpacity>
               <View style={{ flex: 1 }} />
               <TouchableOpacity
@@ -484,18 +432,22 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               >
                 <Ionicons
                   name={isAnonymous ? "eye-off" : "person"}
-                  size={16}
-                  color={isAnonymous ? "#ff3b7f" : "#8ea0d0"}
+                  size={14}
+                  color={isAnonymous ? "#ff5c93" : "#8ea0d0"}
                 />
-                <Text style={[
-                  composerStyles.anonymousBtnText,
-                  isAnonymous && { color: "#ff3b7f" }
-                ]}>
-                  {isAnonymous ? "Anonymous" : "Public"}
+                <Text style={[composerStyles.anonymousBtnText, isAnonymous && { color: "#ff5c93" }]}>
+                  {isAnonymous ? "Anon" : "Public"}
                 </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={composerStyles.collapseBtn}
+                onPress={() => { setIsExpanded(false); Keyboard.dismiss(); }}
+              >
+                <Ionicons name="chevron-down" size={18} color="#8ea0d0" />
               </TouchableOpacity>
             </View>
 
+            {/* File previews */}
             {files.length > 0 && (
               <View style={composerStyles.filesPreviewRow}>
                 {files.map((f, i) => (
@@ -504,13 +456,9 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                       <Image source={{ uri: f.uri }} style={composerStyles.previewImage} />
                     ) : (
                       <View style={composerStyles.previewDoc}>
-                        <Ionicons 
-                          name={f.mimeType.includes("pdf") ? "document-text" : "document"} 
-                          size={16} 
-                          color="#4f9cff" 
-                        />
+                        <Ionicons name={f.mimeType.includes("pdf") ? "document-text" : "document"} size={14} color="#4f9cff" />
                         <Text style={composerStyles.previewDocName} numberOfLines={1}>
-                          {f.name.length > 8 ? f.name.substring(0, 8) + "..." : f.name}
+                          {f.name.length > 6 ? f.name.substring(0, 6) + "…" : f.name}
                         </Text>
                       </View>
                     )}
@@ -518,43 +466,38 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                       style={composerStyles.removeFileBtn}
                       onPress={() => setFiles(files.filter((_, idx) => idx !== i))}
                     >
-                      <Ionicons name="close-circle" size={16} color="#ff5c93" />
+                      <Ionicons name="close-circle" size={14} color="#ff5c93" />
                     </TouchableOpacity>
                   </View>
                 ))}
+                <Text style={composerStyles.fileLimitText}>{files.length}/{maxFiles}</Text>
               </View>
             )}
 
             {attachedLink && (
               <View style={composerStyles.linkPreviewRow}>
-                <Ionicons name="link" size={14} color="#4f9cff" />
-                <Text style={composerStyles.linkPreviewText} numberOfLines={1}>
-                  {attachedLink.title}
-                </Text>
+                <Ionicons name="link" size={12} color="#4f9cff" />
+                <Text style={composerStyles.linkPreviewText} numberOfLines={1}>{attachedLink.title}</Text>
                 <TouchableOpacity onPress={() => setAttachedLink(null)}>
-                  <Ionicons name="close-circle" size={16} color="#ff5c93" />
+                  <Ionicons name="close-circle" size={14} color="#ff5c93" />
                 </TouchableOpacity>
               </View>
             )}
 
             {taggedUsers.length > 0 && (
               <View style={composerStyles.taggedPreviewRow}>
-                <Ionicons name="people" size={12} color="#ff3b7f" />
-                <Text style={composerStyles.taggedPreviewText}>
-                  {taggedUsers.length} tagged
-                </Text>
+                <Ionicons name="people" size={11} color="#ff5c93" />
+                <Text style={composerStyles.taggedPreviewText}>{taggedUsers.length} tagged</Text>
               </View>
             )}
 
+            {/* Input row */}
             <View style={composerStyles.inputRow}>
               <View style={composerStyles.userAvatarSmall}>
                 {isAnonymous ? (
-                  <Ionicons name="person" size={12} color="#8ea0d0" />
+                  <Ionicons name="person" size={11} color="#8ea0d0" />
                 ) : currentUser?.profilePic ? (
-                  <Image
-                    source={{ uri: currentUser.profilePic }}
-                    style={composerStyles.avatarImage}
-                  />
+                  <Image source={{ uri: currentUser.profilePic }} style={composerStyles.avatarImage} />
                 ) : (
                   <Text style={composerStyles.avatarTextSmall}>
                     {currentUser?.firstname?.[0]?.toUpperCase() || "U"}
@@ -574,10 +517,10 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               />
               <TouchableOpacity
                 onPress={handleSendComment}
-                disabled={(!commentText.trim() && files.length === 0 && !attachedLink) || uploading}
+                disabled={(!commentText.trim() && files.length === 0 && !attachedLink && !selectedGif) || uploading}
                 style={[
                   composerStyles.sendButton,
-                  (!commentText.trim() && files.length === 0 && !attachedLink) && composerStyles.sendButtonDisabled,
+                  (!commentText.trim() && files.length === 0 && !attachedLink && !selectedGif) && composerStyles.sendButtonDisabled,
                 ]}
               >
                 {uploading ? (
@@ -585,44 +528,24 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                 ) : (
                   <Ionicons
                     name="send"
-                    size={18}
-                    color={(commentText.trim() || files.length > 0 || attachedLink) ? "#fff" : "#4b5563"}
+                    size={16}
+                    color={(commentText.trim() || files.length > 0 || attachedLink || selectedGif) ? "#fff" : "#243054"}
                   />
                 )}
               </TouchableOpacity>
             </View>
 
             {isNearLimit && (
-              <View style={composerStyles.charCountRow}>
-                <Text style={[
-                  composerStyles.charCountText,
-                  remainingChars < 50 && { color: "#ff5c93" }
-                ]}>
-                  {remainingChars} characters remaining
-                </Text>
-              </View>
+              <Text style={[composerStyles.charCountText, remainingChars < 50 && { color: "#ff5c93" }]}>
+                {remainingChars} left
+              </Text>
             )}
-
-            <TouchableOpacity
-              style={composerStyles.collapseBtn}
-              onPress={() => {
-                setIsExpanded(false);
-                Keyboard.dismiss();
-              }}
-            >
-              <Ionicons name="chevron-down" size={20} color="#8ea0d0" />
-            </TouchableOpacity>
           </View>
         )}
       </View>
 
       {/* Tag Modal */}
-      <Modal
-        visible={showTagModal}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setShowTagModal(false)}
-      >
+      <Modal visible={showTagModal} animationType="slide" transparent onRequestClose={() => setShowTagModal(false)}>
         <View style={composerStyles.modalOverlay}>
           <View style={composerStyles.tagModalContainer}>
             <View style={composerStyles.modalHeader}>
@@ -630,7 +553,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                 Tag People {taggedUsers.length > 0 && `(${taggedUsers.length})`}
               </Text>
               <TouchableOpacity onPress={() => setShowTagModal(false)}>
-                <Ionicons name="close" size={28} color="#b8c7ff" />
+                <Ionicons name="close" size={24} color="#8ea0d0" />
               </TouchableOpacity>
             </View>
 
@@ -638,24 +561,19 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               <TouchableOpacity
                 style={composerStyles.tagAllButton}
                 onPress={() => {
-                  const allTagged = students.filter(
-                    (s) => !taggedUsers.find((u) => u.id === s.id)
-                  );
-                  if (allTagged.length === 0) {
-                    Alert.alert("Info", "Everyone is already tagged!");
-                    return;
-                  }
+                  const allTagged = students.filter((s) => !taggedUsers.find((u) => u.id === s.id));
+                  if (allTagged.length === 0) { Alert.alert("Info", "Everyone is already tagged!"); return; }
                   setTaggedUsers([...taggedUsers, ...allTagged]);
                 }}
               >
-                <Ionicons name="people-circle" size={20} color="#fff" />
+                <Ionicons name="people-circle" size={18} color="#fff" />
                 <Text style={composerStyles.tagAllText}>Tag All</Text>
               </TouchableOpacity>
             )}
 
             <TextInput
               placeholder="Search students..."
-              placeholderTextColor="#a0a8c0"
+              placeholderTextColor="#8ea0d0"
               value={searchQuery}
               onChangeText={setSearchQuery}
               style={composerStyles.searchInput}
@@ -666,27 +584,17 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               keyExtractor={(item) => item.id}
               renderItem={({ item }) => {
                 const tagged = taggedUsers.find((u) => u.id === item.id);
-                const firstname = item.firstname || "?";
-                const lastname = item.lastname || "?";
                 return (
-                  <TouchableOpacity
-                    style={composerStyles.studentItem}
-                    onPress={() => handleTagUser(item)}
-                  >
+                  <TouchableOpacity style={composerStyles.studentItem} onPress={() => handleTagUser(item)}>
                     <View style={composerStyles.studentAvatar}>
                       <Text style={composerStyles.studentAvatarText}>
-                        {firstname.charAt(0)}
-                        {lastname.charAt(0)}
+                        {item.firstname.charAt(0)}{item.lastname.charAt(0)}
                       </Text>
                     </View>
                     <View style={composerStyles.studentInfo}>
-                      <Text style={composerStyles.studentName}>
-                        {firstname} {lastname}
-                      </Text>
+                      <Text style={composerStyles.studentName}>{item.firstname} {item.lastname}</Text>
                     </View>
-                    {tagged && (
-                      <Ionicons name="checkmark-circle" size={20} color="#6f9aff" />
-                    )}
+                    {tagged && <Ionicons name="checkmark-circle" size={18} color="#ff5c93" />}
                   </TouchableOpacity>
                 );
               }}
@@ -701,46 +609,33 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       </Modal>
 
       {/* Link Modal */}
-      <Modal
-        visible={showLinkModal}
-        animationType="fade"
-        transparent
-        onRequestClose={() => setShowLinkModal(false)}
-      >
+      <Modal visible={showLinkModal} animationType="fade" transparent onRequestClose={() => setShowLinkModal(false)}>
         <View style={composerStyles.linkModalOverlay}>
           <View style={composerStyles.linkModalContent}>
             <Text style={composerStyles.linkModalTitle}>Add Link</Text>
-
             <TextInput
-              placeholder="Enter URL (e.g., https://example.com)"
-              placeholderTextColor="#a0a8c0"
+              placeholder="https://example.com"
+              placeholderTextColor="#8ea0d0"
               value={linkUrl}
               onChangeText={setLinkUrl}
               style={composerStyles.linkInput}
               autoCapitalize="none"
               keyboardType="url"
             />
-
             <TextInput
               placeholder="Link title (optional)"
-              placeholderTextColor="#a0a8c0"
+              placeholderTextColor="#8ea0d0"
               value={linkTitle}
               onChangeText={setLinkTitle}
               style={composerStyles.linkInput}
             />
-
             <View style={composerStyles.linkModalButtons}>
               <TouchableOpacity
                 style={[composerStyles.linkModalButton, { backgroundColor: "#1b2235" }]}
-                onPress={() => {
-                  setShowLinkModal(false);
-                  setLinkUrl("");
-                  setLinkTitle("");
-                }}
+                onPress={() => { setShowLinkModal(false); setLinkUrl(""); setLinkTitle(""); }}
               >
                 <Text style={composerStyles.linkModalButtonText}>Cancel</Text>
               </TouchableOpacity>
-
               <TouchableOpacity
                 style={[composerStyles.linkModalButton, { backgroundColor: "#ff5c93" }]}
                 onPress={handleAddLink}
@@ -757,38 +652,29 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         visible={showGifModal}
         animationType="slide"
         transparent
-        onRequestClose={() => {
-          setShowGifModal(false);
-          setGifError(null);
-        }}
+        onRequestClose={() => { setShowGifModal(false); setGifError(null); }}
       >
         <View style={composerStyles.modalOverlay}>
           <View style={composerStyles.tagModalContainer}>
             <View style={composerStyles.modalHeader}>
               <Text style={composerStyles.modalTitle}>Choose a GIF</Text>
-              <TouchableOpacity onPress={() => {
-                setShowGifModal(false);
-                setGifError(null);
-              }}>
-                <Ionicons name="close" size={28} color="#b8c7ff" />
+              <TouchableOpacity onPress={() => { setShowGifModal(false); setGifError(null); }}>
+                <Ionicons name="close" size={24} color="#8ea0d0" />
               </TouchableOpacity>
             </View>
 
             <View style={composerStyles.gifSearchContainer}>
               <TextInput
                 placeholder="Search GIFs..."
-                placeholderTextColor="#a0a8c0"
+                placeholderTextColor="#8ea0d0"
                 value={gifSearchQuery}
                 onChangeText={setGifSearchQuery}
                 onSubmitEditing={() => searchGifs(gifSearchQuery)}
                 style={composerStyles.searchInput}
                 returnKeyType="search"
               />
-              <TouchableOpacity
-                style={composerStyles.gifSearchButton}
-                onPress={() => searchGifs(gifSearchQuery)}
-              >
-                <Ionicons name="search" size={20} color="#fff" />
+              <TouchableOpacity style={composerStyles.gifSearchButton} onPress={() => searchGifs(gifSearchQuery)}>
+                <Ionicons name="search" size={18} color="#fff" />
               </TouchableOpacity>
             </View>
 
@@ -799,14 +685,11 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               </View>
             ) : gifError ? (
               <View style={composerStyles.gifErrorContainer}>
-                <Ionicons name="cloud-offline-outline" size={64} color="#ff5c93" />
+                <Ionicons name="cloud-offline-outline" size={48} color="#ff5c93" />
                 <Text style={composerStyles.gifErrorTitle}>Connection Error</Text>
                 <Text style={composerStyles.gifErrorText}>{gifError}</Text>
-                <TouchableOpacity
-                  style={composerStyles.gifRetryButton}
-                  onPress={() => searchGifs(gifSearchQuery)}
-                >
-                  <Ionicons name="refresh" size={20} color="#fff" />
+                <TouchableOpacity style={composerStyles.gifRetryButton} onPress={() => searchGifs(gifSearchQuery)}>
+                  <Ionicons name="refresh" size={18} color="#fff" />
                   <Text style={composerStyles.gifRetryText}>Try Again</Text>
                 </TouchableOpacity>
               </View>
@@ -814,24 +697,14 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               <FlatList
                 data={gifResults}
                 numColumns={2}
-                keyExtractor={(item, index) => index.toString()}
+                keyExtractor={(_, index) => index.toString()}
                 renderItem={({ item }) => {
                   const gifUrl = item?.media_formats?.gif?.url;
-                  const thumbnailUrl =
-                    item?.media_formats?.tinygif?.url || item?.media_formats?.gif?.url;
-
+                  const thumbnailUrl = item?.media_formats?.tinygif?.url || gifUrl;
                   if (!gifUrl || !thumbnailUrl) return null;
-
                   return (
-                    <TouchableOpacity
-                      style={composerStyles.gifItem}
-                      onPress={() => handleSelectGif(gifUrl)}
-                    >
-                      <Image
-                        source={{ uri: thumbnailUrl }}
-                        style={composerStyles.gifThumbnail}
-                        resizeMode="cover"
-                      />
+                    <TouchableOpacity style={composerStyles.gifItem} onPress={() => handleSelectGif(gifUrl)}>
+                      <Image source={{ uri: thumbnailUrl }} style={composerStyles.gifThumbnail} resizeMode="cover" />
                     </TouchableOpacity>
                   );
                 }}
@@ -839,7 +712,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               />
             ) : (
               <View style={composerStyles.gifEmptyContainer}>
-                <Ionicons name="images-outline" size={64} color="#5a6380" />
+                <Ionicons name="images-outline" size={48} color="#243054" />
                 <Text style={composerStyles.emptyText}>
                   {gifSearchQuery ? "No GIFs found" : "Search for GIFs to get started"}
                 </Text>
@@ -853,71 +726,61 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
 };
 
 const composerStyles = StyleSheet.create({
+  // ── Wrapper ─────────────────────────────────────────────
   inputWrapper: {
-    backgroundColor: "#1c2535",
+    backgroundColor: "#070c15",
     borderTopWidth: 1,
-    borderTopColor: "#243054",
-    paddingTop: 6,              // Reduced
-    paddingHorizontal: 12,      // Slightly reduced
+    borderTopColor: "#0e1320",
+    paddingTop: 6,
+    paddingHorizontal: 12,
     paddingBottom: 6,
   },
+
+  // ── Reply bar (combined into one compact line) ──────────
   replyingToBar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#243054",
-    paddingHorizontal: 8,       // Reduced
-    paddingVertical: 5,
-    borderRadius: 8,
-    marginBottom: 6,            // Reduced
+    backgroundColor: "#0e1320",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    marginBottom: 4,
   },
   replyingToContent: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 4,
     flex: 1,
   },
   replyingToText: {
-    color: "#a0a8c0",
-    fontSize: 12,               // Smaller
+    color: "#8ea0d0",
+    fontSize: 11,
+    flex: 1,
   },
   replyingToName: {
-    color: "#4f9cff",
+    color: "#ff8ab2",
     fontWeight: "600",
+  },
+  replyingToSnippet: {
+    color: "#8ea0d0",
+    fontStyle: "italic",
   },
   cancelReplyBtn: {
     padding: 2,
+    marginLeft: 6,
   },
-  quotedMessageContainer: {
-    backgroundColor: "#243054",
-    padding: 8,                 // Reduced
-    borderRadius: 8,
-    marginBottom: 6,            // Reduced
-    // Removed thick left border for compactness
-  },
-  quotedName: {
-    color: "#e9edff",
-    fontSize: 11,               // Smaller
-    fontWeight: "600",
-    marginBottom: 2,
-  },
-  quotedText: {
-    color: "#a0a8c0",
-    fontSize: 12,               // Smaller
-    lineHeight: 16,
-  },
-  fileLimitInfo: {
-    // Removed standalone info – now shown in preview row
-  },
+
+  // ── GIF preview ─────────────────────────────────────────
   gifPreviewCompact: {
     position: "relative",
-    marginBottom: 6,            // Reduced
+    marginBottom: 4,
     borderRadius: 8,
     overflow: "hidden",
   },
   gifImageCompact: {
     width: "100%",
-    height: 100,                // Smaller preview
+    height: 90,
     borderRadius: 8,
   },
   removeGifBtn: {
@@ -926,82 +789,94 @@ const composerStyles = StyleSheet.create({
     right: 4,
     backgroundColor: "rgba(0,0,0,0.6)",
     borderRadius: 10,
-    padding: 2,
+    padding: 1,
   },
+
+  // ── Collapsed pill ──────────────────────────────────────
   simpleInputContainer: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    backgroundColor: "#0f1624",
+    gap: 8,
+    backgroundColor: "#0e1320",
     borderRadius: 20,
-    paddingHorizontal: 12,
-    paddingVertical: 9,         // Slightly reduced
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#1b2235",
   },
   placeholderText: {
     flex: 1,
     color: "#6b7280",
     fontSize: 14,
   },
+
+  // ── Expanded box ────────────────────────────────────────
   expandedInputContainer: {
-    backgroundColor: "#0f1624",
-    borderRadius: 12,
-    padding: 8,                 // Reduced padding
+    backgroundColor: "#0e1320",
+    borderRadius: 10,
+    padding: 6,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#1b2235",
   },
   optionsRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,                    // Reduced gap
-    marginBottom: 6,            // Reduced
+    gap: 8,
+    marginBottom: 4,
+    paddingBottom: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: "#1b2235",
   },
   optionBtn: {
-    padding: 4,                 // Smaller touch area ok for icons
+    padding: 3,
     position: "relative",
   },
   optionBadge: {
     position: "absolute",
-    top: -2,
-    right: -2,
+    top: -1,
+    right: -1,
     backgroundColor: "#ff5c93",
-    borderRadius: 7,
-    minWidth: 12,
-    height: 12,
+    borderRadius: 6,
+    minWidth: 11,
+    height: 11,
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: 2,
+    paddingHorizontal: 1,
   },
   optionBadgeText: {
     color: "#fff",
-    fontSize: 8,
+    fontSize: 7,
     fontWeight: "bold",
   },
   anonymousBtn: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
+    gap: 3,
     paddingHorizontal: 6,
     paddingVertical: 3,
-    backgroundColor: "#243054",
-    borderRadius: 10,
+    backgroundColor: "#1b2235",
+    borderRadius: 8,
   },
   anonymousBtnText: {
     color: "#8ea0d0",
-    fontSize: 10,               // Smaller
+    fontSize: 10,
     fontWeight: "600",
   },
+  collapseBtn: {
+    padding: 3,
+  },
+
+  // ── File previews ────────────────────────────────────────
   filesPreviewRow: {
     flexDirection: "row",
-    gap: 5,
-    marginBottom: 6,
+    gap: 4,
+    marginBottom: 4,
     flexWrap: "wrap",
     alignItems: "center",
   },
   filePreviewItem: {
-    width: 40,                  // Smaller thumbnails
-    height: 40,
+    width: 36,
+    height: 36,
     borderRadius: 6,
     overflow: "hidden",
     position: "relative",
@@ -1013,13 +888,13 @@ const composerStyles = StyleSheet.create({
   previewDoc: {
     width: "100%",
     height: "100%",
-    backgroundColor: "#243054",
+    backgroundColor: "#1b2235",
     justifyContent: "center",
     alignItems: "center",
   },
   previewDocName: {
     color: "#8ea0d0",
-    fontSize: 7,
+    fontSize: 6,
     marginTop: 1,
   },
   removeFileBtn: {
@@ -1027,17 +902,23 @@ const composerStyles = StyleSheet.create({
     top: 1,
     right: 1,
     backgroundColor: "rgba(0,0,0,0.6)",
-    borderRadius: 8,
+    borderRadius: 7,
     padding: 1,
   },
+  fileLimitText: {
+    color: "#8ea0d0",
+    fontSize: 10,
+  },
+
+  // ── Link & tag previews ──────────────────────────────────
   linkPreviewRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    backgroundColor: "#243054",
-    padding: 5,                 // Reduced
+    gap: 5,
+    backgroundColor: "#1b2235",
+    padding: 4,
     borderRadius: 6,
-    marginBottom: 6,
+    marginBottom: 4,
   },
   linkPreviewText: {
     flex: 1,
@@ -1048,27 +929,31 @@ const composerStyles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    marginBottom: 6,
+    marginBottom: 4,
   },
   taggedPreviewText: {
-    color: "#ff3b7f",
+    color: "#ff5c93",
     fontSize: 11,
     fontWeight: "500",
   },
+
+  // ── Input row ────────────────────────────────────────────
   inputRow: {
     flexDirection: "row",
-    alignItems: "flex-end",     // Better alignment for multiline
-    gap: 8,
+    alignItems: "flex-end",
+    gap: 6,
   },
   userAvatarSmall: {
-    width: 26,                  // Slightly smaller avatar
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: "#243054",
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: "#1b2235",
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
-    marginBottom: 4,            // Align with multiline text
+    marginBottom: 3,
+    borderWidth: 1,
+    borderColor: "#243054",
   },
   avatarImage: {
     width: "100%",
@@ -1076,234 +961,240 @@ const composerStyles = StyleSheet.create({
   },
   avatarTextSmall: {
     color: "#8ea0d0",
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "700",
   },
   input: {
     flex: 1,
-    color: "#e9edff",
+    color: "#d8deff",
     fontSize: 14,
-    maxHeight: 80,              // Limit growth a bit
-    paddingTop: 8,
-    paddingBottom: 8,
+    maxHeight: 80,
+    paddingTop: 6,
+    paddingBottom: 6,
+    lineHeight: 20,
   },
   sendButton: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: "#ff3b7f",
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "#ff5c93",
     justifyContent: "center",
     alignItems: "center",
-    marginBottom: 4,
+    marginBottom: 3,
   },
   sendButtonDisabled: {
-    opacity: 0.5,
-    backgroundColor: "#243054",
-  },
-  charCountRow: {
-    marginTop: 2,
+    backgroundColor: "#1b2235",
   },
   charCountText: {
     color: "#8ea0d0",
     fontSize: 10,
     textAlign: "right",
+    marginTop: 2,
   },
-  collapseBtn: {
-    alignSelf: "center",
-    marginTop: 2,               // Reduced
-    padding: 3,
-  },
+
+  // ── Modals ───────────────────────────────────────────────
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: "rgba(0,0,0,0.75)",
     justifyContent: "flex-end",
   },
   tagModalContainer: {
     flex: 0.8,
-    backgroundColor: "#10172b",
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
+    backgroundColor: "#0e1320",
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    borderWidth: 1,
+    borderColor: "#1b2235",
   },
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: 16,
+    padding: 14,
     borderBottomWidth: 1,
-    borderBottomColor: "#1f2937",
+    borderBottomColor: "#1b2235",
   },
   modalTitle: {
-    color: "#b8c7ff",
-    fontSize: 18,
-    fontWeight: "bold",
+    color: "#e9edff",
+    fontSize: 16,
+    fontWeight: "700",
   },
   tagAllButton: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#ff5c93",
-    marginHorizontal: 16,
-    marginBottom: 10,
-    paddingVertical: 10,
-    borderRadius: 10,
+    marginHorizontal: 14,
+    marginVertical: 8,
+    paddingVertical: 8,
+    borderRadius: 8,
     gap: 6,
   },
   tagAllText: {
     color: "#fff",
     fontWeight: "600",
-    fontSize: 14,
+    fontSize: 13,
   },
   searchInput: {
     backgroundColor: "#1b2235",
-    color: "#e4e8ff",
-    borderRadius: 10,
-    padding: 12,
-    marginHorizontal: 16,
-    marginBottom: 12,
+    color: "#d8deff",
+    borderRadius: 8,
+    padding: 10,
+    marginHorizontal: 14,
+    marginBottom: 8,
+    fontSize: 14,
+    borderWidth: 1,
+    borderColor: "#243054",
   },
   studentItem: {
     flexDirection: "row",
     alignItems: "center",
-    padding: 14,
-    marginHorizontal: 16,
-    borderBottomColor: "#1e2840",
+    padding: 12,
+    marginHorizontal: 14,
+    borderBottomColor: "#1b2235",
     borderBottomWidth: 1,
   },
   studentAvatar: {
-    backgroundColor: "#243054",
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    backgroundColor: "#1b2235",
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
-    marginRight: 12,
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: "#243054",
   },
   studentAvatarText: {
-    color: "#aebeff",
+    color: "#ff8ab2",
     fontWeight: "bold",
+    fontSize: 13,
   },
-  studentInfo: {
-    flex: 1,
-  },
+  studentInfo: { flex: 1 },
   studentName: {
-    color: "#e4e8ff",
-    fontSize: 15,
+    color: "#d8deff",
+    fontSize: 14,
     fontWeight: "500",
   },
   emptyText: {
     color: "#8ea0d0",
-    fontSize: 14,
+    fontSize: 13,
     textAlign: "center",
-    marginTop: 12,
+    marginTop: 20,
   },
+
+  // ── Link modal ───────────────────────────────────────────
   linkModalOverlay: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "rgba(0,0,0,0.7)",
+    backgroundColor: "rgba(0,0,0,0.8)",
   },
   linkModalContent: {
     width: "85%",
-    backgroundColor: "#1b2235",
-    borderRadius: 16,
-    padding: 20,
+    backgroundColor: "#0e1320",
+    borderRadius: 14,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#1b2235",
   },
   linkModalTitle: {
-    color: "#b8c7ff",
-    fontSize: 18,
-    fontWeight: "bold",
-    marginBottom: 16,
+    color: "#e9edff",
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 14,
     textAlign: "center",
   },
   linkInput: {
-    backgroundColor: "#243054",
-    color: "#e9edff",
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 12,
+    backgroundColor: "#1b2235",
+    color: "#d8deff",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 10,
     borderWidth: 1,
-    borderColor: "#2a3548",
+    borderColor: "#243054",
+    fontSize: 14,
   },
   linkModalButtons: {
     flexDirection: "row",
-    gap: 10,
-    marginTop: 8,
+    gap: 8,
+    marginTop: 6,
   },
   linkModalButton: {
     flex: 1,
-    borderRadius: 10,
-    paddingVertical: 12,
+    borderRadius: 8,
+    paddingVertical: 10,
     alignItems: "center",
   },
   linkModalButtonText: {
     color: "#fff",
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "600",
   },
+
+  // ── GIF modal ────────────────────────────────────────────
   gifSearchContainer: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     gap: 8,
-    marginBottom: 12,
+    marginBottom: 8,
   },
   gifSearchButton: {
     backgroundColor: "#ff5c93",
-    padding: 12,
-    borderRadius: 10,
+    padding: 10,
+    borderRadius: 8,
   },
   gifLoadingContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 60,
+    paddingVertical: 40,
   },
   gifLoadingText: {
     color: "#8ea0d0",
-    fontSize: 14,
-    marginTop: 12,
+    fontSize: 13,
+    marginTop: 10,
   },
   gifErrorContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 60,
-    paddingHorizontal: 32,
+    paddingVertical: 40,
+    paddingHorizontal: 28,
   },
   gifErrorTitle: {
     color: "#ff5c93",
-    fontSize: 18,
-    fontWeight: "bold",
-    marginTop: 16,
-    marginBottom: 8,
+    fontSize: 16,
+    fontWeight: "700",
+    marginTop: 12,
+    marginBottom: 6,
   },
   gifErrorText: {
-    color: "#a0a8c0",
-    fontSize: 14,
+    color: "#8ea0d0",
+    fontSize: 13,
     textAlign: "center",
-    lineHeight: 20,
-    marginBottom: 20,
+    lineHeight: 18,
+    marginBottom: 16,
   },
   gifRetryButton: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "#4f9cff",
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 10,
-    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    gap: 6,
   },
   gifRetryText: {
     color: "#fff",
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "600",
   },
-  gifGrid: {
-    padding: 8,
-  },
+  gifGrid: { padding: 6 },
   gifItem: {
     flex: 1,
-    margin: 4,
+    margin: 3,
     aspectRatio: 1,
     maxWidth: "48%",
   },
@@ -1316,12 +1207,7 @@ const composerStyles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 60,
-  },
-   fileLimitText: {
-    color: "#a0a8c0",
-    fontSize: 11,
-    textAlign: "center",
+    paddingVertical: 40,
   },
 });
 

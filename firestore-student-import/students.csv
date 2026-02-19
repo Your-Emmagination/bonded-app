@@ -1,0 +1,11 @@
+studentID,firstname,lastname,course,yearlvl,userType
+012324-005468,Albert Damian,Perez,Bachelor of Science in Information System,3rd Year,student
+012324-005278,Harold James,Orevillo,Bachelor of Science in Information System,3rd Year,student
+012324-003456,James Michael,Sabatin,Bachelor of Science in Information System,3rd Year,moderator
+012324-005614,John Wilbur,Navarres,Bachelor of Science in Information System,3rd Year,moderator
+012324-005490,Jett Vincent,Sabas,Bachelor of Science in Information System,3rd Year,moderator
+012324-005242,Harvey Jay,Intan,Bachelor of Science in Information System,3rd Year,moderator
+012324-005332,Lex Mark,Labayan,Bachelor of Science in Information System,3rd Year,moderator
+012324-005043,Emmanuelle,Encabo,Bachelor of Science in Information System,3rd Year,moderator
+teach-001,Alvin Joseph,Valdez,Professor - Information System,N/A,teacher
+admin-001,System,Administrator,Administration,N/A,admin

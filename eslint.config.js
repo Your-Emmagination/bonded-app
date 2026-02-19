@@ -7,7 +7,7 @@ module.exports = defineConfig([
   {
     ignores: ['dist/*'],
     rules: {
-      'import/no-duplicates': 'off'           // ← this one line kills the yellow forever
+      'import/no-duplicates': 'off'           
     }
   },
 ]);

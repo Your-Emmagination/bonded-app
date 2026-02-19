@@ -1,4 +1,4 @@
-//PollCard.tsx
+// PollCard.tsx - Threads Style with Hanging Indentation
 import { Ionicons } from "@expo/vector-icons";
 import React, { useMemo, useState, useEffect } from "react";
 import {
@@ -8,8 +8,12 @@ import {
   View,
   Image,
   ActivityIndicator,
+  Dimensions,
 } from "react-native";
 import { getRoleColor, getRoleDisplayName, getUserData, UserData } from "../../../utils/rbac";
+
+const { width: SCREEN_WIDTH } = Dimensions.get("window");
+const IMAGE_WIDTH = SCREEN_WIDTH - 68;
 
 type PollOption = {
   text: string;
@@ -68,7 +72,6 @@ const PollCard = ({
   const [loading, setLoading] = useState(true);
   const [revealed, setRevealed] = useState(false);
 
-  // Fetch author data
   useEffect(() => {
     const fetchAuthor = async () => {
       if (poll.userId && poll.userId !== "anonymous") {
@@ -85,7 +88,6 @@ const PollCard = ({
     fetchAuthor();
   }, [poll.userId]);
 
-  // ✅ Get current user's votes based on which options contain their UID
   const userVotes = useMemo(() => {
     if (!currentUserId) return [];
     return poll.options
@@ -93,7 +95,6 @@ const PollCard = ({
       .filter(idx => idx !== -1);
   }, [poll.options, currentUserId]);
 
-  // ✅ Determine visibility and permissions
   const authorRole = authorData?.role || "student";
   const roleColor = getRoleColor(authorRole);
   const roleDisplayName = getRoleDisplayName(authorRole);
@@ -126,39 +127,35 @@ const PollCard = ({
 
   return (
     <View style={styles.pollCard}>
-      {/* Poll Header */}
-      <View style={styles.postHeader}>
-        <TouchableOpacity
-          style={styles.userInfo}
-          onPress={handleProfileClick}
-          disabled={!canClickProfile}
-          activeOpacity={canClickProfile ? 0.7 : 1}
-        >
-          <View
-            style={[
-              styles.avatar,
-              isIdentityVisible && authorRole !== "student" && {
-                borderColor: roleColor,
-                borderWidth: 2,
-              },
-            ]}
-          >
-            {loading ? (
-              <ActivityIndicator size="small" color="#8ea0d0" />
-            ) : isIdentityVisible ? (
-              <Text style={[styles.avatarText, { color: roleColor }]}>
-                {(authorData?.firstname?.[0] ||
-                  poll.username?.[0] ||
-                  "A").toUpperCase()}
-              </Text>
-            ) : (
-              <Ionicons name="person" size={20} color="#8ea0d0" />
-            )}
-          </View>
+      {/* Hanging Indentation Layout */}
+      <View style={styles.hangingLayout}>
+        {/* Left: Avatar Column */}
+        <View style={styles.avatarColumn}>
+          <TouchableOpacity onPress={handleProfileClick} disabled={!canClickProfile}>
+            <View style={styles.avatar}>
+              {loading ? (
+                <ActivityIndicator size="small" color="#8ea0d0" />
+              ) : isIdentityVisible ? (
+                <Text style={[styles.avatarText, { color: roleColor }]}>
+                  {(authorData?.firstname?.[0] ||
+                    poll.username?.[0] ||
+                    "A").toUpperCase()}
+                </Text>
+              ) : (
+                <Ionicons name="person" size={16} color="#8ea0d0" />
+              )}
+            </View>
+          </TouchableOpacity>
+        </View>
 
-          <View style={styles.headerContainer}>
-            <View style={styles.nameRow}>
-              <Text style={styles.username}>{displayName}</Text>
+        {/* Right: Content Column */}
+        <View style={styles.contentColumn}>
+          {/* Header */}
+          <View style={styles.header}>
+            <View style={styles.headerLeft}>
+              <TouchableOpacity onPress={handleProfileClick} disabled={!canClickProfile}>
+                <Text style={styles.username}>{displayName}</Text>
+              </TouchableOpacity>
               
               {isIdentityVisible && authorRole !== "student" && (
                 <View
@@ -180,116 +177,118 @@ const PollCard = ({
                 >
                   <Ionicons
                     name={revealed ? "eye-off-outline" : "eye-outline"}
-                    size={16}
+                    size={13}
                     color={revealed ? "#ff5c93" : "#8ea0d0"}
                   />
                 </TouchableOpacity>
               )}
             </View>
-            <Text style={styles.timestamp}>{getTimeAgo(poll.createdAt)}</Text>
+
+            <View style={styles.headerRight}>
+              <Text style={styles.timestamp}>{getTimeAgo(poll.createdAt)}</Text>
+              <TouchableOpacity style={styles.moreButton}>
+                <Ionicons name="ellipsis-horizontal" size={18} color="#8ea0d0" />
+              </TouchableOpacity>
+            </View>
           </View>
-        </TouchableOpacity>
 
-        <TouchableOpacity>
-          <Ionicons name="ellipsis-vertical" size={20} color="#a0a8c0" />
-        </TouchableOpacity>
-      </View>
+          {/* Poll Question */}
+          <Text style={styles.pollQuestion}>{poll.question}</Text>
 
-      {/* Poll Question */}
-      <Text style={styles.pollQuestion}>{poll.question}</Text>
-
-      {/* Poll Image - Clickable */}
-      {poll.imageUrl && (
-        <TouchableOpacity
-          activeOpacity={0.9}
-          onPress={() => onImagePress([poll.imageUrl!], 0)}
-          style={styles.imageContainer}
-        >
-          <Image
-            source={{ uri: poll.imageUrl }}
-            style={styles.pollImage}
-            resizeMode="cover"
-          />
-        </TouchableOpacity>
-      )}
-
-      {/* Poll Options */}
-      <View style={styles.pollOptions}>
-        {poll.options.map((option, idx) => {
-          const isVoted = userVotes.includes(idx);
-          const percentage =
-            poll.totalVotes > 0 ? (option.votes / poll.totalVotes) * 100 : 0;
-          const singleChoiceLocked = !poll.allowMultiple && userVotes.length > 0;
-          const multiChoiceReachedMax =
-            poll.allowMultiple && userVotes.length >= poll.maxSelections;
-          const disableForUser =
-            expired ||
-            singleChoiceLocked ||
-            (poll.allowMultiple && !isVoted && multiChoiceReachedMax);
-
-          return (
+          {/* Poll Image - Clickable */}
+          {poll.imageUrl && (
             <TouchableOpacity
-              key={`${poll.id}-opt-${idx}`}
-              style={[
-                styles.pollOption,
-                isVoted && styles.pollOptionVoted,
-                disableForUser && { opacity: 0.6 },
-              ]}
-              onPress={() => !disableForUser && onVote(poll.id, idx)}
-              disabled={disableForUser}
-              activeOpacity={disableForUser ? 1 : 0.7}
+              activeOpacity={0.9}
+              onPress={() => onImagePress([poll.imageUrl!], 0)}
+              style={styles.imageContainer}
             >
-              <View style={styles.pollOptionContent}>
-                {poll.allowMultiple ? (
-                  <View
-                    style={[styles.checkbox, isVoted && styles.checkboxActive]}
-                  >
-                    {isVoted && (
-                      <Ionicons name="checkmark" size={14} color="#fff" />
-                    )}
-                  </View>
-                ) : (
-                  <View style={[styles.radio, isVoted && styles.radioActive]}>
-                    {isVoted && <View style={styles.radioDot} />}
-                  </View>
-                )}
-                <Text style={styles.pollOptionText}>{option.text}</Text>
-              </View>
-              <View style={styles.pollVoteInfo}>
-                <View
-                  style={[styles.pollProgressBar, { width: `${percentage}%` }]}
-                />
-                <Text style={styles.pollVoteCount}>{option.votes}</Text>
-              </View>
+              <Image
+                source={{ uri: poll.imageUrl }}
+                style={styles.pollImage}
+                resizeMode="cover"
+              />
             </TouchableOpacity>
-          );
-        })}
-      </View>
+          )}
 
-      {/* Add Option Button */}
-      {poll.allowUsersToAddOption && !expired && (
-        <View style={{ marginBottom: 12 }}>
-          <TouchableOpacity
-            style={styles.addOptionButton}
-            onPress={() => onAddOption(poll.id)}
-          >
-            <Ionicons name="add" size={16} color="#ff5c93" />
-            <Text style={styles.addOptionButtonText}>Add your own option</Text>
-          </TouchableOpacity>
-        </View>
-      )}
+          {/* Poll Options */}
+          <View style={styles.pollOptions}>
+            {poll.options.map((option, idx) => {
+              const isVoted = userVotes.includes(idx);
+              const percentage =
+                poll.totalVotes > 0 ? (option.votes / poll.totalVotes) * 100 : 0;
+              const singleChoiceLocked = !poll.allowMultiple && userVotes.length > 0;
+              const multiChoiceReachedMax =
+                poll.allowMultiple && userVotes.length >= poll.maxSelections;
+              const disableForUser =
+                expired ||
+                singleChoiceLocked ||
+                (poll.allowMultiple && !isVoted && multiChoiceReachedMax);
 
-      {/* Poll Footer */}
-      <View style={styles.pollFooter}>
-        <Text style={styles.pollTotalVotes}>
-          {poll.totalVotes} {poll.totalVotes === 1 ? "vote" : "votes"}
-        </Text>
-        {expired && (
-          <View style={styles.pollExpiredBadge}>
-            <Ionicons name="time-outline" size={12} color="#ff6b6b" />
-            <Text style={styles.pollExpired}>Poll ended</Text>
+              return (
+                <TouchableOpacity
+                  key={`${poll.id}-opt-${idx}`}
+                  style={[
+                    styles.pollOption,
+                    isVoted && styles.pollOptionVoted,
+                    disableForUser && { opacity: 0.6 },
+                  ]}
+                  onPress={() => !disableForUser && onVote(poll.id, idx)}
+                  disabled={disableForUser}
+                  activeOpacity={disableForUser ? 1 : 0.7}
+                >
+                  <View style={styles.pollOptionContent}>
+                    {poll.allowMultiple ? (
+                      <View
+                        style={[styles.checkbox, isVoted && styles.checkboxActive]}
+                      >
+                        {isVoted && (
+                          <Ionicons name="checkmark" size={11} color="#fff" />
+                        )}
+                      </View>
+                    ) : (
+                      <View style={[styles.radio, isVoted && styles.radioActive]}>
+                        {isVoted && <View style={styles.radioDot} />}
+                      </View>
+                    )}
+                    <Text style={styles.pollOptionText}>{option.text}</Text>
+                  </View>
+                  <View style={styles.pollVoteInfo}>
+                    <View
+                      style={[styles.pollProgressBar, { width: `${percentage}%` }]}
+                    />
+                    <Text style={styles.pollVoteCount}>{option.votes}</Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
           </View>
-        )}
+
+          {/* Add Option Button */}
+          {poll.allowUsersToAddOption && !expired && (
+            <View style={{ marginBottom: 8 }}>
+              <TouchableOpacity
+                style={styles.addOptionButton}
+                onPress={() => onAddOption(poll.id)}
+              >
+                <Ionicons name="add" size={15} color="#ff5c93" />
+                <Text style={styles.addOptionButtonText}>Add your own option</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Poll Footer */}
+          <View style={styles.pollFooter}>
+            <Text style={styles.pollTotalVotes}>
+              {poll.totalVotes} {poll.totalVotes === 1 ? "vote" : "votes"}
+            </Text>
+            {expired && (
+              <View style={styles.pollExpiredBadge}>
+                <Ionicons name="time-outline" size={11} color="#ff6b6b" />
+                <Text style={styles.pollExpired}>Poll ended</Text>
+              </View>
+            )}
+          </View>
+        </View>
       </View>
     </View>
   );
@@ -300,96 +299,99 @@ export default PollCard;
 const styles = StyleSheet.create({
   pollCard: {
     backgroundColor: "#1b2235",
-    marginHorizontal: 12,
-    marginBottom: 12,
-    borderRadius: 12,
-    padding: 16,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 1,
+    marginBottom: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
   },
-  postHeader: {
+  hangingLayout: {
     flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 12,
   },
-  userInfo: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    flex: 1,
+  avatarColumn: {
+    width: 36,
+    marginRight: 12,
   },
   avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: "#243054",
     justifyContent: "center",
     alignItems: "center",
   },
   avatarText: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: "bold",
   },
-  headerContainer: {
+  contentColumn: {
     flex: 1,
   },
-  nameRow: {
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  headerLeft: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    flexWrap: "wrap",
+    flex: 1,
   },
   username: {
     color: "#e9edff",
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: "600",
   },
   roleChip: {
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: 3,
     borderWidth: 1,
   },
   roleChipText: {
-    fontSize: 11,
+    fontSize: 9,
     fontWeight: "600",
   },
   eyeButton: {
     padding: 2,
   },
+  headerRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   timestamp: {
     color: "#8ea0d0",
-    fontSize: 12,
-    marginTop: 2,
+    fontSize: 13,
+  },
+  moreButton: {
+    padding: 2,
   },
   pollQuestion: {
-    color: "#e9edff",
-    fontSize: 16,
-    fontWeight: "600",
-    marginBottom: 12,
+    color: "#dbe1ff",
+    fontSize: 15,
+    lineHeight: 20,
+    marginBottom: 8,
   },
   imageContainer: {
-    marginBottom: 14,
-    borderRadius: 10,
-    overflow: "hidden",
+    marginTop: 8,
+    marginBottom: 8,
   },
   pollImage: {
-    width: "100%",
-    height: 180,
+    width: IMAGE_WIDTH,
+    height: 160,
+    borderRadius: 8,
     backgroundColor: "#243054",
   },
   pollOptions: {
-    gap: 10,
-    marginBottom: 12,
+    gap: 6,
+    marginTop: 8,
+    marginBottom: 8,
   },
   pollOption: {
     backgroundColor: "#243054",
-    borderRadius: 10,
-    padding: 12,
+    borderRadius: 6,
+    padding: 8,
     borderWidth: 1,
     borderColor: "#243054",
     overflow: "hidden",
@@ -400,13 +402,13 @@ const styles = StyleSheet.create({
   pollOptionContent: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 8,
     zIndex: 2,
   },
   checkbox: {
-    width: 18,
-    height: 18,
-    borderRadius: 4,
+    width: 16,
+    height: 16,
+    borderRadius: 3,
     borderWidth: 2,
     borderColor: "#8ea0d0",
     justifyContent: "center",
@@ -417,9 +419,9 @@ const styles = StyleSheet.create({
     borderColor: "#ff5c93",
   },
   radio: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
     borderWidth: 2,
     borderColor: "#8ea0d0",
     justifyContent: "center",
@@ -429,14 +431,14 @@ const styles = StyleSheet.create({
     borderColor: "#ff5c93",
   },
   radioDot: {
-    width: 8,
-    height: 8,
+    width: 7,
+    height: 7,
     borderRadius: 4,
     backgroundColor: "#ff5c93",
   },
   pollOptionText: {
     color: "#e9edff",
-    fontSize: 14,
+    fontSize: 13,
     flex: 1,
   },
   pollVoteInfo: {
@@ -446,7 +448,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     justifyContent: "center",
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
     flexDirection: "row",
     alignItems: "center",
   },
@@ -456,12 +458,12 @@ const styles = StyleSheet.create({
     top: 0,
     bottom: 0,
     backgroundColor: "#ff5c93",
-    opacity: 0.18,
+    opacity: 0.15,
     zIndex: 1,
   },
   pollVoteCount: {
     color: "#8ea0d0",
-    fontSize: 12,
+    fontSize: 11,
     marginLeft: "auto",
     zIndex: 2,
   },
@@ -469,13 +471,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: "#243054",
+    paddingTop: 6,
   },
   pollTotalVotes: {
     color: "#8ea0d0",
-    fontSize: 12,
+    fontSize: 13,
   },
   pollExpiredBadge: {
     flexDirection: "row",
@@ -490,10 +490,10 @@ const styles = StyleSheet.create({
   addOptionButton: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 10,
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: "#ff5c93",
     alignSelf: "flex-start",
@@ -502,5 +502,6 @@ const styles = StyleSheet.create({
   addOptionButtonText: {
     color: "#ff5c93",
     fontWeight: "600",
+    fontSize: 12,
   },
 });

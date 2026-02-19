@@ -123,14 +123,14 @@ const HomeScreen = () => {
   const menuTranslateY = useRef(new Animated.Value(0)).current;
   const router = useRouter();
 
-  // ✅ Track if listeners are already set up
+  // âœ… Track if listeners are already set up
   const listenersSetup = useRef(false);
   const unsubscribePostsRef = useRef<(() => void) | null>(null);
   const unsubscribePollsRef = useRef<(() => void) | null>(null);
 
   const { isOffline } = useNetworkStatus();
 
-  // ✅ Only set up auth listener once
+  // âœ… Only set up auth listener once
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
@@ -138,7 +138,7 @@ const HomeScreen = () => {
     return unsubscribe;
   }, []);
 
-  // ✅ Update online status without re-rendering
+  // âœ… Update online status without re-rendering
   useEffect(() => {
     if (!user?.uid || !user?.email || isOffline) return;
 
@@ -179,7 +179,7 @@ const HomeScreen = () => {
     };
   }, [user?.uid, user?.email, isOffline]);
 
-  // ✅ Online users count
+  // âœ… Online users count
   useEffect(() => {
     if (!user || isOffline) {
       setOnlineUsersCount(0);
@@ -194,7 +194,7 @@ const HomeScreen = () => {
     return unsubscribe;
   }, [user, isOffline]);
 
-  // ✅ Upcoming events count
+  // âœ… Upcoming events count
   useEffect(() => {
     if (!user || isOffline) {
       setUpcomingEventsCount(0);
@@ -215,7 +215,7 @@ const HomeScreen = () => {
     return unsubscribe;
   }, [user, isOffline]);
 
-  // ✅ Fetch user role once
+  // âœ… Fetch user role once
   useEffect(() => {
     const fetchCurrentUserRole = async () => {
       if (user?.uid && !isOffline && !currentUserRole) {
@@ -249,7 +249,7 @@ const HomeScreen = () => {
     [userRoles, isOffline]
   );
 
-  // ✅ Set up feed listeners ONCE
+  // âœ… Set up feed listeners ONCE
   useEffect(() => {
     if (!user || !auth.currentUser || isOffline || listenersSetup.current) {
       if (isOffline) return;
@@ -259,7 +259,7 @@ const HomeScreen = () => {
       return;
     }
 
-    console.log("🔥 Setting up feed listeners");
+    console.log("ðŸ”¥ Setting up feed listeners");
     listenersSetup.current = true;
     setIsLoading(true);
 
@@ -337,10 +337,10 @@ const HomeScreen = () => {
     return undefined;
   }, [user, isOffline, fetchUserRole, feedItems.length]);
 
-  // ✅ Cleanup only when user logs out
+  // âœ… Cleanup only when user logs out
   useEffect(() => {
     if (!user && listenersSetup.current) {
-      console.log("🧹 Cleaning up feed listeners");
+      console.log("ðŸ§¹ Cleaning up feed listeners");
       if (unsubscribePostsRef.current) unsubscribePostsRef.current();
       if (unsubscribePollsRef.current) unsubscribePollsRef.current();
       listenersSetup.current = false;
@@ -986,7 +986,7 @@ const renderFeedItem = ({ item }: { item: FeedItem }) => {
 export default HomeScreen;
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0e1320" },
+  container: { flex: 1, backgroundColor: "#070c15" },
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -994,7 +994,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#1b2235",
+    borderBottomColor: "#111827",
   },
   headerTitle: {
     fontSize: 18,
@@ -1010,7 +1010,7 @@ const styles = StyleSheet.create({
   onlineUsersContainer: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1b2235",
+    backgroundColor: "#0e1320",
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 16,
@@ -1033,7 +1033,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: "#1b2235",
+    backgroundColor: "#0e1320",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1,
@@ -1051,7 +1051,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#fff",
+    borderColor: "#070c15",
   },
   eventBadgeText: {
     color: "#fff",
@@ -1059,13 +1059,12 @@ const styles = StyleSheet.create({
     fontWeight: "bold",
   },
 
-  // Enhanced styles for empty/loading states
   flatListContent: {
     paddingVertical: 12,
     paddingBottom: 100,
   },
   emptyListContent: {
-    flexGrow: 1,                    // Makes the empty state take full height
+    flexGrow: 1,
     justifyContent: "center",
     paddingHorizontal: 20,
   },
@@ -1104,7 +1103,6 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
 
-  // Rest of your existing styles (image viewer, modals, FAB, etc.)
   imageViewerContainer: {
     flex: 1,
     backgroundColor: "#000",
@@ -1115,7 +1113,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     padding: 16,
     paddingTop: 50,
-    backgroundColor: "rgba(0, 0, 0, 0.8)",
+    backgroundColor: "rgba(0, 0, 0, 0.85)",
   },
   imageViewerCounter: {
     color: "#fff",
@@ -1135,16 +1133,16 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "rgba(0, 0, 0, 0.7)",
+    backgroundColor: "rgba(0, 0, 0, 0.85)",
   },
   modalContent: {
     width: "85%",
-    backgroundColor: "#1b2235",
+    backgroundColor: "#0e1320",
     borderRadius: 16,
     padding: 20,
-    shadowColor: "#000",
+    shadowColor: "#ff5c93",
     shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.35,
+    shadowOpacity: 0.2,
     shadowRadius: 12,
     elevation: 8,
     borderWidth: 1,
@@ -1158,15 +1156,15 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   modalInput: {
-    backgroundColor: "#243054",
-    color: "#fff",
+    backgroundColor: "#1b2235",
+    color: "#e9edff",
     borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 14,
     fontSize: 15,
     marginBottom: 18,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
+    borderColor: "rgba(255,92,147,0.2)",
   },
   modalButtons: {
     flexDirection: "row",
@@ -1178,6 +1176,9 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     alignItems: "center",
     marginHorizontal: 4,
+    backgroundColor: "#0e1320",
+    borderWidth: 1,
+    borderColor: "#1b2235",
   },
   modalButtonPrimary: {
     flex: 1,
@@ -1229,7 +1230,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   menuItem: {
-    backgroundColor: "#1b2235",
+    backgroundColor: "#0e1320",
     paddingVertical: 12,
     paddingHorizontal: 18,
     borderRadius: 30,

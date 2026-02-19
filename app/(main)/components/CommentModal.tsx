@@ -987,7 +987,6 @@ const styles = StyleSheet.create({
   },
   composerContainer: {
     width: "100%",
-    // background and padding handled inline for dynamic keyboard
   },
   dragIndicatorContainer: {
     alignItems: "center",

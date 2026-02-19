@@ -1,0 +1,17 @@
+{
+  "name": "firestore-student-import",
+  "version": "1.0.0",
+  "description": "",
+  "main": "importStudentsandAuth.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "csv-parser": "^3.2.0",
+    "firebase-admin": "^13.6.1"
+  }
+}

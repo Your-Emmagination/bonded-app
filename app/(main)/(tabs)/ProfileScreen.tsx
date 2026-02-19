@@ -1,5 +1,5 @@
 /* eslint-disable react-hooks/exhaustive-deps */
-/*profileScreen.tsx - FIXED VERSION */
+/*profileScreen.tsx - DARK NAVY THEME */
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { uploadProfileImage } from "../../../utils/cloudinaryUpload";
@@ -68,7 +68,7 @@ const ProfileScreen = () => {
     [student?.firstname, student?.lastname]
   );
   const studentIdDisplay = useMemo(() => 
-    student?.studentID ?? user?.email?.split("@")[0] ?? "—",
+    student?.studentID ?? user?.email?.split("@")[0] ?? "â€”",
     [student?.studentID, user?.email]
   );
 
@@ -81,7 +81,7 @@ const ProfileScreen = () => {
         const email = currentUser.email ?? "";
         const studentID = email.split("@")[0] || currentUser.uid;
 
-        // ✅ Set user online immediately when authenticated
+        // âœ… Set user online immediately when authenticated
         try {
           await setDoc(doc(db, "students", studentID), { isOnline: true }, { merge: true });
         } catch (error) {
@@ -191,7 +191,7 @@ const handleImagePick = useCallback(async (useCamera = false) => {
 
     if (!result.canceled && result.assets?.[0]?.uri) {
       const uri = result.assets[0].uri;
-      // ✅ Use the profile-specific upload function
+      // âœ… Use the profile-specific upload function
       const cloudinaryUrl = await uploadProfileImage(uri);
       
       setProfileImage(cloudinaryUrl);
@@ -285,7 +285,7 @@ const confirmLogout = useCallback(() =>
           // Sign out from Firebase
           await signOut(auth);
 
-          // ✅ CHANGED: Use replace() and point to LoginScreen at root
+          // âœ… CHANGED: Use replace() and point to LoginScreen at root
           router.replace("/LoginScreen");  
           
         } catch (e: any) {
@@ -386,8 +386,8 @@ const confirmLogout = useCallback(() =>
         {/* Academic Info Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Academic Info</Text>
-          <InfoRow icon="school-outline" label="Course" value={student?.course ?? "—"} />
-          <InfoRow icon="trending-up-outline" label="Year Level" value={student?.yearlvl ?? "—"} />
+          <InfoRow icon="school-outline" label="Course" value={student?.course ?? "â€”"} />
+          <InfoRow icon="trending-up-outline" label="Year Level" value={student?.yearlvl ?? "â€”"} />
           <InfoRow icon="card-outline" label="Student ID" value={studentIdDisplay} />
         </View>
 
@@ -434,7 +434,7 @@ const InfoRow = ({ icon, label, value }: {
   value: string;
 }) => (
   <View style={styles.infoCard}>
-    <Ionicons name={icon} size={20} color="#ff3b7f" />
+    <Ionicons name={icon} size={20} color="#ff5c93" />
     <View style={{ marginLeft: 12 }}>
       <Text style={styles.infoLabel}>{label}</Text>
       <Text style={styles.infoValue}>{value}</Text>
@@ -448,7 +448,7 @@ const ActionButton = ({ icon, text, onPress }: {
   onPress: () => void;
 }) => (
   <TouchableOpacity style={styles.actionButton} onPress={onPress}>
-    <Ionicons name={icon} size={22} color="#ff3b7f" />
+    <Ionicons name={icon} size={22} color="#ff5c93" />
     <Text style={styles.actionText}>{text}</Text>
   </TouchableOpacity>
 );
@@ -521,7 +521,7 @@ const EditModal = ({
         {/* Tab Content */}
         <View style={styles.tabContent}>
           {loading ? (
-            <ActivityIndicator size="large" color="#ff3b7f" style={{ marginVertical: 20 }} />
+            <ActivityIndicator size="large" color="#ff5c93" style={{ marginVertical: 20 }} />
           ) : (
             <>
               {editedData.selectedTab === "info" && (
@@ -564,16 +564,8 @@ const InfoTab = ({ editedData, onDataChange, onSave }: {
 <TextInput
   style={styles.input}
   placeholder="Add your email (optional)"
-  placeholderTextColor="#999"
-  value={
-    editedData.email &&
-    !editedData.email.endsWith("@student.csap") &&
-    !editedData.email.endsWith("@teacher.csap") &&
-    !editedData.email.endsWith("@admin.csap")
-      ? editedData.email
-      : ""
-  }
-  onChangeText={(text) => onDataChange("email", text)}
+  placeholderTextColor="rgba(184,199,255,0.5)"
+  onChangeText={(text: string) => onDataChange("email", text)}
   keyboardType="email-address"
   autoCapitalize="none"
 />
@@ -606,7 +598,7 @@ const PasswordTab = ({ editedData, onDataChange, onChangePassword }: {
         <TextInput
           style={styles.passwordInput}
           placeholder="Current Password"
-          placeholderTextColor="#999"
+          placeholderTextColor="rgba(184,199,255,0.5)"
           secureTextEntry={!showCurrentPassword}
           value={editedData.currentPassword ?? ""}
           onChangeText={(text) => onDataChange("currentPassword", text)}
@@ -618,7 +610,7 @@ const PasswordTab = ({ editedData, onDataChange, onChangePassword }: {
           <Ionicons
             name={showCurrentPassword ? "eye-off-outline" : "eye-outline"}
             size={22}
-            color="#888"
+            color="#8ea0d0"
           />
         </TouchableOpacity>
       </View>
@@ -627,7 +619,7 @@ const PasswordTab = ({ editedData, onDataChange, onChangePassword }: {
         <TextInput
           style={styles.passwordInput}
           placeholder="New Password"
-          placeholderTextColor="#999"
+          placeholderTextColor="rgba(184,199,255,0.5)"
           secureTextEntry={!showNewPassword}
           value={editedData.newPassword ?? ""}
           onChangeText={(text) => onDataChange("newPassword", text)}
@@ -639,7 +631,7 @@ const PasswordTab = ({ editedData, onDataChange, onChangePassword }: {
           <Ionicons
             name={showNewPassword ? "eye-off-outline" : "eye-outline"}
             size={22}
-            color="#888"
+            color="#8ea0d0"
           />
         </TouchableOpacity>
       </View>
@@ -654,11 +646,11 @@ const PasswordTab = ({ editedData, onDataChange, onChangePassword }: {
 const PhotoTab = ({ onImagePick }: { onImagePick: (useCamera: boolean) => void }) => (
   <View style={{ marginTop: 10 }}>
     <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(false)}>
-      <Ionicons name="images-outline" size={20} color="#ff3b7f" />
+      <Ionicons name="images-outline" size={20} color="#ff5c93" />
       <Text style={styles.optionText}>Choose from Gallery</Text>
     </TouchableOpacity>
     <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(true)}>
-      <Ionicons name="camera-outline" size={20} color="#ff3b7f" />
+      <Ionicons name="camera-outline" size={20} color="#ff5c93" />
       <Text style={styles.optionText}>Take Photo</Text>
     </TouchableOpacity>
   </View>
@@ -733,65 +725,68 @@ const YearLevelDropdown: React.FC<YearLevelDropdownProps> = ({ value, onChange }
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0f1624" },
-  header: { color: "#ff3b7f", fontSize: 20, fontWeight: "bold", textAlign: "center", margin: 16 },
+  // Background: darker than HomeScreen's #0e1320
+  container: { flex: 1, backgroundColor: "#070c15" },
+  // Header accent: matches HomeScreen's #b8c7ff blue-lavender
+  header: { color: "#b8c7ff", fontSize: 20, fontWeight: "bold", textAlign: "center", margin: 16, letterSpacing: 1 },
+  // Dropdown: surface = #1b2235 (HomeScreen card bg), accent = #ff5c93 (HomeScreen pink)
   dropdown: {
-    backgroundColor: "#2a3548",
-    borderColor: "#ff3b7f",
+    backgroundColor: "#1b2235",
+    borderColor: "#ff5c93",
     borderWidth: 1,
     borderRadius: 10,
     minHeight: 50,
   },
   dropdownContainer: {
-    backgroundColor: "#1f283a",
-    borderColor: "#ff3b7f",
+    backgroundColor: "#0e1320",
+    borderColor: "#ff5c93",
     borderWidth: 1,
     borderRadius: 10,
   },
-  dropdownText: { color: "#fff", fontSize: 16 },
-  placeholderStyle: { color: "rgba(255,255,255,0.6)" },
+  dropdownText: { color: "#e9edff", fontSize: 16 },
+  placeholderStyle: { color: "rgba(184,199,255,0.5)" },
   listItemContainer: {
-    borderBottomColor: "rgba(255,255,255,0.1)",
+    borderBottomColor: "#1b2235",
     borderBottomWidth: 0.5,
   },
-  listItemLabel: { color: "#fff" },
-  arrowIcon: { borderColor: "#ff3b7f" },
-  tickIcon: { backgroundColor: "#ff3b7f", borderRadius: 4 },
+  listItemLabel: { color: "#e9edff" },
+  arrowIcon: { tintColor: "#ff5c93" } as any,
+  tickIcon: { tintColor: "#ff5c93" } as any,
   scroll: { paddingBottom: 100 },
-  profileCard: { alignItems: "center", backgroundColor: "#1c2535", margin: 16, padding: 20, borderRadius: 16 },
-  profileImage: { width: 100, height: 100, borderRadius: 50, borderWidth: 3, borderColor: "#ff3b7f" },
-  placeholder: { width: 100, height: 100, borderRadius: 50, backgroundColor: "#2a3548", justifyContent: "center", alignItems: "center" },
-  editBadge: { position: "absolute", bottom: 5, right: 5, backgroundColor: "#ff3b7f", borderRadius: 16, padding: 5 },
+  // Card surfaces: #1b2235 (HomeScreen surface)
+  profileCard: { alignItems: "center", backgroundColor: "#1b2235", margin: 16, padding: 20, borderRadius: 16, borderWidth: 1, borderColor: "#243054" },
+  profileImage: { width: 100, height: 100, borderRadius: 50, borderWidth: 3, borderColor: "#ff5c93" },
+  placeholder: { width: 100, height: 100, borderRadius: 50, backgroundColor: "#243054", justifyContent: "center", alignItems: "center" },
+  editBadge: { position: "absolute", bottom: 5, right: 5, backgroundColor: "#ff5c93", borderRadius: 16, padding: 5 },
   statusBadge: { position: "absolute", top: 5, right: 5, width: 14, height: 14, borderRadius: 7 },
   statusBtn: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10 },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   section: { marginHorizontal: 16, marginTop: 24 },
-  sectionTitle: { color: "#ff3b7f", fontWeight: "700", marginBottom: 12 },
-  infoCard: { flexDirection: "row", alignItems: "center", padding: 12, backgroundColor: "#1c2535", borderRadius: 12, marginBottom: 10 },
-  infoLabel: { color: "#999", fontSize: 12 },
-  infoValue: { color: "#fff", fontSize: 16 },
-  actionButton: { flexDirection: "row", alignItems: "center", backgroundColor: "#1c2535", padding: 16, borderRadius: 12, marginBottom: 10 },
-  actionText: { color: "#fff", fontSize: 16, marginLeft: 12 },
-  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", alignItems: "center" },
+  sectionTitle: { color: "#8ea0d0", fontWeight: "700", marginBottom: 12, fontSize: 15 },
+  infoCard: { flexDirection: "row", alignItems: "center", padding: 12, backgroundColor: "#1b2235", borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: "#243054" },
+  infoLabel: { color: "#8ea0d0", fontSize: 12 },
+  infoValue: { color: "#e9edff", fontSize: 16 },
+  actionButton: { flexDirection: "row", alignItems: "center", backgroundColor: "#1b2235", padding: 16, borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: "#243054" },
+  actionText: { color: "#e9edff", fontSize: 16, marginLeft: 12 },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.85)", justifyContent: "center", alignItems: "center" },
   modalCard: {
     width: "90%",
     maxWidth: 400,
-    backgroundColor: "#1b2233",
+    backgroundColor: "rgba(0,0,0,0.85)",
     borderRadius: 20,
     paddingVertical: 20,
     paddingHorizontal: 16,
     elevation: 8,
-    shadowColor: "#000",
-    shadowOpacity: 0.4,
-    shadowOffset: { width: 0, height: 3 },
-    shadowRadius: 6,
+
+    borderWidth: 1,
+    borderColor: "rgba(255,92,147,0.15)",
   },
-  modalHeader: { color: "#ff3b7f", fontSize: 20, fontWeight: "bold", textAlign: "center", marginBottom: 18 },
+  modalHeader: { color: "#ff5c93", fontSize: 20, fontWeight: "bold", textAlign: "center", marginBottom: 18 },
   tabRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    backgroundColor: "#2a3548",
+    backgroundColor: "#243054",
     borderRadius: 10,
     padding: 4,
     gap: 4,
@@ -804,31 +799,62 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     minWidth: 0,
   },
-  tabButtonActive: { backgroundColor: "#ff3b7f" },
-  tabText: { color: "#bbb", fontSize: 12, textAlign: "center", fontWeight: "600", flexWrap: "wrap" },
+  tabButtonActive: { backgroundColor: "#ff5c93" },
+  tabText: { color: "#8ea0d0", fontSize: 12, textAlign: "center", fontWeight: "600", flexWrap: "wrap" },
   tabTextActive: { color: "#fff" },
   tabContent: { marginVertical: 10, padding: 12 },
-  input: { backgroundColor: "#2a3548", color: "#fff", borderRadius: 8, padding: 12, marginBottom: 10, fontSize: 15 },
+  input: {
+    backgroundColor: "#243054",
+    color: "#e9edff",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 10,
+    fontSize: 15,
+    borderWidth: 1,
+    borderColor: "rgba(255,92,147,0.3)",
+  },
   passwordInputWrapper: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#2a3548",
+    backgroundColor: "#243054",
     borderRadius: 8,
     marginBottom: 10,
     paddingRight: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,92,147,0.3)",
   },
-  passwordInput: { flex: 1, color: "#fff", padding: 12, fontSize: 15 },
+  passwordInput: { flex: 1, color: "#e9edff", padding: 12, fontSize: 15 },
   eyeIconPassword: { padding: 8 },
-  primaryBtn: { backgroundColor: "#ff3b7f", borderRadius: 10, paddingVertical: 12, alignItems: "center", marginTop: 5 },
+  primaryBtn: {
+    backgroundColor: "#ff5c93",
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+    marginTop: 5,
+    shadowColor: "#ff5c93",
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 3,
+  },
   primaryText: { color: "#fff", fontWeight: "700", fontSize: 15 },
-  closeBtn: { backgroundColor: "#333", borderRadius: 10, paddingVertical: 12, alignItems: "center", marginTop: 10 },
-  closeText: { color: "#fff", fontWeight: "600", fontSize: 15 },
-  modalOption: { flexDirection: "row", alignItems: "center", backgroundColor: "#2a3548", padding: 14, borderRadius: 10, marginBottom: 10 },
-  optionText: { color: "#fff", fontSize: 16, marginLeft: 12 },
-  fullImageModal: { flex: 1, backgroundColor: "rgba(0,0,0,0.95)", justifyContent: "center", alignItems: "center" },
+  closeBtn: { backgroundColor: "#1b2235", borderRadius: 10, paddingVertical: 12, alignItems: "center", marginTop: 10, borderWidth: 1, borderColor: "#243054" },
+  closeText: { color: "#8ea0d0", fontWeight: "600", fontSize: 15 },
+  modalOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#243054",
+    padding: 14,
+    borderRadius: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255,92,147,0.2)",
+  },
+  optionText: { color: "#e9edff", fontSize: 16, marginLeft: 12 },
+  fullImageModal: { flex: 1, backgroundColor: "rgba(0,0,0,0.97)", justifyContent: "center", alignItems: "center" },
   fullImageInner: { width: "100%", height: "100%", justifyContent: "center", alignItems: "center" },
   fullImage: { width: "100%", height: "100%" },
-  inputLabel: { color: "#ff3b7f", fontSize: 14, marginBottom: 6, marginLeft: 2, fontWeight: "600" },
+  inputLabel: { color: "#8ea0d0", fontSize: 14, marginBottom: 6, marginLeft: 2, fontWeight: "600" },
+  statusText: { fontSize: 14, fontWeight: "500" },
 });
 
 export default ProfileScreen;
