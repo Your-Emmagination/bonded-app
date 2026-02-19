@@ -289,10 +289,20 @@ const confirmLogout = useCallback(() =>
           // Sign out from Firebase
           await signOut(auth);
 
-          // ✅ Web-compatible navigation
+          // Navigate based on platform
           if (Platform.OS === "web") {
-            // Force full page reload on web — most reliable
-            window.location.href = "/LoginScreen";
+            // On web, use setTimeout to let Firebase finish signing out
+            // then force navigation
+            setTimeout(() => {
+              try {
+                router.replace("/LoginScreen");
+              } catch {
+                // Last resort fallback
+                if (typeof window !== "undefined") {
+                  (window as any).location.replace("/LoginScreen");
+                }
+              }
+            }, 100);
           } else {
             router.replace("/LoginScreen");
           }
