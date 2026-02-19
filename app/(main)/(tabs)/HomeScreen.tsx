@@ -11,12 +11,14 @@ import {
   onSnapshot,
   orderBy,
   query,
-  updateDoc,
   serverTimestamp,
+  setDoc,
+  updateDoc,
   where,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Animated,
   Dimensions,
@@ -24,7 +26,6 @@ import {
   Image,
   KeyboardAvoidingView,
   Linking,
-  ActivityIndicator,
   Modal,
   Platform,
   RefreshControl,
@@ -36,9 +37,9 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
+import { useNetworkStatus } from "../../../utils/networkUtils";
 import PollCard from "../components/PollCard";
 import PostCard from "../components/PostCard";
-import { useNetworkStatus } from "../../../utils/networkUtils";
 export const tabBarTranslateY = new Animated.Value(0);
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -100,7 +101,9 @@ const HomeScreen = () => {
   const [user, setUser] = useState<User | null>(null);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [fabMenuVisible, setFabMenuVisible] = useState(false);
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>(undefined);
+  const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>(
+    undefined,
+  );
   const [refreshing, setRefreshing] = useState(false);
   const [userRoles, setUserRoles] = useState<{ [key: string]: string }>({});
   const [imageViewerVisible, setImageViewerVisible] = useState(false);
@@ -143,14 +146,19 @@ const HomeScreen = () => {
     const email = user.email;
     const studentID = email.split("@")[0] || user.uid;
     const userStatusRef = doc(db, "students", studentID);
-    
+
     const setOnline = async () => {
       try {
         if (!auth.currentUser) return;
-        await updateDoc(userStatusRef, {
-          isOnline: true,
-          lastSeen: serverTimestamp(),
-        });
+        await setDoc(
+          userStatusRef,
+          {
+            // ✅ setDoc with merge
+            isOnline: true,
+            lastSeen: serverTimestamp(),
+          },
+          { merge: true },
+        );
       } catch (error) {
         console.error("Error setting online status:", error);
       }
@@ -159,10 +167,15 @@ const HomeScreen = () => {
     const setOffline = async () => {
       try {
         if (!auth.currentUser) return;
-        await updateDoc(userStatusRef, {
-          isOnline: false,
-          lastSeen: serverTimestamp(),
-        });
+        await setDoc(
+          userStatusRef,
+          {
+            // ✅ setDoc with merge
+            isOnline: false,
+            lastSeen: serverTimestamp(),
+          },
+          { merge: true },
+        );
       } catch (error) {
         console.error("Error setting offline status:", error);
       }
@@ -203,7 +216,7 @@ const HomeScreen = () => {
     const q = query(
       collection(db, "events"),
       where("date", ">=", today),
-      orderBy("date", "asc")
+      orderBy("date", "asc"),
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -244,7 +257,7 @@ const HomeScreen = () => {
         }
       }
     },
-    [userRoles, isOffline]
+    [userRoles, isOffline],
   );
 
   // âœ… Set up feed listeners ONCE
@@ -290,13 +303,13 @@ const HomeScreen = () => {
             return timeB - timeA;
           });
         });
-        
+
         setIsLoading(false);
       },
       (error) => {
         if (auth.currentUser) console.error("Error fetching posts:", error);
         setIsLoading(false);
-      }
+      },
     );
 
     const qPolls = query(collection(db, "polls"), orderBy("createdAt", "desc"));
@@ -328,7 +341,7 @@ const HomeScreen = () => {
       },
       (error) => {
         if (auth.currentUser) console.error("Error fetching polls:", error);
-      }
+      },
     );
 
     // Don't cleanup listeners on unmount - keep them active
@@ -348,7 +361,10 @@ const HomeScreen = () => {
 
   const onRefresh = useCallback(async () => {
     if (isOffline) {
-      Alert.alert("No Connection", "Please check your internet connection and try again.");
+      Alert.alert(
+        "No Connection",
+        "Please check your internet connection and try again.",
+      );
       return;
     }
     setRefreshing(true);
@@ -357,7 +373,7 @@ const HomeScreen = () => {
 
   const handleLike = async (postId: string, currentLikedBy: string[] = []) => {
     if (!user) return;
-    
+
     if (isOffline) {
       Alert.alert("No Connection", "Cannot like posts while offline.");
       return;
@@ -381,7 +397,7 @@ const HomeScreen = () => {
 
   const handlePollVote = async (pollId: string, optionIndex: number) => {
     if (!user) return;
-    
+
     if (isOffline) {
       Alert.alert("No Connection", "Cannot vote while offline.");
       return;
@@ -389,7 +405,7 @@ const HomeScreen = () => {
 
     const pollRef = doc(db, "polls", pollId);
     const feedItem = feedItems.find(
-      (it) => it.id === pollId && it.type === "poll"
+      (it) => it.id === pollId && it.type === "poll",
     ) as Poll | undefined;
     if (!feedItem) return;
 
@@ -469,7 +485,7 @@ const HomeScreen = () => {
       const updatedOptions = [...poll.options, newOption];
       const totalVotes = updatedOptions.reduce(
         (sum, opt) => sum + (opt.votes || 0),
-        0
+        0,
       );
 
       await updateDoc(pollRef, { options: updatedOptions, totalVotes });
@@ -656,7 +672,7 @@ const HomeScreen = () => {
           } else {
             Alert.alert(
               "Cannot Open File",
-              "Unable to open this file type on your device."
+              "Unable to open this file type on your device.",
             );
           }
         })
@@ -672,57 +688,57 @@ const HomeScreen = () => {
     outputRange: ["0deg", "135deg"],
   });
 
-const renderFeedItem = ({ item }: { item: FeedItem }) => {
-  if (item.type === "post") {
-    const post = item as Post;
-    const isLiked = post.likedBy?.includes(user?.uid || "") || false;
+  const renderFeedItem = ({ item }: { item: FeedItem }) => {
+    if (item.type === "post") {
+      const post = item as Post;
+      const isLiked = post.likedBy?.includes(user?.uid || "") || false;
 
-    return (
-      <PostCard
-        post={post}
-        isLiked={isLiked}
-        currentUserRole={currentUserRole}
-        currentUserId={user?.uid}
-        onLike={handleLike}
-        onProfileClick={(targetId) => {
-          if (targetId === "self") {
-            router.push("../(tabs)/ProfileScreen");
-          } else {
-            router.push(`../UserProfileScreen?userId=${targetId}`);
-          }
-        }}
-        onTagClick={(taggedUserId) => {
-          if (taggedUserId === user?.uid) {
-            router.push("../(tabs)/ProfileScreen");
-          } else {
-            router.push(`../UserProfileScreen?userId=${taggedUserId}`);
-          }
-        }}
-        onImagePress={openImageViewer}
-        onFilePress={handleFilePress}
-        getTimeAgo={getTimeAgo}
-      />
-    );
-  } else {
-    const poll = item as Poll;
-    const userRole = userRoles[poll.userId || ""];
+      return (
+        <PostCard
+          post={post}
+          isLiked={isLiked}
+          currentUserRole={currentUserRole}
+          currentUserId={user?.uid}
+          onLike={handleLike}
+          onProfileClick={(targetId) => {
+            if (targetId === "self") {
+              router.push("../(tabs)/ProfileScreen");
+            } else {
+              router.push(`../UserProfileScreen?userId=${targetId}`);
+            }
+          }}
+          onTagClick={(taggedUserId) => {
+            if (taggedUserId === user?.uid) {
+              router.push("../(tabs)/ProfileScreen");
+            } else {
+              router.push(`../UserProfileScreen?userId=${taggedUserId}`);
+            }
+          }}
+          onImagePress={openImageViewer}
+          onFilePress={handleFilePress}
+          getTimeAgo={getTimeAgo}
+        />
+      );
+    } else {
+      const poll = item as Poll;
+      const userRole = userRoles[poll.userId || ""];
 
-    return (
-      <PollCard
-        poll={poll}
-        onImagePress={openImageViewer}
-        currentUserRole={currentUserRole}
-        userRole={userRole}
-        currentUserId={user?.uid}
-        onVote={handlePollVote}
-        onAddOption={promptOpenAddOption}
-        onProfileClick={handleProfileClick}
-        getTimeAgo={getTimeAgo}
-        isPollExpired={isPollExpired}
-      />
-    );
-  }
-};
+      return (
+        <PollCard
+          poll={poll}
+          onImagePress={openImageViewer}
+          currentUserRole={currentUserRole}
+          userRole={userRole}
+          currentUserId={user?.uid}
+          onVote={handlePollVote}
+          onAddOption={promptOpenAddOption}
+          onProfileClick={handleProfileClick}
+          getTimeAgo={getTimeAgo}
+          isPollExpired={isPollExpired}
+        />
+      );
+    }
+  };
 
   const renderEmptyState = () => {
     if (isLoading) {
@@ -745,12 +761,12 @@ const renderFeedItem = ({ item }: { item: FeedItem }) => {
         </View>
       );
     }
-    
+
     return null;
   };
 
   return (
-    <SafeAreaView style={styles.container}>      
+    <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity>
           <Ionicons name="menu" size={24} color="#b8c7ff" />
@@ -761,8 +777,8 @@ const renderFeedItem = ({ item }: { item: FeedItem }) => {
             <View style={styles.onlineDot} />
             <Text style={styles.onlineUsersText}>{onlineUsersCount}</Text>
           </View>
-          
-          <TouchableOpacity 
+
+          <TouchableOpacity
             style={styles.calendarButton}
             onPress={() => router.push("/EventCalendarScreen")}
           >
@@ -784,7 +800,11 @@ const renderFeedItem = ({ item }: { item: FeedItem }) => {
         keyExtractor={(item) => item.id}
         onScroll={handleScroll}
         scrollEventThrottle={16}
-        contentContainerStyle={feedItems.length === 0 ? styles.emptyListContent : styles.flatListContent}
+        contentContainerStyle={
+          feedItems.length === 0
+            ? styles.emptyListContent
+            : styles.flatListContent
+        }
         ListEmptyComponent={renderEmptyState}
         refreshControl={
           <RefreshControl
@@ -829,7 +849,7 @@ const renderFeedItem = ({ item }: { item: FeedItem }) => {
             })}
             onMomentumScrollEnd={(e) => {
               const index = Math.round(
-                e.nativeEvent.contentOffset.x / SCREEN_WIDTH
+                e.nativeEvent.contentOffset.x / SCREEN_WIDTH,
               );
               setCurrentImageIndex(index);
             }}
@@ -910,8 +930,16 @@ const renderFeedItem = ({ item }: { item: FeedItem }) => {
           pointerEvents="box-none"
         >
           {[
-            { label: "Create", icon: "create-outline" as const, action: "create" },
-            { label: "Polls", icon: "bar-chart-outline" as const, action: "polls" },
+            {
+              label: "Create",
+              icon: "create-outline" as const,
+              action: "create",
+            },
+            {
+              label: "Polls",
+              icon: "bar-chart-outline" as const,
+              action: "polls",
+            },
           ].map((item, index) => (
             <Animated.View
               key={item.action}
@@ -998,8 +1026,8 @@ const styles = StyleSheet.create({
     color: "#b8c7ff",
     letterSpacing: 1,
   },
-  headerIcons: { 
-    flexDirection: "row", 
+  headerIcons: {
+    flexDirection: "row",
     gap: 16,
     alignItems: "center",
   },
