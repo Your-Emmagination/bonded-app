@@ -269,7 +269,7 @@ const confirmLogout = useCallback(() =>
       style: "destructive",
       onPress: async () => {
         try {
-          // Set offline status first
+          // Set offline status
           if (user) {
             const email = user.email ?? "";
             const studentID = email.split("@")[0] || user.uid;
@@ -285,27 +285,7 @@ const confirmLogout = useCallback(() =>
               }
             }
           }
-
-          // Sign out from Firebase
           await signOut(auth);
-
-          // Navigate based on platform
-          if (Platform.OS === "web") {
-            // On web, use setTimeout to let Firebase finish signing out
-            // then force navigation
-            setTimeout(() => {
-              try {
-                router.replace("/LoginScreen");
-              } catch {
-                // Last resort fallback
-                if (typeof window !== "undefined") {
-                  (window as any).location.replace("/LoginScreen");
-                }
-              }
-            }, 100);
-          } else {
-            router.replace("/LoginScreen");
-          }
 
         } catch (e: any) {
           Alert.alert("Error", e.message || "Failed to log out");

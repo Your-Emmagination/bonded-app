@@ -3,7 +3,7 @@ import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect, useState, useRef } from "react";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { auth } from "../Firebase_configure";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator,Platform , View } from "react-native";
 
 export default function RootLayout() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
@@ -34,16 +34,15 @@ const navigationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     console.log("Navigation check:", { inAuthGroup, isAuthenticated, segments });
 
     // Use timeout to prevent navigation during transitions
-    navigationTimeoutRef.current = setTimeout(() => {
-      if (!isAuthenticated && inAuthGroup) {
-        console.log("Redirecting to login (not authenticated)");
-        router.replace("/LoginScreen");
-      } else if (isAuthenticated && !inAuthGroup) {
-        // Redirect if authenticated but not in auth group
-        console.log("Redirecting to home (already authenticated)");
-        router.replace("/(main)/(tabs)/HomeScreen");
-      }
-    }, 50);
+navigationTimeoutRef.current = setTimeout(() => {
+  if (!isAuthenticated && inAuthGroup) {
+    console.log("Redirecting to login (not authenticated)");
+    router.replace("/LoginScreen");
+  } else if (isAuthenticated && !inAuthGroup) {
+    console.log("Redirecting to home (already authenticated)");
+    router.replace("/(main)/(tabs)/HomeScreen");
+  }
+}, Platform.OS === "web" ? 300 : 50); // ← longer delay on web
 
     return () => {
       if (navigationTimeoutRef.current) {
