@@ -17,7 +17,7 @@ import {
     ActivityIndicator,
     Alert, Animated,
     AppState,
-    Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View,
+    Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View, Platform, 
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
@@ -275,7 +275,11 @@ const confirmLogout = useCallback(() =>
             const studentID = email.split("@")[0] || user.uid;
             if (studentID) {
               try {
-                await updateDoc(doc(db, "students", studentID), { isOnline: false });
+                await setDoc(
+                  doc(db, "students", studentID),
+                  { isOnline: false },
+                  { merge: true }
+                );
               } catch (err) {
                 console.log("Could not update offline status:", err);
               }
@@ -285,9 +289,14 @@ const confirmLogout = useCallback(() =>
           // Sign out from Firebase
           await signOut(auth);
 
-          // âœ… CHANGED: Use replace() and point to LoginScreen at root
-          router.replace("/LoginScreen");  
-          
+          // ✅ Web-compatible navigation
+          if (Platform.OS === "web") {
+            // Force full page reload on web — most reliable
+            window.location.href = "/LoginScreen";
+          } else {
+            router.replace("/LoginScreen");
+          }
+
         } catch (e: any) {
           Alert.alert("Error", e.message || "Failed to log out");
         }
