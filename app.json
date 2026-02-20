@@ -8,6 +8,7 @@
     "scheme": "bondedapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "backgroundColor": "#0f1624",
     "ios": {
       "supportsTablet": true,
       "googleServicesFile": "./google-services.json",
@@ -19,6 +20,7 @@
     "android": {
       "package": "com.encabo.bondedapp",
       "googleServicesFile": "./google-services.json",
+      "backgroundColor": "#0f1624",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",

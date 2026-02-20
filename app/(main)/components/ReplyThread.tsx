@@ -1,41 +1,44 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import {
-  View,
-  Text,
-  Modal,
-  TouchableOpacity,
-  StyleSheet,
-  FlatList,
-  Keyboard,
-  Platform,
-  Image,
-  ActivityIndicator,
-  BackHandler,
-  Alert,
-  Linking,
-  Dimensions,
-  Animated,
-} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
-  collection,
   addDoc,
-  query,
-  where,
+  arrayRemove,
+  arrayUnion,
+  collection,
+  deleteDoc,
+  doc,
   onSnapshot,
   orderBy,
-  updateDoc,
-  doc,
+  query,
   serverTimestamp,
-  deleteDoc,
-  arrayUnion,
-  arrayRemove,
+  updateDoc,
+  where,
 } from "firebase/firestore";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  BackHandler,
+  Dimensions,
+  FlatList,
+  Image,
+  Linking,
+  Modal,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { db } from "../../../Firebase_configure";
+import {
+  getRoleColor,
+  getRoleDisplayName,
+  getUserData,
+} from "@/utils/rbac";
 import CommentComposer from "./CommentComposer";
-import { getUserData, getRoleColor, getRoleDisplayName } from "@/utils/rbac";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -88,7 +91,11 @@ const ReplyBubble: React.FC<{
   onFilePress: (url: string, name: string) => void;
   onImagePress: (images: string[], index: number) => void;
   getTimeAgo: (ts: any) => string;
-  getFileDisplayName: (f: { url: string; mimeType: string; name?: string }) => string;
+  getFileDisplayName: (f: {
+    url: string;
+    mimeType: string;
+    name?: string;
+  }) => string;
 }> = ({
   item,
   currentUser,
@@ -116,7 +123,8 @@ const ReplyBubble: React.FC<{
   // Determine if we show avatar/name (group consecutive messages from same sender)
   const isSameSenderAsPrev =
     prevItem &&
-    (prevItem.realUserId || prevItem.userId) === (item.realUserId || item.userId) &&
+    (prevItem.realUserId || prevItem.userId) ===
+      (item.realUserId || item.userId) &&
     prevItem.isAnonymous === item.isAnonymous;
 
   useEffect(() => {
@@ -125,7 +133,7 @@ const ReplyBubble: React.FC<{
       duration: 220,
       useNativeDriver: true,
     }).start();
-  }, []);
+  }, [fadeAnim]);
 
   useEffect(() => {
     const fetchAuthor = async () => {
@@ -166,10 +174,12 @@ const ReplyBubble: React.FC<{
   const isLiked = (item.likedBy || []).includes(currentUser?.uid || "");
 
   const imageFiles = (item.files || []).filter(
-    (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif")
+    (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif"),
   );
   const gifFiles = (item.files || []).filter((f) => f.mimeType.includes("gif"));
-  const docFiles = (item.files || []).filter((f) => !f.mimeType.startsWith("image/"));
+  const docFiles = (item.files || []).filter(
+    (f) => !f.mimeType.startsWith("image/"),
+  );
   const taggedUsers = item.taggedUsers ?? [];
 
   const showHeader = !isSameSenderAsPrev;
@@ -201,9 +211,14 @@ const ReplyBubble: React.FC<{
                 ]}
               >
                 {isIdentityVisible && item.profilePic ? (
-                  <Image source={{ uri: item.profilePic }} style={styles.avatarImg} />
+                  <Image
+                    source={{ uri: item.profilePic }}
+                    style={styles.avatarImg}
+                  />
                 ) : isIdentityVisible ? (
-                  <Text style={[styles.avatarInitial, { color: roleColor }]}>{initial}</Text>
+                  <Text style={[styles.avatarInitial, { color: roleColor }]}>
+                    {initial}
+                  </Text>
                 ) : (
                   <Ionicons name="person" size={13} color="#8ea0d0" />
                 )}
@@ -219,25 +234,46 @@ const ReplyBubble: React.FC<{
       <TouchableOpacity
         onLongPress={() => onLongPress(item)}
         activeOpacity={0.88}
-        style={[styles.bubbleWrapper, isCurrentUser ? styles.bubbleWrapperRight : styles.bubbleWrapperLeft]}
+        style={[
+          styles.bubbleWrapper,
+          isCurrentUser ? styles.bubbleWrapperRight : styles.bubbleWrapperLeft,
+        ]}
       >
         {/* Sender name + role chip — only show on first in group, only for others */}
         {!isCurrentUser && showHeader && (
           <View style={styles.senderRow}>
-            <TouchableOpacity onPress={() => onProfileClick(item)} disabled={!isIdentityVisible}>
-              <Text style={[styles.senderName, { color: isIdentityVisible ? roleColor : "#8ea0d0" }]}>
+            <TouchableOpacity
+              onPress={() => onProfileClick(item)}
+              disabled={!isIdentityVisible}
+            >
+              <Text
+                style={[
+                  styles.senderName,
+                  { color: isIdentityVisible ? roleColor : "#8ea0d0" },
+                ]}
+              >
                 {displayName}
               </Text>
             </TouchableOpacity>
 
             {isIdentityVisible && isPrivileged && (
-              <View style={[styles.roleChip, { backgroundColor: roleColor + "22", borderColor: roleColor }]}>
-                <Text style={[styles.roleChipText, { color: roleColor }]}>{roleDisplayName}</Text>
+              <View
+                style={[
+                  styles.roleChip,
+                  { backgroundColor: roleColor + "22", borderColor: roleColor },
+                ]}
+              >
+                <Text style={[styles.roleChipText, { color: roleColor }]}>
+                  {roleDisplayName}
+                </Text>
               </View>
             )}
 
             {canReveal && (
-              <TouchableOpacity onPress={() => setRevealed(!revealed)} style={styles.eyeBtn}>
+              <TouchableOpacity
+                onPress={() => setRevealed(!revealed)}
+                style={styles.eyeBtn}
+              >
                 <Ionicons
                   name={revealed ? "eye-off-outline" : "eye-outline"}
                   size={13}
@@ -250,14 +286,27 @@ const ReplyBubble: React.FC<{
 
         {/* Reply-to preview */}
         {item.replyingTo && (
-          <View style={[styles.replyPreview, isCurrentUser && styles.replyPreviewRight]}>
+          <View
+            style={[
+              styles.replyPreview,
+              isCurrentUser && styles.replyPreviewRight,
+            ]}
+          >
             <View style={styles.replyPreviewBar} />
             <View style={{ flex: 1 }}>
-              <Text style={[styles.replyPreviewAuthor, isCurrentUser && { color: "#ffaad0" }]}>
+              <Text
+                style={[
+                  styles.replyPreviewAuthor,
+                  isCurrentUser && { color: "#ffaad0" },
+                ]}
+              >
                 {item.replyingTo.name}
               </Text>
               <Text
-                style={[styles.replyPreviewText, isCurrentUser && { color: "#ffffff99" }]}
+                style={[
+                  styles.replyPreviewText,
+                  isCurrentUser && { color: "#ffffff99" },
+                ]}
                 numberOfLines={2}
               >
                 {item.replyingTo.text || "Message"}
@@ -267,10 +316,20 @@ const ReplyBubble: React.FC<{
         )}
 
         {/* Bubble body */}
-        <View style={[styles.bubble, isCurrentUser ? styles.bubbleRight : styles.bubbleLeft]}>
+        <View
+          style={[
+            styles.bubble,
+            isCurrentUser ? styles.bubbleRight : styles.bubbleLeft,
+          ]}
+        >
           {/* Text */}
           {!!item.text && (
-            <Text style={[styles.bubbleText, isCurrentUser && styles.bubbleTextRight]}>
+            <Text
+              style={[
+                styles.bubbleText,
+                isCurrentUser && styles.bubbleTextRight,
+              ]}
+            >
               {item.text}
             </Text>
           )}
@@ -278,7 +337,11 @@ const ReplyBubble: React.FC<{
           {/* GIF */}
           {gifFiles.length > 0 && (
             <View style={styles.gifContainer}>
-              <Image source={{ uri: gifFiles[0].url }} style={styles.gifImage} resizeMode="cover" />
+              <Image
+                source={{ uri: gifFiles[0].url }}
+                style={styles.gifImage}
+                resizeMode="cover"
+              />
             </View>
           )}
 
@@ -286,13 +349,24 @@ const ReplyBubble: React.FC<{
           {imageFiles.length > 0 && (
             <TouchableOpacity
               activeOpacity={0.9}
-              onPress={() => onImagePress(imageFiles.map((f) => f.url), 0)}
+              onPress={() =>
+                onImagePress(
+                  imageFiles.map((f) => f.url),
+                  0,
+                )
+              }
               style={styles.imageContainer}
             >
-              <Image source={{ uri: imageFiles[0].url }} style={styles.imagePreview} resizeMode="cover" />
+              <Image
+                source={{ uri: imageFiles[0].url }}
+                style={styles.imagePreview}
+                resizeMode="cover"
+              />
               {imageFiles.length > 1 && (
                 <View style={styles.imageCountBadge}>
-                  <Text style={styles.imageCountText}>+{imageFiles.length - 1}</Text>
+                  <Text style={styles.imageCountText}>
+                    +{imageFiles.length - 1}
+                  </Text>
                 </View>
               )}
             </TouchableOpacity>
@@ -305,10 +379,16 @@ const ReplyBubble: React.FC<{
                 <TouchableOpacity
                   key={idx}
                   style={[styles.docItem, isCurrentUser && styles.docItemRight]}
-                  onPress={() => onFilePress(file.url, getFileDisplayName(file))}
+                  onPress={() =>
+                    onFilePress(file.url, getFileDisplayName(file))
+                  }
                 >
                   <Ionicons
-                    name={file.mimeType.includes("pdf") ? "document-text" : "document"}
+                    name={
+                      file.mimeType.includes("pdf")
+                        ? "document-text"
+                        : "document"
+                    }
                     size={14}
                     color={isCurrentUser ? "#fff" : "#4f9cff"}
                   />
@@ -331,40 +411,82 @@ const ReplyBubble: React.FC<{
           {/* Link */}
           {item.link && (
             <TouchableOpacity
-              style={[styles.linkPreview, isCurrentUser && styles.linkPreviewRight]}
+              style={[
+                styles.linkPreview,
+                isCurrentUser && styles.linkPreviewRight,
+              ]}
               onPress={() => onLinkPress(item.link?.url ?? "")}
             >
-              <Ionicons name="link" size={13} color={isCurrentUser ? "#fff" : "#4f9cff"} />
+              <Ionicons
+                name="link"
+                size={13}
+                color={isCurrentUser ? "#fff" : "#4f9cff"}
+              />
               <View style={{ flex: 1, marginLeft: 6 }}>
-                <Text style={[styles.linkTitle, isCurrentUser && { color: "#fff" }]} numberOfLines={1}>
+                <Text
+                  style={[styles.linkTitle, isCurrentUser && { color: "#fff" }]}
+                  numberOfLines={1}
+                >
                   {item.link?.title ?? "Link"}
                 </Text>
                 <Text
-                  style={[styles.linkUrl, isCurrentUser && { color: "#ffffff99" }]}
+                  style={[
+                    styles.linkUrl,
+                    isCurrentUser && { color: "#ffffff99" },
+                  ]}
                   numberOfLines={1}
                 >
                   {item.link?.url ?? ""}
                 </Text>
               </View>
-              <Ionicons name="open-outline" size={11} color={isCurrentUser ? "#ffffff99" : "#8ea0d0"} />
+              <Ionicons
+                name="open-outline"
+                size={11}
+                color={isCurrentUser ? "#ffffff99" : "#8ea0d0"}
+              />
             </TouchableOpacity>
           )}
 
           {/* Tagged users */}
           {taggedUsers.length > 0 && (
-            <View style={[styles.taggedRow, isCurrentUser && styles.taggedRowRight]}>
-              <Ionicons name="people-outline" size={11} color={isCurrentUser ? "#ffaad0" : "#ff5c93"} />
-              <Text style={[styles.taggedWith, isCurrentUser && { color: "#ffaad0" }]}>with </Text>
+            <View
+              style={[styles.taggedRow, isCurrentUser && styles.taggedRowRight]}
+            >
+              <Ionicons
+                name="people-outline"
+                size={11}
+                color={isCurrentUser ? "#ffaad0" : "#ff5c93"}
+              />
+              <Text
+                style={[
+                  styles.taggedWith,
+                  isCurrentUser && { color: "#ffaad0" },
+                ]}
+              >
+                with{" "}
+              </Text>
               <View style={styles.taggedNames}>
                 {taggedUsers.map((tag, idx) => (
                   <React.Fragment key={tag.id}>
                     <TouchableOpacity onPress={() => onTagClick(tag.id)}>
-                      <Text style={[styles.taggedName, isCurrentUser && { color: "#fff" }]}>
+                      <Text
+                        style={[
+                          styles.taggedName,
+                          isCurrentUser && { color: "#fff" },
+                        ]}
+                      >
                         {tag.name}
                       </Text>
                     </TouchableOpacity>
                     {idx < taggedUsers.length - 1 && (
-                      <Text style={[styles.taggedWith, isCurrentUser && { color: "#ffaad0" }]}>, </Text>
+                      <Text
+                        style={[
+                          styles.taggedWith,
+                          isCurrentUser && { color: "#ffaad0" },
+                        ]}
+                      >
+                        ,{" "}
+                      </Text>
                     )}
                   </React.Fragment>
                 ))}
@@ -374,8 +496,15 @@ const ReplyBubble: React.FC<{
         </View>
 
         {/* Footer: time + actions */}
-        <View style={[styles.bubbleFooter, isCurrentUser && styles.bubbleFooterRight]}>
-          <Text style={[styles.timeText, isCurrentUser && styles.timeTextRight]}>
+        <View
+          style={[
+            styles.bubbleFooter,
+            isCurrentUser && styles.bubbleFooterRight,
+          ]}
+        >
+          <Text
+            style={[styles.timeText, isCurrentUser && styles.timeTextRight]}
+          >
             {getTimeAgo(item.createdAt)}
           </Text>
 
@@ -387,17 +516,26 @@ const ReplyBubble: React.FC<{
               <Ionicons
                 name={isLiked ? "heart" : "heart-outline"}
                 size={13}
-                color={isLiked ? "#ff5c93" : isCurrentUser ? "#ffffff99" : "#8ea0d0"}
+                color={
+                  isLiked ? "#ff5c93" : isCurrentUser ? "#ffffff99" : "#8ea0d0"
+                }
               />
               {(item.likeCount || 0) > 0 && (
-                <Text style={[styles.footerActionText, isCurrentUser && { color: "#ffffff99" }]}>
+                <Text
+                  style={[
+                    styles.footerActionText,
+                    isCurrentUser && { color: "#ffffff99" },
+                  ]}
+                >
                   {item.likeCount}
                 </Text>
               )}
             </TouchableOpacity>
 
             <TouchableOpacity
-              onPress={() => onReplyClick(item.id, displayName, item.text || "")}
+              onPress={() =>
+                onReplyClick(item.id, displayName, item.text || "")
+              }
               style={styles.footerAction}
             >
               <Ionicons
@@ -428,7 +566,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [showSeenModal, setShowSeenModal] = useState(false);
   const [selectedReplySeenBy, setSelectedReplySeenBy] = useState<string[]>([]);
-  const [replyingTo, setReplyingTo] = useState<{ id: string; name: string; text: string } | null>(null);
+  const [replyingTo, setReplyingTo] = useState<{
+    id: string;
+    name: string;
+    text: string;
+  } | null>(null);
   const [seenUsers, setSeenUsers] = useState<{ [uid: string]: any }>({});
 
   const insets = useSafeAreaInsets();
@@ -443,10 +585,16 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   }, []);
 
   useEffect(() => {
-    const backHandler = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (visible) { onClose(); return true; }
-      return false;
-    });
+    const backHandler = BackHandler.addEventListener(
+      "hardwareBackPress",
+      () => {
+        if (visible) {
+          onClose();
+          return true;
+        }
+        return false;
+      },
+    );
     return () => backHandler.remove();
   }, [visible, onClose]);
 
@@ -455,11 +603,14 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     const q = query(
       collection(db, "replies"),
       where("commentId", "==", commentId),
-      orderBy("createdAt", "asc")
+      orderBy("createdAt", "asc"),
     );
 
     const unsubscribe = onSnapshot(q, async (snapshot) => {
-      const fetched = snapshot.docs.map((d) => ({ id: d.id, ...d.data() })) as Reply[];
+      const fetched = snapshot.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+      })) as Reply[];
       setReplies(fetched);
       setLoading(false);
 
@@ -485,7 +636,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     if (!loading && replies.length > 0) {
       scrollToBottom();
     }
-  }, [loading]);
+  }, [loading, replies.length, scrollToBottom]);
 
   const handleSendReply = async (replyData: any) => {
     if (!currentUser) return;
@@ -549,8 +700,14 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     Alert.alert("Report Reply", "Select a reason:", [
       { text: "Cancel", style: "cancel" },
       { text: "Spam", onPress: () => submitReport(replyId, "spam") },
-      { text: "Harassment", onPress: () => submitReport(replyId, "harassment") },
-      { text: "Inappropriate", onPress: () => submitReport(replyId, "inappropriate") },
+      {
+        text: "Harassment",
+        onPress: () => submitReport(replyId, "harassment"),
+      },
+      {
+        text: "Inappropriate",
+        onPress: () => submitReport(replyId, "inappropriate"),
+      },
     ]);
   };
 
@@ -572,7 +729,8 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
 
   const handleLongPress = (reply: Reply) => {
     const isOwner =
-      reply.realUserId === currentUser?.uid || reply.userId === currentUser?.uid;
+      reply.realUserId === currentUser?.uid ||
+      reply.userId === currentUser?.uid;
     const isAdmin = currentUser?.role === "admin";
     const canDelete = isOwner || isAdmin;
 
@@ -591,7 +749,10 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     ];
 
     if (!isOwner) {
-      options.push({ text: "Report", onPress: () => handleReportReply(reply.id) });
+      options.push({
+        text: "Report",
+        onPress: () => handleReportReply(reply.id),
+      });
     }
 
     options.push({
@@ -629,7 +790,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         }
       } catch {}
     },
-    [currentUser, router]
+    [currentUser, router],
   );
 
   const handleTagClick = useCallback(
@@ -642,7 +803,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         }
       } catch {}
     },
-    [currentUser, router]
+    [currentUser, router],
   );
 
   const handleLinkPress = (url: string) => {
@@ -670,7 +831,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     setImageViewerVisible(true);
   };
 
-  const getFileDisplayName = (file: { url: string; mimeType: string; name?: string }) => {
+  const getFileDisplayName = (file: {
+    url: string;
+    mimeType: string;
+    name?: string;
+  }) => {
     if (file.name) return file.name;
     const parts = file.url.split("/");
     const last = parts[parts.length - 1];
@@ -693,8 +858,12 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   const shouldShowDateSeparator = (item: Reply, prev?: Reply) => {
     if (!prev) return true;
     if (!item.createdAt || !prev.createdAt) return false;
-    const dateA = item.createdAt.toDate ? item.createdAt.toDate() : new Date(item.createdAt);
-    const dateB = prev.createdAt.toDate ? prev.createdAt.toDate() : new Date(prev.createdAt);
+    const dateA = item.createdAt.toDate
+      ? item.createdAt.toDate()
+      : new Date(item.createdAt);
+    const dateB = prev.createdAt.toDate
+      ? prev.createdAt.toDate()
+      : new Date(prev.createdAt);
     return dateA.toDateString() !== dateB.toDateString();
   };
 
@@ -705,7 +874,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     const diffDays = Math.floor((now.getTime() - date.getTime()) / 86400000);
     if (diffDays === 0) return "Today";
     if (diffDays === 1) return "Yesterday";
-    return date.toLocaleDateString(undefined, { month: "long", day: "numeric", year: diffDays > 365 ? "numeric" : undefined });
+    return date.toLocaleDateString(undefined, {
+      month: "long",
+      day: "numeric",
+      year: diffDays > 365 ? "numeric" : undefined,
+    });
   };
 
   return (
@@ -725,7 +898,10 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             <View style={styles.headerCenter}>
               <Text style={styles.headerTitle}>Replies</Text>
               <Text style={styles.headerSub}>
-                to <Text style={{ color: "#ff8ab2", fontWeight: "700" }}>{commentAuthor}</Text>
+                to{" "}
+                <Text style={{ color: "#ff8ab2", fontWeight: "700" }}>
+                  {commentAuthor}
+                </Text>
                 {"  ·  "}
                 <Text style={{ color: "#8ea0d0" }}>
                   {replies.length} {replies.length === 1 ? "reply" : "replies"}
@@ -760,7 +936,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                     {showDate && (
                       <View style={styles.dateSeparator}>
                         <View style={styles.dateLine} />
-                        <Text style={styles.dateLabel}>{formatDateHeader(item.createdAt)}</Text>
+                        <Text style={styles.dateLabel}>
+                          {formatDateHeader(item.createdAt)}
+                        </Text>
                         <View style={styles.dateLine} />
                       </View>
                     )}
@@ -769,7 +947,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                       currentUser={currentUser}
                       prevItem={prev}
                       onLike={handleLikeReply}
-                      onReplyClick={(id, name, text) => setReplyingTo({ id, name, text })}
+                      onReplyClick={(id, name, text) =>
+                        setReplyingTo({ id, name, text })
+                      }
                       onLongPress={handleLongPress}
                       onProfileClick={handleProfileClick}
                       onTagClick={handleTagClick}
@@ -828,7 +1008,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         >
           <View style={styles.seenSheet} onStartShouldSetResponder={() => true}>
             <View style={styles.seenHeader}>
-              <Text style={styles.seenTitle}>Seen by ({selectedReplySeenBy.length})</Text>
+              <Text style={styles.seenTitle}>
+                Seen by ({selectedReplySeenBy.length})
+              </Text>
               <TouchableOpacity onPress={() => setShowSeenModal(false)}>
                 <Ionicons name="close" size={22} color="#8ea0d0" />
               </TouchableOpacity>
@@ -845,7 +1027,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                 renderItem={({ item: uid }) => (
                   <View style={styles.seenRow}>
                     <View style={styles.seenAvatar}>
-                      <Text style={styles.seenAvatarText}>{uid[0]?.toUpperCase()}</Text>
+                      <Text style={styles.seenAvatarText}>
+                        {uid[0]?.toUpperCase()}
+                      </Text>
                     </View>
                     <Text style={styles.seenName}>User {uid.slice(0, 8)}…</Text>
                   </View>
@@ -864,7 +1048,10 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         onRequestClose={() => setImageViewerVisible(false)}
       >
         <View style={styles.imageViewer}>
-          <TouchableOpacity style={styles.imageViewerClose} onPress={() => setImageViewerVisible(false)}>
+          <TouchableOpacity
+            style={styles.imageViewerClose}
+            onPress={() => setImageViewerVisible(false)}
+          >
             <Ionicons name="close" size={30} color="#fff" />
           </TouchableOpacity>
           <FlatList
@@ -872,16 +1059,26 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             horizontal
             pagingEnabled
             initialScrollIndex={selectedImageIndex}
-            getItemLayout={(_, i) => ({ length: SCREEN_WIDTH, offset: SCREEN_WIDTH * i, index: i })}
+            getItemLayout={(_, i) => ({
+              length: SCREEN_WIDTH,
+              offset: SCREEN_WIDTH * i,
+              index: i,
+            })}
             renderItem={({ item }) => (
               <View style={styles.imageViewerPage}>
-                <Image source={{ uri: item }} style={styles.imageViewerImg} resizeMode="contain" />
+                <Image
+                  source={{ uri: item }}
+                  style={styles.imageViewerImg}
+                  resizeMode="contain"
+                />
               </View>
             )}
             keyExtractor={(_, i) => i.toString()}
             showsHorizontalScrollIndicator={false}
             onMomentumScrollEnd={(e) => {
-              setSelectedImageIndex(Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH));
+              setSelectedImageIndex(
+                Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH),
+              );
             }}
           />
           {selectedImages.length > 1 && (
@@ -1041,7 +1238,12 @@ const styles = StyleSheet.create({
   gifImage: { width: 220, height: 160, backgroundColor: "#0e1320" },
 
   // Image
-  imageContainer: { marginTop: 6, borderRadius: 12, overflow: "hidden", position: "relative" },
+  imageContainer: {
+    marginTop: 6,
+    borderRadius: 12,
+    overflow: "hidden",
+    position: "relative",
+  },
   imagePreview: { width: 220, height: 160, backgroundColor: "#0e1320" },
   imageCountBadge: {
     position: "absolute",
@@ -1081,7 +1283,12 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.18)",
     borderColor: "rgba(255,255,255,0.2)",
   },
-  linkTitle: { color: "#e9edff", fontSize: 12.5, fontWeight: "600", marginBottom: 1 },
+  linkTitle: {
+    color: "#e9edff",
+    fontSize: 12.5,
+    fontWeight: "600",
+    marginBottom: 1,
+  },
   linkUrl: { color: "#8ea0d0", fontSize: 11 },
 
   // Tagged
@@ -1170,8 +1377,18 @@ const styles = StyleSheet.create({
   seenName: { color: "#e9edff", fontSize: 14, fontWeight: "500" },
 
   // Centered (empty / loading)
-  centered: { flex: 1, justifyContent: "center", alignItems: "center", padding: 40 },
-  emptyTitle: { color: "#e9edff", fontSize: 17, fontWeight: "700", marginTop: 14 },
+  centered: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 40,
+  },
+  emptyTitle: {
+    color: "#e9edff",
+    fontSize: 17,
+    fontWeight: "700",
+    marginTop: 14,
+  },
   emptySub: { color: "#8ea0d0", fontSize: 13.5, marginTop: 6 },
 
   // Image viewer
@@ -1185,7 +1402,11 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.55)",
     borderRadius: 20,
   },
-  imageViewerPage: { width: SCREEN_WIDTH, justifyContent: "center", alignItems: "center" },
+  imageViewerPage: {
+    width: SCREEN_WIDTH,
+    justifyContent: "center",
+    alignItems: "center",
+  },
   imageViewerImg: { width: "100%", height: "100%" },
   imageCounter: {
     position: "absolute",

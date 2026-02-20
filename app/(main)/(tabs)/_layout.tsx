@@ -1,17 +1,18 @@
-// (tabs)/_layout.tsx
+// app/(main)/(tabs)/_layout.tsx
 import React, { useEffect, useRef, useState } from "react";
 import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import {
+  ActivityIndicator,
   Animated,
-  Platform,
-  TouchableOpacity,
-  Text,
-  View,
   Dimensions,
+  Platform,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaView } from "react-native-safe-area-context";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 
@@ -21,16 +22,8 @@ function TabItem({ isFocused, color, iconName, label, onPress }: any) {
 
   useEffect(() => {
     Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: isFocused ? 1 : 0,
-        duration: 150,
-        useNativeDriver: true,
-      }),
-      Animated.spring(scaleAnim, {
-        toValue: isFocused ? 1.05 : 1,
-        friction: 6,
-        useNativeDriver: true,
-      }),
+      Animated.timing(fadeAnim, { toValue: isFocused ? 1 : 0, duration: 150, useNativeDriver: true }),
+      Animated.spring(scaleAnim, { toValue: isFocused ? 1.05 : 1, friction: 6, useNativeDriver: true }),
     ]).start();
   }, [fadeAnim, isFocused, scaleAnim]);
 
@@ -38,41 +31,22 @@ function TabItem({ isFocused, color, iconName, label, onPress }: any) {
     <TouchableOpacity
       onPress={onPress}
       activeOpacity={0.9}
-      style={{
-        flex: 1,
-        justifyContent: "center",
-        alignItems: "center",
-        height: 70,
-      }}
+      style={{ flex: 1, justifyContent: "center", alignItems: "center", height: 70 }}
     >
       <Animated.View
         style={{
-          width: SCREEN_WIDTH / 5,
+          width: SCREEN_WIDTH / 4,
           height: 50,
           borderRadius: 12,
           justifyContent: "center",
           alignItems: "center",
-          backgroundColor: isFocused
-            ? "rgba(255, 59, 127, 0.15)"
-            : "transparent",
+          backgroundColor: isFocused ? "rgba(255, 59, 127, 0.15)" : "transparent",
           transform: [{ scale: scaleAnim }],
-          opacity: fadeAnim.interpolate({
-            inputRange: [0, 1],
-            outputRange: [0.5, 1],
-          }),
+          opacity: fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }),
         }}
       >
         <Ionicons name={iconName} size={24} color={color} />
-        <Text
-          numberOfLines={1}
-          ellipsizeMode="tail"
-          style={{
-            color,
-            fontSize: 11,
-            marginTop: 3,
-            textAlign: "center",
-          }}
-        >
+        <Text numberOfLines={1} style={{ color, fontSize: 11, marginTop: 3, textAlign: "center" }}>
           {label}
         </Text>
       </Animated.View>
@@ -80,88 +54,61 @@ function TabItem({ isFocused, color, iconName, label, onPress }: any) {
   );
 }
 
+// ✅ Defines visible tabs per role — order here = visual order in tab bar
+const studentRoutes = [
+  { name: "HomeScreen", label: "Home", icon: "home" },
+  { name: "NotificationsScreen", label: "Notifications", icon: "notifications" },
+  { name: "ProfileScreen", label: "Profile", icon: "person-circle" },
+];
+
+const privilegedRoutes = [
+  { name: "DashboardScreen", label: "Dashboard", icon: "grid" },
+  { name: "HomeScreen", label: "Home", icon: "home" },
+  { name: "NotificationsScreen", label: "Notifications", icon: "notifications" },
+  { name: "ProfileScreen", label: "Profile", icon: "person-circle" },
+];
+
 export default function TabLayout() {
   const [userRole, setUserRole] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const loadRole = async () => {
-      try {
-        const storedRole = await AsyncStorage.getItem("userRole");
-        setUserRole(storedRole?.toLowerCase() || "student");
-      } catch (error) {
-        console.error("Error reading userRole:", error);
-        setUserRole("student");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadRole();
+    AsyncStorage.getItem("userRole").then((role) => {
+      setUserRole(role?.toLowerCase() || "student");
+    });
   }, []);
 
-  if (loading) {
-    return null;
+  if (userRole === null) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#0f1624", justifyContent: "center", alignItems: "center" }}>
+        <ActivityIndicator size="large" color="#ff3b7f" />
+      </SafeAreaView>
+    );
   }
 
-  const dashboardRoles = ["moderator", "teacher", "admin"];
-  const isDashboardUser = userRole ? dashboardRoles.includes(userRole) : false;
-
-  const allRoutes = [
-    { name: "HomeScreen", label: "Home", icon: "home" },
-{ name: "NotificationsScreen", label: "Notifications", icon: "notifications" },    
-{ name: "ProfileScreen", label: "Profile", icon: "person-circle" },
-    { name: "DashboardScreen", label: "Dashboard", icon: "grid", visible: isDashboardUser },
-  ];
-
-  const visibleRoutes = allRoutes.filter((r) => r.visible !== false);
+  const isPrivileged = ["moderator", "teacher", "admin"].includes(userRole);
+  const visibleRoutes = isPrivileged ? privilegedRoutes : studentRoutes;
 
   return (
-    <SafeAreaView
-      style={{
-        flex: 1,
-        backgroundColor: "#0f1624",
-      }}
-      edges={["bottom"]}
-    >
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#0f1624" }} edges={["bottom"]}>
       <Tabs
-        screenOptions={{
-          headerShown: false,
-          tabBarStyle: { display: "none" },
-        }}
+        screenOptions={{ headerShown: false, tabBarStyle: { display: "none" } }}
+        initialRouteName={isPrivileged ? "DashboardScreen" : "HomeScreen"}
         tabBar={({ state, navigation }) => (
-          <View
-            style={{
-              position: "absolute",
-              bottom: 0,
-              left: 0,
-              right: 0,
-              flexDirection: "row",
-              justifyContent: "space-around",
-              alignItems: "center",
-              backgroundColor: "#0f1624",
-              borderTopWidth: 1,
-              borderTopColor: "#ff3b7f",
-              height: 70,
-              paddingBottom: Platform.OS === "android" ? 5 : 15,
-            }}
-          >
+          <View style={{
+            position: "absolute", bottom: 0, left: 0, right: 0,
+            flexDirection: "row", justifyContent: "space-around", alignItems: "center",
+            backgroundColor: "#0f1624", borderTopWidth: 1, borderTopColor: "#ff3b7f",
+            height: 70, paddingBottom: Platform.OS === "android" ? 5 : 15,
+          }}>
             {state.routes.map((route: any, index: number) => {
               const isFocused = state.index === index;
               const routeInfo = visibleRoutes.find((r) => r.name === route.name);
+              if (!routeInfo) return null; // ✅ Hides screens not in visibleRoutes
+
               const color = isFocused ? "#ff3b7f" : "#777";
-
-              if (!routeInfo) return null;
-
               const onPress = () => {
-                const event = navigation.emit({
-                  type: "tabPress",
-                  target: route.key,
-                  canPreventDefault: true,
-                });
-                if (!isFocused && !event.defaultPrevented) {
-                  navigation.navigate(route.name);
-                }
+                const event = navigation.emit({ type: "tabPress", target: route.key, canPreventDefault: true });
+                if (!isFocused && !event.defaultPrevented) navigation.navigate(route.name);
               };
 
               return (
@@ -169,7 +116,7 @@ export default function TabLayout() {
                   key={route.key}
                   isFocused={isFocused}
                   color={color}
-                  iconName={routeInfo.icon}
+                  iconName={routeInfo.icon as any}
                   label={routeInfo.label}
                   onPress={onPress}
                 />
@@ -178,10 +125,15 @@ export default function TabLayout() {
           </View>
         )}
       >
+        {/*
+          ✅ ALWAYS declare ALL screens in the desired visual order.
+          Control visibility via the visibleRoutes filter in tabBar, NOT by
+          conditionally rendering Tabs.Screen — that causes ordering bugs.
+        */}
+        <Tabs.Screen name="DashboardScreen" options={!isPrivileged ? { href: null } : {}} />
         <Tabs.Screen name="HomeScreen" />
         <Tabs.Screen name="NotificationsScreen" />
         <Tabs.Screen name="ProfileScreen" />
-        <Tabs.Screen name="DashboardScreen" />
       </Tabs>
     </SafeAreaView>
   );

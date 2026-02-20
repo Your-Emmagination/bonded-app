@@ -1,57 +1,64 @@
-// app/_layout.tsx - OPTIMIZED VERSION
+// app/_layout.tsx
 import { Stack, useRouter, useSegments } from "expo-router";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { auth } from "../Firebase_configure";
-import { ActivityIndicator,Platform , View } from "react-native";
+import { ActivityIndicator, View } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export default function RootLayout() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
-  const [initializing, setInitializing] = useState(true);
-  const segments = useSegments();
   const router = useRouter();
-const navigationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const segments = useSegments();
+  const hasNavigated = useRef(false);
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      console.log("Auth state changed:", currentUser ? "Logged in" : "Logged out");
       setUser(currentUser);
-      setInitializing(false);
+      if (!currentUser) {
+        hasNavigated.current = false;
+      }
     });
     return unsubscribe;
   }, []);
 
   useEffect(() => {
-    if (initializing) return;
+    if (user === undefined) return;
 
-    // Clear any pending navigation
-    if (navigationTimeoutRef.current) {
-      clearTimeout(navigationTimeoutRef.current);
+    const inMainApp = segments[0] === "(main)";
+    const onLoginScreen =
+      segments[0] === "LoginScreen" || segments[0] === undefined;
+
+    if (inMainApp) return;
+
+    if (!user && !onLoginScreen) {
+      router.replace("/LoginScreen");
+    } else if (user && onLoginScreen && !hasNavigated.current) {
+      hasNavigated.current = true;
+
+      AsyncStorage.getItem("userRole").then((role) => {
+        const normalizedRole = role?.toLowerCase() || "student";
+        const isPrivileged = ["moderator", "teacher", "admin"].includes(normalizedRole);
+
+        // ✅ Always replace to HomeScreen — this puts (main) + (tabs) at the
+        //    root of the stack. The tab layout handles showing Dashboard first
+        //    for privileged users via initialRouteName.
+        //    
+        //    All other screens (CreatePostScreen, EventCalendarScreen, etc.) now
+        //    live inside (main)/_layout.tsx's Stack, so pressing back from them
+        //    correctly returns to the tab that triggered the navigation.
+        if (isPrivileged) {
+          router.replace("/(main)/(tabs)/HomeScreen");
+          // Switch active tab to Dashboard without pushing a new stack entry
+          router.navigate("/(main)/(tabs)/DashboardScreen");
+        } else {
+          router.replace("/(main)/(tabs)/HomeScreen");
+        }
+      });
     }
+  }, [user, segments, router]);
 
-    const inAuthGroup = segments[0] === "(main)";
-    const isAuthenticated = !!user;
-
-    console.log("Navigation check:", { inAuthGroup, isAuthenticated, segments });
-
-    // Use timeout to prevent navigation during transitions
-navigationTimeoutRef.current = setTimeout(() => {
-  if (!isAuthenticated && inAuthGroup) {
-    console.log("Redirecting to login (not authenticated)");
-    router.replace("/LoginScreen");
-  } else if (isAuthenticated && !inAuthGroup) {
-    console.log("Redirecting to home (already authenticated)");
-    router.replace("/(main)/(tabs)/HomeScreen");
-  }
-}, Platform.OS === "web" ? 300 : 50); // ← longer delay on web
-
-    return () => {
-      if (navigationTimeoutRef.current) {
-        clearTimeout(navigationTimeoutRef.current);
-      }
-    };
-  }, [user, segments, initializing, router]);
-
-  if (initializing) {
+  if (user === undefined) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#0f1624" }}>
         <ActivityIndicator size="large" color="#ff3b7f" />
@@ -60,13 +67,10 @@ navigationTimeoutRef.current = setTimeout(() => {
   }
 
   return (
-    <Stack 
-      screenOptions={{ 
-        headerShown: false,
-        animation: "fade", // Smoother transitions
-        animationDuration: 200,
-      }}
-    >
+    // This root Stack only has two entries: LoginScreen and (main).
+    // All in-app navigation (tabs + pushed screens) is handled by
+    // app/(main)/_layout.tsx — keeping back-navigation self-contained.
+    <Stack screenOptions={{ headerShown: false, gestureEnabled: false }}>
       <Stack.Screen name="LoginScreen" />
       <Stack.Screen name="(main)" />
     </Stack>

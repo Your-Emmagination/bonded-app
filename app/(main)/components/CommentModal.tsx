@@ -399,7 +399,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         Animated.timing(backdropOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
       ]).start();
     }
-  }, [internalVisible]);
+  }, [backdropOpacity, internalVisible, translateY]);
 
   const closeAndNavigate = useCallback((navigateFn?: () => void) => {
     Animated.parallel([
@@ -410,7 +410,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
       onClose();
       if (navigateFn) navigateFn();
     });
-  }, [onClose]);
+  }, [backdropOpacity, onClose, translateY]);
 
   const handleClose = useCallback(() => closeAndNavigate(), [closeAndNavigate]);
 

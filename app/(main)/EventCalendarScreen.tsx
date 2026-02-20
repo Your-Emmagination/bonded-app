@@ -1,27 +1,27 @@
 // EventCalendarScreen.tsx - FIXED: Only "VIEW MORE" opens modal
-import React, { useState, useEffect } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  FlatList,
-  Modal,
-  ScrollView,
-  Alert,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import {
   collection,
-  query,
-  orderBy,
-  onSnapshot,
   deleteDoc,
   doc,
+  onSnapshot,
+  orderBy,
+  query,
 } from "firebase/firestore";
-import { db, auth } from "../../Firebase_configure";
+import React, { useEffect, useState } from "react";
+import {
+  Alert,
+  FlatList,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { auth, db } from "../../Firebase_configure";
 import { getUserData, UserRole } from "@/utils/rbac";
 
 type CalendarEvent = {
@@ -51,7 +51,9 @@ const EventCalendarScreen = () => {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<CalendarEvent[]>([]);
   const [modalVisible, setModalVisible] = useState(false);
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>();
+  const [currentUserRole, setCurrentUserRole] = useState<
+    UserRole | undefined
+  >();
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -82,7 +84,7 @@ const EventCalendarScreen = () => {
       (error) => {
         console.error("Error fetching events:", error);
         setLoading(false);
-      }
+      },
     );
 
     return unsubscribe;
@@ -113,33 +115,32 @@ const EventCalendarScreen = () => {
   };
 
   // ✅ FIXED: Separate handler for "VIEW MORE" button
-  const handleViewMorePress = (date: string, eventsForDate: CalendarEvent[]) => {
+  const handleViewMorePress = (
+    date: string,
+    eventsForDate: CalendarEvent[],
+  ) => {
     setSelectedDate(date);
     setSelectedEvents(eventsForDate);
     setModalVisible(true);
   };
 
   const handleDeleteEvent = async (eventId: string) => {
-    Alert.alert(
-      "Delete Event",
-      "Are you sure you want to delete this event?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await deleteDoc(doc(db, "events", eventId));
-              Alert.alert("Success", "Event deleted successfully");
-            } catch (error) {
-              console.error("Error deleting event:", error);
-              Alert.alert("Error", "Failed to delete event");
-            }
-          },
+    Alert.alert("Delete Event", "Are you sure you want to delete this event?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await deleteDoc(doc(db, "events", eventId));
+            Alert.alert("Success", "Event deleted successfully");
+          } catch (error) {
+            console.error("Error deleting event:", error);
+            Alert.alert("Error", "Failed to delete event");
+          }
         },
-      ]
-    );
+      },
+    ]);
   };
 
   const canManageEvents = () => {
@@ -178,10 +179,7 @@ const EventCalendarScreen = () => {
 
           return (
             // ✅ FIXED: Changed from TouchableOpacity to View (no press action)
-            <View
-              key={date}
-              style={styles.dateCard}
-            >
+            <View key={date} style={styles.dateCard}>
               <View style={styles.dateNumber}>
                 <Text style={styles.dateNumberText}>{dateNum}</Text>
               </View>
@@ -198,7 +196,7 @@ const EventCalendarScreen = () => {
               </View>
 
               {/* ✅ FIXED: Only this button opens the modal */}
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.viewMoreButton}
                 onPress={() => handleViewMorePress(date, eventsForDate)}
                 activeOpacity={0.7}
@@ -290,7 +288,11 @@ const EventCalendarScreen = () => {
                       <TouchableOpacity
                         onPress={() => handleDeleteEvent(event.id)}
                       >
-                        <Ionicons name="trash-outline" size={20} color="#ff5c93" />
+                        <Ionicons
+                          name="trash-outline"
+                          size={20}
+                          color="#ff5c93"
+                        />
                       </TouchableOpacity>
                     )}
                   </View>
@@ -304,7 +306,11 @@ const EventCalendarScreen = () => {
                   <View style={styles.eventMeta}>
                     {event.startTime && (
                       <View style={styles.metaItem}>
-                        <Ionicons name="time-outline" size={16} color="#b8c7ff" />
+                        <Ionicons
+                          name="time-outline"
+                          size={16}
+                          color="#b8c7ff"
+                        />
                         <Text style={styles.metaText}>
                           {event.startTime}
                           {event.endTime && ` - ${event.endTime}`}
@@ -313,7 +319,11 @@ const EventCalendarScreen = () => {
                     )}
 
                     <View style={styles.metaItem}>
-                      <Ionicons name="person-outline" size={16} color="#b8c7ff" />
+                      <Ionicons
+                        name="person-outline"
+                        size={16}
+                        color="#b8c7ff"
+                      />
                       <Text style={styles.metaText}>{event.createdByName}</Text>
                     </View>
                   </View>

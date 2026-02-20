@@ -1,22 +1,21 @@
 // CreateEventScreen.tsx
-import React, { useState, useEffect, useCallback } from "react";
+import { Ionicons } from "@expo/vector-icons";
+import DateTimePicker from "@react-native-community/datetimepicker"; // You'll need to install this: npx expo install @react-native-community/datetimepicker
+import { useRouter } from "expo-router";
+import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import React, { useCallback, useEffect, useState } from "react";
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
   Alert,
   ScrollView,
+  StyleSheet,
+  Text,
   TextInput,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
-import { collection, addDoc, serverTimestamp } from "firebase/firestore";
-import { db, auth } from "../../Firebase_configure";
+import { auth, db } from "../../Firebase_configure";
 import { getUserData, UserRole } from "@/utils/rbac";
-import DateTimePicker from "@react-native-community/datetimepicker"; // You'll need to install this: npx expo install @react-native-community/datetimepicker
-
 type CalendarEvent = {
   title: string;
   description?: string;
@@ -29,7 +28,9 @@ type CalendarEvent = {
 
 const CreateEventScreen = () => {
   const router = useRouter();
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>();
+  const [currentUserRole, setCurrentUserRole] = useState<
+    UserRole | undefined
+  >();
   const [form, setForm] = useState<CalendarEvent>({
     title: "",
     description: "",
@@ -61,13 +62,18 @@ const CreateEventScreen = () => {
   // ✅ FIXED: Only check after role is fetched (avoids race condition)
   useEffect(() => {
     if (currentUserRole !== undefined && !canManageEvents()) {
-      Alert.alert("Access Denied", "You do not have permission to create events.", [
-        { text: "OK", onPress: () => router.back() },
-      ]);
+      Alert.alert(
+        "Access Denied",
+        "You do not have permission to create events.",
+        [{ text: "OK", onPress: () => router.back() }],
+      );
     }
   }, [currentUserRole, canManageEvents, router]);
 
-  const handleInputChange = (key: keyof CalendarEvent, value: string | boolean) => {
+  const handleInputChange = (
+    key: keyof CalendarEvent,
+    value: string | boolean,
+  ) => {
     setForm((prev) => ({ ...prev, [key]: value }));
   };
 
@@ -79,7 +85,11 @@ const CreateEventScreen = () => {
     }
   };
 
-  const handleTimeChange = (event: any, selectedTime: Date | undefined, field: "startTime" | "endTime") => {
+  const handleTimeChange = (
+    event: any,
+    selectedTime: Date | undefined,
+    field: "startTime" | "endTime",
+  ) => {
     setShowStartTimePicker(false);
     setShowEndTimePicker(false);
     if (selectedTime) {
@@ -108,7 +118,8 @@ const CreateEventScreen = () => {
       await addDoc(collection(db, "events"), {
         ...form,
         createdBy: auth.currentUser.uid,
-        createdByName: auth.currentUser.displayName || auth.currentUser.email || "Unknown",
+        createdByName:
+          auth.currentUser.displayName || auth.currentUser.email || "Unknown",
         createdAt: serverTimestamp(),
       });
       Alert.alert("Success", "Event created successfully!", [
@@ -137,7 +148,10 @@ const CreateEventScreen = () => {
         <View style={{ width: 24 }} />
       </View>
 
-      <ScrollView style={styles.formContainer} contentContainerStyle={styles.formContent}>
+      <ScrollView
+        style={styles.formContainer}
+        contentContainerStyle={styles.formContent}
+      >
         {/* Title */}
         <View style={styles.inputGroup}>
           <Text style={styles.label}>Title *</Text>
@@ -199,10 +213,16 @@ const CreateEventScreen = () => {
           </TouchableOpacity>
           {showStartTimePicker && (
             <DateTimePicker
-              value={form.startTime ? new Date(`2000-01-01T${form.startTime}`) : new Date()}
+              value={
+                form.startTime
+                  ? new Date(`2000-01-01T${form.startTime}`)
+                  : new Date()
+              }
               mode="time"
               display="default"
-              onChange={(event, selected) => handleTimeChange(event, selected, "startTime")}
+              onChange={(event, selected) =>
+                handleTimeChange(event, selected, "startTime")
+              }
             />
           )}
         </View>
@@ -221,10 +241,16 @@ const CreateEventScreen = () => {
           </TouchableOpacity>
           {showEndTimePicker && (
             <DateTimePicker
-              value={form.endTime ? new Date(`2000-01-01T${form.endTime}`) : new Date()}
+              value={
+                form.endTime
+                  ? new Date(`2000-01-01T${form.endTime}`)
+                  : new Date()
+              }
               mode="time"
               display="default"
-              onChange={(event, selected) => handleTimeChange(event, selected, "endTime")}
+              onChange={(event, selected) =>
+                handleTimeChange(event, selected, "endTime")
+              }
             />
           )}
         </View>
@@ -233,25 +259,28 @@ const CreateEventScreen = () => {
         <View style={styles.inputGroup}>
           <Text style={styles.label}>Category</Text>
           <View style={styles.categoryContainer}>
-            {(["morning", "afternoon", "evening", "all-day"] as const).map((cat) => (
-              <TouchableOpacity
-                key={cat}
-                style={[
-                  styles.categoryButton,
-                  form.category === cat && styles.selectedCategoryButton,
-                ]}
-                onPress={() => handleInputChange("category", cat)}
-              >
-                <Text
+            {(["morning", "afternoon", "evening", "all-day"] as const).map(
+              (cat) => (
+                <TouchableOpacity
+                  key={cat}
                   style={[
-                    styles.categoryButtonText,
-                    form.category === cat && styles.selectedCategoryButtonText,
+                    styles.categoryButton,
+                    form.category === cat && styles.selectedCategoryButton,
                   ]}
+                  onPress={() => handleInputChange("category", cat)}
                 >
-                  {cat.replace("-", " ").toUpperCase()}
-                </Text>
-              </TouchableOpacity>
-            ))}
+                  <Text
+                    style={[
+                      styles.categoryButtonText,
+                      form.category === cat &&
+                        styles.selectedCategoryButtonText,
+                    ]}
+                  >
+                    {cat.replace("-", " ").toUpperCase()}
+                  </Text>
+                </TouchableOpacity>
+              ),
+            )}
           </View>
         </View>
 
@@ -264,7 +293,9 @@ const CreateEventScreen = () => {
                 styles.toggleButton,
                 form.notifyUsers && styles.toggleButtonActive,
               ]}
-              onPress={() => handleInputChange("notifyUsers", !form.notifyUsers)}
+              onPress={() =>
+                handleInputChange("notifyUsers", !form.notifyUsers)
+              }
             >
               <Ionicons
                 name={form.notifyUsers ? "toggle" : "toggle-outline"}

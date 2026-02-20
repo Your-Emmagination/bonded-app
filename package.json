@@ -50,8 +50,10 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
+    "babel-plugin-module-resolver": "^5.0.2",
     "eslint": "^9.39.2",
     "eslint-config-expo": "^10.0.0",
+    "eslint-import-resolver-typescript": "^4.4.4",
     "sharp": "^0.34.5",
     "typescript": "~5.9.2"
   },

@@ -1,32 +1,40 @@
 //createpostscreen.tsx - FIXED: Can't tag yourself & duplicate prevention
-import React, { useState, useEffect } from "react";
+import { Ionicons } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
+import { router } from "expo-router";
 import {
-  View,
+  addDoc,
+  collection,
+  getDocs,
+  serverTimestamp,
+} from "firebase/firestore";
+import React, { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Image,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  Image,
-  StyleSheet,
-  ScrollView,
-  Alert,
-  ActivityIndicator,
-  Modal,
-  FlatList,
-  KeyboardAvoidingView,
-  Platform,
+  View,
 } from "react-native";
-import * as DocumentPicker from "expo-document-picker";
-import { addDoc, collection, serverTimestamp, getDocs } from "firebase/firestore";
-import { db, auth } from "../../Firebase_configure";
-import { Ionicons } from "@expo/vector-icons";
-import { router } from "expo-router";
-import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
+import { auth, db } from "../../Firebase_configure";
 
-import { 
-  uploadPostImage, 
-  uploadPostFile, 
-  uploadPostGif 
-} from "../../utils/cloudinaryUpload";
+import {
+  uploadPostFile,
+  uploadPostGif,
+  uploadPostImage,
+} from "@/utils/cloudinaryUpload";
 
 const MAX_FILES = 10;
 
@@ -53,7 +61,10 @@ const CreatePostScreen = () => {
   const [showLinkModal, setShowLinkModal] = useState(false);
   const [linkUrl, setLinkUrl] = useState("");
   const [linkTitle, setLinkTitle] = useState("");
-  const [attachedLink, setAttachedLink] = useState<{ url: string; title: string } | null>(null);
+  const [attachedLink, setAttachedLink] = useState<{
+    url: string;
+    title: string;
+  } | null>(null);
 
   const [showGifModal, setShowGifModal] = useState(false);
   const [gifSearchQuery, setGifSearchQuery] = useState("");
@@ -99,15 +110,15 @@ const CreatePostScreen = () => {
         })
         .filter((student): student is Student => {
           if (student === null) return false;
-          
+
           // ✅ Filter out current user by checking both doc.id and studentID
           if (student.id === currentUserId) return false;
           if (student.id === currentStudentID) return false;
           if (student.studentID === currentStudentID) return false;
-          
+
           return true;
         });
-      
+
       setStudents(studentsList);
     } catch (error) {
       console.error("Error fetching students:", error);
@@ -120,7 +131,7 @@ const CreatePostScreen = () => {
       if (files.length >= MAX_FILES) {
         Alert.alert(
           "Maximum Files Reached",
-          `You can only attach up to ${MAX_FILES} files per post.`
+          `You can only attach up to ${MAX_FILES} files per post.`,
         );
         return;
       }
@@ -143,7 +154,7 @@ const CreatePostScreen = () => {
         if (result.assets.length > remainingSlots) {
           Alert.alert(
             "File Limit",
-            `Only ${remainingSlots} more file(s) can be added. Maximum is ${MAX_FILES} files per post.`
+            `Only ${remainingSlots} more file(s) can be added. Maximum is ${MAX_FILES} files per post.`,
           );
         }
 
@@ -167,7 +178,12 @@ const CreatePostScreen = () => {
       return;
     }
 
-    if (!content.trim() && files.length === 0 && !selectedGif && !attachedLink) {
+    if (
+      !content.trim() &&
+      files.length === 0 &&
+      !selectedGif &&
+      !attachedLink
+    ) {
       Alert.alert("Empty Post", "Please add content, a file, GIF, or link.");
       return;
     }
@@ -178,13 +194,13 @@ const CreatePostScreen = () => {
 
       for (const file of files) {
         let uploadedUrl: string;
-        
+
         if (file.mimeType.startsWith("image/")) {
           uploadedUrl = await uploadPostImage(file.uri);
         } else {
           uploadedUrl = await uploadPostFile(file.uri);
         }
-        
+
         uploadedUrls.push({ url: uploadedUrl, mimeType: file.mimeType });
       }
 
@@ -197,7 +213,8 @@ const CreatePostScreen = () => {
 
       // ✅ Remove duplicate tagged users before saving
       const uniqueTaggedUsers = taggedUsers.filter(
-        (user, index, self) => index === self.findIndex((u) => u.id === user.id)
+        (user, index, self) =>
+          index === self.findIndex((u) => u.id === user.id),
       );
 
       const postData: any = {
@@ -207,9 +224,7 @@ const CreatePostScreen = () => {
         realUserId: user?.uid,
         username: isAnonymous
           ? `Anonymous${Math.floor(Math.random() * 10000)}`
-          : user?.displayName ||
-            user?.email?.split("@")[0] ||
-            "User",
+          : user?.displayName || user?.email?.split("@")[0] || "User",
         isAnonymous: isAnonymous,
         taggedUsers: uniqueTaggedUsers.map((u) => ({
           id: u.id,
@@ -257,14 +272,18 @@ const CreatePostScreen = () => {
       return;
     }
 
-    const urlPattern = /^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$/;
+    const urlPattern =
+      /^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$/;
     if (!urlPattern.test(linkUrl)) {
       Alert.alert("Invalid URL", "Please enter a valid website URL");
       return;
     }
 
     let formattedUrl = linkUrl.trim();
-    if (!formattedUrl.startsWith("http://") && !formattedUrl.startsWith("https://")) {
+    if (
+      !formattedUrl.startsWith("http://") &&
+      !formattedUrl.startsWith("https://")
+    ) {
       formattedUrl = "https://" + formattedUrl;
     }
 
@@ -291,8 +310,8 @@ const CreatePostScreen = () => {
       const limit = 20;
       const response = await fetch(
         `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(
-          query
-        )}&key=${API_KEY}&limit=${limit}&media_filter=gif`
+          query,
+        )}&key=${API_KEY}&limit=${limit}&media_filter=gif`,
       );
 
       if (!response.ok) {
@@ -308,7 +327,9 @@ const CreatePostScreen = () => {
       }
     } catch (error) {
       console.error("Error searching GIFs:", error);
-      setGifError("Failed to search GIFs. Please check your internet connection and try again.");
+      setGifError(
+        "Failed to search GIFs. Please check your internet connection and try again.",
+      );
     } finally {
       setLoadingGifs(false);
     }
@@ -367,15 +388,18 @@ const CreatePostScreen = () => {
               onPress={() => setIsAnonymous(!isAnonymous)}
             >
               <View
-                style={[styles.toggleThumb, isAnonymous && styles.toggleThumbActive]}
+                style={[
+                  styles.toggleThumb,
+                  isAnonymous && styles.toggleThumbActive,
+                ]}
               />
             </TouchableOpacity>
           </View>
 
           {isAnonymous && (
             <Text style={styles.anonymousNote}>
-              Note: Admins and moderators can still see your identity. Only students
-              will see this as anonymous.
+              Note: Admins and moderators can still see your identity. Only
+              students will see this as anonymous.
             </Text>
           )}
 
@@ -422,10 +446,17 @@ const CreatePostScreen = () => {
               {files.map((f, i) => (
                 <View key={i} style={styles.filePreview}>
                   {f.mimeType.startsWith("image/") ? (
-                    <Image source={{ uri: f.uri }} style={styles.imagePreview} />
+                    <Image
+                      source={{ uri: f.uri }}
+                      style={styles.imagePreview}
+                    />
                   ) : (
                     <View style={styles.documentPreview}>
-                      <Ionicons name="document-text" size={40} color="#4f9cff" />
+                      <Ionicons
+                        name="document-text"
+                        size={40}
+                        color="#4f9cff"
+                      />
                       <Text style={styles.documentName} numberOfLines={1}>
                         {f.name}
                       </Text>
@@ -433,7 +464,9 @@ const CreatePostScreen = () => {
                   )}
                   <TouchableOpacity
                     style={styles.removeFile}
-                    onPress={() => setFiles(files.filter((_, idx) => idx !== i))}
+                    onPress={() =>
+                      setFiles(files.filter((_, idx) => idx !== i))
+                    }
                   >
                     <Ionicons name="close-circle" size={22} color="#ff5c93" />
                   </TouchableOpacity>
@@ -447,7 +480,8 @@ const CreatePostScreen = () => {
             <View style={styles.taggedPreview}>
               <Ionicons name="people" size={16} color="#ff5c93" />
               <Text style={styles.taggedPreviewText}>
-                Tagged {taggedUsers.length} {taggedUsers.length === 1 ? 'person' : 'people'}
+                Tagged {taggedUsers.length}{" "}
+                {taggedUsers.length === 1 ? "person" : "people"}
               </Text>
             </View>
           )}
@@ -473,7 +507,9 @@ const CreatePostScreen = () => {
                 <Ionicons name="person-add" size={24} color="#a86fff" />
                 {taggedUsers.length > 0 && (
                   <View style={styles.tagBadge}>
-                    <Text style={styles.tagBadgeText}>{taggedUsers.length}</Text>
+                    <Text style={styles.tagBadgeText}>
+                      {taggedUsers.length}
+                    </Text>
                   </View>
                 )}
               </TouchableOpacity>
@@ -494,17 +530,26 @@ const CreatePostScreen = () => {
         </ScrollView>
 
         <View
-          style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 16) }]}
+          style={[
+            styles.footer,
+            { paddingBottom: Math.max(insets.bottom, 16) },
+          ]}
         >
           <TouchableOpacity
             style={[
               styles.postButton,
-              (!content.trim() && files.length === 0 && !selectedGif && !attachedLink) &&
+              !content.trim() &&
+                files.length === 0 &&
+                !selectedGif &&
+                !attachedLink &&
                 styles.disabledButton,
             ]}
             onPress={handlePost}
             disabled={
-              (!content.trim() && files.length === 0 && !selectedGif && !attachedLink) ||
+              (!content.trim() &&
+                files.length === 0 &&
+                !selectedGif &&
+                !attachedLink) ||
               uploading
             }
           >
@@ -516,93 +561,99 @@ const CreatePostScreen = () => {
           </TouchableOpacity>
         </View>
 
-{/* ✅ Tag Modal (Updated) */}
-<Modal
-  visible={showTagModal}
-  animationType="slide"
-  transparent
-  onRequestClose={() => setShowTagModal(false)}
->
-  <View style={styles.modalOverlay}>
-    <View style={styles.modalContainer}>
-      <View style={styles.modalHeader}>
-        <Text style={styles.modalTitle}>
-          Tag People {taggedUsers.length > 0 && `(${taggedUsers.length})`}
-        </Text>
-        <TouchableOpacity onPress={() => setShowTagModal(false)}>
-          <Ionicons name="close" size={28} color="#b8c7ff" />
-        </TouchableOpacity>
-      </View>
-
-      {/* ✅ Tag All button */}
-      {students.length > 0 && (
-        <TouchableOpacity
-          style={styles.tagAllButton}
-          onPress={() => {
-            // Tag all students (except already tagged)
-            const allTagged = students.filter(
-              (s) => !taggedUsers.find((u) => u.id === s.id)
-            );
-            if (allTagged.length === 0) {
-              Alert.alert("Info", "Everyone is already tagged!");
-              return;
-            }
-            setTaggedUsers([...taggedUsers, ...allTagged]);
-          }}
+        {/* ✅ Tag Modal (Updated) */}
+        <Modal
+          visible={showTagModal}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setShowTagModal(false)}
         >
-          <Ionicons name="people-circle" size={20} color="#fff" />
-          <Text style={styles.tagAllText}>Tag All</Text>
-        </TouchableOpacity>
-      )}
-
-      <TextInput
-        placeholder="Search students..."
-        placeholderTextColor="#a0a8c0"
-        value={searchQuery}
-        onChangeText={setSearchQuery}
-        style={styles.searchInput}
-      />
-
-      <FlatList
-        data={filteredStudents}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => {
-          const tagged = taggedUsers.find((u) => u.id === item.id);
-          const firstname = item.firstname || "?";
-          const lastname = item.lastname || "?";
-          return (
-            <TouchableOpacity
-              style={styles.studentItem}
-              onPress={() => handleTagUser(item)}
-            >
-              <View style={styles.studentAvatar}>
-                <Text style={styles.studentAvatarText}>
-                  {firstname.charAt(0)}
-                  {lastname.charAt(0)}
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContainer}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>
+                  Tag People{" "}
+                  {taggedUsers.length > 0 && `(${taggedUsers.length})`}
                 </Text>
+                <TouchableOpacity onPress={() => setShowTagModal(false)}>
+                  <Ionicons name="close" size={28} color="#b8c7ff" />
+                </TouchableOpacity>
               </View>
-              <View style={styles.studentInfo}>
-                {/* ✅ Show full name only */}
-                <Text style={styles.studentName}>
-                  {firstname} {lastname}
-                </Text>
-              </View>
-              {tagged && (
-                <Ionicons name="checkmark-circle" size={20} color="#6f9aff" />
+
+              {/* ✅ Tag All button */}
+              {students.length > 0 && (
+                <TouchableOpacity
+                  style={styles.tagAllButton}
+                  onPress={() => {
+                    // Tag all students (except already tagged)
+                    const allTagged = students.filter(
+                      (s) => !taggedUsers.find((u) => u.id === s.id),
+                    );
+                    if (allTagged.length === 0) {
+                      Alert.alert("Info", "Everyone is already tagged!");
+                      return;
+                    }
+                    setTaggedUsers([...taggedUsers, ...allTagged]);
+                  }}
+                >
+                  <Ionicons name="people-circle" size={20} color="#fff" />
+                  <Text style={styles.tagAllText}>Tag All</Text>
+                </TouchableOpacity>
               )}
-            </TouchableOpacity>
-          );
-        }}
-        ListEmptyComponent={
-          <Text style={styles.emptyText}>
-            {searchQuery ? "No students found" : "You cannot tag yourself"}
-          </Text>
-        }
-      />
-    </View>
-  </View>
-</Modal>
 
+              <TextInput
+                placeholder="Search students..."
+                placeholderTextColor="#a0a8c0"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                style={styles.searchInput}
+              />
+
+              <FlatList
+                data={filteredStudents}
+                keyExtractor={(item) => item.id}
+                renderItem={({ item }) => {
+                  const tagged = taggedUsers.find((u) => u.id === item.id);
+                  const firstname = item.firstname || "?";
+                  const lastname = item.lastname || "?";
+                  return (
+                    <TouchableOpacity
+                      style={styles.studentItem}
+                      onPress={() => handleTagUser(item)}
+                    >
+                      <View style={styles.studentAvatar}>
+                        <Text style={styles.studentAvatarText}>
+                          {firstname.charAt(0)}
+                          {lastname.charAt(0)}
+                        </Text>
+                      </View>
+                      <View style={styles.studentInfo}>
+                        {/* ✅ Show full name only */}
+                        <Text style={styles.studentName}>
+                          {firstname} {lastname}
+                        </Text>
+                      </View>
+                      {tagged && (
+                        <Ionicons
+                          name="checkmark-circle"
+                          size={20}
+                          color="#6f9aff"
+                        />
+                      )}
+                    </TouchableOpacity>
+                  );
+                }}
+                ListEmptyComponent={
+                  <Text style={styles.emptyText}>
+                    {searchQuery
+                      ? "No students found"
+                      : "You cannot tag yourself"}
+                  </Text>
+                }
+              />
+            </View>
+          </View>
+        </Modal>
 
         {/* Link Modal */}
         <Modal
@@ -638,7 +689,10 @@ const CreatePostScreen = () => {
 
               <View style={styles.linkModalButtons}>
                 <TouchableOpacity
-                  style={[styles.linkModalButton, { backgroundColor: "#1b2235" }]}
+                  style={[
+                    styles.linkModalButton,
+                    { backgroundColor: "#1b2235" },
+                  ]}
                   onPress={() => {
                     setShowLinkModal(false);
                     setLinkUrl("");
@@ -649,7 +703,10 @@ const CreatePostScreen = () => {
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  style={[styles.linkModalButton, { backgroundColor: "#ff5c93" }]}
+                  style={[
+                    styles.linkModalButton,
+                    { backgroundColor: "#ff5c93" },
+                  ]}
                   onPress={handleAddLink}
                 >
                   <Text style={styles.linkModalButtonText}>Add Link</Text>
@@ -700,7 +757,11 @@ const CreatePostScreen = () => {
                 </View>
               ) : gifError ? (
                 <View style={styles.gifErrorContainer}>
-                  <Ionicons name="cloud-offline-outline" size={64} color="#ff5c93" />
+                  <Ionicons
+                    name="cloud-offline-outline"
+                    size={64}
+                    color="#ff5c93"
+                  />
                   <Text style={styles.errorText}>{gifError}</Text>
                   <TouchableOpacity
                     style={styles.retryButton}
@@ -717,7 +778,8 @@ const CreatePostScreen = () => {
                   renderItem={({ item }) => {
                     const gifUrl = item?.media_formats?.gif?.url;
                     const thumbnailUrl =
-                      item?.media_formats?.tinygif?.url || item?.media_formats?.gif?.url;
+                      item?.media_formats?.tinygif?.url ||
+                      item?.media_formats?.gif?.url;
 
                     if (!gifUrl || !thumbnailUrl) return null;
 
@@ -740,7 +802,9 @@ const CreatePostScreen = () => {
                 <View style={styles.gifEmptyContainer}>
                   <Ionicons name="images-outline" size={64} color="#5a6380" />
                   <Text style={styles.emptyText}>
-                    {gifSearchQuery ? "No GIFs found" : "Search for GIFs to get started"}
+                    {gifSearchQuery
+                      ? "No GIFs found"
+                      : "Search for GIFs to get started"}
                   </Text>
                 </View>
               )}
@@ -800,7 +864,12 @@ const styles = StyleSheet.create({
     padding: 2,
   },
   toggleActive: { backgroundColor: "#ff5c93" },
-  toggleThumb: { width: 24, height: 24, backgroundColor: "#fff", borderRadius: 12 },
+  toggleThumb: {
+    width: 24,
+    height: 24,
+    backgroundColor: "#fff",
+    borderRadius: 12,
+  },
   toggleThumbActive: { alignSelf: "flex-end" },
   input: {
     color: "#e9edff",
@@ -824,21 +893,21 @@ const styles = StyleSheet.create({
     fontWeight: "500",
   },
   tagAllButton: {
-  flexDirection: "row",
-  alignItems: "center",
-  justifyContent: "center",
-  backgroundColor: "#ff5c93",
-  marginHorizontal: 16,
-  marginBottom: 10,
-  paddingVertical: 10,
-  borderRadius: 10,
-  gap: 6,
-},
-tagAllText: {
-  color: "#fff",
-  fontWeight: "600",
-  fontSize: 14,
-},
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#ff5c93",
+    marginHorizontal: 16,
+    marginBottom: 10,
+    paddingVertical: 10,
+    borderRadius: 10,
+    gap: 6,
+  },
+  tagAllText: {
+    color: "#fff",
+    fontWeight: "600",
+    fontSize: 14,
+  },
 
   gifPreview: {
     marginBottom: 12,
@@ -972,7 +1041,7 @@ tagAllText: {
   studentInfo: {
     flex: 1,
   },
-  studentName: { 
+  studentName: {
     color: "#e4e8ff",
     fontSize: 15,
     fontWeight: "500",

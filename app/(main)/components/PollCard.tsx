@@ -1,16 +1,21 @@
 // PollCard.tsx - Threads Style with Hanging Indentation
 import { Ionicons } from "@expo/vector-icons";
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
+  Dimensions,
+  Image,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  Image,
-  ActivityIndicator,
-  Dimensions,
 } from "react-native";
-import { getRoleColor, getRoleDisplayName, getUserData, UserData } from "../../../utils/rbac";
+import {
+  getRoleColor,
+  getRoleDisplayName,
+  getUserData,
+  UserData,
+} from "@/utils/rbac";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const IMAGE_WIDTH = SCREEN_WIDTH - 68;
@@ -92,7 +97,7 @@ const PollCard = ({
     if (!currentUserId) return [];
     return poll.options
       .map((opt, idx) => (opt.voters?.includes(currentUserId) ? idx : -1))
-      .filter(idx => idx !== -1);
+      .filter((idx) => idx !== -1);
   }, [poll.options, currentUserId]);
 
   const authorRole = authorData?.role || "student";
@@ -114,7 +119,9 @@ const PollCard = ({
     : "Anonymous";
 
   const canClickProfile =
-    isIdentityVisible && !!authorData?.userId && authorData.userId !== "anonymous";
+    isIdentityVisible &&
+    !!authorData?.userId &&
+    authorData.userId !== "anonymous";
 
   const handleProfileClick = () => {
     if (!canClickProfile) return;
@@ -131,15 +138,20 @@ const PollCard = ({
       <View style={styles.hangingLayout}>
         {/* Left: Avatar Column */}
         <View style={styles.avatarColumn}>
-          <TouchableOpacity onPress={handleProfileClick} disabled={!canClickProfile}>
+          <TouchableOpacity
+            onPress={handleProfileClick}
+            disabled={!canClickProfile}
+          >
             <View style={styles.avatar}>
               {loading ? (
                 <ActivityIndicator size="small" color="#8ea0d0" />
               ) : isIdentityVisible ? (
                 <Text style={[styles.avatarText, { color: roleColor }]}>
-                  {(authorData?.firstname?.[0] ||
+                  {(
+                    authorData?.firstname?.[0] ||
                     poll.username?.[0] ||
-                    "A").toUpperCase()}
+                    "A"
+                  ).toUpperCase()}
                 </Text>
               ) : (
                 <Ionicons name="person" size={16} color="#8ea0d0" />
@@ -153,15 +165,21 @@ const PollCard = ({
           {/* Header */}
           <View style={styles.header}>
             <View style={styles.headerLeft}>
-              <TouchableOpacity onPress={handleProfileClick} disabled={!canClickProfile}>
+              <TouchableOpacity
+                onPress={handleProfileClick}
+                disabled={!canClickProfile}
+              >
                 <Text style={styles.username}>{displayName}</Text>
               </TouchableOpacity>
-              
+
               {isIdentityVisible && authorRole !== "student" && (
                 <View
                   style={[
                     styles.roleChip,
-                    { backgroundColor: roleColor + "20", borderColor: roleColor },
+                    {
+                      backgroundColor: roleColor + "20",
+                      borderColor: roleColor,
+                    },
                   ]}
                 >
                   <Text style={[styles.roleChipText, { color: roleColor }]}>
@@ -187,7 +205,11 @@ const PollCard = ({
             <View style={styles.headerRight}>
               <Text style={styles.timestamp}>{getTimeAgo(poll.createdAt)}</Text>
               <TouchableOpacity style={styles.moreButton}>
-                <Ionicons name="ellipsis-horizontal" size={18} color="#8ea0d0" />
+                <Ionicons
+                  name="ellipsis-horizontal"
+                  size={18}
+                  color="#8ea0d0"
+                />
               </TouchableOpacity>
             </View>
           </View>
@@ -215,8 +237,11 @@ const PollCard = ({
             {poll.options.map((option, idx) => {
               const isVoted = userVotes.includes(idx);
               const percentage =
-                poll.totalVotes > 0 ? (option.votes / poll.totalVotes) * 100 : 0;
-              const singleChoiceLocked = !poll.allowMultiple && userVotes.length > 0;
+                poll.totalVotes > 0
+                  ? (option.votes / poll.totalVotes) * 100
+                  : 0;
+              const singleChoiceLocked =
+                !poll.allowMultiple && userVotes.length > 0;
               const multiChoiceReachedMax =
                 poll.allowMultiple && userVotes.length >= poll.maxSelections;
               const disableForUser =
@@ -239,14 +264,19 @@ const PollCard = ({
                   <View style={styles.pollOptionContent}>
                     {poll.allowMultiple ? (
                       <View
-                        style={[styles.checkbox, isVoted && styles.checkboxActive]}
+                        style={[
+                          styles.checkbox,
+                          isVoted && styles.checkboxActive,
+                        ]}
                       >
                         {isVoted && (
                           <Ionicons name="checkmark" size={11} color="#fff" />
                         )}
                       </View>
                     ) : (
-                      <View style={[styles.radio, isVoted && styles.radioActive]}>
+                      <View
+                        style={[styles.radio, isVoted && styles.radioActive]}
+                      >
                         {isVoted && <View style={styles.radioDot} />}
                       </View>
                     )}
@@ -254,7 +284,10 @@ const PollCard = ({
                   </View>
                   <View style={styles.pollVoteInfo}>
                     <View
-                      style={[styles.pollProgressBar, { width: `${percentage}%` }]}
+                      style={[
+                        styles.pollProgressBar,
+                        { width: `${percentage}%` },
+                      ]}
                     />
                     <Text style={styles.pollVoteCount}>{option.votes}</Text>
                   </View>
@@ -271,7 +304,9 @@ const PollCard = ({
                 onPress={() => onAddOption(poll.id)}
               >
                 <Ionicons name="add" size={15} color="#ff5c93" />
-                <Text style={styles.addOptionButtonText}>Add your own option</Text>
+                <Text style={styles.addOptionButtonText}>
+                  Add your own option
+                </Text>
               </TouchableOpacity>
             </View>
           )}

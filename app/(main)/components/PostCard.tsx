@@ -22,7 +22,7 @@ import {
   getUserData,
   UserData,
   UserRole,
-} from "../../../utils/rbac";
+} from "@/utils/rbac";
 import CommentModal from "./CommentModal";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -101,10 +101,12 @@ const PostCard: React.FC<PostCardProps> = ({
   const autoScrollTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const imageFiles = (post.files || []).filter(
-    (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif")
+    (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif"),
   );
   const gifFiles = (post.files || []).filter((f) => f.mimeType.includes("gif"));
-  const nonImageFiles = (post.files || []).filter((f) => !f.mimeType.startsWith("image/"));
+  const nonImageFiles = (post.files || []).filter(
+    (f) => !f.mimeType.startsWith("image/"),
+  );
 
   if (post.imageUrl && !imageFiles.find((f) => f.url === post.imageUrl)) {
     imageFiles.unshift({ url: post.imageUrl, mimeType: "image/jpeg" });
@@ -191,7 +193,7 @@ const PostCard: React.FC<PostCardProps> = ({
             getTimeAgo={getTimeAgo}
           />
 
-{post.content && (
+          {post.content && (
             <View style={styles.postContentContainer}>
               <Text
                 style={styles.postContent}
@@ -214,15 +216,19 @@ const PostCard: React.FC<PostCardProps> = ({
             </View>
           )}
 
-{taggedUsers.length > 0 && (
-  <TaggedUsersDisplay
-    taggedUsers={taggedUsers}
-    onTagClick={onTagClick}
-  />
-)}
+          {taggedUsers.length > 0 && (
+            <TaggedUsersDisplay
+              taggedUsers={taggedUsers}
+              onTagClick={onTagClick}
+            />
+          )}
           {gifFiles.length > 0 && (
             <View style={styles.mediaContainer}>
-              <Image source={{ uri: gifFiles[0].url }} style={styles.gif} resizeMode="cover" />
+              <Image
+                source={{ uri: gifFiles[0].url }}
+                style={styles.gif}
+                resizeMode="cover"
+              />
             </View>
           )}
 
@@ -252,7 +258,9 @@ const PostCard: React.FC<PostCardProps> = ({
                   </TouchableOpacity>
                 )}
                 onScroll={(e) => {
-                  const idx = Math.round(e.nativeEvent.contentOffset.x / IMAGE_WIDTH);
+                  const idx = Math.round(
+                    e.nativeEvent.contentOffset.x / IMAGE_WIDTH,
+                  );
                   setCurrentImageIndex(idx);
                 }}
                 onMomentumScrollEnd={handleMomentumScrollEnd}
@@ -278,7 +286,10 @@ const PostCard: React.FC<PostCardProps> = ({
           {post.link && <LinkPreview link={post.link} />}
 
           <View style={styles.actions}>
-            <TouchableOpacity style={styles.actionButton} onPress={() => onLike(post.id, post.likedBy || [])}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => onLike(post.id, post.likedBy || [])}
+            >
               <Ionicons
                 name={isLiked ? "heart" : "heart-outline"}
                 size={20}
@@ -286,12 +297,19 @@ const PostCard: React.FC<PostCardProps> = ({
               />
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.actionButton} onPress={() => setShowCommentsModal(true)}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => setShowCommentsModal(true)}
+            >
               <Ionicons name="chatbubble-outline" size={19} color="#8ea0d0" />
             </TouchableOpacity>
 
             <TouchableOpacity style={styles.actionButton}>
-              <MaterialIcons name="bookmark-outline" size={21} color="#8ea0d0" />
+              <MaterialIcons
+                name="bookmark-outline"
+                size={21}
+                color="#8ea0d0"
+              />
             </TouchableOpacity>
           </View>
 
@@ -306,7 +324,8 @@ const PostCard: React.FC<PostCardProps> = ({
 
             {(post.commentCount ?? 0) > 0 && (
               <Text style={styles.statText}>
-                {post.commentCount} {post.commentCount === 1 ? "comment" : "comments"}
+                {post.commentCount}{" "}
+                {post.commentCount === 1 ? "comment" : "comments"}
               </Text>
             )}
 
@@ -331,7 +350,11 @@ const PostCard: React.FC<PostCardProps> = ({
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Liked by</Text>
               <TouchableOpacity onPress={() => setShowLikesModal(false)}>
-                <Ionicons name="close-circle-outline" size={28} color="#ff5c93" />
+                <Ionicons
+                  name="close-circle-outline"
+                  size={28}
+                  color="#ff5c93"
+                />
               </TouchableOpacity>
             </View>
 
@@ -346,7 +369,9 @@ const PostCard: React.FC<PostCardProps> = ({
                   />
                 ))
               ) : (
-                <Text style={styles.noLikesText}>No one has liked this post yet.</Text>
+                <Text style={styles.noLikesText}>
+                  No one has liked this post yet.
+                </Text>
               )}
             </ScrollView>
           </View>
@@ -370,6 +395,7 @@ const PostCard: React.FC<PostCardProps> = ({
 // ────────────────────────────────────────────────
 //   LikeUserRow – shows one person who liked the post
 // ────────────────────────────────────────────────
+// eslint-disable-next-line react/display-name
 const LikeUserRow = React.memo(
   ({
     userId,
@@ -411,7 +437,7 @@ const LikeUserRow = React.memo(
         </Text>
       </TouchableOpacity>
     );
-  }
+  },
 );
 
 const TaggedUsersDisplay = ({
@@ -423,8 +449,10 @@ const TaggedUsersDisplay = ({
 }) => {
   const [expanded, setExpanded] = useState(false);
 
-  const MAX_VISIBLE = 1; 
-  const visibleUsers = expanded ? taggedUsers : taggedUsers.slice(0, MAX_VISIBLE);
+  const MAX_VISIBLE = 1;
+  const visibleUsers = expanded
+    ? taggedUsers
+    : taggedUsers.slice(0, MAX_VISIBLE);
   const remainingCount = taggedUsers.length - MAX_VISIBLE;
 
   const hasMore = remainingCount > 0 && !expanded;
@@ -440,7 +468,8 @@ const TaggedUsersDisplay = ({
             <TouchableOpacity onPress={() => onTagClick(tag.id)}>
               <Text style={styles.taggedName}>{tag.name}</Text>
             </TouchableOpacity>
-            {(index < visibleUsers.length - 1 || (hasMore && index === visibleUsers.length - 1)) && (
+            {(index < visibleUsers.length - 1 ||
+              (hasMore && index === visibleUsers.length - 1)) && (
               <Text style={styles.taggedSeparator}>, </Text>
             )}
           </React.Fragment>
@@ -451,9 +480,7 @@ const TaggedUsersDisplay = ({
             onPress={() => setExpanded(true)}
             activeOpacity={0.7}
           >
-            <Text style={styles.moreCount}>
-              +{remainingCount} more
-            </Text>
+            <Text style={styles.moreCount}>+{remainingCount} more</Text>
           </TouchableOpacity>
         )}
 
@@ -497,14 +524,20 @@ const PostAvatar: React.FC<{
 
   const getSafeRole = (role: string | undefined): UserRole => {
     const validRoles: UserRole[] = ["student", "moderator", "teacher", "admin"];
-    return validRoles.includes(role as UserRole) ? (role as UserRole) : "student";
+    return validRoles.includes(role as UserRole)
+      ? (role as UserRole)
+      : "student";
   };
 
-  const authorRole: UserRole = authorData?.role || getSafeRole(post.role) || "student";
+  const authorRole: UserRole =
+    authorData?.role || getSafeRole(post.role) || "student";
   const roleColor = getRoleColor(authorRole);
   const isIdentityVisible = !post.isAnonymous;
 
-  const canClickProfile = isIdentityVisible && !!authorData?.userId && authorData.userId !== "anonymous";
+  const canClickProfile =
+    isIdentityVisible &&
+    !!authorData?.userId &&
+    authorData.userId !== "anonymous";
 
   const handleProfileClick = () => {
     if (!canClickProfile) return;
@@ -522,7 +555,11 @@ const PostAvatar: React.FC<{
           <ActivityIndicator size="small" color="#8ea0d0" />
         ) : isIdentityVisible ? (
           <Text style={[styles.avatarText, { color: roleColor }]}>
-            {(authorData?.firstname?.[0] || post.username?.[0] || "A").toUpperCase()}
+            {(
+              authorData?.firstname?.[0] ||
+              post.username?.[0] ||
+              "A"
+            ).toUpperCase()}
           </Text>
         ) : (
           <Ionicons name="person" size={18} color="#8ea0d0" />
@@ -562,15 +599,19 @@ const PostHeader: React.FC<{
 
   const getSafeRole = (role: string | undefined): UserRole => {
     const validRoles: UserRole[] = ["student", "moderator", "teacher", "admin"];
-    return validRoles.includes(role as UserRole) ? (role as UserRole) : "student";
+    return validRoles.includes(role as UserRole)
+      ? (role as UserRole)
+      : "student";
   };
 
-  const authorRole: UserRole = authorData?.role || getSafeRole(post.role) || "student";
+  const authorRole: UserRole =
+    authorData?.role || getSafeRole(post.role) || "student";
   const roleColor = getRoleColor(authorRole);
 
   const canSeeIdentity =
     currentUserRole === "admin" ||
-    ((currentUserRole === "teacher" || currentUserRole === "moderator") && authorRole === "student");
+    ((currentUserRole === "teacher" || currentUserRole === "moderator") &&
+      authorRole === "student");
 
   const canShowEyeIcon = (post.isAnonymous ?? true) && canSeeIdentity;
   const isIdentityVisible = !post.isAnonymous || (revealed && canSeeIdentity);
@@ -581,7 +622,10 @@ const PostHeader: React.FC<{
       : post.username || "User"
     : "Anonymous";
 
-  const canClickProfile = isIdentityVisible && !!authorData?.userId && authorData.userId !== "anonymous";
+  const canClickProfile =
+    isIdentityVisible &&
+    !!authorData?.userId &&
+    authorData.userId !== "anonymous";
 
   const handleProfileClick = () => {
     if (!canClickProfile) return;
@@ -595,12 +639,20 @@ const PostHeader: React.FC<{
   return (
     <View style={styles.header}>
       <View style={styles.usernameRow}>
-        <TouchableOpacity onPress={handleProfileClick} disabled={!canClickProfile}>
+        <TouchableOpacity
+          onPress={handleProfileClick}
+          disabled={!canClickProfile}
+        >
           <Text style={styles.username}>{displayName}</Text>
         </TouchableOpacity>
 
         {isIdentityVisible && authorRole !== "student" && (
-          <View style={[styles.roleChip, { backgroundColor: roleColor + "20", borderColor: roleColor }]}>
+          <View
+            style={[
+              styles.roleChip,
+              { backgroundColor: roleColor + "20", borderColor: roleColor },
+            ]}
+          >
             <Text style={[styles.roleChipText, { color: roleColor }]}>
               {getRoleDisplayName(authorRole)}
             </Text>
@@ -608,7 +660,10 @@ const PostHeader: React.FC<{
         )}
 
         {canShowEyeIcon && (
-          <TouchableOpacity onPress={() => setRevealed(!revealed)} style={styles.eyeButton}>
+          <TouchableOpacity
+            onPress={() => setRevealed(!revealed)}
+            style={styles.eyeButton}
+          >
             <Ionicons
               name={revealed ? "eye-off-outline" : "eye-outline"}
               size={14}
@@ -618,37 +673,18 @@ const PostHeader: React.FC<{
         )}
       </View>
 
-      <Text style={styles.timestamp}>
-        {getTimeAgo(post.createdAt)}
-      </Text>
+      <Text style={styles.timestamp}>{getTimeAgo(post.createdAt)}</Text>
     </View>
   );
 };
 
 /* ==================== TAGGED SECTION ==================== */
-const TaggedSection: React.FC<{ taggedUsers: TaggedUser[]; onTagClick: (id: string) => void }> = ({
-  taggedUsers,
-  onTagClick,
-}) => (
-  <View style={styles.taggedSection}>
-    <Ionicons name="people-outline" size={12} color="#ff5c93" />
-    <Text style={styles.taggedText}>with </Text>
-    {taggedUsers.map((tag, idx) => (
-      <React.Fragment key={tag.id}>
-        <TouchableOpacity onPress={() => onTagClick(tag.id)}>
-          <Text style={styles.taggedName}>{tag.name}</Text>
-        </TouchableOpacity>
-        {idx < taggedUsers.length - 1 && <Text style={styles.taggedText}>, </Text>}
-      </React.Fragment>
-    ))}
-  </View>
-);
 
 /* ==================== FILES LIST ==================== */
-const FilesList: React.FC<{ files: FileAttachment[]; onFilePress: (url: string, mimeType: string) => void }> = ({
-  files,
-  onFilePress,
-}) => {
+const FilesList: React.FC<{
+  files: FileAttachment[];
+  onFilePress: (url: string, mimeType: string) => void;
+}> = ({ files, onFilePress }) => {
   const getFileNameFromUrl = (url: string) => {
     try {
       const parts = url.split("/");
@@ -662,7 +698,8 @@ const FilesList: React.FC<{ files: FileAttachment[]; onFilePress: (url: string, 
 
   const getFileIcon = (mimeType: string) => {
     if (mimeType.includes("pdf")) return "document-text";
-    if (mimeType.includes("word") || mimeType.includes("document")) return "document";
+    if (mimeType.includes("word") || mimeType.includes("document"))
+      return "document";
     return "document-attach";
   };
 
@@ -675,7 +712,11 @@ const FilesList: React.FC<{ files: FileAttachment[]; onFilePress: (url: string, 
           onPress={() => onFilePress(file.url, file.mimeType)}
           activeOpacity={0.7}
         >
-          <Ionicons name={getFileIcon(file.mimeType)} size={18} color="#4f9cff" />
+          <Ionicons
+            name={getFileIcon(file.mimeType)}
+            size={18}
+            color="#4f9cff"
+          />
           <Text style={styles.fileName} numberOfLines={1}>
             {file.name || getFileNameFromUrl(file.url)}
           </Text>
@@ -687,16 +728,26 @@ const FilesList: React.FC<{ files: FileAttachment[]; onFilePress: (url: string, 
 };
 
 /* ==================== LINK PREVIEW ==================== */
-const LinkPreview: React.FC<{ link: { url: string; title: string } }> = ({ link }) => (
+const LinkPreview: React.FC<{ link: { url: string; title: string } }> = ({
+  link,
+}) => (
   <TouchableOpacity
     style={styles.linkPreview}
-    onPress={() => Linking.openURL(link.url).catch(() => Alert.alert("Error", "Cannot open link"))}
+    onPress={() =>
+      Linking.openURL(link.url).catch(() =>
+        Alert.alert("Error", "Cannot open link"),
+      )
+    }
     activeOpacity={0.7}
   >
     <Ionicons name="link" size={14} color="#4f9cff" />
     <View style={{ flex: 1, marginLeft: 6 }}>
-      <Text style={styles.linkTitle} numberOfLines={1}>{link.title}</Text>
-      <Text style={styles.linkUrl} numberOfLines={1}>{link.url}</Text>
+      <Text style={styles.linkTitle} numberOfLines={1}>
+        {link.title}
+      </Text>
+      <Text style={styles.linkUrl} numberOfLines={1}>
+        {link.url}
+      </Text>
     </View>
     <Ionicons name="open-outline" size={13} color="#8ea0d0" />
   </TouchableOpacity>
@@ -720,44 +771,44 @@ const styles = StyleSheet.create({
   toggleContainer: { alignSelf: "flex-start", marginTop: 4 },
   toggleText: { color: "#ff5c93", fontSize: 14, fontWeight: "600" },
 
-taggedBox: {
-  backgroundColor: "#1b2235",
-  borderRadius: 12,
-  paddingVertical: 8,
-  paddingHorizontal: 12,
-  marginVertical: 8,
-  borderWidth: 1,
-  borderColor: "#243054",
-},
-taggedContent: {
-  flexDirection: "row",
-  alignItems: "center",
-  flexWrap: "wrap",
-  gap: 4,
-},
-taggedLabel: {
-  color: "#8ea0d0",
-  fontSize: 13,
-},
-taggedName: {
-  color: "#ff8ab2",
-  fontWeight: "600",
-  fontSize: 13.5,
-},
-taggedSeparator: {
-  color: "#8ea0d0",
-  fontSize: 13,
-},
-moreCount: {
-  color: "#8ea0d0",
-  fontWeight: "600",
-  fontSize: 13.5,
-},
-showLessText: {
-  color: "#8ea0d0",
-  fontSize: 13,
-  fontStyle: "italic",
-},
+  taggedBox: {
+    backgroundColor: "#1b2235",
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginVertical: 8,
+    borderWidth: 1,
+    borderColor: "#243054",
+  },
+  taggedContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 4,
+  },
+  taggedLabel: {
+    color: "#8ea0d0",
+    fontSize: 13,
+  },
+  taggedName: {
+    color: "#ff8ab2",
+    fontWeight: "600",
+    fontSize: 13.5,
+  },
+  taggedSeparator: {
+    color: "#8ea0d0",
+    fontSize: 13,
+  },
+  moreCount: {
+    color: "#8ea0d0",
+    fontWeight: "600",
+    fontSize: 13.5,
+  },
+  showLessText: {
+    color: "#8ea0d0",
+    fontSize: 13,
+    fontStyle: "italic",
+  },
 
   actions: {
     flexDirection: "row",
@@ -840,7 +891,6 @@ showLessText: {
     fontSize: 17,
     fontWeight: "700",
   },
-  
 
   // Header with name + date below
   header: {

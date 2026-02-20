@@ -2,26 +2,43 @@
 /*profileScreen.tsx - DARK NAVY THEME */
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
-import { uploadProfileImage } from "../../../utils/cloudinaryUpload";
-import { router } from "expo-router";
 import {
-    EmailAuthProvider, User as FirebaseUser,
-    reauthenticateWithCredential,
-    signOut, updatePassword,
+  EmailAuthProvider,
+  User as FirebaseUser,
+  reauthenticateWithCredential,
+  signOut,
+  updatePassword,
 } from "firebase/auth";
 import { doc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
 import DropDownPicker from "react-native-dropdown-picker";
+import { uploadProfileImage } from "@/utils/cloudinaryUpload";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "expo-router";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
-    ActivityIndicator,
-    Alert, Animated,
-    AppState,
-    Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View, Platform, 
+  ActivityIndicator,
+  Alert,
+  Animated,
+  AppState,
+  Image,
+  Modal,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
-
 
 // Types
 type Student = {
@@ -46,7 +63,11 @@ type EditData = {
 };
 
 // Constants
-const TABS: { key: TabKey; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+const TABS: {
+  key: TabKey;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+}[] = [
   { key: "info", label: "Edit Info", icon: "create-outline" },
   { key: "password", label: "Change Password", icon: "lock-closed-outline" },
   { key: "photo", label: "Change Photo", icon: "camera-outline" },
@@ -55,21 +76,29 @@ const TABS: { key: TabKey; label: string; icon: keyof typeof Ionicons.glyphMap }
 const ProfileScreen = () => {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [student, setStudent] = useState<Student | null>(null);
-  const [editedData, setEditedData] = useState<EditData>({ selectedTab: "info" });
+  const [editedData, setEditedData] = useState<EditData>({
+    selectedTab: "info",
+  });
   const [profileImage, setProfileImage] = useState<string>();
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [viewImageVisible, setViewImageVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const scaleAnim = useRef(new Animated.Value(0)).current;
+  const router = useRouter();
 
-  const imageUri = useMemo(() => profileImage ?? student?.profileImage, [profileImage, student?.profileImage]);
-  const fullName = useMemo(() => 
-    `${student?.firstname ?? ""} ${student?.lastname ?? ""}`.trim() || "Anonymous",
-    [student?.firstname, student?.lastname]
+  const imageUri = useMemo(
+    () => profileImage ?? student?.profileImage,
+    [profileImage, student?.profileImage],
   );
-  const studentIdDisplay = useMemo(() => 
-    student?.studentID ?? user?.email?.split("@")[0] ?? "â€”",
-    [student?.studentID, user?.email]
+  const fullName = useMemo(
+    () =>
+      `${student?.firstname ?? ""} ${student?.lastname ?? ""}`.trim() ||
+      "Anonymous",
+    [student?.firstname, student?.lastname],
+  );
+  const studentIdDisplay = useMemo(
+    () => student?.studentID ?? user?.email?.split("@")[0] ?? "â€”",
+    [student?.studentID, user?.email],
   );
 
   // Main auth listener with automatic online status
@@ -83,7 +112,11 @@ const ProfileScreen = () => {
 
         // âœ… Set user online immediately when authenticated
         try {
-          await setDoc(doc(db, "students", studentID), { isOnline: true }, { merge: true });
+          await setDoc(
+            doc(db, "students", studentID),
+            { isOnline: true },
+            { merge: true },
+          );
         } catch (error) {
           console.error("Error setting online status:", error);
         }
@@ -108,7 +141,7 @@ const ProfileScreen = () => {
             if (auth.currentUser) {
               console.error("Error listening to profile:", error);
             }
-          }
+          },
         );
 
         return () => {
@@ -126,90 +159,114 @@ const ProfileScreen = () => {
 
   // Handle app state changes (background/foreground)
   useEffect(() => {
-    const subscription = AppState.addEventListener("change", async (nextAppState) => {
-      if (!user || !auth.currentUser) return;
-      
-      const email = user.email ?? "";
-      const studentID = email.split("@")[0] || user.uid;
+    const subscription = AppState.addEventListener(
+      "change",
+      async (nextAppState) => {
+        if (!user || !auth.currentUser) return;
 
-      try {
-        if (nextAppState === "active") {
-          // App came to foreground - set online
-          await setDoc(doc(db, "students", studentID), { isOnline: true }, { merge: true });
-        } else if (nextAppState === "background" || nextAppState === "inactive") {
-          // App went to background - set offline
-          await setDoc(doc(db, "students", studentID), { isOnline: false }, { merge: true });
+        const email = user.email ?? "";
+        const studentID = email.split("@")[0] || user.uid;
+
+        try {
+          if (nextAppState === "active") {
+            // App came to foreground - set online
+            await setDoc(
+              doc(db, "students", studentID),
+              { isOnline: true },
+              { merge: true },
+            );
+          } else if (
+            nextAppState === "background" ||
+            nextAppState === "inactive"
+          ) {
+            // App went to background - set offline
+            await setDoc(
+              doc(db, "students", studentID),
+              { isOnline: false },
+              { merge: true },
+            );
+          }
+        } catch (error) {
+          console.error("Error updating online status:", error);
         }
-      } catch (error) {
-        console.error("Error updating online status:", error);
-      }
-    });
+      },
+    );
 
     return () => {
       subscription.remove();
     };
   }, [user]);
 
-  const updateStudent = useCallback(async (data: Partial<Student>) => {
-    if (!student?.studentID || !auth.currentUser) return;
-    
-    try {
-      if (
-  editedData.email?.endsWith("@student.csap") ||
-  editedData.email?.endsWith("@teacher.csap") ||
-  editedData.email?.endsWith("@admin.csap")
-) {
-  delete editedData.email; // Prevent saving fake login email
-}
-      await updateDoc(doc(db, "students", student.studentID), data);
-      setStudent(prev => prev ? { ...prev, ...data } : prev);
-    } catch (error) {
-      console.error("Error updating student:", error);
-      throw error;
-    }
-  }, [student?.studentID]);
+  const updateStudent = useCallback(
+    async (data: Partial<Student>) => {
+      if (!student?.studentID || !auth.currentUser) return;
 
-const handleImagePick = useCallback(async (useCamera = false) => {
-  setLoading(true);
-  try {
-    const permission = useCamera
-      ? await ImagePicker.requestCameraPermissionsAsync()
-      : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      try {
+        if (
+          editedData.email?.endsWith("@student.csap") ||
+          editedData.email?.endsWith("@teacher.csap") ||
+          editedData.email?.endsWith("@admin.csap")
+        ) {
+          delete editedData.email; // Prevent saving fake login email
+        }
+        await updateDoc(doc(db, "students", student.studentID), data);
+        setStudent((prev) => (prev ? { ...prev, ...data } : prev));
+      } catch (error) {
+        console.error("Error updating student:", error);
+        throw error;
+      }
+    },
+    [student?.studentID],
+  );
 
-    if (permission.status !== "granted") {
-      Alert.alert("Permission required", `Allow ${useCamera ? "camera" : "photo"} access.`);
-      return;
-    }
+  const handleImagePick = useCallback(
+    async (useCamera = false) => {
+      setLoading(true);
+      try {
+        const permission = useCamera
+          ? await ImagePicker.requestCameraPermissionsAsync()
+          : await ImagePicker.requestMediaLibraryPermissionsAsync();
 
-    const result = await (useCamera 
-      ? ImagePicker.launchCameraAsync
-      : ImagePicker.launchImageLibraryAsync)({
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.8,
-    });
+        if (permission.status !== "granted") {
+          Alert.alert(
+            "Permission required",
+            `Allow ${useCamera ? "camera" : "photo"} access.`,
+          );
+          return;
+        }
 
-    if (!result.canceled && result.assets?.[0]?.uri) {
-      const uri = result.assets[0].uri;
-      // âœ… Use the profile-specific upload function
-      const cloudinaryUrl = await uploadProfileImage(uri);
-      
-      setProfileImage(cloudinaryUrl);
-      await updateStudent({ profileImage: cloudinaryUrl });
-      Alert.alert("Success", "Profile photo updated!");
-    }
-  } catch (error: any) {
-    Alert.alert("Error", `Failed to update photo: ${error.message}`);
-  } finally {
-    setLoading(false);
-  }
-}, [updateStudent]);
+        const result = await (
+          useCamera
+            ? ImagePicker.launchCameraAsync
+            : ImagePicker.launchImageLibraryAsync
+        )({
+          allowsEditing: true,
+          aspect: [1, 1],
+          quality: 0.8,
+        });
 
+        if (!result.canceled && result.assets?.[0]?.uri) {
+          const uri = result.assets[0].uri;
+          // âœ… Use the profile-specific upload function
+          const cloudinaryUrl = await uploadProfileImage(uri);
+
+          setProfileImage(cloudinaryUrl);
+          await updateStudent({ profileImage: cloudinaryUrl });
+          Alert.alert("Success", "Profile photo updated!");
+        }
+      } catch (error: any) {
+        Alert.alert("Error", `Failed to update photo: ${error.message}`);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [updateStudent],
+  );
 
   const toggleOnlineStatus = useCallback(async () => {
     if (!student || !auth.currentUser) return;
     const newStatus = !student.isOnline;
-    
+
     try {
       await updateStudent({ isOnline: newStatus });
     } catch {
@@ -240,72 +297,115 @@ const handleImagePick = useCallback(async (useCamera = false) => {
 
   const handleChangePassword = useCallback(async () => {
     if (!user) return;
-    
+
     const { currentPassword, newPassword } = editedData;
     if (!currentPassword || !newPassword) {
       return Alert.alert("Error", "Enter both current and new password.");
     }
 
     try {
-      const credential = EmailAuthProvider.credential(user.email || "", currentPassword);
+      const credential = EmailAuthProvider.credential(
+        user.email || "",
+        currentPassword,
+      );
       await reauthenticateWithCredential(user, credential);
       await updatePassword(user, newPassword);
       Alert.alert("Success", "Password changed successfully!");
-      setEditedData(prev => ({ 
-        ...prev, 
-        currentPassword: "", 
-        newPassword: "" 
+      setEditedData((prev) => ({
+        ...prev,
+        currentPassword: "",
+        newPassword: "",
       }));
     } catch (error: any) {
       Alert.alert("Error", error.message || "Failed to change password");
     }
   }, [user, editedData.currentPassword, editedData.newPassword]);
 
-const confirmLogout = useCallback(() =>
-  Alert.alert("Log Out", "Are you sure you want to log out?", [
-    { text: "Cancel", style: "cancel" },
-    {
-      text: "Log Out",
-      style: "destructive",
-      onPress: async () => {
-        try {
-          // Set offline status
-          if (user) {
-            const email = user.email ?? "";
-            const studentID = email.split("@")[0] || user.uid;
-            if (studentID) {
-              try {
-                await setDoc(
-                  doc(db, "students", studentID),
-                  { isOnline: false },
-                  { merge: true }
-                );
-              } catch (err) {
-                console.log("Could not update offline status:", err);
-              }
-            }
-          }
-          await signOut(auth);
+  const handleLogout = useCallback(async () => {
+    console.log("Logout button pressed – starting process");
 
-        } catch (e: any) {
-          Alert.alert("Error", e.message || "Failed to log out");
+    // Confirmation step – platform-specific
+    let confirmed: boolean;
+
+    if (Platform.OS === "web") {
+      confirmed = window.confirm("Are you sure you want to log out?");
+    } else {
+      // Native: use Alert (safe here because we're on iOS/Android)
+      confirmed = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          "Log Out",
+          "Are you sure you want to log out?",
+          [
+            { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+            {
+              text: "Log Out",
+              style: "destructive",
+              onPress: () => resolve(true),
+            },
+          ],
+          { cancelable: true, onDismiss: () => resolve(false) }, // Optional: handle outside tap
+        );
+      });
+    }
+
+    if (!confirmed) {
+      console.log("Logout cancelled by user");
+      return;
+    }
+
+    try {
+      if (user) {
+        const email = user.email ?? "";
+        const studentID = email.split("@")[0] || user.uid;
+        if (studentID) {
+          try {
+            await setDoc(
+              doc(db, "students", studentID),
+              { isOnline: false },
+              { merge: true },
+            );
+            console.log("Offline status set to false");
+          } catch (err) {
+            console.warn("Offline status failed:", err);
+          }
         }
-      },
-    },
-  ]), [user]);
+      }
+
+      await signOut(auth);
+      console.log("signOut completed successfully");
+
+      // Redirect
+      if (Platform.OS === "web") {
+        console.log("Web redirect: using window.location.replace");
+        window.location.replace("/LoginScreen");
+        // If you prefer to keep history (back button works): window.location.href = '/LoginScreen';
+      } else {
+        console.log("Native redirect: using router");
+        router.replace("/LoginScreen");
+      }
+    } catch (e: any) {
+      console.error("Logout failed:", e);
+      // Optional: show error feedback
+      if (Platform.OS !== "web") {
+        Alert.alert("Error", "Failed to log out. Please try again.");
+      } else {
+        alert("Failed to log out: " + (e.message || "Unknown error"));
+      }
+    }
+  }, [user, router]);
 
   const openModal = useCallback(() => {
-    Animated.spring(scaleAnim, { 
-      toValue: 1, 
-      useNativeDriver: true 
+    Animated.spring(scaleAnim, {
+      toValue: 1,
+      useNativeDriver: true,
     }).start();
   }, [scaleAnim]);
 
   const closeModal = useCallback(() => {
-    Animated.timing(scaleAnim, { 
-      toValue: 0, 
-      duration: 200, 
-      useNativeDriver: true 
+    Animated.timing(scaleAnim, {
+      toValue: 0,
+      duration: 200,
+      useNativeDriver: true,
     }).start(() => setEditModalVisible(false));
   }, [scaleAnim]);
 
@@ -313,18 +413,21 @@ const confirmLogout = useCallback(() =>
     if (imageUri) {
       setViewImageVisible(true);
     } else {
-      setEditedData(prev => ({ ...prev, selectedTab: "photo" }));
+      setEditedData((prev) => ({ ...prev, selectedTab: "photo" }));
       setEditModalVisible(true);
     }
   }, [imageUri]);
 
   const handleTabChange = useCallback((key: TabKey) => {
-    setEditedData(prev => ({ ...prev, selectedTab: key }));
+    setEditedData((prev) => ({ ...prev, selectedTab: key }));
   }, []);
 
-  const updateEditedData = useCallback((field: keyof EditData, value: string) => {
-    setEditedData(prev => ({ ...prev, [field]: value }));
-  }, []);
+  const updateEditedData = useCallback(
+    (field: keyof EditData, value: string) => {
+      setEditedData((prev) => ({ ...prev, [field]: value }));
+    },
+    [],
+  );
 
   return (
     <SafeAreaView style={styles.container}>
@@ -352,11 +455,24 @@ const confirmLogout = useCallback(() =>
             <View style={styles.editBadge}>
               <Ionicons name="camera" size={16} color="#fff" />
             </View>
-            <View style={[styles.statusBadge, { backgroundColor: student?.isOnline ? "#0f0" : "#999" }]} />
+            <View
+              style={[
+                styles.statusBadge,
+                { backgroundColor: student?.isOnline ? "#0f0" : "#999" },
+              ]}
+            />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.statusBtn} onPress={toggleOnlineStatus}>
-            <View style={[styles.statusDot, { backgroundColor: student?.isOnline ? "#0f0" : "#999" }]} />
+          <TouchableOpacity
+            style={styles.statusBtn}
+            onPress={toggleOnlineStatus}
+          >
+            <View
+              style={[
+                styles.statusDot,
+                { backgroundColor: student?.isOnline ? "#0f0" : "#999" },
+              ]}
+            />
             <Text style={{ color: student?.isOnline ? "#0f0" : "#999" }}>
               {student?.isOnline ? "Online" : "Offline"}
             </Text>
@@ -367,37 +483,52 @@ const confirmLogout = useCallback(() =>
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Personal Info</Text>
           <InfoRow icon="person-outline" label="Name" value={fullName} />
-<InfoRow
-  icon="mail-outline"
-  label="Email"
-  value={
-    student?.email &&
-    !student.email.endsWith("@student.csap") &&
-    !student.email.endsWith("@teacher.csap") &&
-    !student.email.endsWith("@admin.csap")
-      ? student.email
-      : "No email added"
-  }
-/>
-
+          <InfoRow
+            icon="mail-outline"
+            label="Email"
+            value={
+              student?.email &&
+              !student.email.endsWith("@student.csap") &&
+              !student.email.endsWith("@teacher.csap") &&
+              !student.email.endsWith("@admin.csap")
+                ? student.email
+                : "No email added"
+            }
+          />
         </View>
 
         {/* Academic Info Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Academic Info</Text>
-          <InfoRow icon="school-outline" label="Course" value={student?.course ?? "â€”"} />
-          <InfoRow icon="trending-up-outline" label="Year Level" value={student?.yearlvl ?? "â€”"} />
-          <InfoRow icon="card-outline" label="Student ID" value={studentIdDisplay} />
+          <InfoRow
+            icon="school-outline"
+            label="Course"
+            value={student?.course ?? "â€”"}
+          />
+          <InfoRow
+            icon="trending-up-outline"
+            label="Year Level"
+            value={student?.yearlvl ?? "â€”"}
+          />
+          <InfoRow
+            icon="card-outline"
+            label="Student ID"
+            value={studentIdDisplay}
+          />
         </View>
 
         {/* Actions Section */}
         <View style={styles.section}>
-          <ActionButton 
-            icon="create-outline" 
-            text="Edit Profile" 
-            onPress={() => setEditModalVisible(true)} 
+          <ActionButton
+            icon="create-outline"
+            text="Edit Profile"
+            onPress={() => setEditModalVisible(true)}
           />
-          <ActionButton icon="log-out-outline" text="Log Out" onPress={confirmLogout} />
+          <ActionButton
+            icon="log-out-outline"
+            text="Log Out"
+            onPress={handleLogout}
+          />
         </View>
       </ScrollView>
 
@@ -427,9 +558,13 @@ const confirmLogout = useCallback(() =>
 };
 
 // Sub-components (same as before)
-const InfoRow = ({ icon, label, value }: { 
-  icon: keyof typeof Ionicons.glyphMap; 
-  label: string; 
+const InfoRow = ({
+  icon,
+  label,
+  value,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
   value: string;
 }) => (
   <View style={styles.infoCard}>
@@ -441,9 +576,13 @@ const InfoRow = ({ icon, label, value }: {
   </View>
 );
 
-const ActionButton = ({ icon, text, onPress }: { 
-  icon: keyof typeof Ionicons.glyphMap; 
-  text: string; 
+const ActionButton = ({
+  icon,
+  text,
+  onPress,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  text: string;
   onPress: () => void;
 }) => (
   <TouchableOpacity style={styles.actionButton} onPress={onPress}>
@@ -452,18 +591,18 @@ const ActionButton = ({ icon, text, onPress }: {
   </TouchableOpacity>
 );
 
-const EditModal = ({ 
-  visible, 
-  scaleAnim, 
-  onShow, 
-  onClose, 
-  editedData, 
+const EditModal = ({
+  visible,
+  scaleAnim,
+  onShow,
+  onClose,
+  editedData,
   onTabChange,
   onDataChange,
   onSave,
   onChangePassword,
   onImagePick,
-  loading 
+  loading,
 }: {
   visible: boolean;
   scaleAnim: Animated.Value;
@@ -477,15 +616,17 @@ const EditModal = ({
   onImagePick: (useCamera: boolean) => void;
   loading: boolean;
 }) => (
-  <Modal 
-    visible={visible} 
-    transparent 
-    animationType="fade" 
+  <Modal
+    visible={visible}
+    transparent
+    animationType="fade"
     onShow={onShow}
     onRequestClose={onClose}
   >
     <View style={styles.modalOverlay}>
-      <Animated.View style={[styles.modalCard, { transform: [{ scale: scaleAnim }] }]}>
+      <Animated.View
+        style={[styles.modalCard, { transform: [{ scale: scaleAnim }] }]}
+      >
         <Text style={styles.modalHeader}>Edit Profile</Text>
 
         {/* Tab Navigation */}
@@ -520,11 +661,15 @@ const EditModal = ({
         {/* Tab Content */}
         <View style={styles.tabContent}>
           {loading ? (
-            <ActivityIndicator size="large" color="#ff5c93" style={{ marginVertical: 20 }} />
+            <ActivityIndicator
+              size="large"
+              color="#ff5c93"
+              style={{ marginVertical: 20 }}
+            />
           ) : (
             <>
               {editedData.selectedTab === "info" && (
-                <InfoTab 
+                <InfoTab
                   editedData={editedData}
                   onDataChange={onDataChange}
                   onSave={onSave}
@@ -554,22 +699,24 @@ const EditModal = ({
   </Modal>
 );
 
-const InfoTab = ({ editedData, onDataChange, onSave }: {
+const InfoTab = ({
+  editedData,
+  onDataChange,
+  onSave,
+}: {
   editedData: EditData;
   onDataChange: (field: keyof EditData, value: string) => void;
   onSave: () => void;
 }) => (
   <>
-<TextInput
-  style={styles.input}
-  placeholder="Add your email (optional)"
-  placeholderTextColor="rgba(184,199,255,0.5)"
-  onChangeText={(text: string) => onDataChange("email", text)}
-  keyboardType="email-address"
-  autoCapitalize="none"
-/>
-
-
+    <TextInput
+      style={styles.input}
+      placeholder="Add your email (optional)"
+      placeholderTextColor="rgba(184,199,255,0.5)"
+      onChangeText={(text: string) => onDataChange("email", text)}
+      keyboardType="email-address"
+      autoCapitalize="none"
+    />
 
     <Text style={styles.inputLabel}>Year Level</Text>
     <YearLevelDropdown
@@ -583,7 +730,11 @@ const InfoTab = ({ editedData, onDataChange, onSave }: {
   </>
 );
 
-const PasswordTab = ({ editedData, onDataChange, onChangePassword }: {
+const PasswordTab = ({
+  editedData,
+  onDataChange,
+  onChangePassword,
+}: {
   editedData: EditData;
   onDataChange: (field: keyof EditData, value: string) => void;
   onChangePassword: () => void;
@@ -613,7 +764,7 @@ const PasswordTab = ({ editedData, onDataChange, onChangePassword }: {
           />
         </TouchableOpacity>
       </View>
-      
+
       <View style={styles.passwordInputWrapper}>
         <TextInput
           style={styles.passwordInput}
@@ -642,20 +793,34 @@ const PasswordTab = ({ editedData, onDataChange, onChangePassword }: {
   );
 };
 
-const PhotoTab = ({ onImagePick }: { onImagePick: (useCamera: boolean) => void }) => (
+const PhotoTab = ({
+  onImagePick,
+}: {
+  onImagePick: (useCamera: boolean) => void;
+}) => (
   <View style={{ marginTop: 10 }}>
-    <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(false)}>
+    <TouchableOpacity
+      style={styles.modalOption}
+      onPress={() => onImagePick(false)}
+    >
       <Ionicons name="images-outline" size={20} color="#ff5c93" />
       <Text style={styles.optionText}>Choose from Gallery</Text>
     </TouchableOpacity>
-    <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(true)}>
+    <TouchableOpacity
+      style={styles.modalOption}
+      onPress={() => onImagePick(true)}
+    >
       <Ionicons name="camera-outline" size={20} color="#ff5c93" />
       <Text style={styles.optionText}>Take Photo</Text>
     </TouchableOpacity>
   </View>
 );
 
-const ImageViewerModal = ({ visible, imageUri, onClose }: {
+const ImageViewerModal = ({
+  visible,
+  imageUri,
+  onClose,
+}: {
   visible: boolean;
   imageUri?: string;
   onClose: () => void;
@@ -687,7 +852,10 @@ type YearLevelDropdownProps = {
   onChange: (val: string) => void;
 };
 
-const YearLevelDropdown: React.FC<YearLevelDropdownProps> = ({ value, onChange }) => {
+const YearLevelDropdown: React.FC<YearLevelDropdownProps> = ({
+  value,
+  onChange,
+}) => {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([
     { label: "1st Year", value: "1st Year" },
@@ -727,7 +895,14 @@ const styles = StyleSheet.create({
   // Background: darker than HomeScreen's #0e1320
   container: { flex: 1, backgroundColor: "#070c15" },
   // Header accent: matches HomeScreen's #b8c7ff blue-lavender
-  header: { color: "#b8c7ff", fontSize: 20, fontWeight: "bold", textAlign: "center", margin: 16, letterSpacing: 1 },
+  header: {
+    color: "#b8c7ff",
+    fontSize: 20,
+    fontWeight: "bold",
+    textAlign: "center",
+    margin: 16,
+    letterSpacing: 1,
+  },
   // Dropdown: surface = #1b2235 (HomeScreen card bg), accent = #ff5c93 (HomeScreen pink)
   dropdown: {
     backgroundColor: "#1b2235",
@@ -753,21 +928,89 @@ const styles = StyleSheet.create({
   tickIcon: { tintColor: "#ff5c93" } as any,
   scroll: { paddingBottom: 100 },
   // Card surfaces: #1b2235 (HomeScreen surface)
-  profileCard: { alignItems: "center", backgroundColor: "#1b2235", margin: 16, padding: 20, borderRadius: 16, borderWidth: 1, borderColor: "#243054" },
-  profileImage: { width: 100, height: 100, borderRadius: 50, borderWidth: 3, borderColor: "#ff5c93" },
-  placeholder: { width: 100, height: 100, borderRadius: 50, backgroundColor: "#243054", justifyContent: "center", alignItems: "center" },
-  editBadge: { position: "absolute", bottom: 5, right: 5, backgroundColor: "#ff5c93", borderRadius: 16, padding: 5 },
-  statusBadge: { position: "absolute", top: 5, right: 5, width: 14, height: 14, borderRadius: 7 },
-  statusBtn: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10 },
+  profileCard: {
+    alignItems: "center",
+    backgroundColor: "#1b2235",
+    margin: 16,
+    padding: 20,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#243054",
+  },
+  profileImage: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    borderWidth: 3,
+    borderColor: "#ff5c93",
+  },
+  placeholder: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: "#243054",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  editBadge: {
+    position: "absolute",
+    bottom: 5,
+    right: 5,
+    backgroundColor: "#ff5c93",
+    borderRadius: 16,
+    padding: 5,
+  },
+  statusBadge: {
+    position: "absolute",
+    top: 5,
+    right: 5,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+  },
+  statusBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 10,
+  },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   section: { marginHorizontal: 16, marginTop: 24 },
-  sectionTitle: { color: "#8ea0d0", fontWeight: "700", marginBottom: 12, fontSize: 15 },
-  infoCard: { flexDirection: "row", alignItems: "center", padding: 12, backgroundColor: "#1b2235", borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: "#243054" },
+  sectionTitle: {
+    color: "#8ea0d0",
+    fontWeight: "700",
+    marginBottom: 12,
+    fontSize: 15,
+  },
+  infoCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 12,
+    backgroundColor: "#1b2235",
+    borderRadius: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#243054",
+  },
   infoLabel: { color: "#8ea0d0", fontSize: 12 },
   infoValue: { color: "#e9edff", fontSize: 16 },
-  actionButton: { flexDirection: "row", alignItems: "center", backgroundColor: "#1b2235", padding: 16, borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: "#243054" },
+  actionButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1b2235",
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#243054",
+  },
   actionText: { color: "#e9edff", fontSize: 16, marginLeft: 12 },
-  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.85)", justifyContent: "center", alignItems: "center" },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.85)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
   modalCard: {
     width: "90%",
     maxWidth: 400,
@@ -780,7 +1023,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,92,147,0.15)",
   },
-  modalHeader: { color: "#ff5c93", fontSize: 20, fontWeight: "bold", textAlign: "center", marginBottom: 18 },
+  modalHeader: {
+    color: "#ff5c93",
+    fontSize: 20,
+    fontWeight: "bold",
+    textAlign: "center",
+    marginBottom: 18,
+  },
   tabRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -799,7 +1048,13 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   tabButtonActive: { backgroundColor: "#ff5c93" },
-  tabText: { color: "#8ea0d0", fontSize: 12, textAlign: "center", fontWeight: "600", flexWrap: "wrap" },
+  tabText: {
+    color: "#8ea0d0",
+    fontSize: 12,
+    textAlign: "center",
+    fontWeight: "600",
+    flexWrap: "wrap",
+  },
   tabTextActive: { color: "#fff" },
   tabContent: { marginVertical: 10, padding: 12 },
   input: {
@@ -836,7 +1091,15 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   primaryText: { color: "#fff", fontWeight: "700", fontSize: 15 },
-  closeBtn: { backgroundColor: "#1b2235", borderRadius: 10, paddingVertical: 12, alignItems: "center", marginTop: 10, borderWidth: 1, borderColor: "#243054" },
+  closeBtn: {
+    backgroundColor: "#1b2235",
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: "#243054",
+  },
   closeText: { color: "#8ea0d0", fontWeight: "600", fontSize: 15 },
   modalOption: {
     flexDirection: "row",
@@ -849,10 +1112,26 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,92,147,0.2)",
   },
   optionText: { color: "#e9edff", fontSize: 16, marginLeft: 12 },
-  fullImageModal: { flex: 1, backgroundColor: "rgba(0,0,0,0.97)", justifyContent: "center", alignItems: "center" },
-  fullImageInner: { width: "100%", height: "100%", justifyContent: "center", alignItems: "center" },
+  fullImageModal: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.97)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  fullImageInner: {
+    width: "100%",
+    height: "100%",
+    justifyContent: "center",
+    alignItems: "center",
+  },
   fullImage: { width: "100%", height: "100%" },
-  inputLabel: { color: "#8ea0d0", fontSize: 14, marginBottom: 6, marginLeft: 2, fontWeight: "600" },
+  inputLabel: {
+    color: "#8ea0d0",
+    fontSize: 14,
+    marginBottom: 6,
+    marginLeft: 2,
+    fontWeight: "600",
+  },
   statusText: { fontSize: 14, fontWeight: "500" },
 });
 

@@ -1,27 +1,26 @@
-import React, { useState, useCallback, useMemo } from "react";
 import { Ionicons } from "@expo/vector-icons";
-import { collection, addDoc, serverTimestamp } from "firebase/firestore";
+import * as ImagePicker from "expo-image-picker";
+import { useRouter } from "expo-router";
+import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import React, { useCallback, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
+  Alert,
   FlatList,
+  Image,
+  KeyboardAvoidingView,
+  ListRenderItem,
+  Platform,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
-  Alert,
-  ActivityIndicator,
-  ListRenderItem,
-  KeyboardAvoidingView,
-  Platform,
-  Image,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import DropDownPicker from "react-native-dropdown-picker";
-import * as ImagePicker from "expo-image-picker";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
-import { uploadPostImage } from "../../utils/cloudinaryUpload";
-import { useRouter } from "expo-router";
-
+import { uploadPostImage } from "@/utils/cloudinaryUpload";
 type PollOption = {
   id: string;
   text: string;
@@ -46,7 +45,11 @@ const CreatePollScreen = () => {
   ]);
   const [allowMultiple, setAllowMultiple] = useState(false);
   const [maxSelections, setMaxSelections] = useState(1);
-  const [duration, setDuration] = useState<PollDuration>({ days: 1, hours: 0, minutes: 0 });
+  const [duration, setDuration] = useState<PollDuration>({
+    days: 1,
+    hours: 0,
+    minutes: 0,
+  });
   const [loading, setLoading] = useState(false);
   const [maxSelectionsOpen, setMaxSelectionsOpen] = useState(false);
   const [daysOpen, setDaysOpen] = useState(false);
@@ -58,32 +61,47 @@ const CreatePollScreen = () => {
   const router = useRouter();
 
   // Close all dropdowns except the one being opened
-  const handleDropdownOpen = (dropdown: 'maxSelections' | 'days' | 'hours' | 'minutes') => {
-    setMaxSelectionsOpen(dropdown === 'maxSelections');
-    setDaysOpen(dropdown === 'days');
-    setHoursOpen(dropdown === 'hours');
-    setMinutesOpen(dropdown === 'minutes');
+  const handleDropdownOpen = (
+    dropdown: "maxSelections" | "days" | "hours" | "minutes",
+  ) => {
+    setMaxSelectionsOpen(dropdown === "maxSelections");
+    setDaysOpen(dropdown === "days");
+    setHoursOpen(dropdown === "hours");
+    setMinutesOpen(dropdown === "minutes");
   };
 
   const addOption = useCallback(() => {
-    const newId = String(Math.max(...options.map(o => parseInt(o.id) || 0), 0) + 1);
+    const newId = String(
+      Math.max(...options.map((o) => parseInt(o.id) || 0), 0) + 1,
+    );
     setOptions([...options, { id: newId, text: "" }]);
   }, [options]);
 
-  const removeOption = useCallback((id: string) => {
-    if (options.length > 2) {
-      setOptions(options.filter(opt => opt.id !== id));
-    } else {
-      Alert.alert("Error", "You must have at least 2 options");
-    }
-  }, [options]);
+  const removeOption = useCallback(
+    (id: string) => {
+      if (options.length > 2) {
+        setOptions(options.filter((opt) => opt.id !== id));
+      } else {
+        Alert.alert("Error", "You must have at least 2 options");
+      }
+    },
+    [options],
+  );
 
-  const updateOption = useCallback((id: string, text: string) => {
-    setOptions(options.map(opt => opt.id === id ? { ...opt, text } : opt));
-  }, [options]);
+  const updateOption = useCallback(
+    (id: string, text: string) => {
+      setOptions(
+        options.map((opt) => (opt.id === id ? { ...opt, text } : opt)),
+      );
+    },
+    [options],
+  );
 
-  const updateDuration = (field: "days" | "hours" | "minutes", value: number) => {
-    setDuration(prev => ({ ...prev, [field]: value }));
+  const updateDuration = (
+    field: "days" | "hours" | "minutes",
+    value: number,
+  ) => {
+    setDuration((prev) => ({ ...prev, [field]: value }));
   };
 
   const pickImage = async () => {
@@ -124,7 +142,7 @@ const CreatePollScreen = () => {
       return false;
     }
 
-    const filledOptions = options.filter(opt => opt.text.trim());
+    const filledOptions = options.filter((opt) => opt.text.trim());
     if (filledOptions.length < 2) {
       Alert.alert("Error", "You must have at least 2 options");
       return false;
@@ -136,7 +154,10 @@ const CreatePollScreen = () => {
     }
 
     if (allowMultiple && maxSelections > filledOptions.length) {
-      Alert.alert("Error", `Maximum selections cannot exceed ${filledOptions.length}`);
+      Alert.alert(
+        "Error",
+        `Maximum selections cannot exceed ${filledOptions.length}`,
+      );
       return false;
     }
 
@@ -155,14 +176,15 @@ const CreatePollScreen = () => {
         return;
       }
 
-      const filledOptions = options.filter(opt => opt.text.trim());
-      const durationMs = (duration.days * 24 * 60 * 60 * 1000) +
-                         (duration.hours * 60 * 60 * 1000) +
-                         (duration.minutes * 60 * 1000);
+      const filledOptions = options.filter((opt) => opt.text.trim());
+      const durationMs =
+        duration.days * 24 * 60 * 60 * 1000 +
+        duration.hours * 60 * 60 * 1000 +
+        duration.minutes * 60 * 1000;
 
       const pollData = {
         question: question.trim(),
-        options: filledOptions.map(opt => ({
+        options: filledOptions.map((opt) => ({
           text: opt.text.trim(),
           votes: 0,
           voters: [],
@@ -182,7 +204,7 @@ const CreatePollScreen = () => {
 
       await addDoc(collection(db, "polls"), pollData);
       Alert.alert("Success", "Poll created successfully!", [
-        { text: "OK", onPress: () => router.back() }
+        { text: "OK", onPress: () => router.back() },
       ]);
     } catch (error) {
       console.error("Error creating poll:", error);
@@ -192,24 +214,30 @@ const CreatePollScreen = () => {
     }
   };
 
-  const maxSelectionsOptions = allowMultiple 
-    ? Array.from({ length: Math.min(options.filter(o => o.text.trim()).length, 5) }, (_, i) => ({
-        label: String(i + 1),
-        value: i + 1,
-      }))
+  const maxSelectionsOptions = allowMultiple
+    ? Array.from(
+        { length: Math.min(options.filter((o) => o.text.trim()).length, 5) },
+        (_, i) => ({
+          label: String(i + 1),
+          value: i + 1,
+        }),
+      )
     : [];
 
-  const formSections: FormSection[] = useMemo(() => [
-    { id: "question", type: "question" },
-    { id: "image", type: "image" },
-    { id: "options-header", type: "optionsHeader" },
-    ...options.map(opt => ({ id: opt.id, type: "option" })),
-    { id: "addOption", type: "addOption" },
-    { id: "settings", type: "settings" },
-    { id: "duration", type: "duration" },
-    { id: "spacing", type: "spacing" },
-    { id: "button", type: "button" },
-  ], [options]);
+  const formSections: FormSection[] = useMemo(
+    () => [
+      { id: "question", type: "question" },
+      { id: "image", type: "image" },
+      { id: "options-header", type: "optionsHeader" },
+      ...options.map((opt) => ({ id: opt.id, type: "option" })),
+      { id: "addOption", type: "addOption" },
+      { id: "settings", type: "settings" },
+      { id: "duration", type: "duration" },
+      { id: "spacing", type: "spacing" },
+      { id: "button", type: "button" },
+    ],
+    [options],
+  );
 
   const renderItem: ListRenderItem<FormSection> = ({ item }) => {
     if (item.type === "question") {
@@ -237,7 +265,7 @@ const CreatePollScreen = () => {
           {pollImage ? (
             <View style={styles.imagePreviewContainer}>
               <Image source={{ uri: pollImage }} style={styles.imagePreview} />
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.removeImageBtn}
                 onPress={removeImage}
                 disabled={uploading}
@@ -274,7 +302,7 @@ const CreatePollScreen = () => {
     }
 
     if (item.type === "option") {
-      const option = options.find(o => o.id === item.id);
+      const option = options.find((o) => o.id === item.id);
       if (!option) return null;
       const index = options.indexOf(option);
 
@@ -328,7 +356,9 @@ const CreatePollScreen = () => {
           <View style={styles.settingRow}>
             <View>
               <Text style={styles.settingLabel}>Allow multiple answers</Text>
-              <Text style={styles.settingSubtext}>Users can select multiple options</Text>
+              <Text style={styles.settingSubtext}>
+                Users can select multiple options
+              </Text>
             </View>
             <TouchableOpacity
               style={[styles.toggle, allowMultiple && styles.toggleActive]}
@@ -352,12 +382,12 @@ const CreatePollScreen = () => {
                 value={maxSelections}
                 items={maxSelectionsOptions}
                 setOpen={(open) => {
-                  if (typeof open === 'function') {
+                  if (typeof open === "function") {
                     const newOpen = open(maxSelectionsOpen);
-                    if (newOpen) handleDropdownOpen('maxSelections');
+                    if (newOpen) handleDropdownOpen("maxSelections");
                     else setMaxSelectionsOpen(false);
                   } else {
-                    if (open) handleDropdownOpen('maxSelections');
+                    if (open) handleDropdownOpen("maxSelections");
                     else setMaxSelectionsOpen(false);
                   }
                 }}
@@ -379,7 +409,9 @@ const CreatePollScreen = () => {
           {/* Allow users to add new options */}
           <View style={[styles.settingRow, { marginTop: 14 }]}>
             <View>
-              <Text style={styles.settingLabel}>Allow users to add new options</Text>
+              <Text style={styles.settingLabel}>
+                Allow users to add new options
+              </Text>
               <Text style={styles.settingSubtext}>
                 Users can submit their own choices in this poll
               </Text>
@@ -411,7 +443,7 @@ const CreatePollScreen = () => {
               onChange={(val) => updateDuration("days", val)}
               max={30}
               open={daysOpen}
-              setOpen={() => handleDropdownOpen('days')}
+              setOpen={() => handleDropdownOpen("days")}
               zIndex={100}
             />
             <DurationDropdown
@@ -420,7 +452,7 @@ const CreatePollScreen = () => {
               onChange={(val) => updateDuration("hours", val)}
               max={23}
               open={hoursOpen}
-              setOpen={() => handleDropdownOpen('hours')}
+              setOpen={() => handleDropdownOpen("hours")}
               zIndex={99}
             />
             <DurationDropdown
@@ -429,7 +461,7 @@ const CreatePollScreen = () => {
               onChange={(val) => updateDuration("minutes", val)}
               max={59}
               open={minutesOpen}
-              setOpen={() => handleDropdownOpen('minutes')}
+              setOpen={() => handleDropdownOpen("minutes")}
               zIndex={98}
             />
           </View>
@@ -462,7 +494,7 @@ const CreatePollScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView 
+      <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={{ flex: 1 }}
       >
@@ -488,10 +520,10 @@ const CreatePollScreen = () => {
 };
 
 // Duration Dropdown Component
-const DurationDropdown = ({ 
-  label, 
-  value, 
-  onChange, 
+const DurationDropdown = ({
+  label,
+  value,
+  onChange,
   max,
   open,
   setOpen,
@@ -505,7 +537,6 @@ const DurationDropdown = ({
   setOpen: () => void;
   zIndex?: number;
 }) => {
-
   const items = Array.from({ length: max + 1 }, (_, i) => ({
     label: String(i),
     value: i,
@@ -519,8 +550,9 @@ const DurationDropdown = ({
         items={items}
         setOpen={setOpen}
         setValue={(callback) => {
-            const newValue = typeof callback === "function" ? callback(value) : callback;
-            onChange(newValue);
+          const newValue =
+            typeof callback === "function" ? callback(value) : callback;
+          onChange(newValue);
         }}
         style={styles.durationDropdown}
         dropDownContainerStyle={styles.durationDropdownContainer}

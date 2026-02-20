@@ -1,5 +1,4 @@
 //HomeScreen.tsx - OPTIMIZED VERSION (No Flickering)
-import { getUserData, UserRole } from "@/utils/rbac";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
@@ -37,7 +36,8 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
-import { useNetworkStatus } from "../../../utils/networkUtils";
+import { useNetworkStatus } from "@/utils/networkUtils";
+import { getUserData, UserRole } from "@/utils/rbac";
 import PollCard from "../components/PollCard";
 import PostCard from "../components/PostCard";
 export const tabBarTranslateY = new Animated.Value(0);

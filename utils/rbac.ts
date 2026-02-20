@@ -108,7 +108,7 @@ function getDefaultPermissions(): UserPermissions {
  */
 export function hasPermission(
   permissions: UserPermissions | undefined,
-  permission: keyof UserPermissions
+  permission: keyof UserPermissions,
 ): boolean {
   if (!permissions) return false;
   return permissions[permission] === true;
@@ -146,10 +146,13 @@ export function canDeletePost(
   userRole: UserRole | undefined,
   permissions: UserPermissions | undefined,
   postUserId: string,
-  currentUserId: string
+  currentUserId: string,
 ): boolean {
   // Can delete own post
-  if (postUserId === currentUserId && hasPermission(permissions, "canDeleteOwnPost")) {
+  if (
+    postUserId === currentUserId &&
+    hasPermission(permissions, "canDeleteOwnPost")
+  ) {
     return true;
   }
   // Can delete any post if they have the permission
@@ -165,10 +168,12 @@ export function canDeletePost(
 export function canEditPost(
   permissions: UserPermissions | undefined,
   postUserId: string,
-  currentUserId: string
+  currentUserId: string,
 ): boolean {
   // Can only edit own post
-  return postUserId === currentUserId && hasPermission(permissions, "canEditOwnPost");
+  return (
+    postUserId === currentUserId && hasPermission(permissions, "canEditOwnPost")
+  );
 }
 
 /**
@@ -203,7 +208,7 @@ export function getRoleColor(role: UserRole): string {
 export function canViewAnonymousIdentity(
   viewerRole: UserRole | undefined,
   postAuthorRole: UserRole | undefined,
-  isAnonymous: boolean
+  isAnonymous: boolean,
 ): boolean {
   if (!isAnonymous) return true; // everyone can see if not anonymous
   if (!viewerRole) return false;
@@ -212,7 +217,10 @@ export function canViewAnonymousIdentity(
   if (viewerRole === "admin") return true;
 
   // Teachers and Moderators can see anonymous student posts
-  if ((viewerRole === "teacher" || viewerRole === "moderator") && postAuthorRole === "student") {
+  if (
+    (viewerRole === "teacher" || viewerRole === "moderator") &&
+    postAuthorRole === "student"
+  ) {
     return true;
   }
 
@@ -223,12 +231,15 @@ export function canViewAnonymousIdentity(
 /**
  * Assigns a numeric level to each role (for comparison or hierarchy logic)
  */
+
+// To this:
 export function getRoleHierarchyLevel(role: UserRole | undefined): number {
-  const hierarchy = {
+  if (!role) return 0;
+  const hierarchy: Record<UserRole, number> = {
     student: 1,
     moderator: 2,
     teacher: 2,
     admin: 3,
   };
-  return hierarchy[role || "student"] || 0;
+  return hierarchy[role] ?? 0;
 }
