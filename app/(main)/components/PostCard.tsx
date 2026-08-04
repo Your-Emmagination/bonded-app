@@ -1,12 +1,11 @@
 // components/PostCard.tsx
 
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Dimensions,
-  FlatList,
   Image,
   Linking,
   Modal,
@@ -17,17 +16,27 @@ import {
   View,
 } from "react-native";
 import {
+  canDeleteContent,
+  canViewAnonymousIdentity,
   getRoleColor,
   getRoleDisplayName,
   getUserData,
+  parseUserRole,
   UserData,
   UserRole,
 } from "@/utils/rbac";
+import { resolveAvatarUri } from "@/utils/avatar";
 import CommentModal from "./CommentModal";
+import AiReplyCard from "./AiReplyCard";
+import ExpandableText from "./ExpandableText";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
-const IMAGE_WIDTH = SCREEN_WIDTH - 68;
-const AUTO_SCROLL_INTERVAL = 4000;
+const AVATAR_COLUMN_WIDTH = 40;
+const AVATAR_COLUMN_GAP = 12;
+const FEED_HORIZONTAL_PADDING = 16;
+const IMAGE_WIDTH =
+  SCREEN_WIDTH - FEED_HORIZONTAL_PADDING * 2 - AVATAR_COLUMN_WIDTH - AVATAR_COLUMN_GAP;
 
 type TaggedUser = {
   id: string;
@@ -55,15 +64,21 @@ type Post = {
   createdAt?: any;
   likeCount?: number;
   commentCount?: number;
-  viewCount?: number;
   likedBy?: string[];
-  viewedBy?: string[];
   role?: string;
+  aiReply?: {
+    text?: string;
+    model?: string | null;
+    generatedAtMs?: number;
+    status?: string | null;
+  };
+  pinnedAt?: any;
 };
 
 interface PostCardProps {
   post: Post;
   isLiked: boolean;
+  isHighlighted?: boolean;
   currentUserRole?: UserRole;
   currentUserId?: string;
   onLike: (postId: string, likedBy: string[]) => void;
@@ -73,12 +88,15 @@ interface PostCardProps {
   onFilePress: (url: string, mimeType: string) => void;
   getTimeAgo: (timestamp: any) => string;
   onCommentCountUpdate?: (postId: string, newCount: number) => void;
-  onViewPost?: (postId: string) => void;
+  canPin?: boolean;
+  onTogglePin?: (postId: string, shouldPin: boolean) => void;
+  onDelete?: (postId: string) => void | Promise<void>;
 }
 
 const PostCard: React.FC<PostCardProps> = ({
   post,
   isLiked,
+  isHighlighted = false,
   currentUserRole,
   currentUserId,
   onLike,
@@ -88,17 +106,45 @@ const PostCard: React.FC<PostCardProps> = ({
   onFilePress,
   getTimeAgo,
   onCommentCountUpdate,
-  onViewPost,
+  canPin = false,
+  onTogglePin,
+  onDelete,
 }) => {
   const [showCommentsModal, setShowCommentsModal] = useState(false);
   const [showLikesModal, setShowLikesModal] = useState(false);
-  const [showFullContent, setShowFullContent] = useState(false);
-  const [hasBeenViewed, setHasBeenViewed] = useState(false);
+  const [authorData, setAuthorData] = useState<UserData | null>(null);
+  const [authorLoading, setAuthorLoading] = useState(true);
 
-  const viewTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const [, setCurrentImageIndex] = useState(0);
-  const flatListRef = useRef<FlatList>(null);
-  const autoScrollTimerRef = useRef<NodeJS.Timeout | null>(null);
+  useEffect(() => {
+    let isActive = true;
+
+    const fetchAuthor = async () => {
+      const userIdToFetch = post.realUserId || post.userId;
+      if (!userIdToFetch || userIdToFetch === "anonymous") {
+        if (isActive) {
+          setAuthorData(null);
+          setAuthorLoading(false);
+        }
+        return;
+      }
+
+      try {
+        const data = await getUserData(userIdToFetch);
+        if (isActive) setAuthorData(data);
+      } catch {
+        if (isActive) setAuthorData(null);
+      } finally {
+        if (isActive) setAuthorLoading(false);
+      }
+    };
+
+    setAuthorLoading(true);
+    fetchAuthor();
+
+    return () => {
+      isActive = false;
+    };
+  }, [post.realUserId, post.userId]);
 
   const imageFiles = (post.files || []).filter(
     (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif"),
@@ -112,73 +158,22 @@ const PostCard: React.FC<PostCardProps> = ({
     imageFiles.unshift({ url: post.imageUrl, mimeType: "image/jpeg" });
   }
 
-  useEffect(() => {
-    if (imageFiles.length <= 1) return;
-
-    const startAutoScroll = () => {
-      autoScrollTimerRef.current = setInterval(() => {
-        setCurrentImageIndex((prev) => {
-          const next = (prev + 1) % imageFiles.length;
-          flatListRef.current?.scrollToIndex({ index: next, animated: true });
-          return next;
-        });
-      }, AUTO_SCROLL_INTERVAL);
-    };
-
-    startAutoScroll();
-
-    return () => {
-      if (autoScrollTimerRef.current) clearInterval(autoScrollTimerRef.current);
-    };
-  }, [imageFiles.length]);
-
-  const handleMomentumScrollEnd = () => {
-    if (imageFiles.length <= 1) return;
-    if (autoScrollTimerRef.current) clearInterval(autoScrollTimerRef.current);
-
-    autoScrollTimerRef.current = setInterval(() => {
-      setCurrentImageIndex((prev) => {
-        const next = (prev + 1) % imageFiles.length;
-        flatListRef.current?.scrollToIndex({ index: next, animated: true });
-        return next;
-      });
-    }, AUTO_SCROLL_INTERVAL);
-  };
-
-  useEffect(() => {
-    if (!hasBeenViewed && onViewPost && currentUserId) {
-      viewTimerRef.current = setTimeout(() => {
-        onViewPost(post.id);
-        setHasBeenViewed(true);
-      }, 1000);
-    }
-    return () => {
-      if (viewTimerRef.current) clearTimeout(viewTimerRef.current);
-    };
-  }, [hasBeenViewed, onViewPost, post.id, currentUserId]);
-
   const handleCommentAdded = () => {
     if (onCommentCountUpdate) {
       onCommentCountUpdate(post.id, (post.commentCount || 0) + 1);
     }
   };
 
-  const formatViewCount = (count: number = 0) => {
-    if (count >= 1000000) return `${(count / 1000000).toFixed(1)}M`;
-    if (count >= 1000) return `${(count / 1000).toFixed(1)}K`;
-    return count.toString();
-  };
-
-  const shouldShowToggle = post.content && post.content.length > 180;
   const taggedUsers = post.taggedUsers ?? [];
 
   return (
-    <View style={styles.postCard}>
+    <View style={[styles.postCard, isHighlighted && styles.highlightedPostCard]}>
       <View style={styles.hangingLayout}>
         <View style={styles.avatarColumn}>
           <PostAvatar
             post={post}
-            currentUserRole={currentUserRole}
+            authorData={authorData}
+            authorLoading={authorLoading}
             currentUserId={currentUserId}
             onProfileClick={onProfileClick}
           />
@@ -187,32 +182,26 @@ const PostCard: React.FC<PostCardProps> = ({
         <View style={styles.contentColumn}>
           <PostHeader
             post={post}
+            authorData={authorData}
             currentUserRole={currentUserRole}
             currentUserId={currentUserId}
             onProfileClick={onProfileClick}
             getTimeAgo={getTimeAgo}
+            canPin={canPin}
+            onTogglePin={onTogglePin}
+            onDelete={onDelete}
           />
 
           {post.content && (
             <View style={styles.postContentContainer}>
-              <Text
-                style={styles.postContent}
-                numberOfLines={showFullContent ? undefined : 5}
-                ellipsizeMode="tail"
-              >
-                {post.content}
-              </Text>
-
-              {shouldShowToggle && (
-                <TouchableOpacity
-                  style={styles.toggleContainer}
-                  onPress={() => setShowFullContent(!showFullContent)}
-                >
-                  <Text style={styles.toggleText}>
-                    {showFullContent ? "See less" : "See more"}
-                  </Text>
-                </TouchableOpacity>
-              )}
+              <ExpandableText
+                text={post.content}
+                textStyle={styles.postContent}
+                collapsedLines={5}
+                minLengthToToggle={180}
+                buttonStyle={styles.toggleContainer}
+                buttonTextStyle={styles.toggleText}
+              />
             </View>
           )}
 
@@ -234,14 +223,17 @@ const PostCard: React.FC<PostCardProps> = ({
 
           {imageFiles.length > 0 && (
             <View style={styles.carouselContainer}>
-              <FlatList
-                ref={flatListRef}
-                data={imageFiles}
+              <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
-                keyExtractor={(_, index) => index.toString()}
-                renderItem={({ item, index }) => (
+                decelerationRate="normal"
+                bounces={false}
+                overScrollMode="never"
+                contentContainerStyle={styles.carouselContent}
+              >
+                {imageFiles.map((item, index) => (
                   <TouchableOpacity
+                    key={`${item.url}-${index}`}
                     activeOpacity={0.95}
                     onPress={() => {
                       if (onImagePress) {
@@ -256,27 +248,15 @@ const PostCard: React.FC<PostCardProps> = ({
                       resizeMode="cover"
                     />
                   </TouchableOpacity>
-                )}
-                onScroll={(e) => {
-                  const idx = Math.round(
-                    e.nativeEvent.contentOffset.x / IMAGE_WIDTH,
-                  );
-                  setCurrentImageIndex(idx);
-                }}
-                onMomentumScrollEnd={handleMomentumScrollEnd}
-                scrollEventThrottle={16}
-                decelerationRate="fast"
-                snapToInterval={IMAGE_WIDTH}
-                snapToAlignment="start"
-                disableIntervalMomentum
-                overScrollMode="never"
-                bounces={false}
-                getItemLayout={(_, index) => ({
-                  length: IMAGE_WIDTH,
-                  offset: IMAGE_WIDTH * index,
-                  index,
-                })}
-              />
+                ))}
+              </ScrollView>
+
+              {imageFiles.length > 1 && (
+                <View style={styles.imageCountBadge}>
+                  <Ionicons name="images-outline" size={14} color="#fffaf7" />
+                  <Text style={styles.imageCountText}>{imageFiles.length}</Text>
+                </View>
+              )}
             </View>
           )}
 
@@ -284,6 +264,8 @@ const PostCard: React.FC<PostCardProps> = ({
             <FilesList files={nonImageFiles} onFilePress={onFilePress} />
           )}
           {post.link && <LinkPreview link={post.link} />}
+
+          <AiReplyCard reply={post.aiReply} />
 
           <View style={styles.actions}>
             <TouchableOpacity
@@ -293,7 +275,7 @@ const PostCard: React.FC<PostCardProps> = ({
               <Ionicons
                 name={isLiked ? "heart" : "heart-outline"}
                 size={20}
-                color={isLiked ? "#ff5c93" : "#8ea0d0"}
+                color={isLiked ? "#a61f1f" : "#956a5f"}
               />
             </TouchableOpacity>
 
@@ -301,14 +283,14 @@ const PostCard: React.FC<PostCardProps> = ({
               style={styles.actionButton}
               onPress={() => setShowCommentsModal(true)}
             >
-              <Ionicons name="chatbubble-outline" size={19} color="#8ea0d0" />
+              <Ionicons name="chatbubble-outline" size={19} color="#956a5f" />
             </TouchableOpacity>
 
             <TouchableOpacity style={styles.actionButton}>
               <MaterialIcons
                 name="bookmark-outline"
                 size={21}
-                color="#8ea0d0"
+                color="#956a5f"
               />
             </TouchableOpacity>
           </View>
@@ -329,16 +311,10 @@ const PostCard: React.FC<PostCardProps> = ({
               </Text>
             )}
 
-            {(post.viewCount ?? 0) > 0 && (
-              <Text style={styles.statText}>
-                {formatViewCount(post.viewCount)} views
-              </Text>
-            )}
           </View>
         </View>
       </View>
 
-      {/* Likes Modal */}
       <Modal
         visible={showLikesModal}
         transparent
@@ -353,7 +329,7 @@ const PostCard: React.FC<PostCardProps> = ({
                 <Ionicons
                   name="close-circle-outline"
                   size={28}
-                  color="#ff5c93"
+                  color="#a61f1f"
                 />
               </TouchableOpacity>
             </View>
@@ -392,9 +368,6 @@ const PostCard: React.FC<PostCardProps> = ({
   );
 };
 
-// ────────────────────────────────────────────────
-//   LikeUserRow – shows one person who liked the post
-// ────────────────────────────────────────────────
 // eslint-disable-next-line react/display-name
 const LikeUserRow = React.memo(
   ({
@@ -427,9 +400,13 @@ const LikeUserRow = React.memo(
         onPress={() => onProfileClick(isYou ? "self" : userId)}
       >
         <View style={styles.likeAvatar}>
-          <Text style={styles.likeAvatarText}>
-            {(user?.firstname?.[0] || "U").toUpperCase()}
-          </Text>
+          {user?.profileImage ? (
+            <Image source={{ uri: user.profileImage }} style={styles.likeAvatarImage} />
+          ) : (
+            <Text style={styles.likeAvatarText}>
+              {(user?.firstname?.[0] || "U").toUpperCase()}
+            </Text>
+          )}
         </View>
         <Text style={styles.likeName}>
           {displayName}
@@ -460,7 +437,7 @@ const TaggedUsersDisplay = ({
   return (
     <View style={styles.taggedBox}>
       <View style={styles.taggedContent}>
-        <Ionicons name="people-outline" size={14} color="#ff8ab2" />
+        <Ionicons name="people-outline" size={14} color="#c28724" />
         <Text style={styles.taggedLabel}> Tagged: </Text>
 
         {visibleUsers.map((tag, index) => (
@@ -499,39 +476,13 @@ const TaggedUsersDisplay = ({
 /* ==================== POST AVATAR ==================== */
 const PostAvatar: React.FC<{
   post: Post;
-  currentUserRole?: UserRole;
+  authorData: UserData | null;
+  authorLoading: boolean;
   currentUserId?: string;
   onProfileClick: (userId?: string) => void;
-}> = ({ post, currentUserRole, currentUserId, onProfileClick }) => {
-  const [authorData, setAuthorData] = useState<UserData | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const fetchAuthor = async () => {
-      const userIdToFetch = post.realUserId || post.userId;
-      if (userIdToFetch && userIdToFetch !== "anonymous") {
-        try {
-          const data = await getUserData(userIdToFetch);
-          setAuthorData(data);
-        } catch (err) {
-          setAuthorData(null);
-        }
-      }
-      setLoading(false);
-    };
-    fetchAuthor();
-  }, [post.realUserId, post.userId]);
-
-  const getSafeRole = (role: string | undefined): UserRole => {
-    const validRoles: UserRole[] = ["student", "moderator", "teacher", "admin"];
-    return validRoles.includes(role as UserRole)
-      ? (role as UserRole)
-      : "student";
-  };
-
-  const authorRole: UserRole =
-    authorData?.role || getSafeRole(post.role) || "student";
-  const roleColor = getRoleColor(authorRole);
+}> = ({ post, authorData, authorLoading, currentUserId, onProfileClick }) => {
+  const authorRole = parseUserRole(authorData?.role) ?? parseUserRole(post.role);
+  const roleColor = getRoleColor(authorRole || "student");
   const isIdentityVisible = !post.isAnonymous;
 
   const canClickProfile =
@@ -544,15 +495,22 @@ const PostAvatar: React.FC<{
     if (authorData?.userId === currentUserId) {
       onProfileClick("self");
     } else {
-      onProfileClick(authorData.userId);
+      onProfileClick(
+        buildUserProfileHref({
+          userId: authorData.userId,
+          profileDocId: authorData.studentID,
+        }),
+      );
     }
   };
 
   return (
     <TouchableOpacity onPress={handleProfileClick} disabled={!canClickProfile}>
       <View style={styles.avatar}>
-        {loading ? (
-          <ActivityIndicator size="small" color="#8ea0d0" />
+        {authorLoading ? (
+          <ActivityIndicator size="small" color="#956a5f" />
+        ) : isIdentityVisible && resolveAvatarUri(authorData) ? (
+          <Image source={{ uri: resolveAvatarUri(authorData)! }} style={styles.avatarImage} />
         ) : isIdentityVisible ? (
           <Text style={[styles.avatarText, { color: roleColor }]}>
             {(
@@ -562,7 +520,7 @@ const PostAvatar: React.FC<{
             ).toUpperCase()}
           </Text>
         ) : (
-          <Ionicons name="person" size={18} color="#8ea0d0" />
+          <Ionicons name="person" size={18} color="#956a5f" />
         )}
       </View>
     </TouchableOpacity>
@@ -572,49 +530,44 @@ const PostAvatar: React.FC<{
 /* ==================== POST HEADER ==================== */
 const PostHeader: React.FC<{
   post: Post;
+  authorData: UserData | null;
   currentUserRole?: UserRole;
   currentUserId?: string;
   onProfileClick: (userId?: string) => void;
   getTimeAgo: (timestamp: any) => string;
-}> = ({ post, currentUserRole, currentUserId, onProfileClick, getTimeAgo }) => {
-  const [authorData, setAuthorData] = useState<UserData | null>(null);
-  const [, setLoading] = useState(true);
+  canPin?: boolean;
+  onTogglePin?: (postId: string, shouldPin: boolean) => void;
+  onDelete?: (postId: string) => void | Promise<void>;
+}> = ({
+  post,
+  authorData,
+  currentUserRole,
+  currentUserId,
+  onProfileClick,
+  getTimeAgo,
+  canPin = false,
+  onTogglePin,
+  onDelete,
+}) => {
   const [revealed, setRevealed] = useState(false);
+  const authorUserId = post.realUserId || post.userId;
+  const authorRole = parseUserRole(authorData?.role) ?? parseUserRole(post.role);
+  const roleColor = getRoleColor(authorRole || "student");
 
-  useEffect(() => {
-    const fetchAuthor = async () => {
-      const userIdToFetch = post.realUserId || post.userId;
-      if (userIdToFetch && userIdToFetch !== "anonymous") {
-        try {
-          const data = await getUserData(userIdToFetch);
-          setAuthorData(data);
-        } catch (err) {
-          setAuthorData(null);
-        }
-      }
-      setLoading(false);
-    };
-    fetchAuthor();
-  }, [post.realUserId, post.userId]);
-
-  const getSafeRole = (role: string | undefined): UserRole => {
-    const validRoles: UserRole[] = ["student", "moderator", "teacher", "admin"];
-    return validRoles.includes(role as UserRole)
-      ? (role as UserRole)
-      : "student";
-  };
-
-  const authorRole: UserRole =
-    authorData?.role || getSafeRole(post.role) || "student";
-  const roleColor = getRoleColor(authorRole);
-
-  const canSeeIdentity =
-    currentUserRole === "admin" ||
-    ((currentUserRole === "teacher" || currentUserRole === "moderator") &&
-      authorRole === "student");
+  const canSeeIdentity = canViewAnonymousIdentity(
+    currentUserRole,
+    authorRole,
+    post.isAnonymous ?? false,
+  );
 
   const canShowEyeIcon = (post.isAnonymous ?? true) && canSeeIdentity;
   const isIdentityVisible = !post.isAnonymous || (revealed && canSeeIdentity);
+  const canDelete = canDeleteContent({
+    viewerRole: currentUserRole,
+    viewerUserId: currentUserId,
+    authorUserId,
+    authorRole,
+  });
 
   const displayName = isIdentityVisible
     ? authorData
@@ -626,51 +579,108 @@ const PostHeader: React.FC<{
     isIdentityVisible &&
     !!authorData?.userId &&
     authorData.userId !== "anonymous";
+  const isPinned = !!post.pinnedAt;
+  const canOpenOptions = canPin || canDelete;
 
   const handleProfileClick = () => {
     if (!canClickProfile) return;
     if (authorData?.userId === currentUserId) {
       onProfileClick("self");
     } else {
-      onProfileClick(authorData.userId);
+      onProfileClick(
+        buildUserProfileHref({
+          userId: authorData.userId,
+          profileDocId: authorData.studentID,
+        }),
+      );
     }
+  };
+
+  const handleMorePress = () => {
+    if (!canOpenOptions) return;
+
+    const options: {
+      text: string;
+      style?: "cancel" | "default" | "destructive";
+      onPress?: () => void;
+    }[] = [];
+
+    if (canPin && onTogglePin) {
+      options.push({
+        text: isPinned ? "Unpin Post" : "Pin Post",
+        onPress: () => onTogglePin(post.id, !isPinned),
+      });
+    }
+
+    if (canDelete && onDelete) {
+      options.push({
+        text: "Delete",
+        style: "destructive",
+        onPress: () => onDelete(post.id),
+      });
+    }
+
+    Alert.alert("Post Options", undefined, [
+      ...options,
+      { text: "Cancel", style: "cancel" },
+    ]);
   };
 
   return (
     <View style={styles.header}>
-      <View style={styles.usernameRow}>
-        <TouchableOpacity
-          onPress={handleProfileClick}
-          disabled={!canClickProfile}
-        >
-          <Text style={styles.username}>{displayName}</Text>
-        </TouchableOpacity>
-
-        {isIdentityVisible && authorRole !== "student" && (
-          <View
-            style={[
-              styles.roleChip,
-              { backgroundColor: roleColor + "20", borderColor: roleColor },
-            ]}
-          >
-            <Text style={[styles.roleChipText, { color: roleColor }]}>
-              {getRoleDisplayName(authorRole)}
-            </Text>
-          </View>
-        )}
-
-        {canShowEyeIcon && (
+      <View style={styles.headerTopRow}>
+        <View style={styles.usernameRow}>
           <TouchableOpacity
-            onPress={() => setRevealed(!revealed)}
-            style={styles.eyeButton}
+            onPress={handleProfileClick}
+            disabled={!canClickProfile}
           >
-            <Ionicons
-              name={revealed ? "eye-off-outline" : "eye-outline"}
-              size={14}
-              color={revealed ? "#ff5c93" : "#8ea0d0"}
-            />
+            <Text style={styles.username}>{displayName}</Text>
           </TouchableOpacity>
-        )}
+
+          {isIdentityVisible && authorRole && authorRole !== "student" && (
+            <View
+              style={[
+                styles.roleChip,
+                { backgroundColor: roleColor + "20", borderColor: roleColor },
+              ]}
+            >
+              <Text style={[styles.roleChipText, { color: roleColor }]}>
+                {getRoleDisplayName(authorRole)}
+              </Text>
+            </View>
+          )}
+
+          {canShowEyeIcon && (
+            <TouchableOpacity
+              onPress={() => setRevealed(!revealed)}
+              style={styles.eyeButton}
+            >
+              <Ionicons
+                name={revealed ? "eye-off-outline" : "eye-outline"}
+                size={14}
+                color={revealed ? "#a61f1f" : "#956a5f"}
+              />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <View style={styles.headerRight}>
+          {isPinned && (
+            <View style={styles.pinnedBadge}>
+              <Ionicons name="pin" size={11} color="#fffaf7" />
+              <Text style={styles.pinnedBadgeText}>Pinned</Text>
+            </View>
+          )}
+          {canOpenOptions && (
+            <TouchableOpacity
+              style={styles.moreButton}
+              activeOpacity={0.7}
+              onPress={handleMorePress}
+            >
+              <Ionicons name="ellipsis-horizontal" size={18} color="#8f6a60" />
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       <Text style={styles.timestamp}>{getTimeAgo(post.createdAt)}</Text>
@@ -715,12 +725,12 @@ const FilesList: React.FC<{
           <Ionicons
             name={getFileIcon(file.mimeType)}
             size={18}
-            color="#4f9cff"
+            color="#c28724"
           />
           <Text style={styles.fileName} numberOfLines={1}>
             {file.name || getFileNameFromUrl(file.url)}
           </Text>
-          <Ionicons name="download-outline" size={14} color="#8ea0d0" />
+          <Ionicons name="download-outline" size={14} color="#956a5f" />
         </TouchableOpacity>
       ))}
     </View>
@@ -740,7 +750,7 @@ const LinkPreview: React.FC<{ link: { url: string; title: string } }> = ({
     }
     activeOpacity={0.7}
   >
-    <Ionicons name="link" size={14} color="#4f9cff" />
+    <Ionicons name="link" size={14} color="#c28724" />
     <View style={{ flex: 1, marginLeft: 6 }}>
       <Text style={styles.linkTitle} numberOfLines={1}>
         {link.title}
@@ -749,36 +759,41 @@ const LinkPreview: React.FC<{ link: { url: string; title: string } }> = ({
         {link.url}
       </Text>
     </View>
-    <Ionicons name="open-outline" size={13} color="#8ea0d0" />
+    <Ionicons name="open-outline" size={13} color="#956a5f" />
   </TouchableOpacity>
 );
 
 const styles = StyleSheet.create({
   postCard: {
-    backgroundColor: "#070c15",
-    marginBottom: 1,
+    backgroundColor: "#fffaf7",
     paddingVertical: 14,
-    paddingHorizontal: 16,
+    paddingHorizontal: FEED_HORIZONTAL_PADDING,
     borderBottomWidth: 1,
-    borderBottomColor: "#0e1320",
+    borderBottomColor: "#ead8cf",
+    overflow: "visible",
   },
-  hangingLayout: { flexDirection: "row" },
-  avatarColumn: { width: 40, marginRight: 12 },
-  contentColumn: { flex: 1 },
+  highlightedPostCard: {
+    borderLeftWidth: 4,
+    borderLeftColor: "#a61f1f",
+    backgroundColor: "#fff4ee",
+  },
+  hangingLayout: { flexDirection: "row", overflow: "visible" },
+  avatarColumn: { width: AVATAR_COLUMN_WIDTH, marginRight: AVATAR_COLUMN_GAP },
+  contentColumn: { flex: 1, overflow: "visible" },
 
   postContentContainer: { marginTop: 4, marginBottom: 8 },
-  postContent: { color: "#d8deff", fontSize: 15, lineHeight: 21 },
+  postContent: { color: "#4f1c17", fontSize: 15, lineHeight: 21 },
   toggleContainer: { alignSelf: "flex-start", marginTop: 4 },
-  toggleText: { color: "#ff5c93", fontSize: 14, fontWeight: "600" },
+  toggleText: { color: "#a61f1f", fontSize: 14, fontWeight: "600" },
 
   taggedBox: {
-    backgroundColor: "#1b2235",
+    backgroundColor: "#f8eee8",
     borderRadius: 12,
     paddingVertical: 8,
     paddingHorizontal: 12,
     marginVertical: 8,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#ecd2b0",
   },
   taggedContent: {
     flexDirection: "row",
@@ -787,25 +802,25 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   taggedLabel: {
-    color: "#8ea0d0",
+    color: "#8f6a60",
     fontSize: 13,
   },
   taggedName: {
-    color: "#ff8ab2",
+    color: "#a61f1f",
     fontWeight: "600",
     fontSize: 13.5,
   },
   taggedSeparator: {
-    color: "#8ea0d0",
+    color: "#8f6a60",
     fontSize: 13,
   },
   moreCount: {
-    color: "#8ea0d0",
+    color: "#c28724",
     fontWeight: "600",
     fontSize: 13.5,
   },
   showLessText: {
-    color: "#8ea0d0",
+    color: "#8f6a60",
     fontSize: 13,
     fontStyle: "italic",
   },
@@ -824,8 +839,8 @@ const styles = StyleSheet.create({
     gap: 14,
     marginTop: 4,
   },
-  statText: { color: "#8ea0d0", fontSize: 13, fontWeight: "500" },
-  statLink: { color: "#ff8ab2", fontSize: 13, fontWeight: "600" },
+  statText: { color: "#8f6a60", fontSize: 13, fontWeight: "500" },
+  statLink: { color: "#a61f1f", fontSize: 13, fontWeight: "600" },
 
   // Likes modal
   modalOverlay: {
@@ -837,10 +852,10 @@ const styles = StyleSheet.create({
   likesModalContainer: {
     width: "86%",
     maxHeight: "68%",
-    backgroundColor: "#0e1320",
+    backgroundColor: "#fffaf7",
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#ead8cf",
     overflow: "hidden",
   },
   modalHeader: {
@@ -850,9 +865,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 14,
     borderBottomWidth: 1,
-    borderBottomColor: "#243054",
+    borderBottomColor: "#ead8cf",
   },
-  modalTitle: { color: "#e9edff", fontSize: 17, fontWeight: "700" },
+  modalTitle: { color: "#4f1c17", fontSize: 17, fontWeight: "700" },
   likesScroll: { paddingHorizontal: 12, paddingVertical: 8 },
   likeRow: {
     flexDirection: "row",
@@ -864,15 +879,17 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#243054",
+    backgroundColor: "#f2dfd4",
     justifyContent: "center",
     alignItems: "center",
+    overflow: "hidden",
   },
-  likeAvatarText: { color: "#ff5c93", fontSize: 16, fontWeight: "bold" },
-  likeName: { color: "#e9edff", fontSize: 15 },
-  youBadge: { color: "#8ea0d0", fontSize: 13, fontStyle: "italic" },
+  likeAvatarImage: { width: "100%", height: "100%" },
+  likeAvatarText: { color: "#a61f1f", fontSize: 16, fontWeight: "bold" },
+  likeName: { color: "#4f1c17", fontSize: 15 },
+  youBadge: { color: "#8f6a60", fontSize: 13, fontStyle: "italic" },
   noLikesText: {
-    color: "#8ea0d0",
+    color: "#8f6a60",
     fontSize: 15,
     textAlign: "center",
     paddingVertical: 40,
@@ -881,12 +898,14 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#1b2235",
+    backgroundColor: "#f2dfd4",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1.5,
-    borderColor: "#243054",
+    borderColor: "#e3c3b8",
+    overflow: "hidden",
   },
+  avatarImage: { width: "100%", height: "100%" },
   avatarText: {
     fontSize: 17,
     fontWeight: "700",
@@ -896,14 +915,21 @@ const styles = StyleSheet.create({
   header: {
     marginBottom: 8,
   },
+  headerTopRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 8,
+  },
   usernameRow: {
     flexDirection: "row",
     alignItems: "center",
     flexWrap: "wrap",
     gap: 8,
+    flex: 1,
   },
   username: {
-    color: "#e9edff",
+    color: "#4f1c17",
     fontSize: 15,
     fontWeight: "700",
   },
@@ -920,8 +946,33 @@ const styles = StyleSheet.create({
   eyeButton: {
     padding: 3,
   },
+  headerRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  moreButton: {
+    paddingHorizontal: 2,
+    paddingTop: 2,
+    paddingBottom: 4,
+    alignSelf: "flex-start",
+  },
+  pinnedBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#8f3a2b",
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  pinnedBadgeText: {
+    color: "#fffaf7",
+    fontSize: 10.5,
+    fontWeight: "700",
+  },
   timestamp: {
-    color: "#8ea0d0",
+    color: "#8f6a60",
     fontSize: 12.5,
     marginTop: 3,
     letterSpacing: -0.1,
@@ -933,7 +984,7 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
   },
   seeMoreText: {
-    color: "#ff5c93",
+    color: "#a61f1f",
     fontSize: 14,
     fontWeight: "600",
   },
@@ -947,19 +998,39 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   taggedText: {
-    color: "#8ea0d0",
+    color: "#8f6a60",
     fontSize: 13,
   },
   carouselContainer: {
     marginVertical: 10,
-    borderRadius: 14,
-    overflow: "hidden",
-    backgroundColor: "#0e1320",
+    overflow: "visible",
+    position: "relative",
+  },
+  carouselContent: {
+    gap: 10,
+  },
+  imageCountBadge: {
+    position: "absolute",
+    right: 10,
+    bottom: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(79,28,23,0.82)",
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  imageCountText: {
+    color: "#fffaf7",
+    fontSize: 12,
+    fontWeight: "700",
   },
   carouselImage: {
     width: IMAGE_WIDTH,
     height: IMAGE_WIDTH * 1.25,
-    backgroundColor: "#0e1320",
+    backgroundColor: "#efe1d6",
+    borderRadius: 18,
   },
 
   mediaContainer: {
@@ -969,7 +1040,7 @@ const styles = StyleSheet.create({
     width: IMAGE_WIDTH,
     height: 220,
     borderRadius: 12,
-    backgroundColor: "#0e1320",
+    backgroundColor: "#efe1d6",
   },
 
   filesContainer: {
@@ -979,37 +1050,37 @@ const styles = StyleSheet.create({
   fileCard: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1b2235",
+    backgroundColor: "#f8eee8",
     padding: 10,
     borderRadius: 10,
     gap: 8,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#ecd2b0",
   },
   fileName: {
     flex: 1,
-    color: "#d8deff",
+    color: "#4f1c17",
     fontSize: 13,
   },
 
   linkPreview: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1b2235",
+    backgroundColor: "#f8eee8",
     borderRadius: 10,
     padding: 10,
     marginVertical: 10,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#ecd2b0",
   },
   linkTitle: {
-    color: "#e9edff",
+    color: "#4f1c17",
     fontSize: 13,
     fontWeight: "600",
     marginBottom: 2,
   },
   linkUrl: {
-    color: "#8ea0d0",
+    color: "#8f6a60",
     fontSize: 12,
   },
 });

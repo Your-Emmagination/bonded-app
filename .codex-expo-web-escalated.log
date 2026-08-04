@@ -1,0 +1,60 @@
+
+> bonded-app@1.0.0 web
+> expo start --web --port 8087
+
+Starting project at C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE
+React Compiler enabled
+Starting Metro Bundler
+Skipping dependency validation in offline mode
+Waiting on http://localhost:8087
+Logs for your project will appear below.
+Web node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░ 91.0% (854/895)
+λ node_modules\expo-router\node\render.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░ 89.3% (934/989)
+λ Bundled 3800ms node_modules\expo-router\node\render.js (1068 modules)
+"shadow*" style props are deprecated. Use "boxShadow".
+Web Bundled 6771ms node_modules\expo-router\entry.js (925 modules)
+Web node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+λ Bundled 215ms node_modules\expo-router\node\render.js (1 module)
+"shadow*" style props are deprecated. Use "boxShadow".
+Web Bundled 2614ms node_modules\expo-router\entry.js (1 module)
+Web node_modules\expo-router\entry.js ▓░░░░░░░░░░░░░░░  9.0% ( 30/159)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 98.5% (914/921)
+Web Bundled 7040ms node_modules\expo-router\entry.js (931 modules)
+ LOG  [web] Logs will appear in the browser console
+λ Bundled 91ms node_modules\expo-router\node\render.js (1 module)
+λ Bundled 73ms node_modules\expo-router\node\render.js (1 module)
+"shadow*" style props are deprecated. Use "boxShadow".
+"shadow*" style props are deprecated. Use "boxShadow".
+Web node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Web node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Web Bundled 3103ms node_modules\expo-router\entry.js (1 module)
+Web Bundled 2831ms node_modules\expo-router\entry.js (1 module)
+λ Bundled 67ms node_modules\expo-router\node\render.js (1 module)
+"shadow*" style props are deprecated. Use "boxShadow".
+Web Bundled 1203ms node_modules\expo-router\entry.js (1 module)
+Error: Premature close
+    at onclose (node:internal/streams/end-of-stream:162:30)
+    at processTicksAndRejections (node:internal/process/task_queues:85:11)
+C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\build\src\utils\errors.js:130
+    throw error;
+    ^
+
+Error: ENOENT: no such file or directory, watch 'C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\react-native-worklets\android\.cxx\RelWithDebInfo\4v5l1258\armeabi-v7a\CMakeFiles\CMakeTmp\CMakeFiles\cmTC_bb791.dir'
+    at FSWatcher.<computed> (node:internal/fs/watchers:254:19)
+    at Object.watch (node:fs:2549:36)
+    at FallbackWatcher._watchdir (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\metro-file-map\src\watchers\FallbackWatcher.js:119:33)
+    at C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\metro-file-map\src\watchers\FallbackWatcher.js:219:22
+    at Walker.<anonymous> (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\metro-file-map\src\watchers\FallbackWatcher.js:358:5)
+    at Walker.emit (node:events:518:28)
+    at C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\walker\lib\walker.js:69:16
+    at FSReqCallback.oncomplete (node:fs:187:23)
+    at FSReqCallback.callbackTrampoline (node:internal/async_hooks:130:17) {
+  errno: -4058,
+  syscall: 'watch',
+  code: 'ENOENT',
+  path: 'C:\\Users\\Emmanuel G. Encabo\\Documents\\REACT_NATIVE\\node_modules\\react-native-worklets\\android\\.cxx\\RelWithDebInfo\\4v5l1258\\armeabi-v7a\\CMakeFiles\\CMakeTmp\\CMakeFiles\\cmTC_bb791.dir',
+  filename: 'C:\\Users\\Emmanuel G. Encabo\\Documents\\REACT_NATIVE\\node_modules\\react-native-worklets\\android\\.cxx\\RelWithDebInfo\\4v5l1258\\armeabi-v7a\\CMakeFiles\\CMakeTmp\\CMakeFiles\\cmTC_bb791.dir'
+}
+
+Node.js v22.18.0

@@ -1,0 +1,10 @@
+name = "bonded-ai-worker"
+main = "src/index.js"
+compatibility_date = "2026-04-30"
+
+[vars]
+GROQ_MODEL = "llama-3.1-8b-instant"
+ALLOWED_ORIGIN = "*"
+
+[observability.logs]
+enabled = true

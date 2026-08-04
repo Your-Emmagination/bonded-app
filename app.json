@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "bonded-app",
+    "name": "BondEd",
     "slug": "bonded-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,19 +8,19 @@
     "scheme": "bondedapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "backgroundColor": "#0f1624",
+    "backgroundColor": "#5f0909",
     "ios": {
       "supportsTablet": true,
-      "googleServicesFile": "./google-services.json",
       "bundleIdentifier": "com.encabo.bondedapp",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
+      "softwareKeyboardLayoutMode": "resize",
       "package": "com.encabo.bondedapp",
       "googleServicesFile": "./google-services.json",
-      "backgroundColor": "#0f1624",
+      "backgroundColor": "#5f0909",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -38,6 +38,13 @@
     "plugins": [
       "expo-router",
       [
+        "expo-notifications",
+        {
+          "defaultChannel": "default",
+          "color": "#e0a53d"
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
@@ -48,13 +55,15 @@
             "backgroundColor": "#000000"
           }
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
     },
     "extra": {
+      "aiWorkerUrl": "https://bonded-ai-worker.encaboemmz77.workers.dev",
       "router": {},
       "eas": {
         "projectId": "fcf84c1d-4b2b-408b-b8ac-be878865d028"

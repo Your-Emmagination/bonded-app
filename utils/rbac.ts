@@ -1,11 +1,9 @@
-// utils/rbac.ts
-import { doc, getDoc } from "firebase/firestore";
+import type { User } from "firebase/auth";
+import { collection, doc, getDoc, getDocs, limit, query, where } from "firebase/firestore";
 import { db } from "../Firebase_configure";
 
-// Define all possible user roles
 export type UserRole = "student" | "moderator" | "teacher" | "admin";
 
-// Define permission structure for each user
 export interface UserPermissions {
   canPost: boolean;
   canComment: boolean;
@@ -25,7 +23,6 @@ export interface UserPermissions {
   canViewAnalytics?: boolean;
 }
 
-// Define the structure for a user record
 export interface UserData {
   studentID: string;
   firstname: string;
@@ -41,56 +38,105 @@ export interface UserData {
   userId: string;
 }
 
-/**
- * Fetches user data from Firestore and ensures the role is normalized to a string type
- */
-export async function getUserData(userId: string): Promise<UserData | null> {
-  try {
-    if (!userId) return null;
+type StudentRecord = {
+  userId?: string;
+  studentID?: string;
+  firstname?: string;
+  lastname?: string;
+  email?: string;
+  course?: string;
+  yearlvl?: string;
+  role?: unknown;
+  permissions?: UserPermissions;
+  profileImage?: string | null;
+  bio?: string;
+  isOnline?: boolean;
+};
 
-    const userDoc = await getDoc(doc(db, "students", userId));
-    if (!userDoc.exists()) return null;
+const userDataCache = new Map<string, UserData | null>();
+const pendingUserDataRequests = new Map<string, Promise<UserData | null>>();
 
-    const data = userDoc.data();
+export function parseUserRole(value: unknown): UserRole | undefined {
+  const roleMap: Record<number, UserRole> = {
+    1: "student",
+    2: "teacher",
+    3: "moderator",
+    4: "admin",
+  };
 
-    // Map numeric roles to string roles
-    const roleMap: Record<number, UserRole> = {
-      1: "student",
-      2: "teacher",
-      3: "moderator",
-      4: "admin",
-    };
-
-    // Normalize role type
-    const roleValue: UserRole =
-      typeof data.role === "number"
-        ? roleMap[data.role] || "student"
-        : (data.role as UserRole);
-
-    return {
-      studentID: data.studentID || userId,
-      firstname: data.firstname || "",
-      lastname: data.lastname || "",
-      email: data.email || "",
-      course: data.course,
-      yearlvl: data.yearlvl,
-      role: roleValue, // ✅ always string
-      permissions: data.permissions || getDefaultPermissions(),
-      profileImage: data.profileImage,
-      bio: data.bio,
-      isOnline: data.isOnline,
-      userId,
-    };
-  } catch (error) {
-    console.error("Error fetching user data:", error);
-    return null;
+  if (typeof value === "number") {
+    return roleMap[value];
   }
+
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase();
+    if (
+      normalized === "student" ||
+      normalized === "teacher" ||
+      normalized === "moderator" ||
+      normalized === "admin"
+    ) {
+      return normalized;
+    }
+  }
+
+  return undefined;
 }
 
-/**
- * Default permissions for new users (students)
- */
-function getDefaultPermissions(): UserPermissions {
+export function normalizeUserRole(value: unknown): UserRole {
+  const normalizedRole = parseUserRole(value);
+  if (normalizedRole) {
+    return normalizedRole;
+  }
+
+  return "student";
+}
+
+export function getStudentDocIdFromAuthUser(user: User | null | undefined): string | null {
+  if (!user) return null;
+  const emailPrefix = user.email?.split("@")[0]?.trim();
+  return emailPrefix || user.uid || null;
+}
+
+export async function getUserDataByAuthUser(user: User | null | undefined): Promise<UserData | null> {
+  if (!user) return null;
+
+  const emailPrefix = getStudentDocIdFromAuthUser(user);
+  const docIds = Array.from(
+    new Set([emailPrefix, user.uid].filter(Boolean) as string[]),
+  );
+
+  for (const docId of docIds) {
+    const data = await getUserData(docId);
+    if (data) {
+      return {
+        ...data,
+        userId: user.uid,
+      };
+    }
+  }
+
+  return null;
+}
+
+export async function resolveUserRoleForAuthUser(user: User | null | undefined): Promise<UserRole> {
+  if (!user) return "student";
+
+  try {
+    const idTokenResult = await user.getIdTokenResult(true);
+    const tokenRole = normalizeUserRole(idTokenResult.claims.role);
+    if (tokenRole !== "student" || idTokenResult.claims.role !== undefined) {
+      return tokenRole;
+    }
+  } catch (error) {
+    console.error("Error fetching role from auth token:", error);
+  }
+
+  const profile = await getUserDataByAuthUser(user);
+  return profile?.role || "student";
+}
+
+const getDefaultPermissions = (): UserPermissions => {
   return {
     canPost: true,
     canComment: true,
@@ -101,11 +147,187 @@ function getDefaultPermissions(): UserPermissions {
     canVotePoll: true,
     canCreatePoll: true,
   };
+};
+
+export function getPermissionsForRole(role: UserRole): UserPermissions {
+  const base = getDefaultPermissions();
+
+  if (role === "moderator") {
+    return {
+      ...base,
+      canDeleteAnyPost: true,
+      canDeleteAnyComment: true,
+      canViewReports: true,
+      canManageReports: true,
+      canViewAnalytics: true,
+    };
+  }
+
+  if (role === "teacher") {
+    return {
+      ...base,
+      canDeleteAnyPost: true,
+      canDeleteAnyComment: true,
+      canViewReports: true,
+      canManageReports: true,
+      canViewAnalytics: true,
+    };
+  }
+
+  if (role === "admin") {
+    return {
+      ...base,
+      canDeleteAnyPost: true,
+      canDeleteAnyComment: true,
+      canBanUser: true,
+      canViewReports: true,
+      canManageReports: true,
+      canManageUsers: true,
+      canManageRoles: true,
+      canViewAnalytics: true,
+    };
+  }
+
+  return base;
 }
 
-/**
- * Checks if user has a specific permission
- */
+const scoreCandidate = (candidate: StudentRecord & { id: string }, requestedId: string) => {
+  let score = 0;
+  if (candidate.profileImage) score += 8;
+  if (candidate.firstname) score += 2;
+  if (candidate.lastname) score += 2;
+  if (candidate.course) score += 1;
+  if (candidate.yearlvl) score += 1;
+  if (candidate.studentID && candidate.studentID === candidate.id) score += 4;
+  if (candidate.userId && candidate.userId === requestedId) score += 3;
+  return score;
+};
+
+const cacheUserDataForKeys = (
+  userData: UserData | null,
+  keys: (string | null | undefined)[],
+) => {
+  if (!userData) return;
+
+  const normalizedKeys = Array.from(
+    new Set(keys.map((key) => key?.trim()).filter(Boolean) as string[]),
+  );
+
+  normalizedKeys.forEach((key) => {
+    userDataCache.set(key, userData);
+  });
+};
+
+export function peekUserData(userId: string | null | undefined): UserData | null | undefined {
+  if (!userId) return undefined;
+  return userDataCache.get(userId);
+}
+
+export async function getUserData(userId: string): Promise<UserData | null> {
+  if (!userId) return null;
+
+  if (userDataCache.has(userId)) {
+    return userDataCache.get(userId) ?? null;
+  }
+
+  const pendingRequest = pendingUserDataRequests.get(userId);
+  if (pendingRequest) {
+    return pendingRequest;
+  }
+
+  const request = (async () => {
+  try {
+    const candidates: (StudentRecord & { id: string })[] = [];
+    const seen = new Set<string>();
+
+    const addCandidate = (docId: string, data: StudentRecord) => {
+      if (!docId || seen.has(docId)) return;
+      seen.add(docId);
+      candidates.push({ id: docId, ...data });
+    };
+
+    const loadCandidateDoc = async (docId?: string | null) => {
+      if (!docId || seen.has(docId)) return;
+      const studentDoc = await getDoc(doc(db, "students", docId));
+      if (studentDoc.exists()) {
+        addCandidate(studentDoc.id, studentDoc.data() as StudentRecord);
+      }
+    };
+
+    await loadCandidateDoc(userId);
+
+    const lookupQueries = [
+      query(collection(db, "students"), where("userId", "==", userId), limit(5)),
+      query(collection(db, "students"), where("studentID", "==", userId), limit(5)),
+    ];
+
+    for (const lookupQuery of lookupQueries) {
+      const snapshot = await getDocs(lookupQuery);
+      snapshot.docs.forEach((item) => {
+        addCandidate(item.id, item.data() as StudentRecord);
+      });
+    }
+
+    for (const candidate of [...candidates]) {
+      if (candidate.studentID && candidate.studentID !== candidate.id) {
+        await loadCandidateDoc(candidate.studentID);
+      }
+
+      const emailPrefix = candidate.email?.split("@")[0]?.trim();
+      if (emailPrefix && emailPrefix !== candidate.id) {
+        await loadCandidateDoc(emailPrefix);
+      }
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    candidates.sort((first, second) => scoreCandidate(second, userId) - scoreCandidate(first, userId));
+    const bestCandidate = candidates[0];
+    const roleValue = normalizeUserRole(bestCandidate.role);
+    const normalizedUserData = {
+      studentID: bestCandidate.studentID || bestCandidate.id || userId,
+      firstname: bestCandidate.firstname || "",
+      lastname: bestCandidate.lastname || "",
+      email: bestCandidate.email || "",
+      course: bestCandidate.course,
+      yearlvl: bestCandidate.yearlvl,
+      role: roleValue,
+      permissions: bestCandidate.permissions || getDefaultPermissions(),
+      profileImage: bestCandidate.profileImage,
+      bio: bestCandidate.bio,
+      isOnline: bestCandidate.isOnline,
+      userId: bestCandidate.userId || userId,
+    };
+
+    cacheUserDataForKeys(normalizedUserData, [
+      userId,
+      bestCandidate.id,
+      bestCandidate.studentID,
+      bestCandidate.userId,
+      bestCandidate.email?.split("@")[0]?.trim(),
+      ...candidates.flatMap((candidate) => [
+        candidate.id,
+        candidate.studentID,
+        candidate.userId,
+        candidate.email?.split("@")[0]?.trim(),
+      ]),
+    ]);
+
+    return normalizedUserData;
+  } catch (error) {
+    console.error("Error fetching user data:", error);
+    return null;
+  } finally {
+    pendingUserDataRequests.delete(userId);
+  }
+  })();
+
+  pendingUserDataRequests.set(userId, request);
+  return request;
+}
+
 export function hasPermission(
   permissions: UserPermissions | undefined,
   permission: keyof UserPermissions,
@@ -114,9 +336,6 @@ export function hasPermission(
   return permissions[permission] === true;
 }
 
-/**
- * Checks if a user has one of several roles
- */
 export function hasRole(
   userRole: UserRole | undefined,
   ...roles: UserRole[]
@@ -125,60 +344,50 @@ export function hasRole(
   return roles.includes(userRole);
 }
 
-/**
- * Utility: checks if user is moderator/teacher/admin
- */
 export function isStaff(role: UserRole | undefined): boolean {
   return hasRole(role, "moderator", "teacher", "admin");
 }
 
-/**
- * Utility: checks if user is admin
- */
 export function isAdmin(role: UserRole | undefined): boolean {
   return hasRole(role, "admin");
 }
 
-/**
- * Determines if a user can delete a post
- */
+export function canManageAiMemory(role: UserRole | undefined): boolean {
+  return hasRole(role, "moderator", "teacher", "admin");
+}
+
+export function canManageUsers(role: UserRole | undefined): boolean {
+  return hasRole(role, "admin");
+}
+
 export function canDeletePost(
   userRole: UserRole | undefined,
   permissions: UserPermissions | undefined,
   postUserId: string,
   currentUserId: string,
 ): boolean {
-  // Can delete own post
   if (
     postUserId === currentUserId &&
     hasPermission(permissions, "canDeleteOwnPost")
   ) {
     return true;
   }
-  // Can delete any post if they have the permission
   if (hasPermission(permissions, "canDeleteAnyPost")) {
     return true;
   }
   return false;
 }
 
-/**
- * Determines if a user can edit a post
- */
 export function canEditPost(
   permissions: UserPermissions | undefined,
   postUserId: string,
   currentUserId: string,
 ): boolean {
-  // Can only edit own post
   return (
     postUserId === currentUserId && hasPermission(permissions, "canEditOwnPost")
   );
 }
 
-/**
- * Returns a readable version of the role name
- */
 export function getRoleDisplayName(role: UserRole): string {
   const displayNames = {
     student: "Student",
@@ -189,9 +398,6 @@ export function getRoleDisplayName(role: UserRole): string {
   return displayNames[role] || "User";
 }
 
-/**
- * Returns a color associated with a role
- */
 export function getRoleColor(role: UserRole): string {
   const colors = {
     student: "#4f9cff",
@@ -202,21 +408,16 @@ export function getRoleColor(role: UserRole): string {
   return colors[role] || "#666";
 }
 
-/**
- * Determines if a user can view the identity of an anonymous post
- */
 export function canViewAnonymousIdentity(
   viewerRole: UserRole | undefined,
   postAuthorRole: UserRole | undefined,
   isAnonymous: boolean,
 ): boolean {
-  if (!isAnonymous) return true; // everyone can see if not anonymous
+  if (!isAnonymous) return true;
   if (!viewerRole) return false;
 
-  // Admins can see all anonymous posts
   if (viewerRole === "admin") return true;
 
-  // Teachers and Moderators can see anonymous student posts
   if (
     (viewerRole === "teacher" || viewerRole === "moderator") &&
     postAuthorRole === "student"
@@ -224,15 +425,36 @@ export function canViewAnonymousIdentity(
     return true;
   }
 
-  // Students cannot see any anonymous identities
   return false;
 }
 
-/**
- * Assigns a numeric level to each role (for comparison or hierarchy logic)
- */
+type DeleteContentAccessArgs = {
+  viewerRole: UserRole | undefined;
+  viewerUserId: string | null | undefined;
+  authorUserId: string | null | undefined;
+  authorRole: UserRole | undefined;
+};
 
-// To this:
+export function canDeleteContent({
+  viewerRole,
+  viewerUserId,
+  authorUserId,
+  authorRole,
+}: DeleteContentAccessArgs): boolean {
+  if (!viewerUserId || !authorUserId) return false;
+  if (viewerUserId === authorUserId) return true;
+  if (viewerRole === "admin") return true;
+
+  if (
+    (viewerRole === "teacher" || viewerRole === "moderator") &&
+    authorRole === "student"
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 export function getRoleHierarchyLevel(role: UserRole | undefined): number {
   if (!role) return 0;
   const hierarchy: Record<UserRole, number> = {

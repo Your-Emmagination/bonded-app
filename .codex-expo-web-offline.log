@@ -1,0 +1,18 @@
+
+> bonded-app@1.0.0 web
+> expo start --web --port 8084
+
+Starting project at C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE
+React Compiler enabled
+Starting Metro Bundler
+Skipping dependency validation in offline mode
+Error: spawn EPERM
+Error: spawn EPERM
+    at ChildProcess.spawn (node:internal/child_process:420:11)
+    at Object.spawn (node:child_process:786:9)
+    at baseOpen (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\better-opn\node_modules\open\index.js:224:34)
+    at openBrowserAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\utils\open.ts:20:12)
+    at MetroBundlerDevServer.openPlatformAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\start\server\BundlerDevServer.ts:427:7)
+    at async Promise.allSettled (index 2)
+    at openPlatformsAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\start\server\openPlatforms.ts:10:19)
+    at startAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\start\startAsync.ts:114:3)

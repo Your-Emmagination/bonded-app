@@ -6,16 +6,25 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_AI_WORKER_URL": "https://bonded-ai-worker.encaboemmz77.workers.dev"
+      }
     },
     "preview": {
       "distribution": "internal",
-        "android": {
+      "env": {
+        "EXPO_PUBLIC_AI_WORKER_URL": "https://bonded-ai-worker.encaboemmz77.workers.dev"
+      },
+      "android": {
         "buildType": "apk"
       }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_AI_WORKER_URL": "https://bonded-ai-worker.encaboemmz77.workers.dev"
+      }
     }
   },
   "submit": {

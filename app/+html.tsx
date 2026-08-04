@@ -1,3 +1,4 @@
+import React from 'react';
 import { ScrollViewStyleReset } from 'expo-router/html';
 import type { PropsWithChildren } from 'react';
 
@@ -14,7 +15,7 @@ export default function Root({ children }: PropsWithChildren) {
 
         {/* PWA Essentials */}
         <link rel="manifest" href="/manifest.json" />
-        <meta name="theme-color" content="#0f1624" />
+        <meta name="theme-color" content="#5f0909" />
         <meta name="background-color" content="#ffffff" />
 
         {/* Apple-specific */}

@@ -1,6 +1,6 @@
-// EventCalendarScreen.tsx - FIXED: Only "VIEW MORE" opens modal
+// EventCalendarScreen.tsx
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   collection,
   deleteDoc,
@@ -28,8 +28,8 @@ type CalendarEvent = {
   id: string;
   title: string;
   description?: string;
-  date: string; // Format: "YYYY-MM-DD"
-  startTime?: string; // Format: "HH:mm"
+  date: string; 
+  startTime?: string; 
   endTime?: string;
   category: "morning" | "afternoon" | "evening" | "all-day";
   createdBy: string;
@@ -46,7 +46,9 @@ type GroupedEvents = {
 
 const EventCalendarScreen = () => {
   const router = useRouter();
-  const [, setEvents] = useState<CalendarEvent[]>([]);
+  const { eventId } = useLocalSearchParams<{ eventId?: string | string[] }>();
+  const resolvedEventId = Array.isArray(eventId) ? eventId[0] : eventId;
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [groupedEvents, setGroupedEvents] = useState<GroupedEvents>({});
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<CalendarEvent[]>([]);
@@ -90,6 +92,25 @@ const EventCalendarScreen = () => {
     return unsubscribe;
   }, []);
 
+  useEffect(() => {
+    if (!resolvedEventId || events.length === 0) return;
+
+    const targetEvent = events.find((event) => event.id === resolvedEventId);
+    if (!targetEvent) return;
+
+    const eventsForDate = events
+      .filter((event) => event.date === targetEvent.date)
+      .sort((first, second) => {
+        const firstTime = first.startTime || "";
+        const secondTime = second.startTime || "";
+        return firstTime.localeCompare(secondTime);
+      });
+
+    setSelectedDate(targetEvent.date);
+    setSelectedEvents(eventsForDate);
+    setModalVisible(true);
+  }, [events, resolvedEventId]);
+
   const groupEventsByMonth = (eventList: CalendarEvent[]) => {
     const grouped: GroupedEvents = {};
 
@@ -114,7 +135,6 @@ const EventCalendarScreen = () => {
     setGroupedEvents(grouped);
   };
 
-  // ✅ FIXED: Separate handler for "VIEW MORE" button
   const handleViewMorePress = (
     date: string,
     eventsForDate: CalendarEvent[],
@@ -162,7 +182,7 @@ const EventCalendarScreen = () => {
       morning: "#ff9f43",
       afternoon: "#4f9cff",
       evening: "#9b59b6",
-      "all-day": "#ff5c93",
+      "all-day": "#e0a53d",
     };
     return colors[category as keyof typeof colors] || "#4f9cff";
   };
@@ -172,30 +192,38 @@ const EventCalendarScreen = () => {
 
     return (
       <View style={styles.monthSection}>
-        <Text style={styles.monthHeader}>{item}</Text>
+        <View style={styles.monthHeaderRow}>
+          <Text style={styles.monthHeader}>{item}</Text>
+          <View style={styles.monthAccent} />
+        </View>
         {dates.map((date) => {
           const eventsForDate = groupedEvents[item][date];
           const dateNum = new Date(date).getDate();
 
           return (
-            // ✅ FIXED: Changed from TouchableOpacity to View (no press action)
             <View key={date} style={styles.dateCard}>
               <View style={styles.dateNumber}>
                 <Text style={styles.dateNumberText}>{dateNum}</Text>
               </View>
 
               <View style={styles.eventPreview}>
+                <Text style={styles.eventDateLabel}>
+                  {new Date(date).toLocaleDateString("en-US", {
+                    weekday: "short",
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </Text>
                 <Text style={styles.eventTitle} numberOfLines={1}>
                   {eventsForDate[0].title}
                 </Text>
                 {eventsForDate.length > 1 && (
                   <Text style={styles.moreEvents}>
-                    +{eventsForDate.length - 1} more
+                    +{eventsForDate.length - 1} more scheduled
                   </Text>
                 )}
               </View>
 
-              {/* ✅ FIXED: Only this button opens the modal */}
               <TouchableOpacity
                 style={styles.viewMoreButton}
                 onPress={() => handleViewMorePress(date, eventsForDate)}
@@ -212,15 +240,16 @@ const EventCalendarScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
+      <View style={styles.contentShell}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color="#b8c7ff" />
+          <Ionicons name="arrow-back" size={24} color="#7a3b2e" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Event Calendar</Text>
         {canManageEvents() && (
           <TouchableOpacity onPress={() => router.push("/CreateEventScreen")}>
-            <Ionicons name="add-circle" size={28} color="#ff5c93" />
+            <Ionicons name="add-circle" size={28} color="#e0a53d" />
           </TouchableOpacity>
         )}
         {!canManageEvents() && <View style={{ width: 28 }} />}
@@ -233,7 +262,7 @@ const EventCalendarScreen = () => {
         </View>
       ) : Object.keys(groupedEvents).length === 0 ? (
         <View style={styles.emptyContainer}>
-          <Ionicons name="calendar-outline" size={80} color="#3a4a6a" />
+          <Ionicons name="calendar-outline" size={80} color="#b88f87" />
           <Text style={styles.emptyText}>No events scheduled</Text>
           {canManageEvents() && (
             <TouchableOpacity
@@ -268,7 +297,7 @@ const EventCalendarScreen = () => {
                 {selectedDate ? formatDate(selectedDate) : ""}
               </Text>
               <TouchableOpacity onPress={() => setModalVisible(false)}>
-                <Ionicons name="close" size={28} color="#b8c7ff" />
+                <Ionicons name="close" size={28} color="#7a3b2e" />
               </TouchableOpacity>
             </View>
 
@@ -279,6 +308,7 @@ const EventCalendarScreen = () => {
                   key={event.id}
                   style={[
                     styles.eventCard,
+                    resolvedEventId === event.id && styles.highlightedEventCard,
                     { borderLeftColor: getCategoryColor(event.category) },
                   ]}
                 >
@@ -291,7 +321,7 @@ const EventCalendarScreen = () => {
                         <Ionicons
                           name="trash-outline"
                           size={20}
-                          color="#ff5c93"
+                          color="#e0a53d"
                         />
                       </TouchableOpacity>
                     )}
@@ -309,7 +339,7 @@ const EventCalendarScreen = () => {
                         <Ionicons
                           name="time-outline"
                           size={16}
-                          color="#b8c7ff"
+                          color="#7a3b2e"
                         />
                         <Text style={styles.metaText}>
                           {event.startTime}
@@ -322,7 +352,7 @@ const EventCalendarScreen = () => {
                       <Ionicons
                         name="person-outline"
                         size={16}
-                        color="#b8c7ff"
+                        color="#7a3b2e"
                       />
                       <Text style={styles.metaText}>{event.createdByName}</Text>
                     </View>
@@ -344,6 +374,7 @@ const EventCalendarScreen = () => {
           </View>
         </View>
       </Modal>
+      </View>
     </SafeAreaView>
   );
 };
@@ -351,7 +382,11 @@ const EventCalendarScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0e1320",
+    backgroundColor: "#5f0909",
+  },
+  contentShell: {
+    flex: 1,
+    backgroundColor: "#f6f1ed",
   },
   header: {
     flexDirection: "row",
@@ -360,12 +395,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#1b2235",
+    borderBottomColor: "#fffaf7",
   },
   headerTitle: {
     fontSize: 18,
     fontWeight: "bold",
-    color: "#b8c7ff",
+    color: "#7a3b2e",
     letterSpacing: 1,
   },
   listContent: {
@@ -375,28 +410,43 @@ const styles = StyleSheet.create({
   monthSection: {
     marginBottom: 24,
   },
+  monthHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 12,
+  },
   monthHeader: {
     fontSize: 20,
     fontWeight: "bold",
-    color: "#ff5c93",
-    marginBottom: 12,
+    color: "#5f0909",
     letterSpacing: 0.5,
+  },
+  monthAccent: {
+    flex: 1,
+    height: 1,
+    marginLeft: 12,
+    backgroundColor: "#d8b7ab",
   },
   dateCard: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffdfb",
     borderRadius: 12,
     padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "rgba(255, 92, 147, 0.2)",
+    borderColor: "#eadbd4",
+    shadowColor: "#7a3b2e",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
   dateNumber: {
     width: 50,
     height: 50,
     borderRadius: 25,
-    backgroundColor: "#ff5c93",
+    backgroundColor: "#7d1d13",
     justifyContent: "center",
     alignItems: "center",
     marginRight: 16,
@@ -404,7 +454,15 @@ const styles = StyleSheet.create({
   dateNumberText: {
     fontSize: 20,
     fontWeight: "bold",
-    color: "#fff",
+    color: "#fff7f1",
+  },
+  eventDateLabel: {
+    fontSize: 11,
+    color: "#9b766c",
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+    marginBottom: 3,
   },
   eventPreview: {
     flex: 1,
@@ -412,23 +470,24 @@ const styles = StyleSheet.create({
   eventTitle: {
     fontSize: 16,
     fontWeight: "600",
-    color: "#e9edff",
+    color: "#4d1b17",
     marginBottom: 4,
   },
   moreEvents: {
     fontSize: 12,
-    color: "#b8c7ff",
+    color: "#7a3b2e",
   },
   viewMoreButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-    backgroundColor: "rgba(255, 92, 147, 0.2)",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "#7d1d13",
   },
   viewMoreText: {
     fontSize: 12,
-    fontWeight: "600",
-    color: "#ff5c93",
+    fontWeight: "700",
+    color: "#fff7f1",
+    letterSpacing: 0.4,
   },
   modalOverlay: {
     flex: 1,
@@ -436,7 +495,7 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
   },
   modalContent: {
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingTop: 20,
@@ -449,22 +508,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingBottom: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#2a3650",
+    borderBottomColor: "#eadbd4",
   },
   modalDate: {
     fontSize: 18,
     fontWeight: "bold",
-    color: "#e9edff",
+    color: "#4d1b17",
   },
   eventsScrollView: {
     padding: 20,
   },
   eventCard: {
-    backgroundColor: "#243054",
+    backgroundColor: "#f8efea",
     borderRadius: 12,
     padding: 16,
     marginBottom: 16,
     borderLeftWidth: 4,
+    borderWidth: 1,
+    borderColor: "#eadbd4",
+  },
+  highlightedEventCard: {
+    backgroundColor: "#fff5df",
+    borderColor: "#e0a53d",
   },
   eventHeader: {
     flexDirection: "row",
@@ -475,12 +540,12 @@ const styles = StyleSheet.create({
   eventCardTitle: {
     fontSize: 18,
     fontWeight: "bold",
-    color: "#e9edff",
+    color: "#4d1b17",
     flex: 1,
   },
   eventDescription: {
     fontSize: 14,
-    color: "#b8c7ff",
+    color: "#7a3b2e",
     marginBottom: 12,
     lineHeight: 20,
   },
@@ -494,7 +559,7 @@ const styles = StyleSheet.create({
   },
   metaText: {
     fontSize: 13,
-    color: "#b8c7ff",
+    color: "#7a3b2e",
     marginLeft: 8,
   },
   categoryBadge: {
@@ -516,7 +581,7 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     fontSize: 16,
-    color: "#b8c7ff",
+    color: "#7a3b2e",
   },
   emptyContainer: {
     flex: 1,
@@ -526,12 +591,12 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 18,
-    color: "#b8c7ff",
+    color: "#7a3b2e",
     marginTop: 16,
     marginBottom: 24,
   },
   createButton: {
-    backgroundColor: "#ff5c93",
+    backgroundColor: "#e0a53d",
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 24,

@@ -19,7 +19,7 @@ function getUserConfig(userType) {
   
   const configs = {
     student: { domain: "@student.csap", role: "student" },
-    moderator: { domain: "@student.csap", role: "moderator" }, // Uses student domain but has moderator role
+    moderator: { domain: "@student.csap", role: "moderator" },
     teacher: { domain: "@teacher.csap", role: "teacher" },
     admin: { domain: "@admin.csap", role: "admin" },
   };
@@ -41,7 +41,7 @@ fs.createReadStream(csvFilePath)
       const lastname = student.lastname?.trim();
       const course = student.course?.trim();
       const yearlvl = student.yearlvl?.trim();
-      const userType = student.userType?.trim() || "student"; // Default to student if not specified
+      const userType = student.userType?.trim() || "student"; 
 
       if (!studentID || !lastname) {
         console.log(`⚠️ Skipped record with missing studentID or lastname.`);

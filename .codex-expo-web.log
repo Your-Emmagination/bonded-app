@@ -1,0 +1,19 @@
+
+> bonded-app@1.0.0 web
+> expo start --web --port 8083
+
+Starting project at C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE
+React Compiler enabled
+Starting Metro Bundler
+TypeError: fetch failed
+TypeError: fetch failed
+    at node:internal/deps/undici/undici:13510:13
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at fetchWithCredentials (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\api\rest\client.ts:98:24)
+    at cachedFetch (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\api\rest\cache\wrapFetchWithCache.ts:26:24)
+    at getNativeModuleVersionsAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\api\getNativeModuleVersions.ts:39:20)
+    at getVersionedNativeModulesAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\start\doctor\dependencies\bundledNativeModules.ts:33:14)
+    at getCombinedKnownVersionsAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\start\doctor\dependencies\getVersionedPackages.ts:58:7)
+    at getVersionedDependenciesAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\start\doctor\dependencies\validateDependenciesVersions.ts:100:33)
+    at validateDependenciesVersionsAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\start\doctor\dependencies\validateDependenciesVersions.ts:49:25)
+    at startAsync (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\@expo\cli\src\start\startAsync.ts:110:5)

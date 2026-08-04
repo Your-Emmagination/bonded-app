@@ -1,0 +1,25 @@
+
+> bonded-app@1.0.0 web
+> expo start --web --port 8086
+
+Starting project at C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE
+React Compiler enabled
+Starting Metro Bundler
+Skipping dependency validation in offline mode
+Waiting on http://localhost:8086
+Logs for your project will appear below.
+Failed to construct transformer:  Error: spawn EPERM
+    at ChildProcess.spawn (node:internal/child_process:420:11)
+    at spawn (node:child_process:786:9)
+    at fork (node:child_process:174:10)
+    at ChildProcessWorker.initialize (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\jest-worker\build\workers\ChildProcessWorker.js:144:45)
+    at new ChildProcessWorker (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\jest-worker\build\workers\ChildProcessWorker.js:100:10)
+    at WorkerPool.createWorker (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\jest-worker\build\WorkerPool.js:30:12)
+    at new BaseWorkerPool (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\jest-worker\build\base\BaseWorkerPool.js:55:27)
+    at new WorkerPool (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\jest-worker\build\WorkerPool.js:18:1)
+    at new Worker (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\jest-worker\build\index.js:141:26)
+    at WorkerFarm._makeFarm (C:\Users\Emmanuel G. Encabo\Documents\REACT_NATIVE\node_modules\metro\src\DeltaBundler\WorkerFarm.js:70:12) {
+  errno: -4048,
+  code: 'EPERM',
+  syscall: 'spawn'
+}

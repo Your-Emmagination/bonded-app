@@ -12,11 +12,22 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { onAuthStateChanged } from "firebase/auth";
+import { emitHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
+import { auth } from "../../../Firebase_configure";
+import { subscribeToUnreadNotificationCount } from "@/utils/notifications";
+import { resolveUserRoleForAuthUser } from "@/utils/rbac";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 
-function TabItem({ isFocused, color, iconName, label, onPress }: any) {
+function TabItem({
+  isFocused,
+  color,
+  iconName,
+  label,
+  onPress,
+  showBadge = false,
+}: any) {
   const fadeAnim = useRef(new Animated.Value(isFocused ? 1 : 0)).current;
   const scaleAnim = useRef(new Animated.Value(isFocused ? 1.05 : 1)).current;
 
@@ -40,12 +51,13 @@ function TabItem({ isFocused, color, iconName, label, onPress }: any) {
           borderRadius: 12,
           justifyContent: "center",
           alignItems: "center",
-          backgroundColor: isFocused ? "rgba(255, 59, 127, 0.15)" : "transparent",
+          backgroundColor: isFocused ? "rgba(224, 165, 61, 0.22)" : "transparent",
           transform: [{ scale: scaleAnim }],
           opacity: fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }),
         }}
       >
         <Ionicons name={iconName} size={24} color={color} />
+        {showBadge && <View style={styles.notificationBadge} />}
         <Text numberOfLines={1} style={{ color, fontSize: 11, marginTop: 3, textAlign: "center" }}>
           {label}
         </Text>
@@ -54,7 +66,7 @@ function TabItem({ isFocused, color, iconName, label, onPress }: any) {
   );
 }
 
-// ✅ Defines visible tabs per role — order here = visual order in tab bar
+// Defines visible tabs per role — order here = visual order in tab bar
 const studentRoutes = [
   { name: "HomeScreen", label: "Home", icon: "home" },
   { name: "NotificationsScreen", label: "Notifications", icon: "notifications" },
@@ -70,17 +82,32 @@ const privilegedRoutes = [
 
 export default function TabLayout() {
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [authUserId, setAuthUserId] = useState<string | null>(null);
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
 
   useEffect(() => {
-    AsyncStorage.getItem("userRole").then((role) => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        setAuthUserId(null);
+        setUserRole("student");
+        return;
+      }
+
+      setAuthUserId(user.uid);
+      const role = await resolveUserRoleForAuthUser(user);
       setUserRole(role?.toLowerCase() || "student");
     });
+    return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    return subscribeToUnreadNotificationCount(authUserId, setUnreadNotificationCount);
+  }, [authUserId]);
 
   if (userRole === null) {
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#0f1624", justifyContent: "center", alignItems: "center" }}>
-        <ActivityIndicator size="large" color="#ff3b7f" />
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#5f0909", justifyContent: "center", alignItems: "center" }}>
+        <ActivityIndicator size="large" color="#e0a53d" />
       </SafeAreaView>
     );
   }
@@ -89,7 +116,7 @@ export default function TabLayout() {
   const visibleRoutes = isPrivileged ? privilegedRoutes : studentRoutes;
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#0f1624" }} edges={["bottom"]}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#5f0909" }} edges={["bottom"]}>
       <Tabs
         screenOptions={{ headerShown: false, tabBarStyle: { display: "none" } }}
         initialRouteName={isPrivileged ? "DashboardScreen" : "HomeScreen"}
@@ -97,17 +124,21 @@ export default function TabLayout() {
           <View style={{
             position: "absolute", bottom: 0, left: 0, right: 0,
             flexDirection: "row", justifyContent: "space-around", alignItems: "center",
-            backgroundColor: "#0f1624", borderTopWidth: 1, borderTopColor: "#ff3b7f",
+            backgroundColor: "#5f0909", borderTopWidth: 1, borderTopColor: "#7f2220",
             height: 70, paddingBottom: Platform.OS === "android" ? 5 : 15,
           }}>
             {state.routes.map((route: any, index: number) => {
               const isFocused = state.index === index;
               const routeInfo = visibleRoutes.find((r) => r.name === route.name);
-              if (!routeInfo) return null; // ✅ Hides screens not in visibleRoutes
+              if (!routeInfo) return null; 
 
-              const color = isFocused ? "#ff3b7f" : "#777";
+              const color = isFocused ? "#e0a53d" : "#e7cdbf";
               const onPress = () => {
                 const event = navigation.emit({ type: "tabPress", target: route.key, canPreventDefault: true });
+                if (route.name === "HomeScreen" && isFocused) {
+                  emitHomeFeedScrollToTop();
+                  return;
+                }
                 if (!isFocused && !event.defaultPrevented) navigation.navigate(route.name);
               };
 
@@ -118,6 +149,9 @@ export default function TabLayout() {
                   color={color}
                   iconName={routeInfo.icon as any}
                   label={routeInfo.label}
+                  showBadge={
+                    route.name === "NotificationsScreen" && unreadNotificationCount > 0
+                  }
                   onPress={onPress}
                 />
               );
@@ -125,11 +159,6 @@ export default function TabLayout() {
           </View>
         )}
       >
-        {/*
-          ✅ ALWAYS declare ALL screens in the desired visual order.
-          Control visibility via the visibleRoutes filter in tabBar, NOT by
-          conditionally rendering Tabs.Screen — that causes ordering bugs.
-        */}
         <Tabs.Screen name="DashboardScreen" options={!isPrivileged ? { href: null } : {}} />
         <Tabs.Screen name="HomeScreen" />
         <Tabs.Screen name="NotificationsScreen" />
@@ -138,3 +167,17 @@ export default function TabLayout() {
     </SafeAreaView>
   );
 }
+
+const styles = {
+  notificationBadge: {
+    position: "absolute" as const,
+    top: 5,
+    right: SCREEN_WIDTH / 8 - 4,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: "#ffcf5a",
+    borderWidth: 2,
+    borderColor: "#5f0909",
+  },
+};

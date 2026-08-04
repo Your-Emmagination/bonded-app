@@ -1,16 +1,26 @@
 // app/_layout.tsx
+import React from "react";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { auth } from "../Firebase_configure";
 import { ActivityIndicator, View } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { StatusBar } from "expo-status-bar";
+import { resolveUserRoleForAuthUser } from "@/utils/rbac";
+import {
+  addPushNotificationResponseListener,
+  getLastPushNotificationResponse,
+  handlePushNotificationNavigation,
+  isPushNotificationsSupported,
+  registerDeviceForPushNotifications,
+} from "@/utils/pushNotifications";
 
 export default function RootLayout() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const router = useRouter();
   const segments = useSegments();
   const hasNavigated = useRef(false);
+  const lastHandledNotificationId = useRef<string | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -36,21 +46,12 @@ export default function RootLayout() {
     } else if (user && onLoginScreen && !hasNavigated.current) {
       hasNavigated.current = true;
 
-      AsyncStorage.getItem("userRole").then((role) => {
+      resolveUserRoleForAuthUser(user).then((role) => {
         const normalizedRole = role?.toLowerCase() || "student";
         const isPrivileged = ["moderator", "teacher", "admin"].includes(normalizedRole);
 
-        // ✅ Always replace to HomeScreen — this puts (main) + (tabs) at the
-        //    root of the stack. The tab layout handles showing Dashboard first
-        //    for privileged users via initialRouteName.
-        //    
-        //    All other screens (CreatePostScreen, EventCalendarScreen, etc.) now
-        //    live inside (main)/_layout.tsx's Stack, so pressing back from them
-        //    correctly returns to the tab that triggered the navigation.
         if (isPrivileged) {
-          router.replace("/(main)/(tabs)/HomeScreen");
-          // Switch active tab to Dashboard without pushing a new stack entry
-          router.navigate("/(main)/(tabs)/DashboardScreen");
+          router.replace("/(main)/(tabs)/DashboardScreen");
         } else {
           router.replace("/(main)/(tabs)/HomeScreen");
         }
@@ -58,21 +59,108 @@ export default function RootLayout() {
     }
   }, [user, segments, router]);
 
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    if (!isPushNotificationsSupported()) {
+      return;
+    }
+
+    registerDeviceForPushNotifications(user).catch((error) => {
+      console.error("Error registering device for push notifications:", error);
+    });
+  }, [user]);
+
+  useEffect(() => {
+    if (!isPushNotificationsSupported()) {
+      return;
+    }
+
+    let isActive = true;
+    let subscription: { remove: () => void } | null = null;
+
+    const handleResponse = (response: unknown) => {
+      const typedResponse = response as
+        | {
+            notification?: {
+              request?: { identifier?: string };
+            };
+          }
+        | null
+        | undefined;
+      const notificationId = typedResponse?.notification?.request?.identifier;
+
+      if (!notificationId || lastHandledNotificationId.current === notificationId) {
+        return;
+      }
+
+      const wasHandled = handlePushNotificationNavigation(
+        response as Parameters<typeof handlePushNotificationNavigation>[0],
+        router,
+      );
+      if (wasHandled) {
+        lastHandledNotificationId.current = notificationId;
+      }
+    };
+
+    getLastPushNotificationResponse()
+      .then((response) => {
+        if (isActive) {
+          handleResponse(response);
+        }
+      })
+      .catch((error) => {
+        console.error("Error reading last notification response:", error);
+      });
+
+    addPushNotificationResponseListener((response) => {
+      if (isActive) {
+        handleResponse(response);
+      }
+    })
+      .then((nextSubscription) => {
+        if (!isActive) {
+          nextSubscription?.remove();
+          return;
+        }
+
+        subscription = nextSubscription;
+      })
+      .catch((error) => {
+        console.error("Error attaching notification response listener:", error);
+      });
+
+    return () => {
+      isActive = false;
+      subscription?.remove();
+    };
+  }, [router]);
+
   if (user === undefined) {
     return (
-      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#0f1624" }}>
-        <ActivityIndicator size="large" color="#ff3b7f" />
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f6f1ed" }}>
+        <StatusBar style="dark" backgroundColor="#f6f1ed" />
+        <ActivityIndicator size="large" color="#e0a53d" />
       </View>
     );
   }
 
   return (
-    // This root Stack only has two entries: LoginScreen and (main).
-    // All in-app navigation (tabs + pushed screens) is handled by
-    // app/(main)/_layout.tsx — keeping back-navigation self-contained.
-    <Stack screenOptions={{ headerShown: false, gestureEnabled: false }}>
-      <Stack.Screen name="LoginScreen" />
-      <Stack.Screen name="(main)" />
-    </Stack>
+    <>
+      <StatusBar style="dark" backgroundColor="#f6f1ed" />
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          gestureEnabled: false,
+          animation: "fade",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
+      >
+        <Stack.Screen name="LoginScreen" />
+        <Stack.Screen name="(main)" />
+      </Stack>
+    </>
   );
 }

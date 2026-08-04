@@ -1,4 +1,4 @@
-// Updated CommentModal.tsx – matched PostCard color palette & tagged/see-more behavior
+// Updated CommentModal.tsx 
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   View,
@@ -14,6 +14,8 @@ import {
   Linking,
   Dimensions,
   PanResponder,
+  KeyboardEvent ,
+  Keyboard,
   Animated,
   Platform,
 } from "react-native";
@@ -31,22 +33,75 @@ import {
   updateDoc,
   doc,
   getDoc,
+  getDocs,
   increment,
   serverTimestamp,
+  deleteDoc,
+  deleteField,
 } from "firebase/firestore";
 import { db, auth } from "../../../Firebase_configure";
+import {
+  createMentionNotifications,
+  createNotification,
+  removeLikeNotification,
+  resolveMentionRecipientIds,
+  upsertLikeNotification,
+} from "@/utils/notifications";
+import { hasAiAssistantMention, isAiAssistantId } from "@/utils/aiAssistant";
+import {
+  AI_REQUEST_COOLDOWN_MS,
+  requestAiReplyFromWorker,
+  reserveAiCooldown,
+} from "@/utils/aiWorker";
+import { getAiErrorMessage } from "@/utils/aiConfig";
+import {
+  canViewModeratedContent,
+  getModerationPreviewText,
+  requestModerationDecision,
+} from "@/utils/contentModeration";
+import { resolveAvatarUri } from "@/utils/avatar";
 
 import ReplyThread from "./ReplyThread";
 import {
+  canDeleteContent,
+  canViewAnonymousIdentity,
   getUserData,
   getRoleColor,
   getRoleDisplayName,
+  parseUserRole,
   UserRole,
 } from "@/utils/rbac";
 
 import CommentComposer from "./CommentComposer";
+import AiReplyCard from "./AiReplyCard";
+import ExpandableText from "./ExpandableText";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
+import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
+const KEYBOARD_COMPOSER_LIFT = Platform.OS === "android" ? 14 : 8;
+const COMMENT_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
+
+const buildCurrentUserPreview = (authUser: typeof auth.currentUser) => {
+  if (!authUser) return null;
+
+  const displayName = authUser.displayName?.trim() || "";
+  const [firstName = "", ...restName] = displayName.split(/\s+/).filter(Boolean);
+  const lastName = restName.join(" ");
+  const emailFallback = authUser.email?.split("@")[0]?.trim() || "User";
+
+  return {
+    uid: authUser.uid,
+    userId: authUser.uid,
+    firstname: firstName || emailFallback,
+    lastname: lastName,
+    username: displayName || emailFallback,
+    role: "student",
+    profileImage: null,
+    profilePic: null,
+  };
+};
 
 type Comment = {
   id: string;
@@ -57,12 +112,16 @@ type Comment = {
   createdAt: any;
   role?: string;
   likes?: string[];
+  profileImage?: string | null;
   profilePic?: string;
   isAnonymous?: boolean;
   replyCount?: number;
   files?: { url: string; mimeType: string; name?: string }[];
   link?: { url: string; title: string };
   taggedUsers?: { id: string; name: string; studentID: string }[];
+  aiReply?: { text: string; model?: string | null; generatedAtMs?: number };
+  moderationStatus?: string;
+  moderationReasons?: string[];
   onImagePress?: (images: string[], index: number) => void;
   onLinkPress?: (url: string) => void;
   onTagClick?: (userId: string) => void;
@@ -76,6 +135,9 @@ type CommentModalProps = {
   currentUserId?: string;
   currentUserRole?: UserRole;
   onCommentAdded?: () => void;
+  initialCommentId?: string | null;
+  initialReplyId?: string | null;
+  autoOpenReplyThread?: boolean;
 };
 
 type SortOption = "latest" | "relevant" | "all";
@@ -84,18 +146,23 @@ const CommentItem: React.FC<{
   item: Comment;
   user: any;
   onLike: (commentId: string) => void;
-  onProfileClick: (comment: Comment) => void;
+  onProfileClick: (comment: Comment, profileDocId?: string | null) => void;
   onReply: (comment: Comment) => void;
+  onOptionsPress: (comment: Comment, authorRole?: UserRole) => void;
   getTimeAgo: (timestamp: any) => string;
-}> = ({ item, user, onLike, onProfileClick, onReply, getTimeAgo }) => {
+  isHighlighted?: boolean;
+}> = ({
+  item,
+  user,
+  onLike,
+  onProfileClick,
+  onReply,
+  onOptionsPress,
+  getTimeAgo,
+  isHighlighted = false,
+}) => {
   const [authorData, setAuthorData] = useState<any>(null);
   const [revealed, setRevealed] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-
-  const MAX_CHARS = 300;
-  const needsExpansion = item.text.length > MAX_CHARS;
-  const displayText = expanded || !needsExpansion ? item.text : item.text.substring(0, MAX_CHARS) + "...";
-
   useEffect(() => {
     const fetchAuthor = async () => {
       const userIdToFetch = item.realUserId || item.userId;
@@ -111,13 +178,15 @@ const CommentItem: React.FC<{
     fetchAuthor();
   }, [item.realUserId, item.userId]);
 
-  const authorRole = authorData?.role || item.role || "student";
-  const roleColor = getRoleColor(authorRole);
-  const roleDisplayName = getRoleDisplayName(authorRole);
+  const authorRole = parseUserRole(authorData?.role) ?? parseUserRole(item.role);
+  const roleColor = getRoleColor(authorRole || "student");
+  const roleDisplayName = getRoleDisplayName(authorRole || "student");
 
-  const canSeeIdentity =
-    user?.role === "admin" ||
-    ((user?.role === "teacher" || user?.role === "moderator") && authorRole === "student");
+  const canSeeIdentity = canViewAnonymousIdentity(
+    parseUserRole(user?.role),
+    authorRole,
+    item.isAnonymous ?? false,
+  );
 
   const canShowEyeIcon = (item.isAnonymous ?? true) && canSeeIdentity;
   const isIdentityVisible = !item.isAnonymous || (revealed && canSeeIdentity);
@@ -130,13 +199,16 @@ const CommentItem: React.FC<{
 
   const canClickProfile =
     isIdentityVisible && !!authorData?.userId && authorData.userId !== "anonymous";
+  const avatarUri = resolveAvatarUri({
+    profileImage: item.profileImage || authorData?.profileImage,
+    profilePic: item.profilePic,
+  });
 
   const liked = item.likes?.includes(user?.uid);
 
   const imageFiles = (item.files || []).filter((f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif"));
   const gifFiles = (item.files || []).filter((f) => f.mimeType.includes("gif"));
   const docFiles = (item.files || []).filter((f) => !f.mimeType.startsWith("image/"));
-
   const [imageHeight, setImageHeight] = useState(200);
 
   useEffect(() => {
@@ -157,10 +229,10 @@ const CommentItem: React.FC<{
   };
 
   return (
-    <View style={styles.commentItem}>
+    <View style={[styles.commentItem, isHighlighted && styles.commentItemHighlighted]}>
       <View style={styles.commentTopRow}>
         <TouchableOpacity
-          onPress={() => canClickProfile && onProfileClick(item)}
+          onPress={() => canClickProfile && onProfileClick(item, authorData?.studentID)}
           disabled={!canClickProfile}
         >
           <View
@@ -173,15 +245,15 @@ const CommentItem: React.FC<{
             ]}
           >
             {isIdentityVisible ? (
-              item.profilePic ? (
-                <Image source={{ uri: item.profilePic }} style={styles.avatarImage} />
+              avatarUri ? (
+                <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
               ) : (
                 <Text style={[styles.avatarText, { color: roleColor }]}>
                   {(authorData?.firstname?.[0] || displayName[0] || "A").toUpperCase()}
                 </Text>
               )
             ) : (
-              <Ionicons name="person" size={16} color="#8ea0d0" />
+              <Ionicons name="person" size={16} color="#9b766c" />
             )}
           </View>
         </TouchableOpacity>
@@ -189,15 +261,15 @@ const CommentItem: React.FC<{
         <View style={{ flex: 1 }}>
           <View style={styles.nameRow}>
             <TouchableOpacity
-              onPress={() => canClickProfile && onProfileClick(item)}
+              onPress={() => canClickProfile && onProfileClick(item, authorData?.studentID)}
               disabled={!canClickProfile}
             >
-              <Text style={[styles.commentName, { color: isIdentityVisible ? roleColor : "#8ea0d0" }]}>
+              <Text style={[styles.commentName, { color: isIdentityVisible ? roleColor : "#9b766c" }]}>
                 {displayName}
               </Text>
             </TouchableOpacity>
 
-            {isIdentityVisible && authorRole !== "student" && (
+            {isIdentityVisible && authorRole && authorRole !== "student" && (
               <View style={[styles.roleChip, { backgroundColor: roleColor + "20", borderColor: roleColor }]}>
                 <Text style={[styles.roleChipText, { color: roleColor }]}>{roleDisplayName}</Text>
               </View>
@@ -208,7 +280,7 @@ const CommentItem: React.FC<{
                 <Ionicons
                   name={revealed ? "eye-off-outline" : "eye-outline"}
                   size={14}
-                  color={revealed ? "#ff5c93" : "#8ea0d0"}
+                  color={revealed ? "#e0a53d" : "#9b766c"}
                 />
               </TouchableOpacity>
             )}
@@ -219,12 +291,14 @@ const CommentItem: React.FC<{
       </View>
 
       <View style={styles.commentContentContainer}>
-        <Text style={styles.commentText}>{displayText}</Text>
-        {needsExpansion && (
-          <TouchableOpacity onPress={() => setExpanded(!expanded)} style={styles.seeMoreButton}>
-            <Text style={styles.seeMoreText}>{expanded ? "See less" : "See more"}</Text>
-          </TouchableOpacity>
-        )}
+        <ExpandableText
+          text={item.text}
+          textStyle={styles.commentText}
+          collapsedLines={5}
+          minLengthToToggle={220}
+          buttonStyle={styles.seeMoreButton}
+          buttonTextStyle={styles.seeMoreText}
+        />
       </View>
 
       {gifFiles.length > 0 && (
@@ -269,7 +343,7 @@ const CommentItem: React.FC<{
               <Text style={styles.commentDocText} numberOfLines={1}>
                 {getFileDisplayName(file)}
               </Text>
-              <Ionicons name="download-outline" size={14} color="#8ea0d0" />
+              <Ionicons name="download-outline" size={14} color="#9b766c" />
             </TouchableOpacity>
           ))}
         </View>
@@ -297,19 +371,28 @@ const CommentItem: React.FC<{
         <TaggedUsersDisplay taggedUsers={item.taggedUsers} onTagClick={item.onTagClick} />
       )}
 
+      <AiReplyCard reply={item.aiReply} compact />
+
       <View style={styles.actionRow}>
         <TouchableOpacity style={styles.actionBtn} onPress={() => onLike(item.id)}>
           <Ionicons
             name={liked ? "heart" : "heart-outline"}
             size={16}
-            color={liked ? "#ff5c93" : "#8ea0d0"}
+            color={liked ? "#e0a53d" : "#9b766c"}
           />
           <Text style={styles.actionText}>{item.likes?.length || 0}</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.actionBtn} onPress={() => onReply(item)}>
-          <Ionicons name="chatbubble-outline" size={14} color="#8ea0d0" />
+          <Ionicons name="chatbubble-outline" size={14} color="#9b766c" />
           <Text style={styles.actionText}>{item.replyCount || 0}</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => onOptionsPress(item, authorRole)}
+        >
+          <Ionicons name="ellipsis-horizontal" size={16} color="#9b766c" />
         </TouchableOpacity>
       </View>
     </View>
@@ -333,7 +416,7 @@ const TaggedUsersDisplay = ({
   return (
     <View style={styles.taggedBox}>
       <View style={styles.taggedContent}>
-        <Ionicons name="people-outline" size={14} color="#ff5c93" />
+        <Ionicons name="people-outline" size={14} color="#e0a53d" />
         <Text style={styles.taggedLabel}>with </Text>
 
         {visible.map((tag, idx) => (
@@ -367,26 +450,72 @@ const CommentModal: React.FC<CommentModalProps> = ({
   visible,
   onClose,
   postId,
+  initialCommentId,
+  initialReplyId,
+  autoOpenReplyThread = false,
 }) => {
   const [internalVisible, setInternalVisible] = useState(visible);
   const [comments, setComments] = useState<Comment[]>([]);
   const [displayedComments, setDisplayedComments] = useState<Comment[]>([]);
   const [loading, setLoading] = useState(true);
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<any>(() => buildCurrentUserPreview(auth.currentUser));
   const [sortBy, setSortBy] = useState<SortOption>("latest");
   const [replyModalVisible, setReplyModalVisible] = useState(false);
   const [selectedComment, setSelectedComment] = useState<Comment | null>(null);
   const [imageViewerVisible, setImageViewerVisible] = useState(false);
   const [selectedImages, setSelectedImages] = useState<string[]>([]);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
-  const [isNavigating, setIsNavigating] = useState(false); // ← FIXED: missing state
+  const [isNavigating, setIsNavigating] = useState(false); 
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const relativeTimeNow = useRelativeTimeNow();
+  const composerBottom = useRef(new Animated.Value(0)).current;
 
   const flatListRef = useRef<FlatList>(null);
+  const initialReplyKeyRef = useRef<string | null>(null);
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const hiddenComposerPadding = Math.max(insets.bottom, Platform.OS === "android" ? 16 : 12);
 
   const translateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
   const backdropOpacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      (e: KeyboardEvent) => {
+        const nextHeight = Math.max(0, e.endCoordinates.height);
+        setKeyboardHeight(nextHeight);
+        Animated.timing(composerBottom, {
+          toValue: nextHeight + KEYBOARD_COMPOSER_LIFT,
+          duration: Platform.OS === "ios" ? e.duration || 250 : 220,
+          useNativeDriver: false,
+        }).start(({ finished }) => {
+          if (finished) {
+            requestAnimationFrame(() => {
+              flatListRef.current?.scrollToEnd({ animated: true });
+            });
+          }
+        });
+      }
+    );
+
+    const hideSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      (e: KeyboardEvent) => {
+        setKeyboardHeight(0);
+        Animated.timing(composerBottom, {
+          toValue: 0,
+          duration: Platform.OS === "ios" ? e.duration || 250 : 180,
+          useNativeDriver: false,
+        }).start();
+      }
+    );
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, [composerBottom]);
 
   useEffect(() => {
     setInternalVisible(visible);
@@ -469,9 +598,16 @@ const CommentModal: React.FC<CommentModalProps> = ({
 
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged(async (u) => {
+      setUser(buildCurrentUserPreview(u));
       if (u) {
         const userData = await getUserData(u.uid);
-        setUser({ uid: u.uid, ...userData });
+        setUser((currentUser: any) => ({
+          ...(currentUser || buildCurrentUserPreview(u)),
+          ...(userData || {}),
+          uid: u.uid,
+        }));
+      } else {
+        setUser(null);
       }
     });
     return unsubscribe;
@@ -486,16 +622,26 @@ const CommentModal: React.FC<CommentModalProps> = ({
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetchedComments = snapshot.docs.map((d) => ({
-        id: d.id,
-        ...d.data(),
-      })) as Comment[];
+      const fetchedComments = (snapshot.docs
+        .map((d) => ({
+          id: d.id,
+          ...d.data(),
+        })) as Comment[])
+        .filter((item) =>
+          canViewModeratedContent({
+            moderationStatus: item.moderationStatus,
+            realUserId: item.realUserId,
+            userId: item.userId,
+            viewerUserId: user?.uid,
+            viewerRole: user?.role,
+          }),
+        );
       setComments(fetchedComments);
       setLoading(false);
     });
 
     return unsubscribe;
-  }, [postId]);
+  }, [postId, user?.role, user?.uid]);
 
   useEffect(() => {
     let sorted = [...comments];
@@ -526,19 +672,202 @@ const CommentModal: React.FC<CommentModalProps> = ({
         break;
     }
 
+    if (initialCommentId) {
+      const targetIndex = sorted.findIndex(
+        (comment) => comment.id === initialCommentId,
+      );
+      if (targetIndex > 0) {
+        const [targetComment] = sorted.splice(targetIndex, 1);
+        sorted.unshift(targetComment);
+      }
+    }
+
     setDisplayedComments(sorted);
-  }, [comments, sortBy]);
+  }, [comments, sortBy, initialCommentId]);
+
+  useEffect(() => {
+    if (!internalVisible || !initialCommentId || !autoOpenReplyThread) {
+      return;
+    }
+
+    const replyKey = `${initialCommentId}:${initialReplyId || "none"}`;
+    if (initialReplyKeyRef.current === replyKey) {
+      return;
+    }
+
+    const targetComment = comments.find(
+      (comment) => comment.id === initialCommentId,
+    );
+    if (!targetComment) {
+      return;
+    }
+
+    setSelectedComment(targetComment);
+    setReplyModalVisible(true);
+    initialReplyKeyRef.current = replyKey;
+  }, [
+    autoOpenReplyThread,
+    comments,
+    initialCommentId,
+    initialReplyId,
+    internalVisible,
+  ]);
+
+  useEffect(() => {
+    if (!internalVisible) {
+      initialReplyKeyRef.current = null;
+    }
+  }, [internalVisible]);
 
   const handleSend = async (commentData: any) => {
+    if (!user?.uid) return;
+
     const newComment = {
       ...commentData,
       postId,
       createdAt: serverTimestamp(),
     };
-    await addDoc(collection(db, "comments"), newComment);
+    const moderationDecision = await requestModerationDecision({
+      text: getModerationPreviewText({
+        text: commentData.text,
+        linkTitle: commentData.link?.title,
+        fileCount: commentData.files?.length,
+      }),
+      scope: "comment",
+      serverId: postId,
+      channelId: postId,
+      authorId: user.uid,
+      authorRole: user.role,
+    });
+    newComment.moderationStatus = moderationDecision.status;
+    newComment.moderationReasons = moderationDecision.reasons;
+    newComment.moderatedAtMs = Date.now();
+    const commentRef = await addDoc(collection(db, "comments"), newComment);
     await updateDoc(doc(db, "posts", postId), {
       commentCount: increment(1),
     });
+
+    const postSnap = await getDoc(doc(db, "posts", postId));
+    const postData = postSnap.exists() ? postSnap.data() : null;
+    const postOwnerId = postData?.realUserId || postData?.userId;
+      const actor = {
+        id: user.uid,
+        name: commentData.username,
+        profileImage:
+          commentData.isAnonymous === true
+            ? null
+          : resolveAvatarUri(user),
+        isAnonymous: commentData.isAnonymous,
+      };
+
+    if (moderationDecision.status !== "pending") {
+      await createNotification({
+        recipientId: postOwnerId,
+        actor,
+        type: "comment",
+        entityType: "comment",
+        entityId: commentRef.id,
+        parentId: postId,
+        message: "commented on your post",
+        preview: commentData.text || postData?.content,
+      });
+
+      await createMentionNotifications({
+        recipientIds: await resolveMentionRecipientIds({
+          taggedUserIds: (commentData.taggedUsers || [])
+            .map((tag: any) => tag.id)
+            .filter((tagId: string) => !isAiAssistantId(tagId)),
+          actorId: user.uid,
+          serverId: postData?.serverId || null,
+        }),
+        actor,
+        entityType: "comment",
+        entityId: commentRef.id,
+        parentId: postId,
+        message: "mentioned you in a comment",
+        preview: commentData.text,
+        excludeUserIds: [postOwnerId].filter(Boolean) as string[],
+      });
+    }
+
+    const shouldTriggerAi =
+      hasAiAssistantMention(commentData.text) ||
+      (commentData.taggedUsers || []).some((tag: any) => isAiAssistantId(tag.id));
+
+    if (!shouldTriggerAi || moderationDecision.status === "pending") {
+      if (moderationDecision.status === "pending") {
+        Alert.alert(
+          "Comment Pending Review",
+          "This comment was flagged and is waiting for moderator approval.",
+        );
+      }
+      return;
+    }
+
+    const cooldown = await reserveAiCooldown("comments", postId, AI_REQUEST_COOLDOWN_MS);
+    if (!cooldown.allowed) {
+      return;
+    }
+
+    try {
+      await updateDoc(commentRef, {
+        aiReply: {
+          text: "",
+          status: "generating",
+          generatedAtMs: Date.now(),
+        },
+      });
+
+      const prompt =
+        summarizeAiVisibleContent({
+          text: commentData.text,
+          username: commentData.username,
+          isAnonymous: commentData.isAnonymous,
+          link: commentData.link,
+          files: commentData.files,
+          taggedUsers: commentData.taggedUsers,
+        });
+
+      const contextMessages = [
+        {
+          role: "user" as const,
+          name: "Thread",
+          content: postData?.content?.trim()
+            ? `Original post: ${postData.content.trim()}`
+            : "[post without text]",
+        },
+        ...buildAiConversationContext(comments.slice(-8)),
+        {
+          role: "user" as const,
+          name: commentData.username || "User",
+          content: prompt,
+        },
+      ];
+
+      const { reply, model } = await requestAiReplyFromWorker({
+        serverId: "comments",
+        channelId: postId,
+        sourceMessageId: commentRef.id,
+        sourceUserId: user.uid,
+        prompt,
+        contextMessages,
+      });
+
+      await updateDoc(commentRef, {
+        aiReply: {
+          text: reply,
+          model,
+          status: "completed",
+          generatedAtMs: Date.now(),
+        },
+      });
+    } catch (error) {
+      console.error("Comment AI request failed:", error);
+      await updateDoc(commentRef, {
+        aiReply: deleteField(),
+      }).catch(() => undefined);
+      Alert.alert("AI Unavailable", getAiErrorMessage(error));
+    }
   };
 
   const handleLikeComment = async (commentId: string) => {
@@ -554,6 +883,34 @@ const CommentModal: React.FC<CommentModalProps> = ({
         : [...existingLikes, user.uid];
 
       await updateDoc(commentRef, { likes: updatedLikes });
+
+      const commentOwnerId = commentData.realUserId || commentData.userId;
+      const actorName =
+        user.firstname && user.lastname
+          ? `${user.firstname} ${user.lastname}`.trim()
+          : "Someone";
+
+      if (existingLikes.includes(user.uid)) {
+        await removeLikeNotification({
+          recipientId: commentOwnerId,
+          actorId: user.uid,
+          entityType: "comment",
+          entityId: commentId,
+        });
+      } else {
+        await upsertLikeNotification({
+          recipientId: commentOwnerId,
+          actor: {
+            id: user.uid,
+            name: actorName,
+            profileImage: resolveAvatarUri(user),
+          },
+          entityType: "comment",
+          entityId: commentId,
+          parentId: postId,
+          preview: commentData.text,
+        });
+      }
     }
   };
 
@@ -562,7 +919,102 @@ const CommentModal: React.FC<CommentModalProps> = ({
     setReplyModalVisible(true);
   };
 
-  const handleProfileClick = useCallback((comment: Comment) => {
+  const decrementParentCommentCount = useCallback(async () => {
+    const postRef = doc(db, "posts", postId);
+    const pollRef = doc(db, "polls", postId);
+
+    try {
+      const postSnap = await getDoc(postRef);
+      if (postSnap.exists()) {
+        await updateDoc(postRef, {
+          commentCount: increment(-1),
+        });
+        return;
+      }
+
+      const pollSnap = await getDoc(pollRef);
+      if (pollSnap.exists()) {
+        await updateDoc(pollRef, {
+          commentCount: increment(-1),
+        });
+      }
+    } catch (error) {
+      console.error("Error updating parent comment count:", error);
+    }
+  }, [postId]);
+
+  const handleDeleteComment = useCallback(
+    async (comment: Comment) => {
+      Alert.alert("Delete Comment", "This will permanently remove the comment and its replies.", [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const repliesSnapshot = await getDocs(
+                query(collection(db, "replies"), where("commentId", "==", comment.id)),
+              );
+
+              await Promise.all(repliesSnapshot.docs.map((replyDoc) => deleteDoc(replyDoc.ref)));
+              await deleteDoc(doc(db, "comments", comment.id));
+              await decrementParentCommentCount();
+
+              if (selectedComment?.id === comment.id) {
+                setReplyModalVisible(false);
+                setSelectedComment(null);
+              }
+            } catch (error) {
+              console.error("Error deleting comment:", error);
+              Alert.alert("Error", "Failed to delete comment.");
+            }
+          },
+        },
+      ]);
+    },
+    [decrementParentCommentCount, selectedComment?.id],
+  );
+
+  const handleCommentOptions = useCallback(
+    (comment: Comment, authorRole?: UserRole) => {
+      const authorUserId = comment.realUserId || comment.userId;
+      const viewerRole = parseUserRole(user?.role);
+      const isOwner = authorUserId === user?.uid;
+      const canDelete = canDeleteContent({
+        viewerRole,
+        viewerUserId: user?.uid,
+        authorUserId,
+        authorRole,
+      });
+
+      const options: {
+        text: string;
+        style?: "cancel" | "default" | "destructive";
+        onPress?: () => void;
+      }[] = [
+        {
+          text: "Reply",
+          onPress: () => handleReply(comment),
+        },
+      ];
+
+      if (canDelete) {
+        options.push({
+          text: "Delete",
+          style: "destructive",
+          onPress: () => handleDeleteComment(comment),
+        });
+      }
+
+      Alert.alert("Comment Options", undefined, [
+        ...options,
+        { text: "Cancel", style: "cancel" },
+      ]);
+    },
+    [handleDeleteComment, user?.role, user?.uid],
+  );
+
+  const handleProfileClick = useCallback((comment: Comment, profileDocId?: string | null) => {
     const isCommentAnonymous = comment.isAnonymous ?? true;
     const userIdToNavigate = comment.realUserId || comment.userId;
 
@@ -574,9 +1026,18 @@ const CommentModal: React.FC<CommentModalProps> = ({
       setIsNavigating(true);
       closeAndNavigate(() => {
         if (user && userIdToNavigate === user.uid) {
-          router.push("../../(tabs)/ProfileScreen");
+          router.push({
+            pathname: "/(main)/(tabs)/ProfileScreen",
+            params: { returnTo: COMMENT_RETURN_ROUTE },
+          });
         } else {
-          router.push(`../../UserProfileScreen?userId=${userIdToNavigate}`);
+          router.push(
+            buildUserProfileHref({
+              userId: userIdToNavigate,
+              profileDocId,
+              returnTo: COMMENT_RETURN_ROUTE,
+            }) as any,
+          );
         }
       });
     } catch (error) {
@@ -590,9 +1051,17 @@ const CommentModal: React.FC<CommentModalProps> = ({
       setIsNavigating(true);
       closeAndNavigate(() => {
         if (user && taggedUserId === user.uid) {
-          router.push("../../(tabs)/ProfileScreen");
+          router.push({
+            pathname: "/(main)/(tabs)/ProfileScreen",
+            params: { returnTo: COMMENT_RETURN_ROUTE },
+          });
         } else {
-          router.push(`../../UserProfileScreen?userId=${taggedUserId}`);
+          router.push(
+            buildUserProfileHref({
+              userId: taggedUserId,
+              returnTo: COMMENT_RETURN_ROUTE,
+            }) as any,
+          );
         }
       });
     } catch (error) {
@@ -632,7 +1101,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
 
   const getTimeAgo = (timestamp: any) => {
     if (!timestamp) return "";
-    const now = new Date();
+    const now = new Date(relativeTimeNow);
     const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
     const diffSec = Math.floor((now.getTime() - date.getTime()) / 1000);
     if (diffSec < 60) return "Just now";
@@ -648,181 +1117,207 @@ const CommentModal: React.FC<CommentModalProps> = ({
 
   return (
     <>
-      <Modal visible={internalVisible} animationType="none" transparent onRequestClose={handleClose}>
-        <View style={styles.modalOverlay}>
-          <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
-            <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={handleClose} />
-          </Animated.View>
+<Modal visible={internalVisible} animationType="none" transparent onRequestClose={handleClose}>
+  <View style={styles.modalOverlay}>
+    <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
+      <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={handleClose} />
+    </Animated.View>
 
-          <Animated.View
-            style={[
-              styles.modalContainer,
-              { paddingTop: insets.top, transform: [{ translateY }] },
-            ]}
-          >
-            <View {...panResponder.panHandlers}>
-              <View style={styles.dragIndicatorContainer}>
-                <View style={styles.dragIndicator} />
-              </View>
-
-              <View style={styles.header}>
-                <Text style={styles.headerTitle}>Comments ({comments.length})</Text>
-              </View>
-
-              <View style={styles.sortContainer}>
-                <TouchableOpacity
-                  style={[styles.sortButton, sortBy === "latest" && styles.sortButtonActive]}
-                  onPress={() => setSortBy("latest")}
-                >
-                  <Ionicons
-                    name="time-outline"
-                    size={14}
-                    color={sortBy === "latest" ? "#ff5c93" : "#8ea0d0"}
-                  />
-                  <Text style={[styles.sortText, sortBy === "latest" && styles.sortTextActive]}>
-                    Latest
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.sortButton, sortBy === "relevant" && styles.sortButtonActive]}
-                  onPress={() => setSortBy("relevant")}
-                >
-                  <Ionicons
-                    name="trending-up-outline"
-                    size={14}
-                    color={sortBy === "relevant" ? "#ff5c93" : "#8ea0d0"}
-                  />
-                  <Text style={[styles.sortText, sortBy === "relevant" && styles.sortTextActive]}>
-                    Relevant
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.sortButton, sortBy === "all" && styles.sortButtonActive]}
-                  onPress={() => setSortBy("all")}
-                >
-                  <Ionicons
-                    name="list-outline"
-                    size={14}
-                    color={sortBy === "all" ? "#ff5c93" : "#8ea0d0"}
-                  />
-                  <Text style={[styles.sortText, sortBy === "all" && styles.sortTextActive]}>
-                    All
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            <View style={styles.modalContent}>
-              {loading ? (
-                <ActivityIndicator color="#ff5c93" style={{ marginTop: 40 }} />
-              ) : displayedComments.length === 0 ? (
-                <View style={styles.emptyContainer}>
-                  <Ionicons name="chatbubbles-outline" size={48} color="#8ea0d0" />
-                  <Text style={styles.emptyText}>No comments yet</Text>
-                  <Text style={styles.emptySubText}>Be the first to comment!</Text>
-                </View>
-              ) : (
-                <FlatList
-                  ref={flatListRef}
-                  data={displayedComments}
-                  keyExtractor={(item) => item.id}
-                  renderItem={({ item }) => (
-                    <CommentItem
-                      item={{
-                        ...item,
-                        onImagePress: handleImagePress,
-                        onLinkPress: handleLinkPress,
-                        onTagClick: handleTagClick,
-                        onFilePress: handleFilePress,
-                      }}
-                      user={user}
-                      onLike={handleLikeComment}
-                      onProfileClick={handleProfileClick}
-                      onReply={handleReply}
-                      getTimeAgo={getTimeAgo}
-                    />
-                  )}
-                  contentContainerStyle={{ paddingBottom: 8, paddingHorizontal: 0 }}
-                  showsVerticalScrollIndicator={false}
-                />
-              )}
-
-              {user && (
-                <View
-                  style={{
-                    borderTopWidth: 1,
-                    borderTopColor: "#243054",
-                    backgroundColor: "#0e1320",
-                    paddingHorizontal: 12,
-                    paddingTop: 8,
-                    paddingBottom: Platform.select({
-                      ios: insets.bottom + 8,
-                      android: 16,
-                      default: insets.bottom + 8,
-                    }),
-                  }}
-                >
-                  <CommentComposer
-                    currentUser={user}
-                    onSend={handleSend}
-                    placeholder="Write a comment..."
-                  />
-                </View>
-              )}
-            </View>
-          </Animated.View>
+    <Animated.View
+      style={[
+        styles.modalContainer,
+        { paddingTop: insets.top, transform: [{ translateY }] },
+      ]}
+    >
+      <View {...panResponder.panHandlers}>
+        <View style={styles.dragIndicatorContainer}>
+          <View style={styles.dragIndicator} />
         </View>
-      </Modal>
 
-      {selectedComment && (
-        <ReplyThread
-          visible={replyModalVisible}
-          onClose={() => {
-            setReplyModalVisible(false);
-            setSelectedComment(null);
-          }}
-          commentId={selectedComment.id}
-          commentAuthor={selectedComment.isAnonymous ? "Anonymous" : selectedComment.username || "User"}
-          currentUser={user}
-        />
-      )}
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Comments ({comments.length})</Text>
+        </View>
 
-      <Modal visible={imageViewerVisible} transparent animationType="fade" onRequestClose={() => setImageViewerVisible(false)}>
-        <View style={styles.imageViewerContainer}>
-          <TouchableOpacity style={styles.imageViewerClose} onPress={() => setImageViewerVisible(false)}>
-            <Ionicons name="close" size={32} color="#fff" />
+        <View style={styles.sortContainer}>
+          <TouchableOpacity
+            style={[styles.sortButton, sortBy === "latest" && styles.sortButtonActive]}
+            onPress={() => setSortBy("latest")}
+          >
+            <Ionicons
+              name="time-outline"
+              size={14}
+              color={sortBy === "latest" ? "#e0a53d" : "#9b766c"}
+            />
+            <Text style={[styles.sortText, sortBy === "latest" && styles.sortTextActive]}>
+              Latest
+            </Text>
           </TouchableOpacity>
 
-          <FlatList
-            data={selectedImages}
-            horizontal
-            pagingEnabled
-            initialScrollIndex={selectedImageIndex}
-            getItemLayout={(_, index) => ({ length: SCREEN_WIDTH, offset: SCREEN_WIDTH * index, index })}
-            renderItem={({ item }) => (
-              <View style={styles.imageViewerPage}>
-                <Image source={{ uri: item }} style={styles.imageViewerImage} resizeMode="contain" />
-              </View>
-            )}
-            keyExtractor={(_, i) => i.toString()}
-            showsHorizontalScrollIndicator={false}
-            onMomentumScrollEnd={(e) => {
-              const idx = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
-              setSelectedImageIndex(idx);
-            }}
-          />
+          <TouchableOpacity
+            style={[styles.sortButton, sortBy === "relevant" && styles.sortButtonActive]}
+            onPress={() => setSortBy("relevant")}
+          >
+            <Ionicons
+              name="trending-up-outline"
+              size={14}
+              color={sortBy === "relevant" ? "#e0a53d" : "#9b766c"}
+            />
+            <Text style={[styles.sortText, sortBy === "relevant" && styles.sortTextActive]}>
+              Relevant
+            </Text>
+          </TouchableOpacity>
 
-          {selectedImages.length > 1 && (
-            <View style={styles.imageViewerCounter}>
-              <Text style={styles.imageViewerCounterText}>
-                {selectedImageIndex + 1} / {selectedImages.length}
-              </Text>
-            </View>
-          )}
+          <TouchableOpacity
+            style={[styles.sortButton, sortBy === "all" && styles.sortButtonActive]}
+            onPress={() => setSortBy("all")}
+          >
+            <Ionicons
+              name="list-outline"
+              size={14}
+              color={sortBy === "all" ? "#e0a53d" : "#9b766c"}
+            />
+            <Text style={[styles.sortText, sortBy === "all" && styles.sortTextActive]}>
+              All
+            </Text>
+          </TouchableOpacity>
         </View>
-      </Modal>
+      </View>
+
+
+      <View style={styles.contentArea}>
+        <FlatList
+          ref={flatListRef}
+          data={displayedComments}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) =>
+            loading ? null : (
+              <CommentItem
+                item={{
+                  ...item,
+                  onImagePress: handleImagePress,
+                  onLinkPress: handleLinkPress,
+                  onTagClick: handleTagClick,
+                  onFilePress: handleFilePress,
+                }}
+                user={user}
+                onLike={handleLikeComment}
+                onProfileClick={handleProfileClick}
+                onReply={handleReply}
+                onOptionsPress={handleCommentOptions}
+                getTimeAgo={getTimeAgo}
+                isHighlighted={item.id === initialCommentId}
+              />
+            )
+          }
+          ListHeaderComponent={
+            loading ? (
+              <ActivityIndicator color="#e0a53d" style={{ marginTop: 40 }} />
+            ) : displayedComments.length === 0 ? (
+              <View style={styles.emptyContainer}>
+                <Ionicons name="chatbubbles-outline" size={48} color="#9b766c" />
+                <Text style={styles.emptyText}>No comments yet</Text>
+                <Text style={styles.emptySubText}>Be the first to comment!</Text>
+              </View>
+            ) : null
+          }
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+          style={{ flex: 1 }}
+        />
+
+        {user && (
+          <Animated.View
+            style={[
+              styles.composerWrapper,
+              {
+                marginBottom: composerBottom,
+                paddingBottom: keyboardHeight > 0 ? 8 : hiddenComposerPadding,
+              },
+            ]}
+          >
+            <CommentComposer
+              currentUser={user}
+              onSend={handleSend}
+              placeholder="Write a comment..."
+              autoExpand={true}
+            />
+          </Animated.View>
+        )}
+      </View>
+    </Animated.View>
+  </View>
+</Modal>
+
+{selectedComment && (
+  <ReplyThread
+    visible={replyModalVisible}
+    onClose={() => {
+      setReplyModalVisible(false);
+      setSelectedComment(null);
+    }}
+    commentId={selectedComment.id}
+    commentAuthor={selectedComment.isAnonymous ? "Anonymous" : selectedComment.username || "User"}
+    currentUser={user}
+    initialReplyId={
+      selectedComment.id === initialCommentId
+        ? initialReplyId || undefined
+        : undefined
+    }
+  />
+)}
+
+<Modal
+  visible={imageViewerVisible}
+  transparent
+  animationType="fade"
+  onRequestClose={() => setImageViewerVisible(false)}
+>
+  <View style={styles.imageViewerContainer}>
+    <TouchableOpacity
+      style={styles.imageViewerClose}
+      onPress={() => setImageViewerVisible(false)}
+    >
+      <Ionicons name="close" size={32} color="#fff" />
+    </TouchableOpacity>
+
+    <FlatList
+      data={selectedImages}
+      horizontal
+      pagingEnabled
+      initialScrollIndex={selectedImageIndex}
+      getItemLayout={(_, index) => ({
+        length: SCREEN_WIDTH,
+        offset: SCREEN_WIDTH * index,
+        index,
+      })}
+      renderItem={({ item }) => (
+        <View style={styles.imageViewerPage}>
+          <Image
+            source={{ uri: item }}
+            style={styles.imageViewerImage}
+            resizeMode="contain"
+          />
+        </View>
+      )}
+      keyExtractor={(_, i) => i.toString()}
+      showsHorizontalScrollIndicator={false}
+      onMomentumScrollEnd={(e) => {
+        const idx = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
+        setSelectedImageIndex(idx);
+      }}
+    />
+
+    {selectedImages.length > 1 && (
+      <View style={styles.imageViewerCounter}>
+        <Text style={styles.imageViewerCounterText}>
+          {selectedImageIndex + 1} / {selectedImages.length}
+        </Text>
+      </View>
+    )}
+  </View>
+</Modal>
     </>
   );
 };
@@ -830,27 +1325,31 @@ const CommentModal: React.FC<CommentModalProps> = ({
 const styles = StyleSheet.create({
   modalOverlay: { flex: 1 },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.82)" },
-  modalContainer: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: SCREEN_HEIGHT,
-    backgroundColor: "#070c15",
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+modalContainer: {
+  position: "absolute",
+  bottom: 0,
+  left: 0,
+  right: 0,
+  height: SCREEN_HEIGHT,
+  backgroundColor: "#f6f1ed",
+  borderTopLeftRadius: 20,
+  borderTopRightRadius: 20,
+  overflow: "hidden",
+  flexDirection: "column", 
+},
+  contentArea: {
+    flex: 1,
   },
   dragIndicatorContainer: { alignItems: "center", paddingVertical: 8 },
-  dragIndicator: { width: 40, height: 4, backgroundColor: "#8ea0d0", borderRadius: 2, opacity: 0.5 },
-  modalContent: { flex: 1, backgroundColor: "#070c15" },
-
+  dragIndicator: { width: 40, height: 4, backgroundColor: "#9b766c", borderRadius: 2, opacity: 0.5 },
   header: {
     alignItems: "center",
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#243054",
+    borderBottomColor: "#8f3a2b",
+    backgroundColor: "#5f0909",
   },
-  headerTitle: { color: "#e9edff", fontSize: 17, fontWeight: "700" },
+  headerTitle: { color: "#fffaf7", fontSize: 17, fontWeight: "700" },
 
   sortContainer: {
     flexDirection: "row",
@@ -858,7 +1357,8 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: "#243054",
+    borderBottomColor: "#f0e7e2",
+    backgroundColor: "#fff4ee",
   },
   sortButton: {
     flexDirection: "row",
@@ -867,16 +1367,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 20,
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#f0e7e2",
   },
   sortButtonActive: {
-    backgroundColor: "#ff5c9320",
-    borderColor: "#ff5c93",
+    backgroundColor: "rgba(224,165,61,0.16)",
+    borderColor: "#e0a53d",
   },
-  sortText: { color: "#8ea0d0", fontSize: 13, fontWeight: "600" },
-  sortTextActive: { color: "#ff5c93" },
+  sortText: { color: "#9b766c", fontSize: 13, fontWeight: "600" },
+  sortTextActive: { color: "#e0a53d" },
 
   emptyContainer: {
     flex: 1,
@@ -884,29 +1384,46 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 80,
   },
-  emptyText: { color: "#e9edff", fontSize: 17, fontWeight: "700", marginTop: 16 },
-  emptySubText: { color: "#8ea0d0", fontSize: 14, marginTop: 6 },
+  emptyText: { color: "#4d1b17", fontSize: 17, fontWeight: "700", marginTop: 16 },
+  emptySubText: { color: "#9b766c", fontSize: 14, marginTop: 6 },
+  listContent: {
+    paddingBottom: 8,
+  },
+  composerWrapper: {
+    borderTopWidth: 1,
+    borderTopColor: "#f0e7e2",
+    backgroundColor: "#fff4ee",
+    paddingHorizontal: 12,
+    paddingTop: 8,
+  },
 
   commentItem: {
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     marginHorizontal: 16,
     marginTop: 12,
     padding: 14,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#f0e7e2",
+  },
+  commentItemHighlighted: {
+    borderColor: "#e0a53d",
+    shadowColor: "#e0a53d",
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+    elevation: 3,
   },
   commentTopRow: { flexDirection: "row", alignItems: "flex-start", marginBottom: 10, gap: 12 },
   avatar: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#243054",
+    backgroundColor: "#f0e7e2",
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
     borderWidth: 1.5,
-    borderColor: "#243054",
+    borderColor: "#f0e7e2",
   },
   avatarImage: { width: "100%", height: "100%" },
   avatarText: { fontSize: 17, fontWeight: "700" },
@@ -916,18 +1433,18 @@ const styles = StyleSheet.create({
   roleChip: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1 },
   roleChipText: { fontSize: 10, fontWeight: "700" },
   eyeButton: { padding: 4 },
-  commentRole: { color: "#8ea0d0", fontSize: 12.5, marginTop: 3 },
+  commentRole: { color: "#9b766c", fontSize: 12.5, marginTop: 3 },
 
   commentContentContainer: { marginTop: 4, marginBottom: 8 },
-  commentText: { color: "#d8deff", fontSize: 15, lineHeight: 21 },
+  commentText: { color: "#4d1b17", fontSize: 15, lineHeight: 21 },
   seeMoreButton: { alignSelf: "flex-start", marginTop: 4 },
-  seeMoreText: { color: "#ff5c93", fontSize: 14, fontWeight: "600" },
+  seeMoreText: { color: "#e0a53d", fontSize: 14, fontWeight: "600" },
 
   commentGifContainer: { marginTop: 10, marginHorizontal: -14, overflow: "hidden", borderRadius: 12 },
-  commentGif: { width: "100%", height: 220, backgroundColor: "#0e1320" },
+  commentGif: { width: "100%", height: 220, backgroundColor: "#f6f1ed" },
 
   commentImageContainer: { position: "relative", marginTop: 10, marginHorizontal: -14, overflow: "hidden", borderRadius: 12 },
-  commentImageFull: { width: "100%", backgroundColor: "#0e1320" },
+  commentImageFull: { width: "100%", backgroundColor: "#f6f1ed" },
   imageCountBadge: {
     position: "absolute",
     top: 8,
@@ -946,43 +1463,43 @@ const styles = StyleSheet.create({
   commentDocItem: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     padding: 10,
     borderRadius: 10,
     gap: 10,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#f0e7e2",
   },
-  commentDocText: { flex: 1, color: "#d8deff", fontSize: 13 },
+  commentDocText: { flex: 1, color: "#4d1b17", fontSize: 13 },
 
   commentLinkPreview: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     padding: 12,
     borderRadius: 12,
     marginTop: 10,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#f0e7e2",
   },
-  commentLinkTitle: { color: "#e9edff", fontSize: 14, fontWeight: "600", marginBottom: 2 },
-  commentLinkUrl: { color: "#8ea0d0", fontSize: 12 },
+  commentLinkTitle: { color: "#4d1b17", fontSize: 14, fontWeight: "600", marginBottom: 2 },
+  commentLinkUrl: { color: "#9b766c", fontSize: 12 },
 
   taggedBox: {
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     borderRadius: 12,
     paddingVertical: 8,
     paddingHorizontal: 12,
     marginVertical: 10,
     borderWidth: 1,
-    borderColor: "#243054",
+    borderColor: "#f0e7e2",
   },
   taggedContent: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 4 },
-  taggedLabel: { color: "#8ea0d0", fontSize: 13 },
-  taggedName: { color: "#ff8ab2", fontWeight: "600", fontSize: 13.5 },
-  taggedSeparator: { color: "#8ea0d0", fontSize: 13 },
-  moreCount: { color: "#8ea0d0", fontWeight: "600", fontSize: 13.5 },
-  showLessText: { color: "#8ea0d0", fontSize: 13, fontStyle: "italic" },
+  taggedLabel: { color: "#9b766c", fontSize: 13 },
+  taggedName: { color: "#8f3a2b", fontWeight: "600", fontSize: 13.5 },
+  taggedSeparator: { color: "#9b766c", fontSize: 13 },
+  moreCount: { color: "#9b766c", fontWeight: "600", fontSize: 13.5 },
+  showLessText: { color: "#9b766c", fontSize: 13, fontStyle: "italic" },
 
   actionRow: {
     flexDirection: "row",
@@ -991,10 +1508,20 @@ const styles = StyleSheet.create({
     paddingTop: 10,
     marginTop: 8,
     borderTopWidth: 1,
-    borderTopColor: "#243054",
+    borderTopColor: "#f0e7e2",
   },
-  actionBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 4 },
-  actionText: { color: "#8ea0d0", fontSize: 13, fontWeight: "500" },
+  actionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: "#f5efeb",
+    borderWidth: 1,
+    borderColor: "#f0e7e2",
+  },
+  actionText: { color: "#5f0909", fontSize: 13, fontWeight: "600" },
 
   imageViewerContainer: { flex: 1, backgroundColor: "#000", justifyContent: "center", alignItems: "center" },
   imageViewerClose: {

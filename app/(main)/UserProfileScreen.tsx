@@ -1,8 +1,12 @@
-// UserProfileScreen.tsx - FIXED ALL TS ERRORS + Tappable Profile Pic + Accurate Online Status
+// UserProfileScreen.tsx 
 import { Ionicons } from "@expo/vector-icons";
 import {
-  doc,
   collection,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  query as firestoreQuery,
   query,
   where,
   onSnapshot,
@@ -10,6 +14,7 @@ import {
 } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
 import {
+  BackHandler,
   ScrollView,
   StyleSheet,
   Text,
@@ -20,13 +25,21 @@ import {
   Modal,
   Dimensions,
 } from "react-native";
+import { Image as ExpoImage } from "expo-image";
+import { useNavigation } from "@react-navigation/native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { db } from "../../Firebase_configure";
 import { useRouter, useLocalSearchParams } from "expo-router";
+import { resolveAvatarUri } from "@/utils/avatar";
+import { getProfileIdLabel } from "@/utils/profileLabels";
+import { peekUserData, type UserData } from "@/utils/rbac";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
 type Student = {
+  id?: string;
+  userId?: string;
   firstname?: string;
   lastname?: string;
   course?: string;
@@ -34,6 +47,7 @@ type Student = {
   studentID?: string;
   email?: string;
   profileImage?: string;
+  profilePic?: string | null;
   isOnline?: boolean;
   role?: string;
 };
@@ -59,66 +73,261 @@ type Poll = {
   createdAt: any;
 };
 
+const buildStudentPreview = (
+  profile: UserData | null | undefined,
+): Student | null => {
+  if (!profile) return null;
+
+  return {
+    userId: profile.userId,
+    firstname: profile.firstname,
+    lastname: profile.lastname,
+    course: profile.course,
+    yearlvl: profile.yearlvl,
+    studentID: profile.studentID,
+    email: profile.email,
+    profileImage: profile.profileImage || undefined,
+    isOnline: profile.isOnline,
+    role: profile.role,
+  };
+};
+
 const UserProfileScreen = () => {
-  const { userId } = useLocalSearchParams();
-  const [student, setStudent] = useState<Student | null>(null);
+  const { userId, profileDocId, returnTo } = useLocalSearchParams();
+  const relativeTimeNow = useRelativeTimeNow();
+  const navigation = useNavigation();
+  const initialStudentPreview =
+    buildStudentPreview(
+      peekUserData(
+        typeof profileDocId === "string"
+          ? profileDocId
+          : typeof userId === "string"
+            ? userId
+            : null,
+      ),
+    ) ||
+    buildStudentPreview(
+      peekUserData(
+        typeof userId === "string"
+          ? userId
+          : typeof profileDocId === "string"
+            ? profileDocId
+            : null,
+      ),
+    );
+  const [student, setStudent] = useState<Student | null>(initialStudentPreview);
   const [posts, setPosts] = useState<Post[]>([]);
   const [polls, setPolls] = useState<Poll[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialStudentPreview);
 
   // Image viewer modal
   const [imageViewerVisible, setImageViewerVisible] = useState(false);
   const [currentImage, setCurrentImage] = useState<string>("");
+  const [imageViewerFailed, setImageViewerFailed] = useState(false);
 
   const router = useRouter();
-
-  useEffect(() => {
-    if (userId === undefined) return;
-    if (typeof userId !== "string" || !userId) {
-      router.back();
+  const navigateBack = React.useCallback(() => {
+    if (navigation.canGoBack()) {
+      navigation.goBack();
       return;
     }
 
-    const unsubscribeProfile = onSnapshot(
-      doc(db, "students", userId),
-      (docSnapshot) => {
-        if (docSnapshot.exists()) {
-          const data = docSnapshot.data() as Student;
-          setStudent(data);
-        } else {
-          setStudent(null);
-        }
-        setLoading(false);
-      },
-      (error) => {
-        console.error("Error listening to user profile:", error);
-        setLoading(false);
-      }
-    );
+    const nextReturnTo = typeof returnTo === "string" ? returnTo : null;
+    if (nextReturnTo) {
+      router.replace(nextReturnTo as any);
+      return;
+    }
+    router.back();
+  }, [navigation, returnTo, router]);
 
-    const unsubscribePosts = fetchUserPosts(userId);
-    const unsubscribePolls = fetchUserPolls(userId);
+  const getStudentScore = (candidate: Student & { id: string }) => {
+    let score = 0;
+    if (resolveAvatarUri(candidate)) score += 8;
+    if (candidate.firstname) score += 2;
+    if (candidate.lastname) score += 2;
+    if (candidate.course) score += 1;
+    if (candidate.yearlvl) score += 1;
+    if (candidate.studentID && candidate.studentID === candidate.id) score += 4;
+    if (candidate.userId && typeof userId === "string" && candidate.userId === userId) score += 3;
+    return score;
+  };
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (imageViewerVisible) {
+        setImageViewerVisible(false);
+        return true;
+      }
+
+      navigateBack();
+      return true;
+    });
+
+    return () => subscription.remove();
+  }, [imageViewerVisible, navigateBack]);
+
+  useEffect(() => {
+    const resolvedUserId = typeof userId === "string" ? userId : null;
+    const resolvedProfileDocId = typeof profileDocId === "string" ? profileDocId : null;
+    const cachedPreview =
+      buildStudentPreview(peekUserData(resolvedProfileDocId || resolvedUserId)) ||
+      buildStudentPreview(peekUserData(resolvedUserId || resolvedProfileDocId));
+
+    if (userId === undefined && profileDocId === undefined) return;
+    if (!resolvedUserId && !resolvedProfileDocId) {
+      navigateBack();
+      return;
+    }
+
+    if (cachedPreview) {
+      setStudent(cachedPreview);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+
+    let active = true;
+    let unsubscribeProfile: (() => void) | null = null;
+    const identityKey = resolvedUserId || resolvedProfileDocId || "";
+    const unsubscribePosts = fetchUserPosts(identityKey);
+    const unsubscribePolls = fetchUserPolls(identityKey);
+
+    const resolveProfileDocId = async () => {
+      const candidates: Array<Student & { id: string }> = [];
+      const seen = new Set<string>();
+
+      const addCandidate = (docId: string, data: Student) => {
+        if (seen.has(docId)) return;
+        seen.add(docId);
+        candidates.push({ id: docId, ...data });
+      };
+
+      const loadCandidateDoc = async (docId?: string | null) => {
+        if (!docId || seen.has(docId)) return;
+        const candidateDoc = await getDoc(doc(db, "students", docId));
+        if (candidateDoc.exists()) {
+          addCandidate(candidateDoc.id, candidateDoc.data() as Student);
+        }
+      };
+
+      if (resolvedProfileDocId) {
+        await loadCandidateDoc(resolvedProfileDocId);
+      }
+
+      if (resolvedUserId) {
+        const directDoc = await getDoc(doc(db, "students", resolvedUserId));
+        if (directDoc.exists()) {
+          addCandidate(directDoc.id, directDoc.data() as Student);
+        }
+      }
+
+      const fallbackQueries = [];
+      if (resolvedUserId) {
+        fallbackQueries.push(
+          firestoreQuery(
+            collection(db, "students"),
+            where("userId", "==", resolvedUserId),
+            limit(5),
+          ),
+        );
+        fallbackQueries.push(
+          firestoreQuery(
+            collection(db, "students"),
+            where("studentID", "==", resolvedUserId),
+            limit(5),
+          ),
+        );
+      }
+      if (resolvedProfileDocId && resolvedProfileDocId !== resolvedUserId) {
+        fallbackQueries.push(
+          firestoreQuery(
+            collection(db, "students"),
+            where("studentID", "==", resolvedProfileDocId),
+            limit(5),
+          ),
+        );
+      }
+
+      for (const profileQuery of fallbackQueries) {
+        const snapshot = await getDocs(profileQuery);
+        snapshot.docs.forEach((studentDoc) => {
+          addCandidate(studentDoc.id, studentDoc.data() as Student);
+        });
+      }
+
+      for (const candidate of [...candidates]) {
+        if (candidate.studentID && candidate.studentID !== candidate.id) {
+          await loadCandidateDoc(candidate.studentID);
+        }
+
+        const emailPrefix = candidate.email?.split("@")[0]?.trim();
+        if (emailPrefix && emailPrefix !== candidate.id) {
+          await loadCandidateDoc(emailPrefix);
+        }
+      }
+
+      if (candidates.length === 0) {
+        return null;
+      }
+
+      candidates.sort((first, second) => getStudentScore(second) - getStudentScore(first));
+      return candidates[0].id;
+    };
+
+    void resolveProfileDocId()
+      .then((resolvedProfileId) => {
+        if (!active) return;
+
+        if (!resolvedProfileId) {
+          setStudent(null);
+          setLoading(false);
+          return;
+        }
+
+        unsubscribeProfile = onSnapshot(
+          doc(db, "students", resolvedProfileId),
+          (docSnapshot) => {
+            if (docSnapshot.exists()) {
+              const data = docSnapshot.data() as Student;
+              setStudent(data);
+            } else {
+              setStudent(null);
+            }
+            setLoading(false);
+          },
+          (error) => {
+            console.error("Error listening to user profile:", error);
+            setLoading(false);
+          },
+        );
+      })
+      .catch((error) => {
+        console.error("Error resolving user profile:", error);
+        if (active) {
+          setStudent(null);
+          setLoading(false);
+        }
+      });
 
     return () => {
-      unsubscribeProfile();
+      active = false;
+      unsubscribeProfile?.();
       unsubscribePosts?.();
       unsubscribePolls?.();
     };
-  }, [userId, router]);
+  }, [navigateBack, profileDocId, userId]);
 
   const fetchUserPosts = (uid: string) => {
-    const q = query(
-      collection(db, "posts"),
-      where("userId", "==", uid),
-      orderBy("createdAt", "desc")
-    );
+    const q = query(collection(db, "posts"), orderBy("createdAt", "desc"));
     return onSnapshot(
       q,
       (snapshot) => {
-        const userPosts = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        })) as Post[];
+        const userPosts = snapshot.docs
+          .map((item) => ({
+            id: item.id,
+            ...item.data(),
+          }))
+          .filter((post: any) => post.realUserId === uid || post.userId === uid) as Post[];
         setPosts(userPosts);
       },
       (error) => console.error("Error listening to user posts:", error)
@@ -126,18 +335,16 @@ const UserProfileScreen = () => {
   };
 
   const fetchUserPolls = (uid: string) => {
-    const q = query(
-      collection(db, "polls"),
-      where("userId", "==", uid),
-      orderBy("createdAt", "desc")
-    );
+    const q = query(collection(db, "polls"), orderBy("createdAt", "desc"));
     return onSnapshot(
       q,
       (snapshot) => {
-        const userPolls = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        })) as Poll[];
+        const userPolls = snapshot.docs
+          .map((item) => ({
+            id: item.id,
+            ...item.data(),
+          }))
+          .filter((poll: any) => poll.realUserId === uid || poll.userId === uid) as Poll[];
         setPolls(userPolls);
       },
       (error) => console.error("Error listening to user polls:", error)
@@ -146,7 +353,7 @@ const UserProfileScreen = () => {
 
   const getTimeAgo = (timestamp: any) => {
     if (!timestamp || !timestamp.toDate) return "";
-    const now = new Date();
+    const now = new Date(relativeTimeNow);
     const postDate = timestamp.toDate();
     const diffMs = now.getTime() - postDate.getTime();
     const diffSec = Math.floor(diffMs / 1000);
@@ -167,14 +374,27 @@ const UserProfileScreen = () => {
   };
 
   const openImageViewer = (imageUrl: string) => {
+    setImageViewerFailed(false);
     setCurrentImage(imageUrl);
     setImageViewerVisible(true);
   };
 
-  if (loading) {
+  if (loading && !student) {
     return (
       <SafeAreaView style={styles.container}>
-        <ActivityIndicator size="large" color="#ff5c93" style={{ marginTop: 50 }} />
+        <View style={styles.contentShell}>
+          <View style={styles.header}>
+            <TouchableOpacity onPress={navigateBack}>
+              <Ionicons name="arrow-back" size={24} color="#e0a53d" />
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>Profile</Text>
+            <View style={{ width: 24 }} />
+          </View>
+          <View style={styles.loadingState}>
+            <ActivityIndicator size="large" color="#e0a53d" />
+            <Text style={styles.loadingText}>Loading profile...</Text>
+          </View>
+        </View>
       </SafeAreaView>
     );
   }
@@ -182,21 +402,24 @@ const UserProfileScreen = () => {
   if (!student) {
     return (
       <SafeAreaView style={styles.container}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Ionicons name="arrow-back" size={24} color="#ff5c93" />
+        <TouchableOpacity onPress={navigateBack} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={24} color="#e0a53d" />
         </TouchableOpacity>
         <Text style={styles.errorText}>User not found</Text>
       </SafeAreaView>
     );
   }
 
+  const profileImageUri = resolveAvatarUri(student) || "";
   const fullName = `${student.firstname || ""} ${student.lastname || ""}`.trim() || "Anonymous";
+  const profileIdLabel = getProfileIdLabel(student.role);
 
   return (
     <SafeAreaView style={styles.container}>
+      <View style={styles.contentShell}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color="#ff5c93" />
+        <TouchableOpacity onPress={navigateBack}>
+          <Ionicons name="arrow-back" size={24} color="#e0a53d" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>{fullName}</Text>
         <View style={{ width: 24 }} />
@@ -206,14 +429,14 @@ const UserProfileScreen = () => {
         <View style={styles.profileCard}>
           <TouchableOpacity
             activeOpacity={0.85}
-            onPress={() => student.profileImage && openImageViewer(student.profileImage)}
+            onPress={() => profileImageUri && openImageViewer(profileImageUri)}
           >
             <View style={styles.profileImageContainer}>
-              {student.profileImage ? (
-                <Image source={{ uri: student.profileImage }} style={styles.profileImage} />
+              {profileImageUri ? (
+                <ExpoImage source={{ uri: profileImageUri }} style={styles.profileImage} contentFit="cover" />
               ) : (
                 <View style={styles.placeholder}>
-                  <Ionicons name="person" size={50} color="#ff5c93" />
+                  <Ionicons name="person" size={50} color="#e0a53d" />
                 </View>
               )}
               {/* Online Status Badge */}
@@ -241,12 +464,11 @@ const UserProfileScreen = () => {
           </View>
         </View>
 
-        {student.role !== "admin" && (
-          <View style={styles.section}>
+        <View style={styles.section}>
             <Text style={styles.sectionTitle}>Information</Text>
 
             <View style={styles.infoCard}>
-              <Ionicons name="school-outline" size={20} color="#ff5c93" />
+              <Ionicons name="school-outline" size={20} color="#e0a53d" />
               <View style={{ marginLeft: 12, flex: 1 }}>
                 <Text style={styles.infoLabel}>Course</Text>
                 <Text style={styles.infoValue}>{student.course || "—"}</Text>
@@ -254,7 +476,7 @@ const UserProfileScreen = () => {
             </View>
 
             <View style={styles.infoCard}>
-              <Ionicons name="trending-up-outline" size={20} color="#ff5c93" />
+              <Ionicons name="trending-up-outline" size={20} color="#e0a53d" />
               <View style={{ marginLeft: 12, flex: 1 }}>
                 <Text style={styles.infoLabel}>Year Level</Text>
                 <Text style={styles.infoValue}>{student.yearlvl || "—"}</Text>
@@ -262,14 +484,13 @@ const UserProfileScreen = () => {
             </View>
 
             <View style={styles.infoCard}>
-              <Ionicons name="card-outline" size={20} color="#ff5c93" />
+              <Ionicons name="card-outline" size={20} color="#e0a53d" />
               <View style={{ marginLeft: 12, flex: 1 }}>
-                <Text style={styles.infoLabel}>Student ID</Text>
+                <Text style={styles.infoLabel}>{profileIdLabel}</Text>
                 <Text style={styles.infoValue}>{student.studentID || "—"}</Text>
               </View>
             </View>
           </View>
-        )}
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Posts ({posts.length})</Text>
@@ -288,7 +509,7 @@ const UserProfileScreen = () => {
                   <Text style={styles.postTime}>{getTimeAgo(post.createdAt)}</Text>
                   <View style={styles.postStats}>
                     <View style={styles.statItem}>
-                      <Ionicons name="heart" size={14} color="#ff5c93" />
+                      <Ionicons name="heart" size={14} color="#e0a53d" />
                       <Text style={styles.statText}>{post.likeCount || 0}</Text>
                     </View>
                     <View style={styles.statItem}>
@@ -328,24 +549,44 @@ const UserProfileScreen = () => {
       {/* Fullscreen Image Viewer Modal */}
       <Modal
         visible={imageViewerVisible}
-        transparent={true}
+        transparent
         animationType="fade"
-        onRequestClose={() => setImageViewerVisible(false)}
+        onRequestClose={() => {
+          setImageViewerVisible(false);
+          setImageViewerFailed(false);
+        }}
       >
         <View style={styles.imageViewerOverlay}>
           <TouchableOpacity
             style={styles.closeButton}
-            onPress={() => setImageViewerVisible(false)}
+            onPress={() => {
+              setImageViewerVisible(false);
+              setImageViewerFailed(false);
+            }}
           >
             <Ionicons name="close" size={32} color="#fff" />
           </TouchableOpacity>
-          <Image
-            source={{ uri: currentImage }}
-            style={styles.fullscreenImage}
-            resizeMode="contain"
-          />
+          <View style={styles.fullscreenImageWrap}>
+            {currentImage && !imageViewerFailed ? (
+              <Image
+                key={currentImage}
+                source={{ uri: currentImage }}
+                style={styles.fullscreenImage}
+                resizeMode="contain"
+                onError={() => setImageViewerFailed(true)}
+              />
+            ) : (
+              <View style={styles.imageViewerFallback}>
+                <Ionicons name="image-outline" size={44} color="#fff" />
+                <Text style={styles.imageViewerFallbackText}>
+                  Unable to load profile image
+                </Text>
+              </View>
+            )}
+          </View>
         </View>
       </Modal>
+      </View>
     </SafeAreaView>
   );
 };
@@ -355,7 +596,11 @@ export default UserProfileScreen;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0e1320",
+    backgroundColor: "#f6f1ed",
+  },
+  contentShell: {
+    flex: 1,
+    backgroundColor: "#f6f1ed",
   },
   header: {
     flexDirection: "row",
@@ -363,10 +608,10 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     padding: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#1b2235",
+    borderBottomColor: "#fffaf7",
   },
   headerTitle: {
-    color: "#b8c7ff",
+    color: "#7a3b2e",
     fontSize: 18,
     fontWeight: "bold",
   },
@@ -379,14 +624,25 @@ const styles = StyleSheet.create({
     marginTop: 50,
     fontSize: 16,
   },
+  loadingState: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+  },
+  loadingText: {
+    color: "#8f6a60",
+    fontSize: 14,
+    fontWeight: "600",
+  },
   profileCard: {
     alignItems: "center",
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     margin: 16,
     padding: 24,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: "rgba(255,92,147,0.15)",
+    borderColor: "rgba(224,165,61,0.18)",
   },
   profileImageContainer: {
     position: "relative",
@@ -397,17 +653,17 @@ const styles = StyleSheet.create({
     height: 120,
     borderRadius: 60,
     borderWidth: 4,
-    borderColor: "#ff5c93",
+    borderColor: "#e0a53d",
   },
   placeholder: {
     width: 120,
     height: 120,
     borderRadius: 60,
-    backgroundColor: "#243054",
+    backgroundColor: "#f0e7e2",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 3,
-    borderColor: "#ff5c93",
+    borderColor: "#e0a53d",
   },
   statusBadge: {
     position: "absolute",
@@ -417,10 +673,10 @@ const styles = StyleSheet.create({
     height: 24,
     borderRadius: 12,
     borderWidth: 3,
-    borderColor: "#1b2235",
+    borderColor: "#fffaf7",
   },
   name: {
-    color: "#fff",
+    color: "#5f0909",
     fontSize: 24,
     fontWeight: "bold",
     marginBottom: 8,
@@ -445,7 +701,7 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   sectionTitle: {
-    color: "#ff5c93",
+    color: "#e0a53d",
     fontSize: 17,
     fontWeight: "700",
     marginBottom: 12,
@@ -454,32 +710,32 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     padding: 16,
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     borderRadius: 14,
     marginBottom: 10,
     borderWidth: 1,
-    borderColor: "rgba(255,92,147,0.1)",
+    borderColor: "rgba(224,165,61,0.14)",
   },
   infoLabel: {
     color: "#888",
     fontSize: 13,
   },
   infoValue: {
-    color: "#fff",
+    color: "#4d1b17",
     fontSize: 16,
     fontWeight: "500",
     marginTop: 4,
   },
   postCard: {
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     borderRadius: 14,
     padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "rgba(255,92,147,0.08)",
+    borderColor: "rgba(224,165,61,0.12)",
   },
   postContent: {
-    color: "#e4e6eb",
+    color: "#4d1b17",
     fontSize: 15,
     lineHeight: 22,
     marginBottom: 12,
@@ -496,7 +752,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingTop: 12,
     borderTopWidth: 1,
-    borderTopColor: "#243054",
+    borderTopColor: "#f0e7e2",
   },
   postTime: {
     color: "#888",
@@ -522,27 +778,27 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   pollCard: {
-    backgroundColor: "#1b2235",
+    backgroundColor: "#fffaf7",
     borderRadius: 14,
     padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "rgba(255,92,147,0.15)",
+    borderColor: "rgba(224,165,61,0.18)",
   },
   pollQuestion: {
-    color: "#fff",
+    color: "#4d1b17",
     fontSize: 16,
     fontWeight: "600",
     marginBottom: 10,
   },
   pollOption: {
-    color: "#ccc",
+    color: "#7a3b2e",
     fontSize: 14,
     marginVertical: 3,
     marginLeft: 4,
   },
   moreOptions: {
-    color: "#ff5c93",
+    color: "#e0a53d",
     fontSize: 13,
     marginTop: 6,
     fontStyle: "italic",
@@ -570,7 +826,22 @@ const styles = StyleSheet.create({
   },
   fullscreenImage: {
     width: SCREEN_WIDTH,
-    maxWidth: "100%",
-    maxHeight: "90%",
+    height: "100%",
+  },
+  fullscreenImageWrap: {
+    width: "100%",
+    height: "100%",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  imageViewerFallback: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  imageViewerFallbackText: {
+    color: "#fff",
+    fontSize: 15,
+    marginTop: 12,
   },
 });

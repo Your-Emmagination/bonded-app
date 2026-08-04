@@ -4,8 +4,8 @@
   "description": "Multi Functional School Community Hub App",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#070c15",
-  "theme_color": "#0f1624",
+  "background_color": "#f6f1ed",
+  "theme_color": "#5f0909",
   "orientation": "portrait-primary",
   "icons": [
     {

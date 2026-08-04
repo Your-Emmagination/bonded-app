@@ -1,13 +1,13 @@
 // app/LoginScreen.tsx
 import { Ionicons } from "@expo/vector-icons";
+import { StatusBar } from "expo-status-bar";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
 import React, { useRef, useState, useEffect, useCallback } from "react";
 import {
   ActivityIndicator,
   Animated,
   Image,
-  KeyboardAvoidingView,
+  Keyboard,
   Platform,
   ScrollView,
   StyleSheet,
@@ -15,11 +15,11 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  Keyboard,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { auth, db } from "../Firebase_configure";
+import { auth } from "../Firebase_configure";
+import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
 
 export default function LoginScreen() {
   const [studentID, setStudentID] = useState("");
@@ -31,6 +31,9 @@ export default function LoginScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
   const shakeAnim = useRef(new Animated.Value(0)).current;
+  const formLiftAnim = useRef(new Animated.Value(0)).current;
+  const heroShiftAnim = useRef(new Animated.Value(0)).current;
+  const heroScaleAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     Animated.parallel([
@@ -38,6 +41,62 @@ export default function LoginScreen() {
       Animated.timing(slideAnim, { toValue: 0, duration: 500, useNativeDriver: true }),
     ]).start();
   }, [fadeAnim, slideAnim]);
+
+  useEffect(() => {
+    const handleKeyboardShow = () => {
+      Animated.parallel([
+        Animated.timing(formLiftAnim, {
+          toValue: Platform.OS === "android" ? -54 : -26,
+          duration: 220,
+          useNativeDriver: true,
+        }),
+        Animated.timing(heroShiftAnim, {
+          toValue: -28,
+          duration: 220,
+          useNativeDriver: true,
+        }),
+        Animated.timing(heroScaleAnim, {
+          toValue: 0.92,
+          duration: 220,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    };
+
+    const handleKeyboardHide = () => {
+      Animated.parallel([
+        Animated.timing(formLiftAnim, {
+          toValue: 0,
+          duration: 220,
+          useNativeDriver: true,
+        }),
+        Animated.timing(heroShiftAnim, {
+          toValue: 0,
+          duration: 220,
+          useNativeDriver: true,
+        }),
+        Animated.timing(heroScaleAnim, {
+          toValue: 1,
+          duration: 220,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    };
+
+    const showSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      handleKeyboardShow,
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      handleKeyboardHide,
+    );
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, [formLiftAnim, heroScaleAnim, heroShiftAnim]);
 
   const shakeAnimation = useCallback(() => {
     Animated.sequence([
@@ -85,19 +144,14 @@ export default function LoginScreen() {
       const user = userCredential.user;
 
       // Get role (token first → Firestore fallback)
-      const idTokenResult = await user.getIdTokenResult(true); // force refresh
-      let role = (idTokenResult.claims.role as string)?.toLowerCase();
+      const role = await resolveUserRoleForAuthUser(user);
+      const profile = await getUserDataByAuthUser(user);
 
-      if (!role) {
-        const userDoc = await getDoc(doc(db, "students", user.uid));
-        role = userDoc.exists() ? userDoc.data()?.role?.toLowerCase() || "student" : "student";
-      }
-
-      // Save to AsyncStorage (only what's needed)
       await AsyncStorage.multiSet([
         ["userRole", role],
         ["userId", user.uid],
         ["userEmail", email],
+        ["userProfileDocId", profile?.studentID || email.split("@")[0] || user.uid],
       ]);
 
       // Role-based navigation
@@ -123,210 +177,287 @@ export default function LoginScreen() {
   }, [studentID, password, loading, shakeAnimation]);
 
   return (
-    <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
-      >
+    <SafeAreaView edges={["left", "right", "bottom"]} style={styles.container}>
+      <StatusBar style="light" backgroundColor="#5f0909" />
+      <View style={styles.keyboardView}>
         <ScrollView
+          style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
           showsVerticalScrollIndicator={false}
+          bounces={false}
+          contentInsetAdjustmentBehavior="never"
         >
           <Animated.View
             style={[styles.content, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}
           >
-            <View style={styles.logoContainer}>
-              <Image
-                source={require("../assets/images/BondEDlogo.png")}
-                style={styles.logo}
-                resizeMode="contain"
-              />
-              <Text style={styles.loginTitle}>Welcome Back</Text>
-              <Text style={styles.subtitle}>Sign in to continue</Text>
-            </View>
+            <View style={styles.visualShell}>
+              <View style={styles.topAccent} />
+              <View style={styles.bottomAccent} />
 
-            <Animated.View
-              style={[styles.inputContainer, { transform: [{ translateX: shakeAnim }] }]}
-            >
-              <View style={[styles.inputWrapper, error && styles.inputError]}>
-                <Ionicons name="id-card-outline" size={20} color="#ff3b7f" style={styles.inputIcon} />
-                <TextInput
-                  placeholder="ID + Domain"
-                  placeholderTextColor="#666"
-                  style={styles.input}
-                  value={studentID}
-                  onChangeText={(text) => {
-                    setStudentID(text);
-                    if (error) setError(null);
-                  }}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  returnKeyType="next"
-                  blurOnSubmit={false}
-                  onSubmitEditing={() => {/* optional: focus password input */}}
-                />
-              </View>
-
-              <View style={[styles.inputWrapper, error && styles.inputError]}>
-                <Ionicons name="lock-closed-outline" size={20} color="#ff3b7f" style={styles.inputIcon} />
-                <TextInput
-                  placeholder="Password"
-                  placeholderTextColor="#666"
-                  secureTextEntry={!showPassword}
-                  style={styles.input}
-                  value={password}
-                  onChangeText={(text) => {
-                    setPassword(text);
-                    if (error) setError(null);
-                  }}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  returnKeyType="done"
-                  onSubmitEditing={handleSignin}
-                />
-                <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
-                  <Ionicons
-                    name={showPassword ? "eye-off-outline" : "eye-outline"}
-                    size={22}
-                    color="#888"
-                  />
-                </TouchableOpacity>
-              </View>
-
-              {error && (
-                <Animated.View style={styles.errorContainer}>
-                  <Ionicons name="alert-circle" size={18} color="#ff3b7f" />
-                  <Text style={styles.errorText}>{error}</Text>
-                </Animated.View>
-              )}
-
-              <TouchableOpacity
-                style={[styles.button, loading && styles.buttonDisabled]}
-                onPress={handleSignin}
-                disabled={loading}
-                activeOpacity={0.8}
+              <Animated.View
+                style={[
+                  styles.logoContainer,
+                  {
+                    transform: [
+                      { translateY: heroShiftAnim },
+                      { scale: heroScaleAnim },
+                    ],
+                  },
+                ]}
               >
-                {loading ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <>
-                    <Text style={styles.buttonText}>Sign In</Text>
-                    <Ionicons name="arrow-forward" size={20} color="#fff" />
-                  </>
+                <Image
+                  source={require("../assets/images/BondEDlogo.png")}
+                  style={styles.logo}
+                  resizeMode="contain"
+                />
+                <Text style={styles.brandText}>BondED</Text>
+                <Text style={styles.loginTitle}>Welcome Back</Text>
+                <Text style={styles.subtitle}>Sign in to continue</Text>
+              </Animated.View>
+
+              <Animated.View
+                style={[
+                  styles.inputContainer,
+                  {
+                    transform: [
+                      { translateX: shakeAnim },
+                      { translateY: formLiftAnim },
+                    ],
+                  },
+                ]}
+              >
+                <View style={[styles.inputWrapper, error && styles.inputError]}>
+                  <TextInput
+                    placeholder="Email"
+                    placeholderTextColor="#e5b9ad"
+                    style={styles.input}
+                    value={studentID}
+                    onChangeText={(text) => {
+                      setStudentID(text);
+                      if (error) setError(null);
+                    }}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="next"
+                    blurOnSubmit={false}
+                    onSubmitEditing={() => {
+                      /* keep existing flow */
+                    }}
+                  />
+                </View>
+
+                <View style={[styles.inputWrapper, error && styles.inputError]}>
+                  <TextInput
+                    placeholder="Password"
+                    placeholderTextColor="#e5b9ad"
+                    secureTextEntry={!showPassword}
+                    style={styles.input}
+                    value={password}
+                    onChangeText={(text) => {
+                      setPassword(text);
+                      if (error) setError(null);
+                    }}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="done"
+                    onSubmitEditing={handleSignin}
+                  />
+                  <TouchableOpacity
+                    onPress={() => setShowPassword(!showPassword)}
+                    style={styles.eyeIcon}
+                  >
+                    <Ionicons
+                      name={showPassword ? "eye-off-outline" : "eye-outline"}
+                      size={20}
+                      color="#b88f87"
+                    />
+                  </TouchableOpacity>
+                </View>
+
+                {error && (
+                  <Animated.View style={styles.errorContainer}>
+                    <Ionicons name="alert-circle" size={18} color="#ffb4ab" />
+                    <Text style={styles.errorText}>{error}</Text>
+                  </Animated.View>
                 )}
-              </TouchableOpacity>
-            </Animated.View>
+
+                <TouchableOpacity
+                  style={[styles.button, loading && styles.buttonDisabled]}
+                  onPress={handleSignin}
+                  disabled={loading}
+                  activeOpacity={0.85}
+                >
+                  {loading ? (
+                    <ActivityIndicator color="#5e0a09" />
+                  ) : (
+                    <>
+                      <Text style={styles.buttonText}>Sign In</Text>
+                      <Ionicons name="arrow-forward" size={18} color="#5e0a09" />
+                    </>
+                  )}
+                </TouchableOpacity>
+              </Animated.View>
+
+              <View style={styles.footer}>
+                <View style={styles.footerLine} />
+                <Text style={styles.footerText}>BonED - CSAP Community Hub</Text>
+              </View>
+            </View>
           </Animated.View>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </View>
     </SafeAreaView>
   );
 }
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    backgroundColor: "#070c15",  // ← match PostCard background
+  container: {
+    flex: 1,
+    backgroundColor: "#5f0909",
   },
-  scrollContent: { 
-    flexGrow: 1, 
-    justifyContent: "center", 
-    paddingHorizontal: 24,        // slightly more breathing room
+  keyboardView: {
+    flex: 1,
   },
-  content: { 
-    width: "100%" 
+  scrollView: {
+    flex: 1,
+    backgroundColor: "#5f0909",
   },
-  logoContainer: { 
-    alignItems: "center", 
-    marginBottom: 40 
+  scrollContent: {
+    flexGrow: 1,
+    paddingBottom: 20,
   },
-  logo: { 
-    width: "65%", 
-    height: undefined, 
-    aspectRatio: 1 
+  content: {
+    width: "100%",
+    flex: 1,
   },
-  loginTitle: { 
-    fontSize: 34, 
-    fontWeight: "700", 
-    color: "#ff5c93",           // ← PostCard's vibrant pink
-    marginTop: 16,
-    letterSpacing: -0.5,
+  visualShell: {
+    flex: 1,
+    backgroundColor: "#5f0909",
+    overflow: "hidden",
+    paddingHorizontal: 28,
+    paddingTop: 16,
+    paddingBottom: 28,
+    justifyContent: "space-between",
   },
-  subtitle: { 
-    color: "#8ea0d0",            // ← PostCard secondary text
-    fontSize: 16, 
-    marginTop: 6,
+  topAccent: {
+    position: "absolute",
+    top: -76,
+    right: -78,
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: "#8a1214",
+  },
+  bottomAccent: {
+    position: "absolute",
+    bottom: -90,
+    left: -92,
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: "#8a1214",
+  },
+  logoContainer: {
+    alignItems: "center",
+    paddingTop: 76,
+  },
+  logo: {
+    width: 92,
+    height: 92,
+  },
+  brandText: {
+    fontSize: 26,
+    color: "#40d4b9",
+    marginTop: 8,
     fontWeight: "500",
   },
-
-  inputContainer: { 
-    width: "100%" 
+  loginTitle: {
+    fontSize: 28,
+    fontWeight: "800",
+    color: "#e0aa42",
+    marginTop: 52,
+  },
+  subtitle: {
+    color: "#dfb85e",
+    fontSize: 15,
+    marginTop: 6,
+    fontWeight: "600",
+  },
+  inputContainer: {
+    width: "100%",
+    marginTop: 28,
   },
   inputWrapper: {
-    backgroundColor: "#1b2235",     // ← PostCard card/accent bg
-    borderColor: "#243054",         // ← PostCard subtle border
-    borderWidth: 1.5,
-    borderRadius: 14,
+    backgroundColor: "#7a2020",
+    borderColor: "#e0a028",
+    borderWidth: 1.6,
+    borderRadius: 12,
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 16,
-    marginBottom: 16,
-    height: 58,
+    paddingHorizontal: 10,
+    marginBottom: 18,
+    height: 46,
   },
-  inputError: { 
-    borderColor: "#ff5c93"         // ← error uses same pink
-  },
-  inputIcon: { 
-    marginRight: 12,
-    color: "#ff5c93",              // ← icons match accent
+  inputError: {
+    borderColor: "#ffb4ab",
   },
   input: {
     flex: 1,
-    color: "#d8deff",               // ← main text color from PostCard
-    fontSize: 16,
+    color: "#f5d8d3",
+    fontSize: 15,
     paddingVertical: 0,
+    fontWeight: "600",
   },
-  eyeIcon: { 
-    padding: 6 
+  eyeIcon: {
+    padding: 8,
   },
   errorContainer: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginBottom: 20,
-    paddingHorizontal: 4,
+    marginTop: -4,
+    marginBottom: 14,
+    paddingHorizontal: 2,
   },
-  errorText: { 
-    color: "#ff5c93", 
-    fontSize: 14.5,
+  errorText: {
+    color: "#ffd4cf",
+    fontSize: 13.5,
     flex: 1,
     fontWeight: "500",
   },
-
   button: {
-    backgroundColor: "#ff5c93",     // ← same pink as likes/heart
-    paddingVertical: 16,
-    borderRadius: 14,
+    backgroundColor: "#e0a53d",
+    paddingVertical: 14,
+    borderRadius: 10,
     alignItems: "center",
-    marginTop: 12,
+    marginTop: 18,
     flexDirection: "row",
     justifyContent: "center",
-    gap: 10,
-    shadowColor: "#ff5c93",
-    shadowOffset: { width: 0, height: 5 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 10,
-    minHeight: 58,
+    gap: 6,
+    minHeight: 48,
   },
-  buttonDisabled: { 
-    opacity: 0.6 
+  buttonDisabled: {
+    opacity: 0.75,
   },
-  buttonText: { 
-    color: "#fff", 
-    fontWeight: "700", 
+  buttonText: {
+    color: "#5e0a09",
+    fontWeight: "800",
     fontSize: 17,
-    letterSpacing: 0.3,
+  },
+  footer: {
+    marginTop: 40,
+    alignItems: "center",
+  },
+  footerLine: {
+    width: "100%",
+    height: 1,
+    backgroundColor: "rgba(184, 143, 135, 0.16)",
+    marginBottom: 18,
+  },
+  footerText: {
+    color: "#b88f87",
+    fontSize: 12,
+    fontWeight: "500",
   },
 });

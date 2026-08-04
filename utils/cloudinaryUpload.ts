@@ -77,7 +77,6 @@ if (!CLOUDINARY_UPLOAD_PRESET) {
   } catch (error: any) {
     console.error("❌ Cloudinary upload error:", error.message);
     
-    // Provide more helpful error messages
     if (error.message.includes("Network request failed")) {
       throw new Error("Network error. Please check your internet connection.");
     }

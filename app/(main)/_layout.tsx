@@ -1,4 +1,5 @@
 // app/(main)/_layout.tsx
+import React from "react";
 import { Stack } from "expo-router";
 
 export default function MainLayout() {
@@ -6,37 +7,61 @@ export default function MainLayout() {
     <Stack
       screenOptions={{
         headerShown: false,
-        gestureEnabled: false,
-        animation: "none",
-        contentStyle: { backgroundColor: "#0f1624" },
+        gestureEnabled: true,
+        animation: "fade",
+        contentStyle: { backgroundColor: "#f6f1ed" },
       }}
     >
       <Stack.Screen
         name="(tabs)"
         options={{
-          animation: "none",
-          contentStyle: { backgroundColor: "#0f1624" },
+          animation: "fade",
+          contentStyle: { backgroundColor: "#f6f1ed" },
         }}
       />
       <Stack.Screen
         name="CreatePostScreen"
-        options={{ contentStyle: { backgroundColor: "#0e1320" } }}
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
       />
       <Stack.Screen
         name="CreatePollScreen"
-        options={{ contentStyle: { backgroundColor: "#0f1624" } }}
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
       />
       <Stack.Screen
         name="CreateEventScreen"
-        options={{ contentStyle: { backgroundColor: "#0f1624" } }}
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
       />
       <Stack.Screen
         name="EventCalendarScreen"
-        options={{ contentStyle: { backgroundColor: "#0f1624" } }}
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
       />
       <Stack.Screen
         name="UserProfileScreen"
-        options={{ contentStyle: { backgroundColor: "#0f1624" } }}
+        options={{
+          animation: "fade",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
+      />
+      <Stack.Screen
+        name="ServerChannelScreen"
+        options={{
+          animation: "none",
+          gestureEnabled: false,
+          presentation: "transparentModal",
+          contentStyle: { backgroundColor: "transparent" },
+        }}
       />
     </Stack>
   );

@@ -1,9 +1,15 @@
-const { getDefaultConfig } = require('expo/metro-config');
+const { getDefaultConfig } = require("expo/metro-config");
 
-const defaultConfig = getDefaultConfig(__dirname);
+const config = getDefaultConfig(__dirname);
 
-// Ensure proper resolution for Firebase on web
-defaultConfig.resolver.sourceExts = [...defaultConfig.resolver.sourceExts, 'cjs'];
-defaultConfig.resolver.assetExts = defaultConfig.resolver.assetExts.filter(ext => ext !== 'cjs');
+// Force Metro to use browser/RN builds instead of Node.js builds for Firebase
+config.resolver.resolverMainFields = [
+  "react-native",
+  "browser",
+  "main",
+];
 
-module.exports = defaultConfig;
+// Ensure Firebase packages resolve correctly
+config.resolver.unstable_enablePackageExports = false;
+
+module.exports = config;

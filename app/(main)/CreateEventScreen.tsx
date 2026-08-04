@@ -1,6 +1,6 @@
 // CreateEventScreen.tsx
 import { Ionicons } from "@expo/vector-icons";
-import DateTimePicker from "@react-native-community/datetimepicker"; // You'll need to install this: npx expo install @react-native-community/datetimepicker
+import DateTimePicker from "@react-native-community/datetimepicker"; 
 import { useRouter } from "expo-router";
 import { addDoc, collection, serverTimestamp } from "firebase/firestore";
 import React, { useCallback, useEffect, useState } from "react";
@@ -16,6 +16,8 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
 import { getUserData, UserRole } from "@/utils/rbac";
+import { createBroadcastEventNotifications } from "@/utils/notifications";
+import { sendBroadcastEventPushNotifications } from "@/utils/pushNotifications";
 type CalendarEvent = {
   title: string;
   description?: string;
@@ -34,7 +36,7 @@ const CreateEventScreen = () => {
   const [form, setForm] = useState<CalendarEvent>({
     title: "",
     description: "",
-    date: new Date().toISOString().split("T")[0], // Default to today
+    date: new Date().toISOString().split("T")[0], 
     category: "morning",
     notifyUsers: false,
   });
@@ -47,7 +49,6 @@ const CreateEventScreen = () => {
     const fetchUserRole = async () => {
       if (auth.currentUser) {
         const userData = await getUserData(auth.currentUser.uid);
-        console.log("Fetched user role:", userData?.role); // Temporary debug log
         setCurrentUserRole(userData?.role);
       }
     };
@@ -59,7 +60,6 @@ const CreateEventScreen = () => {
     return ["moderator", "teacher", "admin"].includes(currentUserRole || "");
   }, [currentUserRole]);
 
-  // ✅ FIXED: Only check after role is fetched (avoids race condition)
   useEffect(() => {
     if (currentUserRole !== undefined && !canManageEvents()) {
       Alert.alert(
@@ -115,14 +115,64 @@ const CreateEventScreen = () => {
 
     setLoading(true);
     try {
-      await addDoc(collection(db, "events"), {
+      const currentUserData = await getUserData(auth.currentUser.uid);
+      const actorName =
+        currentUserData
+          ? `${currentUserData.firstname} ${currentUserData.lastname}`.trim()
+          : auth.currentUser.displayName || auth.currentUser.email || "Unknown";
+      const createdEventRef = await addDoc(collection(db, "events"), {
         ...form,
         createdBy: auth.currentUser.uid,
         createdByName:
-          auth.currentUser.displayName || auth.currentUser.email || "Unknown",
+          currentUserData
+            ? `${currentUserData.firstname} ${currentUserData.lastname}`.trim() ||
+              auth.currentUser.displayName ||
+              auth.currentUser.email ||
+              "Unknown"
+            : auth.currentUser.displayName || auth.currentUser.email || "Unknown",
         createdAt: serverTimestamp(),
       });
-      Alert.alert("Success", "Event created successfully!", [
+
+      let successMessage = "Event created successfully!";
+
+      if (form.notifyUsers) {
+        const notificationResults = await Promise.allSettled([
+          createBroadcastEventNotifications({
+            actor: {
+              id: auth.currentUser.uid,
+              name: actorName,
+              profileImage: currentUserData?.profileImage || null,
+            },
+            entityId: createdEventRef.id,
+            title: form.title,
+            description: form.description,
+            eventDate: form.date,
+          }),
+          sendBroadcastEventPushNotifications({
+            entityId: createdEventRef.id,
+            title: form.title,
+            description: form.description,
+            eventDate: form.date,
+            excludeUserIds: [auth.currentUser.uid],
+          }),
+        ]);
+
+        const failedDeliveries = notificationResults.filter(
+          (result) => result.status === "rejected",
+        );
+
+        if (failedDeliveries.length > 0) {
+          failedDeliveries.forEach((result) => {
+            if (result.status === "rejected") {
+              console.error("Event notification delivery error:", result.reason);
+            }
+          });
+          successMessage =
+            "Event created, but some notifications could not be delivered.";
+        }
+      }
+
+      Alert.alert("Success", successMessage, [
         { text: "OK", onPress: () => router.back() },
       ]);
     } catch (error) {
@@ -134,15 +184,16 @@ const CreateEventScreen = () => {
   };
 
   if (!canManageEvents()) {
-    return null; // Or a loading screen until redirect
+    return null; 
   }
 
   return (
     <SafeAreaView style={styles.container}>
+      <View style={styles.contentShell}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color="#b8c7ff" />
+          <Ionicons name="arrow-back" size={24} color="#7a3b2e" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Create Event</Text>
         <View style={{ width: 24 }} />
@@ -160,7 +211,7 @@ const CreateEventScreen = () => {
             value={form.title}
             onChangeText={(value) => handleInputChange("title", value)}
             placeholder="Enter event title"
-            placeholderTextColor="rgba(255,255,255,0.5)"
+            placeholderTextColor="#9b766c"
           />
         </View>
 
@@ -172,7 +223,7 @@ const CreateEventScreen = () => {
             value={form.description}
             onChangeText={(value) => handleInputChange("description", value)}
             placeholder="Enter event description (optional)"
-            placeholderTextColor="rgba(255,255,255,0.5)"
+            placeholderTextColor="#9b766c"
             multiline
             numberOfLines={3}
             textAlignVertical="top"
@@ -187,7 +238,7 @@ const CreateEventScreen = () => {
             onPress={() => setShowDatePicker(true)}
           >
             <Text style={styles.dateTimeText}>{form.date}</Text>
-            <Ionicons name="calendar-outline" size={20} color="#b8c7ff" />
+            <Ionicons name="calendar-outline" size={20} color="#7a3b2e" />
           </TouchableOpacity>
           {showDatePicker && (
             <DateTimePicker
@@ -209,7 +260,7 @@ const CreateEventScreen = () => {
             <Text style={styles.dateTimeText}>
               {form.startTime || "Select start time"}
             </Text>
-            <Ionicons name="time-outline" size={20} color="#b8c7ff" />
+            <Ionicons name="time-outline" size={20} color="#7a3b2e" />
           </TouchableOpacity>
           {showStartTimePicker && (
             <DateTimePicker
@@ -237,7 +288,7 @@ const CreateEventScreen = () => {
             <Text style={styles.dateTimeText}>
               {form.endTime || "Select end time"}
             </Text>
-            <Ionicons name="time-outline" size={20} color="#b8c7ff" />
+            <Ionicons name="time-outline" size={20} color="#7a3b2e" />
           </TouchableOpacity>
           {showEndTimePicker && (
             <DateTimePicker
@@ -317,6 +368,7 @@ const CreateEventScreen = () => {
           {loading ? "Creating..." : "Create Event"}
         </Text>
       </TouchableOpacity>
+      </View>
     </SafeAreaView>
   );
 };
@@ -324,7 +376,11 @@ const CreateEventScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0e1320",
+    backgroundColor: "#5f0909",
+  },
+  contentShell: {
+    flex: 1,
+    backgroundColor: "#f6f1ed",
   },
   header: {
     flexDirection: "row",
@@ -333,12 +389,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#1b2235",
+    borderBottomColor: "#fffaf7",
   },
   headerTitle: {
     fontSize: 18,
     fontWeight: "bold",
-    color: "#b8c7ff",
+    color: "#7a3b2e",
     letterSpacing: 1,
   },
   formContainer: {
@@ -354,18 +410,18 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 16,
     fontWeight: "600",
-    color: "#e9edff",
+    color: "#4d1b17",
     marginBottom: 8,
   },
   textInput: {
-    backgroundColor: "#243054",
-    color: "#fff",
+    backgroundColor: "#fff8f4",
+    color: "#4d1b17",
     borderRadius: 10,
     paddingVertical: 12,
     paddingHorizontal: 16,
     fontSize: 16,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
+    borderColor: "#dfc5bc",
   },
   multilineInput: {
     height: 80,
@@ -375,15 +431,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#243054",
+    backgroundColor: "#fff8f4",
     borderRadius: 10,
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
+    borderColor: "#dfc5bc",
   },
   dateTimeText: {
-    color: "#fff",
+    color: "#4d1b17",
     fontSize: 16,
   },
   categoryContainer: {
@@ -392,19 +448,19 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   categoryButton: {
-    backgroundColor: "#243054",
+    backgroundColor: "#fff8f4",
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
+    borderColor: "#dfc5bc",
   },
   selectedCategoryButton: {
-    backgroundColor: "#ff5c93",
-    borderColor: "#ff5c93",
+    backgroundColor: "#e0a53d",
+    borderColor: "#e0a53d",
   },
   categoryButtonText: {
-    color: "#b8c7ff",
+    color: "#7a3b2e",
     fontSize: 14,
     fontWeight: "600",
   },
@@ -417,30 +473,30 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   toggleButton: {
-    backgroundColor: "#243054",
+    backgroundColor: "#fff8f4",
     padding: 8,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
+    borderColor: "#dfc5bc",
   },
   toggleButtonActive: {
-    backgroundColor: "#ff5c93",
-    borderColor: "#ff5c93",
+    backgroundColor: "#e0a53d",
+    borderColor: "#e0a53d",
   },
   submitButton: {
-    backgroundColor: "#ff5c93",
+    backgroundColor: "#e0a53d",
     paddingVertical: 16,
     alignItems: "center",
     marginHorizontal: 16,
     marginBottom: 20,
     borderRadius: 12,
-    shadowColor: "#ff5c93",
+    shadowColor: "#e0a53d",
     shadowOpacity: 0.4,
     shadowRadius: 6,
     elevation: 3,
   },
   submitButtonDisabled: {
-    backgroundColor: "#6c757d",
+    backgroundColor: "#b88f87",
   },
   submitButtonText: {
     color: "#fff",
