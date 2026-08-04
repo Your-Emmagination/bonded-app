@@ -2,6 +2,23 @@
 
 This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
 
+## Clone and access from another computer
+
+To access this project on another laptop, use these commands:
+
+```bash
+git clone https://github.com/Your-Emmagination/bonded-app.git
+cd bonded-app
+git checkout backup/hardware-issue-20260805
+npm install
+```
+
+If you want to switch back to the main project branch later:
+
+```bash
+git checkout main
+```
+
 ## Get started
 
 1. Install dependencies

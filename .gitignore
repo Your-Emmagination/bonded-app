@@ -58,4 +58,7 @@ service-account-key.json
 # Your custom import script folder (if it contains secrets or large data)
 # firestore-student-import/
 
+# Local Cloudflare worker secrets
+cloudflare/ai-worker/.dev.vars
+
 # End of .gitignore
