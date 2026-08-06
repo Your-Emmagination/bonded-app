@@ -1,3 +1,4 @@
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
@@ -23,9 +24,15 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
-import { useRelativeTimeNow } from "@/utils/relativeTime";
 
-type NotificationType = "like" | "comment" | "reply" | "mention" | "activity" | "event";
+type NotificationType =
+  | "like"
+  | "comment"
+  | "reply"
+  | "mention"
+  | "activity"
+  | "event"
+  | "emergency";
 type TimeSection = "Today" | "Yesterday" | "This Week" | "This Month" | "Older";
 type FilterOption =
   | "All"
@@ -38,7 +45,7 @@ type FilterOption =
 type NotificationItem = {
   id: string;
   type: NotificationType;
-  entityType?: "post" | "comment" | "reply" | "event";
+  entityType?: "post" | "comment" | "reply" | "event" | "emergency";
   entityId?: string;
   parentId?: string | null;
   actorName: string;
@@ -317,6 +324,8 @@ const NotificationsScreen = () => {
         return "at";
       case "event":
         return "calendar";
+      case "emergency":
+        return "warning";
       default:
         return "notifications";
     }
@@ -334,6 +343,8 @@ const NotificationsScreen = () => {
         return { icon: "#00d470", bg: "#00d47020" };
       case "event":
         return { icon: "#e0a53d", bg: "#e0a53d20" };
+      case "emergency":
+        return { icon: "#ff2d2d", bg: "#ff2d2d22" };
       default:
         return { icon: "#b88f87", bg: "#b88f8720" };
     }
@@ -354,7 +365,12 @@ const NotificationsScreen = () => {
 
     return (
       <TouchableOpacity
-        style={[styles.notificationItem, !item.read && styles.unreadItem]}
+        style={[
+          styles.notificationItem,
+          item.type === "emergency" && styles.emergencyItem,
+          !item.read && styles.unreadItem,
+          item.type === "emergency" && !item.read && styles.emergencyUnreadItem,
+        ]}
         onPress={() => handleNotificationPress(item)}
         activeOpacity={0.85}
       >
@@ -381,7 +397,14 @@ const NotificationsScreen = () => {
           <Text style={styles.timestamp}>{getTimeAgo(item.createdAt)}</Text>
         </View>
 
-        {!item.read && <View style={styles.unreadDot} />}
+        {!item.read && (
+          <View
+            style={[
+              styles.unreadDot,
+              item.type === "emergency" && styles.emergencyUnreadDot,
+            ]}
+          />
+        )}
       </TouchableOpacity>
     );
   };
@@ -644,6 +667,14 @@ const styles = StyleSheet.create({
     borderLeftColor: "#e0a53d",
     borderColor: "rgba(224,165,61,0.34)",
   },
+  emergencyItem: {
+    backgroundColor: "#fff1f1",
+    borderColor: "rgba(255,45,45,0.36)",
+  },
+  emergencyUnreadItem: {
+    borderLeftWidth: 4,
+    borderLeftColor: "#ff2d2d",
+  },
   iconContainer: {
     width: 40,
     height: 40,
@@ -685,6 +716,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#e0a53d",
     marginLeft: 8,
     marginTop: 8,
+  },
+  emergencyUnreadDot: {
+    backgroundColor: "#ff2d2d",
   },
   modalOverlay: {
     flex: 1,

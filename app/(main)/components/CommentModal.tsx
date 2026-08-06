@@ -75,6 +75,7 @@ import {
 import CommentComposer from "./CommentComposer";
 import AiReplyCard from "./AiReplyCard";
 import ExpandableText from "./ExpandableText";
+import ImageZoomViewer from "./ImageZoomViewer";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
@@ -1268,56 +1269,12 @@ const CommentModal: React.FC<CommentModalProps> = ({
   />
 )}
 
-<Modal
+<ImageZoomViewer
+  images={selectedImages}
+  startIndex={selectedImageIndex}
   visible={imageViewerVisible}
-  transparent
-  animationType="fade"
-  onRequestClose={() => setImageViewerVisible(false)}
->
-  <View style={styles.imageViewerContainer}>
-    <TouchableOpacity
-      style={styles.imageViewerClose}
-      onPress={() => setImageViewerVisible(false)}
-    >
-      <Ionicons name="close" size={32} color="#fff" />
-    </TouchableOpacity>
-
-    <FlatList
-      data={selectedImages}
-      horizontal
-      pagingEnabled
-      initialScrollIndex={selectedImageIndex}
-      getItemLayout={(_, index) => ({
-        length: SCREEN_WIDTH,
-        offset: SCREEN_WIDTH * index,
-        index,
-      })}
-      renderItem={({ item }) => (
-        <View style={styles.imageViewerPage}>
-          <Image
-            source={{ uri: item }}
-            style={styles.imageViewerImage}
-            resizeMode="contain"
-          />
-        </View>
-      )}
-      keyExtractor={(_, i) => i.toString()}
-      showsHorizontalScrollIndicator={false}
-      onMomentumScrollEnd={(e) => {
-        const idx = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
-        setSelectedImageIndex(idx);
-      }}
-    />
-
-    {selectedImages.length > 1 && (
-      <View style={styles.imageViewerCounter}>
-        <Text style={styles.imageViewerCounterText}>
-          {selectedImageIndex + 1} / {selectedImages.length}
-        </Text>
-      </View>
-    )}
-  </View>
-</Modal>
+  onClose={() => setImageViewerVisible(false)}
+/>
     </>
   );
 };

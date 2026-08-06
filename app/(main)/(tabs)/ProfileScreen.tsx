@@ -13,8 +13,9 @@ import {
 import { doc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
 import DropDownPicker from "react-native-dropdown-picker";
 
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { getProfileIdLabel } from "@/utils/profileLabels";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import React, {
   useCallback,
   useEffect,
@@ -40,7 +41,6 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { getProfileIdLabel } from "@/utils/profileLabels";
 import { auth, db } from "../../../Firebase_configure";
 
 // Types

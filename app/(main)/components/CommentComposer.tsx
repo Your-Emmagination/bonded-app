@@ -447,18 +447,32 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
     setGifError(null);
     try {
       const API_KEY = "AIzaSyCFwGab5AO3lSHEBTxTDIVgOwFt4YvCWEI";
+      const CLIENT_KEY = "bonded-app";
       const limit = 20;
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000);
 
       const response = await fetch(
-        `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(query)}&key=${API_KEY}&limit=${limit}&media_filter=gif`,
-        { signal: controller.signal }
+        `https://tenor.googleapis.com/v2/search?${new URLSearchParams({
+          q: query,
+          key: API_KEY,
+          client_key: CLIENT_KEY,
+          limit: String(limit),
+          media_filter: "gif",
+          country: "US",
+        }).toString()}`,
+        {
+          signal: controller.signal,
+          headers: { Accept: "application/json" },
+        },
       );
 
       clearTimeout(timeoutId);
 
-      if (!response.ok) throw new Error("Failed to fetch GIFs");
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`GIF search failed (${response.status}): ${errorText}`);
+      }
 
       const data = await response.json();
 
@@ -474,6 +488,8 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
 
       if (error.name === "AbortError") {
         setGifError("Connection timeout. Please check your internet and try again.");
+      } else if (error.message?.includes("401") || error.message?.includes("403") || error.message?.includes("429")) {
+        setGifError("GIF search is temporarily unavailable. Please try again later.");
       } else if (error.message?.includes("network") || error.message?.includes("Failed to fetch")) {
         setGifError("No internet connection. Please check your network and try again.");
       } else {

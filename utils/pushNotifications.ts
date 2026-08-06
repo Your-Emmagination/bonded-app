@@ -8,12 +8,13 @@ import {
   serverTimestamp,
   setDoc,
 } from "firebase/firestore";
-import { Platform } from "react-native";
+import { Platform, Vibration } from "react-native";
 import { db } from "../Firebase_configure";
 import { getStudentDocIdFromAuthUser, getUserDataByAuthUser } from "./rbac";
 
 const EXPO_PUSH_API_URL = "https://exp.host/--/api/v2/push/send";
 const ANDROID_CHANNEL_ID = "default";
+const EMERGENCY_ANDROID_CHANNEL_ID = "emergency";
 const EXPO_GO_EXECUTION_ENVIRONMENT = "storeClient";
 
 type NotificationsModule = typeof import("expo-notifications");
@@ -28,16 +29,26 @@ type EventPushNotificationInput = {
   excludeUserIds?: string[];
 };
 
+type EmergencyPushNotificationInput = {
+  recipientIds: string[];
+  entityId: string;
+  title?: string | null;
+  message: string;
+  serverId?: string | null;
+  channelId?: string | null;
+  serverName?: string | null;
+  channelLabel?: string | null;
+  serverAccent?: string | null;
+  excludeUserIds?: string[];
+};
+
 type PushTokenRecord = {
   userId?: string;
   expoPushTokens?: unknown;
 };
 
 type RouterLike = {
-  push: (href: {
-    pathname: "/(main)/EventCalendarScreen";
-    params: { eventId: string };
-  }) => void;
+  push: (href: any) => void;
 };
 
 type ExpoPushMessage = {
@@ -47,11 +58,7 @@ type ExpoPushMessage = {
   sound: "default";
   priority: "high";
   channelId: string;
-  data: {
-    screen: "event-calendar";
-    entityType: "event";
-    entityId: string;
-  };
+  data: Record<string, string>;
 };
 
 let notificationsModulePromise: Promise<NotificationsModule | null> | null = null;
@@ -152,6 +159,57 @@ const ensureAndroidNotificationChannel = async (
     lightColor: "#e0a53d",
     sound: "default",
   });
+
+  await notifications.setNotificationChannelAsync(EMERGENCY_ANDROID_CHANNEL_ID, {
+    name: "Emergency alerts",
+    importance: notifications.AndroidImportance.MAX,
+    vibrationPattern: [0, 500, 200, 500, 200, 900],
+    lightColor: "#ff2d2d",
+    lockscreenVisibility: notifications.AndroidNotificationVisibility.PUBLIC,
+    bypassDnd: true,
+    sound: "default",
+  });
+};
+
+const playBrowserEmergencyTone = () => {
+  if (Platform.OS !== "web") {
+    return false;
+  }
+
+  const browserWindow = globalThis as typeof globalThis & {
+    AudioContext?: typeof AudioContext;
+    webkitAudioContext?: typeof AudioContext;
+  };
+  const AudioContextCtor =
+    browserWindow.AudioContext || browserWindow.webkitAudioContext;
+
+  if (!AudioContextCtor) {
+    return false;
+  }
+
+  const audioContext = new AudioContextCtor();
+  const startAt = audioContext.currentTime;
+  const beepDurations = [0, 0.32, 0.64];
+
+  beepDurations.forEach((offset) => {
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    oscillator.type = "square";
+    oscillator.frequency.setValueAtTime(880, startAt + offset);
+    gain.gain.setValueAtTime(0.0001, startAt + offset);
+    gain.gain.exponentialRampToValueAtTime(0.24, startAt + offset + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + offset + 0.24);
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+    oscillator.start(startAt + offset);
+    oscillator.stop(startAt + offset + 0.26);
+  });
+
+  globalThis.setTimeout(() => {
+    audioContext.close().catch(() => null);
+  }, 1200);
+
+  return true;
 };
 
 const persistPushTokenForUser = async (user: User, pushToken: string) => {
@@ -209,13 +267,61 @@ const readEventIdFromNotificationData = (data: unknown) => {
   return null;
 };
 
+const readEmergencyAlertTargetFromNotificationData = (data: unknown) => {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  const record = data as Record<string, unknown>;
+  const screen = typeof record.screen === "string" ? record.screen : null;
+  const entityType =
+    typeof record.entityType === "string" ? record.entityType : null;
+  const serverId = typeof record.serverId === "string" ? record.serverId : null;
+  const channelId =
+    typeof record.channelId === "string" ? record.channelId : null;
+  const serverName =
+    typeof record.serverName === "string" ? record.serverName : "Emergency";
+  const channelLabel =
+    typeof record.channelLabel === "string" ? record.channelLabel : "alerts";
+  const serverAccent =
+    typeof record.serverAccent === "string" ? record.serverAccent : "#b64040";
+
+  if (screen !== "emergency-alert" && entityType !== "emergency") {
+    return null;
+  }
+
+  if (!serverId || !channelId) {
+    return {
+      pathname: "/(main)/(tabs)/NotificationsScreen",
+    };
+  }
+
+  return {
+    pathname: "/(main)/ServerChannelScreen",
+    params: {
+      serverId,
+      channelId,
+      serverName,
+      channelLabel,
+      serverAccent,
+    },
+  };
+};
+
 const navigateFromNotificationResponse = (
   response: NotificationResponse | null | undefined,
   router: RouterLike,
 ) => {
-  const eventId = readEventIdFromNotificationData(
-    response?.notification.request.content.data,
-  );
+  const notificationData = response?.notification.request.content.data;
+  const emergencyTarget =
+    readEmergencyAlertTargetFromNotificationData(notificationData);
+
+  if (emergencyTarget) {
+    router.push(emergencyTarget);
+    return true;
+  }
+
+  const eventId = readEventIdFromNotificationData(notificationData);
 
   if (!eventId) {
     return false;
@@ -294,6 +400,42 @@ export const handlePushNotificationNavigation = (
   router: RouterLike,
 ) => navigateFromNotificationResponse(response, router);
 
+export const playEmergencyAlertSound = async ({
+  title = "Emergency alert",
+  body = "Open BondED for details.",
+  data = {},
+}: {
+  title?: string;
+  body?: string;
+  data?: Record<string, string>;
+}) => {
+  const playedBrowserTone = playBrowserEmergencyTone();
+  Vibration.vibrate([0, 500, 200, 500, 200, 900]);
+
+  const notifications = await loadNotificationsModule();
+  if (!notifications) {
+    return playedBrowserTone;
+  }
+
+  await ensureAndroidNotificationChannel(notifications);
+  await notifications.scheduleNotificationAsync({
+    content: {
+      title,
+      body,
+      sound: "default",
+      priority: notifications.AndroidNotificationPriority.MAX,
+      data: {
+        screen: "emergency-alert",
+        entityType: "emergency",
+        ...data,
+      },
+    },
+    trigger: null,
+  });
+
+  return true;
+};
+
 export const sendBroadcastEventPushNotifications = async ({
   entityId,
   title,
@@ -354,6 +496,87 @@ export const sendBroadcastEventPushNotifications = async ({
       const errorBody = await response.text().catch(() => "");
       throw new Error(
         `Expo push send failed with status ${response.status}: ${errorBody}`,
+      );
+    }
+  }
+
+  return tokens.size;
+};
+
+export const sendEmergencyPushNotifications = async ({
+  recipientIds,
+  entityId,
+  title,
+  message,
+  serverId,
+  channelId,
+  serverName,
+  channelLabel,
+  serverAccent,
+  excludeUserIds = [],
+}: EmergencyPushNotificationInput) => {
+  const allowedRecipientIds = new Set(recipientIds.filter(Boolean));
+  const excludedIds = new Set(excludeUserIds.filter(Boolean));
+
+  if (allowedRecipientIds.size === 0) {
+    return 0;
+  }
+
+  const pushTokensSnapshot = await getDocs(collection(db, "userPushTokens"));
+  const tokens = new Set<string>();
+
+  pushTokensSnapshot.docs.forEach((item) => {
+    const data = item.data() as PushTokenRecord;
+    const userId = String(data?.userId || item.id || "").trim();
+
+    if (!userId || excludedIds.has(userId) || !allowedRecipientIds.has(userId)) {
+      return;
+    }
+
+    extractPushTokens(data?.expoPushTokens).forEach((token) => {
+      tokens.add(token);
+    });
+  });
+
+  if (tokens.size === 0) {
+    return 0;
+  }
+
+  const notificationTitle = title?.trim() || "Emergency alert";
+  const notificationBody = message.trim() || "Open BondED for details.";
+
+  const messages: ExpoPushMessage[] = Array.from(tokens).map((token) => ({
+    to: token,
+    title: notificationTitle,
+    body: notificationBody,
+    sound: "default",
+    priority: "high",
+    channelId: EMERGENCY_ANDROID_CHANNEL_ID,
+    data: {
+      screen: "emergency-alert",
+      entityType: "emergency",
+      entityId,
+      serverId: serverId || "",
+      channelId: channelId || "",
+      serverName: serverName || "",
+      channelLabel: channelLabel || "",
+      serverAccent: serverAccent || "",
+    },
+  }));
+
+  for (const batch of chunkArray(messages, 100)) {
+    const response = await fetch(EXPO_PUSH_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(batch),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      throw new Error(
+        `Expo emergency push send failed with status ${response.status}: ${errorBody}`,
       );
     }
   }

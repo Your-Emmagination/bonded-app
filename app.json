@@ -13,7 +13,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.encabo.bondedapp",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCameraUsageDescription": "BondEd uses your camera when you host a live stream.",
+        "NSMicrophoneUsageDescription": "BondEd uses your microphone when you host a live stream."
       }
     },
     "android": {
@@ -21,6 +23,11 @@
       "package": "com.encabo.bondedapp",
       "googleServicesFile": "./google-services.json",
       "backgroundColor": "#5f0909",
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -56,7 +63,8 @@
           }
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-font"
     ],
     "experiments": {
       "typedRoutes": true,

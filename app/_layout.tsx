@@ -3,7 +3,8 @@ import React from "react";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { auth } from "../Firebase_configure";
+import { collection, onSnapshot, query, where } from "firebase/firestore";
+import { auth, db } from "../Firebase_configure";
 import { ActivityIndicator, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { resolveUserRoleForAuthUser } from "@/utils/rbac";
@@ -12,6 +13,7 @@ import {
   getLastPushNotificationResponse,
   handlePushNotificationNavigation,
   isPushNotificationsSupported,
+  playEmergencyAlertSound,
   registerDeviceForPushNotifications,
 } from "@/utils/pushNotifications";
 
@@ -72,6 +74,71 @@ export default function RootLayout() {
       console.error("Error registering device for push notifications:", error);
     });
   }, [user]);
+
+  useEffect(() => {
+    if (!user?.uid) {
+      return;
+    }
+
+    let hasLoadedInitialSnapshot = false;
+    const emergencyNotificationsQuery = query(
+      collection(db, "notifications"),
+      where("recipientId", "==", user.uid),
+      where("type", "==", "emergency"),
+    );
+
+    const unsubscribe = onSnapshot(
+      emergencyNotificationsQuery,
+      (snapshot) => {
+        snapshot.docChanges().forEach((change) => {
+          if (change.type !== "added") {
+            return;
+          }
+
+          if (!hasLoadedInitialSnapshot) {
+            return;
+          }
+
+          const data = change.doc.data();
+          if (data?.read === true) {
+            return;
+          }
+
+          const actorName =
+            typeof data?.actorName === "string" && data.actorName.trim()
+              ? data.actorName.trim()
+              : "BondED";
+          const message =
+            typeof data?.message === "string" && data.message.trim()
+              ? data.message.trim()
+              : "sent an emergency alert";
+          const preview =
+            typeof data?.preview === "string" && data.preview.trim()
+              ? data.preview.trim()
+              : "Open BondED for details.";
+
+          playEmergencyAlertSound({
+            title: "Emergency alert",
+            body: `${actorName} ${message}: ${preview}`,
+            data: {
+              entityId: change.doc.id,
+              parentId:
+                typeof data?.parentId === "string" ? data.parentId : "",
+            },
+          }).catch((error) => {
+            console.error("Error playing emergency alert sound:", error);
+          });
+        });
+
+        hasLoadedInitialSnapshot = true;
+      },
+      (error) => {
+        console.error("Error listening for emergency notifications:", error);
+      },
+    );
+
+    return unsubscribe;
+  }, [user?.uid]);
 
   useEffect(() => {
     if (!isPushNotificationsSupported()) {

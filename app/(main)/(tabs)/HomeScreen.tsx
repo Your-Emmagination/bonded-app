@@ -37,6 +37,7 @@ import {
   Image,
   Linking,
   Modal,
+  PanResponder,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -64,6 +65,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import PollCard from "../components/PollCard";
 import CommentModal from "../components/CommentModal";
 import PostCard from "../components/PostCard";
+import ImageZoomViewer from "../components/ImageZoomViewer";
 import ServerDrawer, {
   ServerEditPatch,
   ServerMemberPreview,
@@ -515,6 +517,24 @@ const HomeScreen = () => {
   const menuTranslateY = useRef(new Animated.Value(0)).current;
   const feedListRef = useRef<FlatList<FeedItem>>(null);
   const searchInputRef = useRef<TextInput>(null);
+  const drawerPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: (evt, gestureState) =>
+        evt.nativeEvent.pageX <= 24 &&
+        gestureState.dx > 10 &&
+        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 2,
+      onMoveShouldSetPanResponder: (evt, gestureState) =>
+        evt.nativeEvent.pageX <= 24 &&
+        gestureState.dx > 10 &&
+        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 2,
+      onPanResponderRelease: (_, gestureState) => {
+        if (gestureState.dx > 80 || gestureState.vx > 0.45) {
+          setServerDrawerVisible(true);
+        }
+      },
+      onPanResponderTerminationRequest: () => false,
+    }),
+  ).current;
   const router = useRouter();
 
   const {
@@ -2456,6 +2476,16 @@ const handleSelectChannel = useCallback(
       router.push("/CreatePostScreen");
     } else if (action === "polls") {
       router.push("/CreatePollScreen");
+    } else if (action === "live") {
+      router.push({
+        pathname: "/LiveStreamScreen",
+        params: {
+          serverId: selectedServer?.id || "",
+          serverName: selectedServer?.name || "",
+          channelId: selectedChannel?.id || "",
+          channelLabel: selectedChannel?.label || "",
+        },
+      });
     }
   };
 
@@ -3039,7 +3069,11 @@ const renderEmptyState = () => {
   // ─────────────────────────────────────────────────────────────────────────
 
 return (
-    <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
+    <SafeAreaView
+      style={styles.container}
+      edges={["top", "left", "right"]}
+      {...drawerPanResponder.panHandlers}
+    >
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <View style={styles.header}>
         {searchExpanded ? (
@@ -3357,52 +3391,12 @@ return (
       />
 
       {/* ── Image Viewer Modal ───────────────────────────────────────────── */}
-      <Modal
+      <ImageZoomViewer
+        images={currentImages}
+        startIndex={currentImageIndex}
         visible={imageViewerVisible}
-        animationType="fade"
-        transparent={false}
-        onRequestClose={() => setImageViewerVisible(false)}
-      >
-        <View style={styles.imageViewerContainer}>
-          <View style={styles.imageViewerHeader}>
-            <Text style={styles.imageViewerCounter}>
-              {currentImageIndex + 1} / {currentImages.length}
-            </Text>
-            <TouchableOpacity onPress={() => setImageViewerVisible(false)}>
-              <Ionicons name="close" size={32} color="#fff" />
-            </TouchableOpacity>
-          </View>
-
-          <FlatList
-            data={currentImages}
-            horizontal
-            pagingEnabled
-            showsHorizontalScrollIndicator={false}
-            keyExtractor={(_, idx) => idx.toString()}
-            initialScrollIndex={currentImageIndex}
-            getItemLayout={(_, index) => ({
-              length: SCREEN_WIDTH,
-              offset: SCREEN_WIDTH * index,
-              index,
-            })}
-            onMomentumScrollEnd={(e) => {
-              const index = Math.round(
-                e.nativeEvent.contentOffset.x / SCREEN_WIDTH,
-              );
-              setCurrentImageIndex(index);
-            }}
-            renderItem={({ item }) => (
-              <View style={styles.imageViewerSlide}>
-                <Image
-                  source={{ uri: item }}
-                  style={styles.fullscreenImage}
-                  resizeMode="contain"
-                />
-              </View>
-            )}
-          />
-        </View>
-      </Modal>
+        onClose={() => setImageViewerVisible(false)}
+      />
 
       {/* ── FAB Menu ────────────────────────────────────────────────────── */}
       {fabMenuVisible && (
@@ -3427,6 +3421,11 @@ return (
               label: "Polls",
               icon: "bar-chart-outline" as const,
               action: "polls",
+            },
+            {
+              label: "Live",
+              icon: "videocam-outline" as const,
+              action: "live",
             },
           ].map((item, index) => (
             <Animated.View
@@ -3533,6 +3532,14 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "#7f2220",
     backgroundColor: "#5f0909",
+  },
+  edgeSwipeArea: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 26,
+    zIndex: 20,
   },
   headerLeft: {
     flexDirection: "row",
