@@ -2456,6 +2456,16 @@ const handleSelectChannel = useCallback(
       router.push("/CreatePostScreen");
     } else if (action === "polls") {
       router.push("/CreatePollScreen");
+    } else if (action === "live") {
+      router.push({
+        pathname: "/LiveStreamScreen",
+        params: {
+          serverId: selectedServer?.id || "",
+          serverName: selectedServer?.name || "",
+          channelId: selectedChannel?.id || "",
+          channelLabel: selectedChannel?.label || "",
+        },
+      });
     }
   };
 
@@ -3427,6 +3437,11 @@ return (
               label: "Polls",
               icon: "bar-chart-outline" as const,
               action: "polls",
+            },
+            {
+              label: "Live",
+              icon: "videocam-outline" as const,
+              action: "live",
             },
           ].map((item, index) => (
             <Animated.View

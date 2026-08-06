@@ -20,9 +20,15 @@ export type NotificationType =
   | "reply"
   | "mention"
   | "activity"
-  | "event";
+  | "event"
+  | "emergency";
 
-export type NotificationEntityType = "post" | "comment" | "reply" | "event";
+export type NotificationEntityType =
+  | "post"
+  | "comment"
+  | "reply"
+  | "event"
+  | "emergency";
 
 type NotificationActor = {
   id: string;
@@ -46,7 +52,7 @@ type CreateNotificationInput = {
 type LikeNotificationInput = {
   recipientId?: string | null;
   actor: NotificationActor;
-  entityType: Exclude<NotificationEntityType, "event">;
+  entityType: Exclude<NotificationEntityType, "event" | "emergency">;
   entityId: string;
   preview?: string | null;
   parentId?: string | null;
@@ -69,6 +75,16 @@ type BroadcastEventNotificationInput = {
   title: string;
   description?: string | null;
   eventDate?: string | null;
+  excludeUserIds?: string[];
+};
+
+type EmergencyNotificationInput = {
+  recipientIds: string[];
+  actor: NotificationActor;
+  entityId: string;
+  message: string;
+  preview?: string | null;
+  parentId?: string | null;
   excludeUserIds?: string[];
 };
 
@@ -162,7 +178,10 @@ export const upsertLikeNotification = async ({
     return;
   }
 
-  const likeMessages: Record<Exclude<NotificationEntityType, "event">, string> = {
+  const likeMessages: Record<
+    Exclude<NotificationEntityType, "event" | "emergency">,
+    string
+  > = {
     post: "liked your post",
     comment: "liked your comment",
     reply: "liked your reply",
@@ -337,6 +356,36 @@ export const createBroadcastEventNotifications = async ({
         entityId,
         message: "scheduled a new event",
         preview: previewParts.join(" - "),
+      }),
+    ),
+  );
+};
+
+export const createEmergencyNotifications = async ({
+  recipientIds,
+  actor,
+  entityId,
+  message,
+  preview,
+  parentId,
+  excludeUserIds = [],
+}: EmergencyNotificationInput) => {
+  const excludedIds = new Set([...excludeUserIds, actor.id].filter(Boolean));
+  const uniqueRecipientIds = [...new Set(recipientIds)].filter(
+    (recipientId) => recipientId && !excludedIds.has(recipientId),
+  );
+
+  await Promise.all(
+    uniqueRecipientIds.map((recipientId) =>
+      createNotification({
+        recipientId,
+        actor,
+        type: "emergency",
+        entityType: "emergency",
+        entityId,
+        parentId,
+        message,
+        preview,
       }),
     ),
   );

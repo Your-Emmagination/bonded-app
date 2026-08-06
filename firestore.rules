@@ -1,0 +1,271 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.role == 'admin';
+    }
+
+    function isStaff() {
+      return signedIn() &&
+        request.auth.token.role in ['moderator', 'teacher', 'admin'];
+    }
+
+    function isStudentOwner(studentId) {
+      return signedIn() && (
+        request.auth.uid == studentId ||
+        (
+          request.auth.token.email != null &&
+          request.auth.token.email.split('@')[0] == studentId
+        )
+      );
+    }
+
+    function isContentOwner(data) {
+      return signedIn() && (
+        data.userId == request.auth.uid ||
+        data.realUserId == request.auth.uid
+      );
+    }
+
+    match /communityServers/{serverId} {
+      allow read, list: if signedIn();
+
+      allow create: if signedIn() && isStaff();
+
+      allow update, delete: if signedIn() && (
+        isStaff() ||
+        resource.data.createdBy == request.auth.uid ||
+        resource.data.ownerId == request.auth.uid
+      );
+    }
+
+    match /communityServerMemberships/{membershipId} {
+      allow read, list: if signedIn();
+
+      allow create: if signedIn() && (
+        isStaff() ||
+        request.resource.data.userId == request.auth.uid
+      );
+
+      allow update, delete: if signedIn() && (
+        isStaff() ||
+        resource.data.userId == request.auth.uid
+      );
+    }
+
+    match /communityServerJoinRequests/{requestId} {
+      allow read, list: if signedIn();
+
+      allow create: if signedIn() &&
+        request.resource.data.userId == request.auth.uid;
+
+      allow update, delete: if signedIn() && (
+        isStaff() ||
+        resource.data.userId == request.auth.uid
+      );
+    }
+
+    match /communityThreadMessages/{messageId} {
+      allow read, list: if signedIn();
+
+      allow create: if signedIn() &&
+        request.resource.data.userId is string &&
+        request.resource.data.createdAt is timestamp &&
+        request.resource.data.serverId is string &&
+        request.resource.data.channelId is string;
+
+      allow update, delete: if signedIn() && (
+        isContentOwner(resource.data) ||
+        isStaff()
+      );
+    }
+
+    match /students/{studentId} {
+      allow read, list, create: if signedIn();
+
+      allow update: if signedIn() && (
+        isStudentOwner(studentId) ||
+        isAdmin() ||
+        request.resource.data.diff(resource.data)
+          .affectedKeys()
+          .hasOnly(['isOnline', 'lastSeen'])
+      );
+
+      allow delete: if signedIn() && (
+        isStudentOwner(studentId) ||
+        isAdmin()
+      );
+    }
+
+    match /userPushTokens/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow list: if signedIn() && isStaff();
+
+      allow create, update, delete: if signedIn() &&
+        request.auth.uid == userId;
+    }
+
+    match /posts/{postId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn() &&
+        request.resource.data.userId is string &&
+        request.resource.data.username is string &&
+        request.resource.data.content is string &&
+        request.resource.data.createdAt is timestamp;
+
+      allow update: if signedIn() && (
+        isContentOwner(resource.data) ||
+        isStaff() ||
+        request.resource.data.diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'likedBy',
+            'likeCount',
+            'reactions',
+            'commentCount',
+            'viewCount',
+            'viewedBy'
+          ])
+      );
+
+      allow delete: if signedIn() && (
+        isContentOwner(resource.data) ||
+        isStaff()
+      );
+    }
+
+    match /comments/{commentId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn() &&
+        request.resource.data.postId is string &&
+        request.resource.data.userId is string &&
+        request.resource.data.text is string &&
+        request.resource.data.createdAt is timestamp &&
+        request.resource.data.likes is list;
+
+      allow update: if signedIn() && (
+        isContentOwner(resource.data) ||
+        isStaff() ||
+        request.resource.data.diff(resource.data)
+          .affectedKeys()
+          .hasOnly(['likes', 'replyCount'])
+      );
+
+      allow delete: if signedIn() && (
+        isContentOwner(resource.data) ||
+        isStaff()
+      );
+    }
+
+    match /replies/{replyId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn() &&
+        request.resource.data.commentId is string &&
+        request.resource.data.userId is string &&
+        request.resource.data.text is string &&
+        request.resource.data.createdAt is timestamp;
+
+      allow update: if signedIn() && (
+        isContentOwner(resource.data) ||
+        isStaff() ||
+        request.resource.data.diff(resource.data)
+          .affectedKeys()
+          .hasOnly(['likedBy', 'likeCount', 'seenBy'])
+      );
+
+      allow delete: if signedIn() && (
+        isContentOwner(resource.data) ||
+        isStaff()
+      );
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if signedIn() &&
+        resource.data.recipientId == request.auth.uid;
+
+      allow create: if signedIn() &&
+        request.resource.data.recipientId is string &&
+        request.resource.data.actorId == request.auth.uid &&
+        request.resource.data.type is string &&
+        request.resource.data.entityType is string &&
+        request.resource.data.entityId is string &&
+        request.resource.data.message is string &&
+        request.resource.data.read is bool &&
+        request.resource.data.createdAt is timestamp;
+
+      allow update: if signedIn() && (
+        (
+          resource.data.recipientId == request.auth.uid &&
+          request.resource.data.diff(resource.data)
+            .affectedKeys()
+            .hasOnly(['read'])
+        ) ||
+        resource.data.actorId == request.auth.uid
+      );
+
+      allow delete: if signedIn() &&
+        resource.data.actorId == request.auth.uid;
+    }
+
+    match /polls/{pollId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn() &&
+        request.resource.data.userId is string &&
+        request.resource.data.question is string &&
+        request.resource.data.createdAt is timestamp;
+
+      allow update: if signedIn() && (
+        resource.data.userId == request.auth.uid ||
+        request.resource.data.userId == request.auth.uid ||
+        request.auth.token.role in ['teacher', 'admin'] ||
+        request.resource.data.diff(resource.data)
+          .affectedKeys()
+          .hasOnly(['options', 'totalVotes', 'userVotes'])
+      );
+
+      allow delete: if signedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isStaff()
+      );
+    }
+
+    match /events/{eventId} {
+      allow read, list: if signedIn();
+
+      allow create: if signedIn() &&
+        request.auth.token.role in ['moderator', 'teacher', 'admin'] &&
+        request.resource.data.createdBy == request.auth.uid &&
+        request.resource.data.title is string &&
+        request.resource.data.date is string &&
+        request.resource.data.category in ['morning', 'afternoon', 'evening', 'all-day'];
+
+      allow update: if signedIn() && (
+        resource.data.createdBy == request.auth.uid ||
+        isStaff()
+      );
+
+      allow delete: if signedIn() && (
+        resource.data.createdBy == request.auth.uid ||
+        isStaff()
+      );
+    }
+
+    match /reports/{reportId} {
+      allow create: if signedIn() &&
+        request.resource.data.reportedBy == request.auth.uid &&
+        request.resource.data.reason is string &&
+        request.resource.data.status is string;
+
+      allow read, update, delete: if isStaff();
+    }
+  }
+}

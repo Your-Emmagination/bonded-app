@@ -41,6 +41,13 @@ export default function MainLayout() {
         }}
       />
       <Stack.Screen
+        name="LiveStreamScreen"
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
+      />
+      <Stack.Screen
         name="EventCalendarScreen"
         options={{
           animation: "fade_from_bottom",

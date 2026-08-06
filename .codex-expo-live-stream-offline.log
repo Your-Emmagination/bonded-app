@@ -1,0 +1,10 @@
+
+> bonded-app@1.0.0 start
+> expo start --web --port 8082 --offline
+
+Networking has been disabled
+Starting project at C:\Users\lexma\bonded-app
+React Compiler enabled
+Starting Metro Bundler
+Waiting on http://localhost:8082
+Logs for your project will appear below.
