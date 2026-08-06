@@ -1,50 +1,347 @@
-# Welcome to your Expo app 👋
+# 📱 Expo Mobile App
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+This project is built with [Expo](https://expo.dev) using `create-expo-app`.
 
-## Get started
+---
 
-1. Install dependencies
+# Prerequisites
 
-   ```bash
-   npm install
-   ```
+Make sure you have the following installed:
 
-2. Start the app
+- Node.js (LTS version recommended)
+- npm
+- Git
+- Expo CLI (optional, `npx expo` works without installing globally)
 
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+Verify installation:
 
 ```bash
-npm run reset-project
+node -v
+npm -v
+git --version
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+---
 
-## Learn more
+# Installation
 
-To learn more about developing your project with Expo, look at the following resources:
+Clone the repository:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```bash
+git clone <YOUR_GIT_REPOSITORY_URL>
+```
 
-## Join the community
+Navigate into the project:
 
-Join our community of developers creating universal apps.
+```bash
+cd <PROJECT_NAME>
+```
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+Install dependencies:
+
+```bash
+npm install
+```
+
+---
+
+# Running the App
+
+## Start Expo (Recommended)
+
+Use tunnel mode so physical devices on different networks can connect easily.
+
+```bash
+npx expo start --tunnel
+```
+
+If tunnel mode is unnecessary (same Wi-Fi):
+
+```bash
+npx expo start
+```
+
+Or use LAN:
+
+```bash
+npx expo start --lan
+```
+
+---
+
+## Open the App
+
+After Expo starts, you can:
+
+- Press **a** → Android Emulator
+- Press **i** → iOS Simulator (Mac only)
+- Press **w** → Web Browser
+- Scan the QR code using **Expo Go**
+
+---
+
+# Building an APK
+
+## Option 1: Using EAS Build (Recommended)
+
+Install EAS CLI:
+
+```bash
+npm install -g eas-cli
+```
+
+Login:
+
+```bash
+eas login
+```
+
+Configure the project (first time only):
+
+```bash
+eas build:configure
+```
+
+Build an Android APK:
+
+```bash
+eas build --platform android --profile preview
+```
+
+Or, if your `eas.json` is configured for APK output:
+
+```bash
+eas build -p android
+```
+
+Once the build finishes, Expo provides a download link for the APK.
+
+---
+
+## Local Android Build (Optional)
+
+Generate the Android project:
+
+```bash
+npx expo prebuild
+```
+
+Then build using Android Studio or Gradle.
+
+---
+
+# Git Workflow
+
+## Check Current Status
+
+```bash
+git status
+```
+
+---
+
+## Pull Latest Changes
+
+Before starting work:
+
+```bash
+git pull origin main
+```
+
+Replace `main` with your branch if needed.
+
+---
+
+## Create a New Branch
+
+```bash
+git checkout -b feature/my-feature
+```
+
+---
+
+## Stage Changes
+
+```bash
+git add .
+```
+
+Or add a specific file:
+
+```bash
+git add filename
+```
+
+---
+
+## Commit Changes
+
+```bash
+git commit -m "Describe your changes"
+```
+
+---
+
+## Push Changes
+
+First push:
+
+```bash
+git push -u origin feature/my-feature
+```
+
+Later pushes:
+
+```bash
+git push
+```
+
+---
+
+## Switch Branches
+
+```bash
+git checkout main
+```
+
+or
+
+```bash
+git checkout feature/my-feature
+```
+
+---
+
+# Updating Dependencies
+
+```bash
+npm install
+```
+
+If new packages were added:
+
+```bash
+npm update
+```
+
+---
+
+# Reset Metro Cache
+
+If Expo behaves unexpectedly:
+
+```bash
+npx expo start --clear
+```
+
+---
+
+# Project Structure
+
+```
+app/
+assets/
+components/
+constants/
+hooks/
+```
+
+The app uses **Expo Router** with file-based routing.
+
+---
+
+# Useful Commands
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start Expo:
+
+```bash
+npx expo start --tunnel
+```
+
+Start with cleared cache:
+
+```bash
+npx expo start --clear
+```
+
+Run Android:
+
+```bash
+npx expo run:android
+```
+
+Run iOS (Mac only):
+
+```bash
+npx expo run:ios
+```
+
+Check Git status:
+
+```bash
+git status
+```
+
+Pull latest changes:
+
+```bash
+git pull origin main
+```
+
+Commit changes:
+
+```bash
+git add .
+git commit -m "Your message"
+git push
+```
+
+Build Android:
+
+```bash
+eas build -p android
+```
+
+---
+
+# Troubleshooting
+
+## Dependencies not installing
+
+```bash
+rm -rf node_modules
+npm install
+```
+
+---
+
+## Metro Bundler Issues
+
+```bash
+npx expo start --clear
+```
+
+---
+
+## App won't connect on phone
+
+Start Expo using tunnel mode:
+
+```bash
+npx expo start --tunnel
+```
+
+---
+
+# Resources
+
+- Expo Documentation: https://docs.expo.dev/
+- Expo Router: https://docs.expo.dev/router/introduction/
+- EAS Build: https://docs.expo.dev/build/introduction/
+- Expo Go: https://expo.dev/go
