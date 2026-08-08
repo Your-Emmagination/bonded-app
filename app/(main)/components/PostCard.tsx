@@ -1,20 +1,7 @@
 // components/PostCard.tsx
 
-import { Ionicons, MaterialIcons } from "@expo/vector-icons";
-import React, { useEffect, useState } from "react";
-import {
-  ActivityIndicator,
-  Alert,
-  Dimensions,
-  Image,
-  Linking,
-  Modal,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from "react-native";
+import { resolveAvatarUri } from "@/utils/avatar";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
 import {
   canDeleteContent,
   canViewAnonymousIdentity,
@@ -25,11 +12,26 @@ import {
   UserData,
   UserRole,
 } from "@/utils/rbac";
-import { resolveAvatarUri } from "@/utils/avatar";
-import CommentModal from "./CommentModal";
+import { Ionicons, MaterialIcons } from "@expo/vector-icons";
+import React, { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Dimensions,
+  Image,
+  Linking,
+  Modal,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import AiReplyCard from "./AiReplyCard";
+import CommentModal from "./CommentModal";
 import ExpandableText from "./ExpandableText";
-import { buildUserProfileHref } from "@/utils/profileNavigation";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const AVATAR_COLUMN_WIDTH = 40;
@@ -114,6 +116,7 @@ const PostCard: React.FC<PostCardProps> = ({
   const [showLikesModal, setShowLikesModal] = useState(false);
   const [authorData, setAuthorData] = useState<UserData | null>(null);
   const [authorLoading, setAuthorLoading] = useState(true);
+  const [activeImageIndex, setActiveImageIndex] = useState(0);
 
   useEffect(() => {
     let isActive = true;
@@ -164,6 +167,15 @@ const PostCard: React.FC<PostCardProps> = ({
     }
   };
 
+  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const slide = Math.round(
+      event.nativeEvent.contentOffset.x / IMAGE_WIDTH
+    );
+    if (slide !== activeImageIndex && slide >= 0 && slide < imageFiles.length) {
+      setActiveImageIndex(slide);
+    }
+  };
+
   const taggedUsers = post.taggedUsers ?? [];
 
   return (
@@ -211,6 +223,7 @@ const PostCard: React.FC<PostCardProps> = ({
               onTagClick={onTagClick}
             />
           )}
+
           {gifFiles.length > 0 && (
             <View style={styles.mediaContainer}>
               <Image
@@ -225,11 +238,16 @@ const PostCard: React.FC<PostCardProps> = ({
             <View style={styles.carouselContainer}>
               <ScrollView
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                pagingEnabled
                 decelerationRate="normal"
+                showsHorizontalScrollIndicator={false}
                 bounces={false}
                 overScrollMode="never"
-                contentContainerStyle={styles.carouselContent}
+                onScroll={handleScroll}
+                scrollEventThrottle={16}
+                // Optional: Snap alignment optimizations
+                snapToAlignment="center"
+                disableIntervalMomentum={true}
               >
                 {imageFiles.map((item, index) => (
                   <TouchableOpacity
@@ -251,10 +269,18 @@ const PostCard: React.FC<PostCardProps> = ({
                 ))}
               </ScrollView>
 
+              {/* Dynamic Dot Indicators */}
               {imageFiles.length > 1 && (
-                <View style={styles.imageCountBadge}>
-                  <Ionicons name="images-outline" size={14} color="#fffaf7" />
-                  <Text style={styles.imageCountText}>{imageFiles.length}</Text>
+                <View style={styles.paginationDotsContainer}>
+                  {imageFiles.map((_, index) => (
+                    <View
+                      key={index}
+                      style={[
+                        styles.dot,
+                        activeImageIndex === index ? styles.activeDot : styles.inactiveDot,
+                      ]}
+                    />
+                  ))}
                 </View>
               )}
             </View>
@@ -310,7 +336,6 @@ const PostCard: React.FC<PostCardProps> = ({
                 {post.commentCount === 1 ? "comment" : "comments"}
               </Text>
             )}
-
           </View>
         </View>
       </View>
@@ -473,6 +498,7 @@ const TaggedUsersDisplay = ({
     </View>
   );
 };
+
 /* ==================== POST AVATAR ==================== */
 const PostAvatar: React.FC<{
   post: Post;
@@ -687,8 +713,6 @@ const PostHeader: React.FC<{
     </View>
   );
 };
-
-/* ==================== TAGGED SECTION ==================== */
 
 /* ==================== FILES LIST ==================== */
 const FilesList: React.FC<{
@@ -1006,31 +1030,35 @@ const styles = StyleSheet.create({
     overflow: "visible",
     position: "relative",
   },
-  carouselContent: {
-    gap: 10,
-  },
-  imageCountBadge: {
-    position: "absolute",
-    right: 10,
-    bottom: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    backgroundColor: "rgba(79,28,23,0.82)",
-    borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-  },
-  imageCountText: {
-    color: "#fffaf7",
-    fontSize: 12,
-    fontWeight: "700",
-  },
   carouselImage: {
     width: IMAGE_WIDTH,
     height: IMAGE_WIDTH * 1.25,
     backgroundColor: "#efe1d6",
     borderRadius: 18,
+  },
+  paginationDotsContainer: {
+    position: "absolute",
+    bottom: 12,
+    left: 0,
+    right: 0,
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 6,
+  },
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  activeDot: {
+    backgroundColor: "#ffffff",
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  inactiveDot: {
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
   },
 
   mediaContainer: {

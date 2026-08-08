@@ -24,7 +24,6 @@ import {
   Alert,
   Animated,
   BackHandler,
-  Dimensions,
   FlatList,
   Image,
   Keyboard,
@@ -71,13 +70,13 @@ import {
 import CommentComposer from "./CommentComposer";
 import AiReplyCard from "./AiReplyCard";
 import ExpandableText from "./ExpandableText";
+import ImageZoomViewer from "./ImageZoomViewer";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 
 const REPLY_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
 
-const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const KEYBOARD_COMPOSER_LIFT = Platform.OS === "android" ? 14 : 8;
 
 type Reply = {
@@ -1448,55 +1447,12 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       </Modal>
 
       {/* ── Image viewer ── */}
-      <Modal
+      <ImageZoomViewer
+        images={selectedImages}
+        startIndex={selectedImageIndex}
         visible={imageViewerVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setImageViewerVisible(false)}
-      >
-        <View style={styles.imageViewer}>
-          <TouchableOpacity
-            style={styles.imageViewerClose}
-            onPress={() => setImageViewerVisible(false)}
-          >
-            <Ionicons name="close" size={30} color="#fff" />
-          </TouchableOpacity>
-          <FlatList
-            data={selectedImages}
-            horizontal
-            pagingEnabled
-            initialScrollIndex={selectedImageIndex}
-            getItemLayout={(_, i) => ({
-              length: SCREEN_WIDTH,
-              offset: SCREEN_WIDTH * i,
-              index: i,
-            })}
-            renderItem={({ item }) => (
-              <View style={styles.imageViewerPage}>
-                <Image
-                  source={{ uri: item }}
-                  style={styles.imageViewerImg}
-                  resizeMode="contain"
-                />
-              </View>
-            )}
-            keyExtractor={(_, i) => i.toString()}
-            showsHorizontalScrollIndicator={false}
-            onMomentumScrollEnd={(e) => {
-              setSelectedImageIndex(
-                Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH),
-              );
-            }}
-          />
-          {selectedImages.length > 1 && (
-            <View style={styles.imageCounter}>
-              <Text style={styles.imageCounterText}>
-                {selectedImageIndex + 1} / {selectedImages.length}
-              </Text>
-            </View>
-          )}
-        </View>
-      </Modal>
+        onClose={() => setImageViewerVisible(false)}
+      />
     </>
   );
 };
@@ -1818,33 +1774,6 @@ const styles = StyleSheet.create({
   },
   emptySub: { color: "#9b766c", fontSize: 13.5, marginTop: 6 },
 
-  // Image viewer
-  imageViewer: { flex: 1, backgroundColor: "#000" },
-  imageViewerClose: {
-    position: "absolute",
-    top: 50,
-    right: 20,
-    zIndex: 10,
-    padding: 8,
-    backgroundColor: "rgba(0,0,0,0.55)",
-    borderRadius: 20,
-  },
-  imageViewerPage: {
-    width: SCREEN_WIDTH,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  imageViewerImg: { width: "100%", height: "100%" },
-  imageCounter: {
-    position: "absolute",
-    bottom: 42,
-    alignSelf: "center",
-    backgroundColor: "rgba(0,0,0,0.7)",
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-  },
-  imageCounterText: { color: "#fff", fontSize: 14, fontWeight: "600" },
 });
 
 export default ReplyThread;

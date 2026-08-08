@@ -7,6 +7,7 @@ import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { auth, db } from "../Firebase_configure";
 import { ActivityIndicator, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { resolveUserRoleForAuthUser } from "@/utils/rbac";
 import {
   addPushNotificationResponseListener,
@@ -207,15 +208,17 @@ export default function RootLayout() {
 
   if (user === undefined) {
     return (
-      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f6f1ed" }}>
-        <StatusBar style="dark" backgroundColor="#f6f1ed" />
-        <ActivityIndicator size="large" color="#e0a53d" />
-      </View>
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f6f1ed" }}>
+          <StatusBar style="dark" backgroundColor="#f6f1ed" />
+          <ActivityIndicator size="large" color="#e0a53d" />
+        </View>
+      </GestureHandlerRootView>
     );
   }
 
   return (
-    <>
+    <GestureHandlerRootView style={{ flex: 1 }}>
       <StatusBar style="dark" backgroundColor="#f6f1ed" />
       <Stack
         screenOptions={{
@@ -228,6 +231,6 @@ export default function RootLayout() {
         <Stack.Screen name="LoginScreen" />
         <Stack.Screen name="(main)" />
       </Stack>
-    </>
+    </GestureHandlerRootView>
   );
 }

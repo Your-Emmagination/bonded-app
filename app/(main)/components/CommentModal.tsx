@@ -1,45 +1,41 @@
 // Updated CommentModal.tsx 
-import React, { useEffect, useState, useRef, useCallback } from "react";
-import {
-  View,
-  Text,
-  Modal,
-  TouchableOpacity,
-  StyleSheet,
-  FlatList,
-  Image,
-  ActivityIndicator,
-  BackHandler,
-  Alert,
-  Linking,
-  Dimensions,
-  PanResponder,
-  KeyboardEvent ,
-  Keyboard,
-  Animated,
-  Platform,
-} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  BackHandler,
+  Dimensions,
+  FlatList,
+  Image,
+  Keyboard,
+  KeyboardEvent,
+  Linking,
+  Modal,
+  PanResponder,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { hasAiAssistantMention, isAiAssistantId } from "@/utils/aiAssistant";
+import { getAiErrorMessage } from "@/utils/aiConfig";
 import {
-  collection,
-  addDoc,
-  query,
-  where,
-  onSnapshot,
-  orderBy,
-  updateDoc,
-  doc,
-  getDoc,
-  getDocs,
-  increment,
-  serverTimestamp,
-  deleteDoc,
-  deleteField,
-} from "firebase/firestore";
-import { db, auth } from "../../../Firebase_configure";
+  AI_REQUEST_COOLDOWN_MS,
+  requestAiReplyFromWorker,
+  reserveAiCooldown,
+} from "@/utils/aiWorker";
+import { resolveAvatarUri } from "@/utils/avatar";
+import {
+  canViewModeratedContent,
+  getModerationPreviewText,
+  requestModerationDecision,
+} from "@/utils/contentModeration";
 import {
   createMentionNotifications,
   createNotification,
@@ -47,42 +43,45 @@ import {
   resolveMentionRecipientIds,
   upsertLikeNotification,
 } from "@/utils/notifications";
-import { hasAiAssistantMention, isAiAssistantId } from "@/utils/aiAssistant";
 import {
-  AI_REQUEST_COOLDOWN_MS,
-  requestAiReplyFromWorker,
-  reserveAiCooldown,
-} from "@/utils/aiWorker";
-import { getAiErrorMessage } from "@/utils/aiConfig";
-import {
-  canViewModeratedContent,
-  getModerationPreviewText,
-  requestModerationDecision,
-} from "@/utils/contentModeration";
-import { resolveAvatarUri } from "@/utils/avatar";
+  addDoc,
+  collection,
+  deleteDoc,
+  deleteField,
+  doc,
+  getDoc,
+  getDocs,
+  increment,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where,
+} from "firebase/firestore";
+import { auth, db } from "../../../Firebase_configure";
 
-import ReplyThread from "./ReplyThread";
 import {
   canDeleteContent,
   canViewAnonymousIdentity,
-  getUserData,
   getRoleColor,
   getRoleDisplayName,
+  getUserData,
   parseUserRole,
   UserRole,
 } from "@/utils/rbac";
+import ReplyThread from "./ReplyThread";
 
-import CommentComposer from "./CommentComposer";
+import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 import AiReplyCard from "./AiReplyCard";
+import CommentComposer from "./CommentComposer";
 import ExpandableText from "./ExpandableText";
 import ImageZoomViewer from "./ImageZoomViewer";
-import { buildUserProfileHref } from "@/utils/profileNavigation";
-import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
-import { useRelativeTimeNow } from "@/utils/relativeTime";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const KEYBOARD_COMPOSER_LIFT = Platform.OS === "android" ? 14 : 8;
-const COMMENT_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
 
 const buildCurrentUserPreview = (authUser: typeof auth.currentUser) => {
   if (!authUser) return null;
@@ -164,6 +163,7 @@ const CommentItem: React.FC<{
 }) => {
   const [authorData, setAuthorData] = useState<any>(null);
   const [revealed, setRevealed] = useState(false);
+
   useEffect(() => {
     const fetchAuthor = async () => {
       const userIdToFetch = item.realUserId || item.userId;
@@ -207,17 +207,23 @@ const CommentItem: React.FC<{
 
   const liked = item.likes?.includes(user?.uid);
 
-  const imageFiles = (item.files || []).filter((f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif"));
+  const imageFiles = (item.files || []).filter(
+    (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif")
+  );
   const gifFiles = (item.files || []).filter((f) => f.mimeType.includes("gif"));
   const docFiles = (item.files || []).filter((f) => !f.mimeType.startsWith("image/"));
   const [imageHeight, setImageHeight] = useState(200);
 
   useEffect(() => {
     if (imageFiles.length > 0) {
-      Image.getSize(imageFiles[0].url, (w, h) => {
-        const ratio = h / w;
-        setImageHeight(Math.min(SCREEN_WIDTH * ratio, 500));
-      }, () => setImageHeight(200));
+      Image.getSize(
+        imageFiles[0].url,
+        (w, h) => {
+          const ratio = h / w;
+          setImageHeight(Math.min(SCREEN_WIDTH * ratio, 500));
+        },
+        () => setImageHeight(200)
+      );
     }
   }, [imageFiles]);
 
@@ -308,10 +314,11 @@ const CommentItem: React.FC<{
         </View>
       )}
 
+      {/* Image attachment with Fullscreen Zoom Trigger */}
       {imageFiles.length > 0 && (
         <TouchableOpacity
           activeOpacity={0.9}
-          onPress={() => item.onImagePress?.(imageFiles.map(f => f.url), 0)}
+          onPress={() => item.onImagePress?.(imageFiles.map((f) => f.url), 0)}
           style={styles.commentImageContainer}
         >
           <Image
@@ -350,23 +357,23 @@ const CommentItem: React.FC<{
         </View>
       )}
 
-{item.link && (
-  <TouchableOpacity
-    style={styles.commentLinkPreview}
-    onPress={() => item.onLinkPress?.(item.link?.url ?? '')}
-  >
-    <Ionicons name="link" size={16} color="#4f9cff" />
-    <View style={{ flex: 1, marginLeft: 8 }}>
-      <Text style={styles.commentLinkTitle} numberOfLines={1}>
-        {item.link?.title ?? 'Link'}
-      </Text>
-      <Text style={styles.commentLinkUrl} numberOfLines={1}>
-        {item.link?.url ?? ''}
-      </Text>
-    </View>
-    <Ionicons name="open-outline" size={14} color="#a0a8c0" />
-  </TouchableOpacity>
-)}
+      {item.link && (
+        <TouchableOpacity
+          style={styles.commentLinkPreview}
+          onPress={() => item.onLinkPress?.(item.link?.url ?? "")}
+        >
+          <Ionicons name="link" size={16} color="#4f9cff" />
+          <View style={{ flex: 1, marginLeft: 8 }}>
+            <Text style={styles.commentLinkTitle} numberOfLines={1}>
+              {item.link?.title ?? "Link"}
+            </Text>
+            <Text style={styles.commentLinkUrl} numberOfLines={1}>
+              {item.link?.url ?? ""}
+            </Text>
+          </View>
+          <Ionicons name="open-outline" size={14} color="#a0a8c0" />
+        </TouchableOpacity>
+      )}
 
       {item.taggedUsers && item.taggedUsers.length > 0 && (
         <TaggedUsersDisplay taggedUsers={item.taggedUsers} onTagClick={item.onTagClick} />
@@ -463,10 +470,13 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const [sortBy, setSortBy] = useState<SortOption>("latest");
   const [replyModalVisible, setReplyModalVisible] = useState(false);
   const [selectedComment, setSelectedComment] = useState<Comment | null>(null);
+
+  // Zoom Viewer State
   const [imageViewerVisible, setImageViewerVisible] = useState(false);
   const [selectedImages, setSelectedImages] = useState<string[]>([]);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
-  const [isNavigating, setIsNavigating] = useState(false); 
+
+  const [isNavigating, setIsNavigating] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const relativeTimeNow = useRelativeTimeNow();
   const composerBottom = useRef(new Animated.Value(0)).current;
@@ -531,16 +541,19 @@ const CommentModal: React.FC<CommentModalProps> = ({
     }
   }, [backdropOpacity, internalVisible, translateY]);
 
-  const closeAndNavigate = useCallback((navigateFn?: () => void) => {
-    Animated.parallel([
-      Animated.timing(translateY, { toValue: SCREEN_HEIGHT, duration: 300, useNativeDriver: true }),
-      Animated.timing(backdropOpacity, { toValue: 0, duration: 300, useNativeDriver: true }),
-    ]).start(() => {
-      setInternalVisible(false);
-      onClose();
-      if (navigateFn) navigateFn();
-    });
-  }, [backdropOpacity, onClose, translateY]);
+  const closeAndNavigate = useCallback(
+    (navigateFn?: () => void) => {
+      Animated.parallel([
+        Animated.timing(translateY, { toValue: SCREEN_HEIGHT, duration: 300, useNativeDriver: true }),
+        Animated.timing(backdropOpacity, { toValue: 0, duration: 300, useNativeDriver: true }),
+      ]).start(() => {
+        setInternalVisible(false);
+        onClose();
+        if (navigateFn) navigateFn();
+      });
+    },
+    [backdropOpacity, onClose, translateY]
+  );
 
   const handleClose = useCallback(() => closeAndNavigate(), [closeAndNavigate]);
 
@@ -556,7 +569,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
       onPanResponderMove: (evt, gestureState) => {
         if (gestureState.dy > 0) {
           translateY.setValue(gestureState.dy);
-          const opacity = 1 - (gestureState.dy / SCREEN_HEIGHT);
+          const opacity = 1 - gestureState.dy / SCREEN_HEIGHT;
           backdropOpacity.setValue(Math.max(0, opacity));
         }
       },
@@ -588,14 +601,14 @@ const CommentModal: React.FC<CommentModalProps> = ({
         setIsNavigating(false);
         return false;
       }
-      if (internalVisible && !replyModalVisible) {
+      if (internalVisible && !replyModalVisible && !imageViewerVisible) {
         handleClose();
         return true;
       }
       return false;
     });
     return () => backHandler.remove();
-  }, [internalVisible, replyModalVisible, isNavigating, handleClose]);
+  }, [internalVisible, replyModalVisible, imageViewerVisible, isNavigating, handleClose]);
 
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged(async (u) => {
@@ -627,16 +640,15 @@ const CommentModal: React.FC<CommentModalProps> = ({
         .map((d) => ({
           id: d.id,
           ...d.data(),
-        })) as Comment[])
-        .filter((item) =>
-          canViewModeratedContent({
-            moderationStatus: item.moderationStatus,
-            realUserId: item.realUserId,
-            userId: item.userId,
-            viewerUserId: user?.uid,
-            viewerRole: user?.role,
-          }),
-        );
+        })) as Comment[]).filter((item) =>
+        canViewModeratedContent({
+          moderationStatus: item.moderationStatus,
+          realUserId: item.realUserId,
+          userId: item.userId,
+          viewerUserId: user?.uid,
+          viewerRole: user?.role,
+        })
+      );
       setComments(fetchedComments);
       setLoading(false);
     });
@@ -674,9 +686,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
     }
 
     if (initialCommentId) {
-      const targetIndex = sorted.findIndex(
-        (comment) => comment.id === initialCommentId,
-      );
+      const targetIndex = sorted.findIndex((comment) => comment.id === initialCommentId);
       if (targetIndex > 0) {
         const [targetComment] = sorted.splice(targetIndex, 1);
         sorted.unshift(targetComment);
@@ -696,9 +706,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
       return;
     }
 
-    const targetComment = comments.find(
-      (comment) => comment.id === initialCommentId,
-    );
+    const targetComment = comments.find((comment) => comment.id === initialCommentId);
     if (!targetComment) {
       return;
     }
@@ -706,13 +714,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
     setSelectedComment(targetComment);
     setReplyModalVisible(true);
     initialReplyKeyRef.current = replyKey;
-  }, [
-    autoOpenReplyThread,
-    comments,
-    initialCommentId,
-    initialReplyId,
-    internalVisible,
-  ]);
+  }, [autoOpenReplyThread, comments, initialCommentId, initialReplyId, internalVisible]);
 
   useEffect(() => {
     if (!internalVisible) {
@@ -743,6 +745,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
     newComment.moderationStatus = moderationDecision.status;
     newComment.moderationReasons = moderationDecision.reasons;
     newComment.moderatedAtMs = Date.now();
+
     const commentRef = await addDoc(collection(db, "comments"), newComment);
     await updateDoc(doc(db, "posts", postId), {
       commentCount: increment(1),
@@ -751,15 +754,12 @@ const CommentModal: React.FC<CommentModalProps> = ({
     const postSnap = await getDoc(doc(db, "posts", postId));
     const postData = postSnap.exists() ? postSnap.data() : null;
     const postOwnerId = postData?.realUserId || postData?.userId;
-      const actor = {
-        id: user.uid,
-        name: commentData.username,
-        profileImage:
-          commentData.isAnonymous === true
-            ? null
-          : resolveAvatarUri(user),
-        isAnonymous: commentData.isAnonymous,
-      };
+    const actor = {
+      id: user.uid,
+      name: commentData.username,
+      profileImage: commentData.isAnonymous === true ? null : resolveAvatarUri(user),
+      isAnonymous: commentData.isAnonymous,
+    };
 
     if (moderationDecision.status !== "pending") {
       await createNotification({
@@ -799,7 +799,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
       if (moderationDecision.status === "pending") {
         Alert.alert(
           "Comment Pending Review",
-          "This comment was flagged and is waiting for moderator approval.",
+          "This comment was flagged and is waiting for moderator approval."
         );
       }
       return;
@@ -819,15 +819,14 @@ const CommentModal: React.FC<CommentModalProps> = ({
         },
       });
 
-      const prompt =
-        summarizeAiVisibleContent({
-          text: commentData.text,
-          username: commentData.username,
-          isAnonymous: commentData.isAnonymous,
-          link: commentData.link,
-          files: commentData.files,
-          taggedUsers: commentData.taggedUsers,
-        });
+      const prompt = summarizeAiVisibleContent({
+        text: commentData.text,
+        username: commentData.username,
+        isAnonymous: commentData.isAnonymous,
+        link: commentData.link,
+        files: commentData.files,
+        taggedUsers: commentData.taggedUsers,
+      });
 
       const contextMessages = [
         {
@@ -927,17 +926,13 @@ const CommentModal: React.FC<CommentModalProps> = ({
     try {
       const postSnap = await getDoc(postRef);
       if (postSnap.exists()) {
-        await updateDoc(postRef, {
-          commentCount: increment(-1),
-        });
+        await updateDoc(postRef, { commentCount: increment(-1) });
         return;
       }
 
       const pollSnap = await getDoc(pollRef);
       if (pollSnap.exists()) {
-        await updateDoc(pollRef, {
-          commentCount: increment(-1),
-        });
+        await updateDoc(pollRef, { commentCount: increment(-1) });
       }
     } catch (error) {
       console.error("Error updating parent comment count:", error);
@@ -954,7 +949,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
           onPress: async () => {
             try {
               const repliesSnapshot = await getDocs(
-                query(collection(db, "replies"), where("commentId", "==", comment.id)),
+                query(collection(db, "replies"), where("commentId", "==", comment.id))
               );
 
               await Promise.all(repliesSnapshot.docs.map((replyDoc) => deleteDoc(replyDoc.ref)));
@@ -973,14 +968,13 @@ const CommentModal: React.FC<CommentModalProps> = ({
         },
       ]);
     },
-    [decrementParentCommentCount, selectedComment?.id],
+    [decrementParentCommentCount, selectedComment?.id]
   );
 
   const handleCommentOptions = useCallback(
     (comment: Comment, authorRole?: UserRole) => {
       const authorUserId = comment.realUserId || comment.userId;
       const viewerRole = parseUserRole(user?.role);
-      const isOwner = authorUserId === user?.uid;
       const canDelete = canDeleteContent({
         viewerRole,
         viewerUserId: user?.uid,
@@ -1012,186 +1006,119 @@ const CommentModal: React.FC<CommentModalProps> = ({
         { text: "Cancel", style: "cancel" },
       ]);
     },
-    [handleDeleteComment, user?.role, user?.uid],
+    [handleDeleteComment, user?.role, user?.uid]
   );
 
-  const handleProfileClick = useCallback((comment: Comment, profileDocId?: string | null) => {
-    const isCommentAnonymous = comment.isAnonymous ?? true;
-    const userIdToNavigate = comment.realUserId || comment.userId;
+  const handleProfileClick = useCallback(
+    (comment: Comment, profileDocId?: string | null) => {
+      if (comment.isAnonymous) return;
+      const targetUserId = comment.realUserId || comment.userId;
+      if (!targetUserId || targetUserId === "anonymous") return;
 
-    if (isCommentAnonymous || !userIdToNavigate || userIdToNavigate === "anonymous") {
-      return;
-    }
-
-    try {
       setIsNavigating(true);
       closeAndNavigate(() => {
-        if (user && userIdToNavigate === user.uid) {
-          router.push({
-            pathname: "/(main)/(tabs)/ProfileScreen",
-            params: { returnTo: COMMENT_RETURN_ROUTE },
-          });
-        } else {
-          router.push(
-            buildUserProfileHref({
-              userId: userIdToNavigate,
-              profileDocId,
-              returnTo: COMMENT_RETURN_ROUTE,
-            }) as any,
-          );
-        }
+        router.push(
+          buildUserProfileHref({
+            userId: targetUserId,
+            studentID: profileDocId,
+          })
+        );
       });
-    } catch (error) {
-      console.log("Navigation error:", error);
-      setIsNavigating(false);
-    }
-  }, [closeAndNavigate, user, router, setIsNavigating]);
+    },
+    [closeAndNavigate, router]
+  );
 
-  const handleTagClick = useCallback((taggedUserId: string) => {
-    try {
-      setIsNavigating(true);
-      closeAndNavigate(() => {
-        if (user && taggedUserId === user.uid) {
-          router.push({
-            pathname: "/(main)/(tabs)/ProfileScreen",
-            params: { returnTo: COMMENT_RETURN_ROUTE },
-          });
-        } else {
-          router.push(
-            buildUserProfileHref({
-              userId: taggedUserId,
-              returnTo: COMMENT_RETURN_ROUTE,
-            }) as any,
-          );
-        }
-      });
-    } catch (error) {
-      console.log("Navigation error:", error);
-      setIsNavigating(false);
-    }
-  }, [closeAndNavigate, user, router, setIsNavigating]);
-
-  const handleLinkPress = (url: string) => {
-    Linking.canOpenURL(url)
-      .then((supported) => {
-        if (supported) Linking.openURL(url);
-        else Alert.alert("Invalid Link", "Cannot open this URL");
-      })
-      .catch(() => Alert.alert("Error", "Failed to open link"));
-  };
-
-  const handleFilePress = async (url: string, filename: string) => {
-    try {
-      const supported = await Linking.canOpenURL(url);
-      if (supported) {
-        await Linking.openURL(url);
-      } else {
-        Alert.alert("Error", "Cannot open this file");
-      }
-    } catch (error) {
-      console.error("Error opening file:", error);
-      Alert.alert("Error", "Failed to open file");
-    }
-  };
-
-  const handleImagePress = (images: string[], startIndex: number) => {
+  const handleImagePress = useCallback((images: string[], index: number = 0) => {
     setSelectedImages(images);
-    setSelectedImageIndex(startIndex);
+    setSelectedImageIndex(index);
     setImageViewerVisible(true);
-  };
+  }, []);
 
-  const getTimeAgo = (timestamp: any) => {
-    if (!timestamp) return "";
-    const now = new Date(relativeTimeNow);
-    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-    const diffSec = Math.floor((now.getTime() - date.getTime()) / 1000);
-    if (diffSec < 60) return "Just now";
-    const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return `${diffMin}m ago`;
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h ago`;
-    const diffDay = Math.floor(diffHr / 24);
-    return `${diffDay}d ago`;
-  };
+  const handleLinkPress = useCallback((url: string) => {
+    if (url) Linking.openURL(url).catch(() => Alert.alert("Error", "Cannot open URL"));
+  }, []);
+
+  const handleTagClick = useCallback(
+    (taggedUserId: string) => {
+      if (!taggedUserId) return;
+      setIsNavigating(true);
+      closeAndNavigate(() => {
+        router.push(buildUserProfileHref({ userId: taggedUserId }));
+      });
+    },
+    [closeAndNavigate, router]
+  );
+
+  const handleFilePress = useCallback((url: string) => {
+    if (url) Linking.openURL(url).catch(() => Alert.alert("Error", "Cannot download file"));
+  }, []);
+
+  const getTimeAgo = useCallback(
+    (timestamp: any) => {
+      if (!timestamp) return "Just now";
+      const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+      const seconds = Math.floor((relativeTimeNow - date.getTime()) / 1000);
+      if (seconds < 60) return "Just now";
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      const days = Math.floor(hours / 24);
+      if (days < 7) return `${days}d ago`;
+      return date.toLocaleDateString();
+    },
+    [relativeTimeNow]
+  );
 
   if (!internalVisible) return null;
 
   return (
-    <>
-<Modal visible={internalVisible} animationType="none" transparent onRequestClose={handleClose}>
-  <View style={styles.modalOverlay}>
-    <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
-      <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={handleClose} />
-    </Animated.View>
+    <Modal transparent visible={internalVisible} animationType="none" onRequestClose={handleClose}>
+      <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
+        <TouchableOpacity style={{ flex: 1 }} onPress={handleClose} activeOpacity={1} />
+      </Animated.View>
 
-    <Animated.View
-      style={[
-        styles.modalContainer,
-        { paddingTop: insets.top, transform: [{ translateY }] },
-      ]}
-    >
-      <View {...panResponder.panHandlers}>
-        <View style={styles.dragIndicatorContainer}>
-          <View style={styles.dragIndicator} />
-        </View>
-
+      <Animated.View
+        style={[styles.modalContainer, { transform: [{ translateY }] }]}
+        {...panResponder.panHandlers}
+      >
+        {/* Header */}
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Comments ({comments.length})</Text>
+          <View style={styles.dragIndicator} />
+          <View style={styles.headerTop}>
+            <Text style={styles.headerTitle}>Comments</Text>
+            <TouchableOpacity onPress={handleClose} style={styles.closeBtn}>
+              <Ionicons name="close" size={20} color="#fff" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Sort Tabs */}
+          <View style={styles.sortRow}>
+            {(["latest", "relevant", "all"] as SortOption[]).map((option) => (
+              <TouchableOpacity
+                key={option}
+                onPress={() => setSortBy(option)}
+                style={[styles.sortTab, sortBy === option && styles.activeSortTab]}
+              >
+                <Text style={[styles.sortTabText, sortBy === option && styles.activeSortTabText]}>
+                  {option.charAt(0).toUpperCase() + option.slice(1)}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
 
-        <View style={styles.sortContainer}>
-          <TouchableOpacity
-            style={[styles.sortButton, sortBy === "latest" && styles.sortButtonActive]}
-            onPress={() => setSortBy("latest")}
-          >
-            <Ionicons
-              name="time-outline"
-              size={14}
-              color={sortBy === "latest" ? "#e0a53d" : "#9b766c"}
-            />
-            <Text style={[styles.sortText, sortBy === "latest" && styles.sortTextActive]}>
-              Latest
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.sortButton, sortBy === "relevant" && styles.sortButtonActive]}
-            onPress={() => setSortBy("relevant")}
-          >
-            <Ionicons
-              name="trending-up-outline"
-              size={14}
-              color={sortBy === "relevant" ? "#e0a53d" : "#9b766c"}
-            />
-            <Text style={[styles.sortText, sortBy === "relevant" && styles.sortTextActive]}>
-              Relevant
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.sortButton, sortBy === "all" && styles.sortButtonActive]}
-            onPress={() => setSortBy("all")}
-          >
-            <Ionicons
-              name="list-outline"
-              size={14}
-              color={sortBy === "all" ? "#e0a53d" : "#9b766c"}
-            />
-            <Text style={[styles.sortText, sortBy === "all" && styles.sortTextActive]}>
-              All
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-
-      <View style={styles.contentArea}>
-        <FlatList
-          ref={flatListRef}
-          data={displayedComments}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) =>
-            loading ? null : (
+        {/* Comment List */}
+        {loading ? (
+          <View style={styles.center}>
+            <ActivityIndicator size="large" color="#e0a53d" />
+          </View>
+        ) : (
+          <FlatList
+            ref={flatListRef}
+            data={displayedComments}
+            keyExtractor={(item) => item.id}
+            renderItem={({ item }) => (
               <CommentItem
                 item={{
                   ...item,
@@ -1208,300 +1135,356 @@ const CommentModal: React.FC<CommentModalProps> = ({
                 getTimeAgo={getTimeAgo}
                 isHighlighted={item.id === initialCommentId}
               />
-            )
-          }
-          ListHeaderComponent={
-            loading ? (
-              <ActivityIndicator color="#e0a53d" style={{ marginTop: 40 }} />
-            ) : displayedComments.length === 0 ? (
+            )}
+            contentContainerStyle={styles.listContent}
+            ListEmptyComponent={
               <View style={styles.emptyContainer}>
                 <Ionicons name="chatbubbles-outline" size={48} color="#9b766c" />
                 <Text style={styles.emptyText}>No comments yet</Text>
-                <Text style={styles.emptySubText}>Be the first to comment!</Text>
+                <Text style={styles.emptySubtext}>Be the first to share your thoughts!</Text>
               </View>
-            ) : null
-          }
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-          style={{ flex: 1 }}
-        />
-
-        {user && (
-          <Animated.View
-            style={[
-              styles.composerWrapper,
-              {
-                marginBottom: composerBottom,
-                paddingBottom: keyboardHeight > 0 ? 8 : hiddenComposerPadding,
-              },
-            ]}
-          >
-            <CommentComposer
-              currentUser={user}
-              onSend={handleSend}
-              placeholder="Write a comment..."
-              autoExpand={true}
-            />
-          </Animated.View>
+            }
+          />
         )}
-      </View>
-    </Animated.View>
-  </View>
-</Modal>
 
-{selectedComment && (
-  <ReplyThread
-    visible={replyModalVisible}
-    onClose={() => {
-      setReplyModalVisible(false);
-      setSelectedComment(null);
-    }}
-    commentId={selectedComment.id}
-    commentAuthor={selectedComment.isAnonymous ? "Anonymous" : selectedComment.username || "User"}
-    currentUser={user}
-    initialReplyId={
-      selectedComment.id === initialCommentId
-        ? initialReplyId || undefined
-        : undefined
-    }
-  />
-)}
+        {/* Floating Composer */}
+        <Animated.View
+          style={[
+            styles.composerWrapper,
+            {
+              bottom: composerBottom,
+              paddingBottom: keyboardHeight > 0 ? 0 : hiddenComposerPadding,
+            },
+          ]}
+        >
+          <CommentComposer onSend={handleSend} user={user} postId={postId} />
+        </Animated.View>
+      </Animated.View>
 
-<ImageZoomViewer
-  images={selectedImages}
-  startIndex={selectedImageIndex}
-  visible={imageViewerVisible}
-  onClose={() => setImageViewerVisible(false)}
-/>
-    </>
+      {/* Reply Thread Modal */}
+      {selectedComment && (
+        <ReplyThread
+          visible={replyModalVisible}
+          onClose={() => {
+            setReplyModalVisible(false);
+            setSelectedComment(null);
+          }}
+          commentId={selectedComment.id}
+          commentAuthorId={selectedComment.realUserId || selectedComment.userId}
+          commentText={selectedComment.text}
+          commentAuthorName={selectedComment.username}
+          commentAuthorRole={selectedComment.role}
+          commentAuthorAvatar={resolveAvatarUri(selectedComment)}
+          commentIsAnonymous={selectedComment.isAnonymous}
+          initialReplyId={initialReplyId}
+          onImagePress={handleImagePress}
+          onLinkPress={handleLinkPress}
+          onTagClick={handleTagClick}
+          onFilePress={handleFilePress}
+        />
+      )}
+
+      {/* Fullscreen Shared Image Zoom Modal */}
+      <ImageZoomViewer
+        images={selectedImages}
+        startIndex={selectedImageIndex}
+        visible={imageViewerVisible}
+        onClose={() => setImageViewerVisible(false)}
+      />
+    </Modal>
   );
 };
 
 const styles = StyleSheet.create({
-  modalOverlay: { flex: 1 },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.82)" },
-modalContainer: {
-  position: "absolute",
-  bottom: 0,
-  left: 0,
-  right: 0,
-  height: SCREEN_HEIGHT,
-  backgroundColor: "#f6f1ed",
-  borderTopLeftRadius: 20,
-  borderTopRightRadius: 20,
-  overflow: "hidden",
-  flexDirection: "column", 
-},
-  contentArea: {
-    flex: 1,
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0, 0, 0, 0.6)",
   },
-  dragIndicatorContainer: { alignItems: "center", paddingVertical: 8 },
-  dragIndicator: { width: 40, height: 4, backgroundColor: "#9b766c", borderRadius: 2, opacity: 0.5 },
+  modalContainer: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: SCREEN_HEIGHT * 0.85,
+    backgroundColor: "#1f1b18",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    overflow: "hidden",
+  },
   header: {
-    alignItems: "center",
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: "#8f3a2b",
-    backgroundColor: "#5f0909",
-  },
-  headerTitle: { color: "#fffaf7", fontSize: 17, fontWeight: "700" },
-
-  sortContainer: {
-    flexDirection: "row",
     paddingHorizontal: 16,
-    paddingVertical: 10,
-    gap: 8,
+    paddingTop: 8,
+    paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#f0e7e2",
-    backgroundColor: "#fff4ee",
+    borderBottomColor: "#2c2623",
   },
-  sortButton: {
+  dragIndicator: {
+    width: 36,
+    height: 4,
+    backgroundColor: "#403632",
+    borderRadius: 2,
+    alignSelf: "center",
+    marginBottom: 8,
+  },
+  headerTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#fff",
+  },
+  closeBtn: {
+    padding: 4,
+  },
+  sortRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  sortTab: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: "#2c2623",
+  },
+  activeSortTab: {
+    backgroundColor: "#e0a53d",
+  },
+  sortTabText: {
+    color: "#9b766c",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  activeSortTabText: {
+    color: "#fff",
+  },
+  center: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  listContent: {
+    padding: 16,
+    paddingBottom: 100,
+  },
+  emptyContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 48,
+  },
+  emptyText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "bold",
+    marginTop: 12,
+  },
+  emptySubtext: {
+    color: "#9b766c",
+    fontSize: 14,
+    marginTop: 4,
+  },
+  commentItem: {
+    marginBottom: 16,
+    backgroundColor: "#27211e",
+    borderRadius: 12,
+    padding: 12,
+  },
+  commentItemHighlighted: {
+    borderWidth: 1,
+    borderColor: "#e0a53d",
+  },
+  commentTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  avatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#362e2a",
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 10,
+    overflow: "hidden",
+  },
+  avatarImage: {
+    width: "100%",
+    height: "100%",
+  },
+  avatarText: {
+    fontWeight: "bold",
+    fontSize: 14,
+  },
+  nameRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    backgroundColor: "#fffaf7",
+  },
+  commentName: {
+    fontWeight: "bold",
+    fontSize: 14,
+  },
+  roleChip: {
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
   },
-  sortButtonActive: {
-    backgroundColor: "rgba(224,165,61,0.16)",
-    borderColor: "#e0a53d",
+  roleChipText: {
+    fontSize: 10,
+    fontWeight: "bold",
   },
-  sortText: { color: "#9b766c", fontSize: 13, fontWeight: "600" },
-  sortTextActive: { color: "#e0a53d" },
-
-  emptyContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingVertical: 80,
+  eyeButton: {
+    padding: 2,
   },
-  emptyText: { color: "#4d1b17", fontSize: 17, fontWeight: "700", marginTop: 16 },
-  emptySubText: { color: "#9b766c", fontSize: 14, marginTop: 6 },
-  listContent: {
-    paddingBottom: 8,
+  commentRole: {
+    color: "#9b766c",
+    fontSize: 11,
   },
-  composerWrapper: {
-    borderTopWidth: 1,
-    borderTopColor: "#f0e7e2",
-    backgroundColor: "#fff4ee",
-    paddingHorizontal: 12,
-    paddingTop: 8,
+  commentContentContainer: {
+    marginVertical: 4,
   },
-
-  commentItem: {
-    backgroundColor: "#fffaf7",
-    marginHorizontal: 16,
-    marginTop: 12,
-    padding: 14,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#f0e7e2",
+  commentText: {
+    color: "#fff",
+    fontSize: 14,
+    lineHeight: 20,
   },
-  commentItemHighlighted: {
-    borderColor: "#e0a53d",
-    shadowColor: "#e0a53d",
-    shadowOpacity: 0.18,
-    shadowRadius: 12,
-    elevation: 3,
+  seeMoreButton: {
+    marginTop: 4,
   },
-  commentTopRow: { flexDirection: "row", alignItems: "flex-start", marginBottom: 10, gap: 12 },
-  avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "#f0e7e2",
-    justifyContent: "center",
-    alignItems: "center",
+  seeMoreText: {
+    color: "#e0a53d",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  commentGifContainer: {
+    marginTop: 8,
+    borderRadius: 8,
     overflow: "hidden",
-    borderWidth: 1.5,
-    borderColor: "#f0e7e2",
+    maxHeight: 200,
   },
-  avatarImage: { width: "100%", height: "100%" },
-  avatarText: { fontSize: 17, fontWeight: "700" },
-
-  nameRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 },
-  commentName: { fontWeight: "700", fontSize: 15 },
-  roleChip: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1 },
-  roleChipText: { fontSize: 10, fontWeight: "700" },
-  eyeButton: { padding: 4 },
-  commentRole: { color: "#9b766c", fontSize: 12.5, marginTop: 3 },
-
-  commentContentContainer: { marginTop: 4, marginBottom: 8 },
-  commentText: { color: "#4d1b17", fontSize: 15, lineHeight: 21 },
-  seeMoreButton: { alignSelf: "flex-start", marginTop: 4 },
-  seeMoreText: { color: "#e0a53d", fontSize: 14, fontWeight: "600" },
-
-  commentGifContainer: { marginTop: 10, marginHorizontal: -14, overflow: "hidden", borderRadius: 12 },
-  commentGif: { width: "100%", height: 220, backgroundColor: "#f6f1ed" },
-
-  commentImageContainer: { position: "relative", marginTop: 10, marginHorizontal: -14, overflow: "hidden", borderRadius: 12 },
-  commentImageFull: { width: "100%", backgroundColor: "#f6f1ed" },
+  commentGif: {
+    width: "100%",
+    height: 180,
+  },
+  commentImageContainer: {
+    marginTop: 8,
+    borderRadius: 8,
+    overflow: "hidden",
+    position: "relative",
+  },
+  commentImageFull: {
+    width: "100%",
+    borderRadius: 8,
+  },
   imageCountBadge: {
     position: "absolute",
     top: 8,
     right: 8,
-    backgroundColor: "rgba(0,0,0,0.75)",
-    borderRadius: 16,
-    paddingHorizontal: 10,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    borderRadius: 12,
+    paddingHorizontal: 8,
     paddingVertical: 4,
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
   },
-  imageCountText: { color: "#fff", fontSize: 12, fontWeight: "bold" },
-
-  commentDocsContainer: { marginTop: 10, gap: 8 },
+  imageCountText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "bold",
+  },
+  commentDocsContainer: {
+    marginTop: 8,
+    gap: 6,
+  },
   commentDocItem: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fffaf7",
-    padding: 10,
-    borderRadius: 10,
-    gap: 10,
-    borderWidth: 1,
-    borderColor: "#f0e7e2",
+    backgroundColor: "#1f1b18",
+    padding: 8,
+    borderRadius: 8,
+    gap: 8,
   },
-  commentDocText: { flex: 1, color: "#4d1b17", fontSize: 13 },
-
+  commentDocText: {
+    color: "#fff",
+    fontSize: 12,
+    flex: 1,
+  },
   commentLinkPreview: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fffaf7",
-    padding: 12,
-    borderRadius: 12,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: "#f0e7e2",
+    backgroundColor: "#1f1b18",
+    padding: 8,
+    borderRadius: 8,
+    marginTop: 8,
   },
-  commentLinkTitle: { color: "#4d1b17", fontSize: 14, fontWeight: "600", marginBottom: 2 },
-  commentLinkUrl: { color: "#9b766c", fontSize: 12 },
-
+  commentLinkTitle: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  commentLinkUrl: {
+    color: "#9b766c",
+    fontSize: 10,
+  },
   taggedBox: {
-    backgroundColor: "#fffaf7",
-    borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginVertical: 10,
-    borderWidth: 1,
-    borderColor: "#f0e7e2",
+    marginTop: 6,
   },
-  taggedContent: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 4 },
-  taggedLabel: { color: "#9b766c", fontSize: 13 },
-  taggedName: { color: "#8f3a2b", fontWeight: "600", fontSize: 13.5 },
-  taggedSeparator: { color: "#9b766c", fontSize: 13 },
-  moreCount: { color: "#9b766c", fontWeight: "600", fontSize: 13.5 },
-  showLessText: { color: "#9b766c", fontSize: 13, fontStyle: "italic" },
-
+  taggedContent: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+  },
+  taggedLabel: {
+    color: "#9b766c",
+    fontSize: 12,
+  },
+  taggedName: {
+    color: "#e0a53d",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  taggedSeparator: {
+    color: "#9b766c",
+    fontSize: 12,
+  },
+  moreCount: {
+    color: "#e0a53d",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  showLessText: {
+    color: "#9b766c",
+    fontSize: 12,
+  },
   actionRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 24,
-    paddingTop: 10,
-    marginTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: "#f0e7e2",
+    marginTop: 10,
+    gap: 16,
   },
   actionBtn: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 999,
-    backgroundColor: "#f5efeb",
-    borderWidth: 1,
-    borderColor: "#f0e7e2",
+    gap: 4,
   },
-  actionText: { color: "#5f0909", fontSize: 13, fontWeight: "600" },
-
-  imageViewerContainer: { flex: 1, backgroundColor: "#000", justifyContent: "center", alignItems: "center" },
-  imageViewerClose: {
+  actionText: {
+    color: "#9b766c",
+    fontSize: 12,
+  },
+  composerWrapper: {
     position: "absolute",
-    top: 50,
-    right: 20,
-    zIndex: 10,
-    padding: 8,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    borderRadius: 20,
+    left: 0,
+    right: 0,
+    backgroundColor: "#1f1b18",
+    borderTopWidth: 1,
+    borderTopColor: "#2c2623",
   },
-  imageViewerPage: { width: SCREEN_WIDTH, justifyContent: "center", alignItems: "center" },
-  imageViewerImage: { width: "100%", height: "100%" },
-  imageViewerCounter: {
-    position: "absolute",
-    bottom: 40,
-    alignSelf: "center",
-    backgroundColor: "rgba(0,0,0,0.7)",
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-  },
-  imageViewerCounterText: { color: "#fff", fontSize: 14, fontWeight: "600" },
 });
 
 export default CommentModal;
