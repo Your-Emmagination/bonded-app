@@ -22,8 +22,6 @@ import {
   View,
   Image,
   ActivityIndicator,
-  Modal,
-  Dimensions,
 } from "react-native";
 import { Image as ExpoImage } from "expo-image";
 import { useNavigation } from "@react-navigation/native";
@@ -33,9 +31,8 @@ import { useRouter, useLocalSearchParams } from "expo-router";
 import { resolveAvatarUri } from "@/utils/avatar";
 import { getProfileIdLabel } from "@/utils/profileLabels";
 import { peekUserData, type UserData } from "@/utils/rbac";
+import ImageZoomViewer from "./components/ImageZoomViewer";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
-
-const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
 type Student = {
   id?: string;
@@ -123,7 +120,6 @@ const UserProfileScreen = () => {
   // Image viewer modal
   const [imageViewerVisible, setImageViewerVisible] = useState(false);
   const [currentImage, setCurrentImage] = useState<string>("");
-  const [imageViewerFailed, setImageViewerFailed] = useState(false);
 
   const router = useRouter();
   const navigateBack = React.useCallback(() => {
@@ -374,7 +370,6 @@ const UserProfileScreen = () => {
   };
 
   const openImageViewer = (imageUrl: string) => {
-    setImageViewerFailed(false);
     setCurrentImage(imageUrl);
     setImageViewerVisible(true);
   };
@@ -547,45 +542,13 @@ const UserProfileScreen = () => {
       </ScrollView>
 
       {/* Fullscreen Image Viewer Modal */}
-      <Modal
+      <ImageZoomViewer
+        images={currentImage ? [currentImage] : []}
+        startIndex={0}
         visible={imageViewerVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => {
-          setImageViewerVisible(false);
-          setImageViewerFailed(false);
-        }}
-      >
-        <View style={styles.imageViewerOverlay}>
-          <TouchableOpacity
-            style={styles.closeButton}
-            onPress={() => {
-              setImageViewerVisible(false);
-              setImageViewerFailed(false);
-            }}
-          >
-            <Ionicons name="close" size={32} color="#fff" />
-          </TouchableOpacity>
-          <View style={styles.fullscreenImageWrap}>
-            {currentImage && !imageViewerFailed ? (
-              <Image
-                key={currentImage}
-                source={{ uri: currentImage }}
-                style={styles.fullscreenImage}
-                resizeMode="contain"
-                onError={() => setImageViewerFailed(true)}
-              />
-            ) : (
-              <View style={styles.imageViewerFallback}>
-                <Ionicons name="image-outline" size={44} color="#fff" />
-                <Text style={styles.imageViewerFallbackText}>
-                  Unable to load profile image
-                </Text>
-              </View>
-            )}
-          </View>
-        </View>
-      </Modal>
+        onClose={() => setImageViewerVisible(false)}
+        showActions={false}
+      />
       </View>
     </SafeAreaView>
   );
@@ -808,40 +771,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 10,
     textAlign: "right",
-  },
-  imageViewerOverlay: {
-    flex: 1,
-    backgroundColor: "#000",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  closeButton: {
-    position: "absolute",
-    top: 50,
-    right: 20,
-    zIndex: 10,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    borderRadius: 20,
-    padding: 8,
-  },
-  fullscreenImage: {
-    width: SCREEN_WIDTH,
-    height: "100%",
-  },
-  fullscreenImageWrap: {
-    width: "100%",
-    height: "100%",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  imageViewerFallback: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 24,
-  },
-  imageViewerFallbackText: {
-    color: "#fff",
-    fontSize: 15,
-    marginTop: 12,
   },
 });

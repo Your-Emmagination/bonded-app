@@ -33,6 +33,7 @@ interface Props {
   onLike?: () => void;
   onComment?: () => void;
   onBookmark?: () => void;
+  showActions?: boolean;
 }
 
 const clamp = (value: number, min: number, max: number) =>
@@ -227,6 +228,7 @@ const ImageZoomViewer: React.FC<Props> = ({
   onLike,
   onComment,
   onBookmark,
+  showActions = true,
 }) => {
   const { width, height } = useWindowDimensions();
   const [currentIndex, setCurrentIndex] = useState(startIndex);
@@ -358,35 +360,37 @@ const ImageZoomViewer: React.FC<Props> = ({
             </View>
           )}
 
-          <View style={styles.actionRow}>
-            <TouchableOpacity style={styles.actionBtn} onPress={onLike} activeOpacity={0.7}>
-              <Ionicons
-                name={isLiked ? "heart" : "heart-outline"}
-                size={22}
-                color={isLiked ? "#F91880" : "#FFFFFF"}
-              />
-              {likesCount > 0 && (
-                <Text style={[styles.actionCount, isLiked && { color: "#F91880" }]}>
-                  {likesCount}
-                </Text>
-              )}
-            </TouchableOpacity>
+          {showActions && (
+            <View style={styles.actionRow}>
+              <TouchableOpacity style={styles.actionBtn} onPress={onLike} activeOpacity={0.7}>
+                <Ionicons
+                  name={isLiked ? "heart" : "heart-outline"}
+                  size={22}
+                  color={isLiked ? "#F91880" : "#FFFFFF"}
+                />
+                {likesCount > 0 && (
+                  <Text style={[styles.actionCount, isLiked && { color: "#F91880" }]}>
+                    {likesCount}
+                  </Text>
+                )}
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.actionBtn} onPress={onComment} activeOpacity={0.7}>
-              <Ionicons name="chatbubble-outline" size={20} color="#FFFFFF" />
-              {commentsCount > 0 && (
-                <Text style={styles.actionCount}>{commentsCount}</Text>
-              )}
-            </TouchableOpacity>
+              <TouchableOpacity style={styles.actionBtn} onPress={onComment} activeOpacity={0.7}>
+                <Ionicons name="chatbubble-outline" size={20} color="#FFFFFF" />
+                {commentsCount > 0 && (
+                  <Text style={styles.actionCount}>{commentsCount}</Text>
+                )}
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.actionBtn} onPress={onBookmark} activeOpacity={0.7}>
-              <Ionicons
-                name={isBookmarked ? "bookmark" : "bookmark-outline"}
-                size={22}
-                color={isBookmarked ? "#1D9BF0" : "#FFFFFF"}
-              />
-            </TouchableOpacity>
-          </View>
+              <TouchableOpacity style={styles.actionBtn} onPress={onBookmark} activeOpacity={0.7}>
+                <Ionicons
+                  name={isBookmarked ? "bookmark" : "bookmark-outline"}
+                  size={22}
+                  color={isBookmarked ? "#1D9BF0" : "#FFFFFF"}
+                />
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       </GestureHandlerRootView>
     </Modal>

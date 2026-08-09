@@ -37,7 +37,6 @@ import {
   Image,
   Linking,
   Modal,
-  PanResponder,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -46,6 +45,8 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { runOnJS } from "react-native-reanimated";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
 import {
@@ -476,6 +477,9 @@ const HomeScreen = () => {
   const [imageViewerVisible, setImageViewerVisible] = useState(false);
   const [currentImages, setCurrentImages] = useState<string[]>([]);
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
+  const [currentImageViewerPostId, setCurrentImageViewerPostId] = useState<
+    string | null
+  >(null);
   const [onlineUsersCount, setOnlineUsersCount] = useState(0);
   const [onlineUsersModalVisible, setOnlineUsersModalVisible] = useState(false);
   const [upcomingEventsCount, setUpcomingEventsCount] = useState(0);
@@ -517,24 +521,6 @@ const HomeScreen = () => {
   const menuTranslateY = useRef(new Animated.Value(0)).current;
   const feedListRef = useRef<FlatList<FeedItem>>(null);
   const searchInputRef = useRef<TextInput>(null);
-  const drawerPanResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: (evt, gestureState) =>
-        evt.nativeEvent.pageX <= 24 &&
-        gestureState.dx > 10 &&
-        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 2,
-      onMoveShouldSetPanResponder: (evt, gestureState) =>
-        evt.nativeEvent.pageX <= 24 &&
-        gestureState.dx > 10 &&
-        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 2,
-      onPanResponderRelease: (_, gestureState) => {
-        if (gestureState.dx > 80 || gestureState.vx > 0.45) {
-          setServerDrawerVisible(true);
-        }
-      },
-      onPanResponderTerminationRequest: () => false,
-    }),
-  ).current;
   const router = useRouter();
 
   const {
@@ -641,6 +627,61 @@ const selectedChannel = useMemo(() => {
     // Fallback (should rarely happen)
     return channels[0] || null;
   }, [selectedChannelId, selectedServer, selectedServerChannels]);
+
+  // ── Edge-swipe navigation: HomeScreen → ServerDrawer ────────────────────
+  // Swiping in from the left edge opens the same ServerDrawer panel as the
+  // header menu button — reuses the identical "pick a default server if
+  // none selected yet" logic so behavior is consistent everywhere.
+  const openServerDrawer = useCallback(() => {
+    if (!selectedServerId) {
+      const nextServer =
+        communityServers.find((server) => server.membershipState === "joined") ||
+        communityServers[0] ||
+        null;
+      if (nextServer) {
+        setSelectedServerId(nextServer.id);
+      }
+    }
+    setServerDrawerVisible(true);
+  }, [communityServers, selectedServerId]);
+
+  // communityServers is live Firestore data and gets a new array reference
+  // on nearly every snapshot update, which would otherwise force
+  // openServerDrawer — and therefore panGesture below — to be rebuilt
+  // constantly. Rebuilding the Pan gesture while a touch is in progress
+  // makes RNGH detach and reattach the native recognizer mid-swipe, which
+  // is a real source of dropped frames / stutter. Routing through a ref
+  // lets the gesture object stay 100% stable for the component's lifetime
+  // while still always calling the latest openServerDrawer.
+  const openServerDrawerRef = useRef(openServerDrawer);
+  useEffect(() => {
+    openServerDrawerRef.current = openServerDrawer;
+  }, [openServerDrawer]);
+  const triggerOpenServerDrawer = useCallback(() => {
+    openServerDrawerRef.current();
+  }, []);
+
+  // Constructed exactly once — never recreated on re-render, so the native
+  // gesture recognizer is registered a single time for the screen's whole
+  // lifetime and can't be interrupted mid-touch.
+  const panGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .hitSlop({ left: 0, width: 32 }) // Activation zone limited to the left screen edge (~32px)
+        .activeOffsetX(20) // Requires an intentful rightward drag before the gesture activates
+        .failOffsetY([-15, 15]) // Yields to vertical scrolling immediately
+        .maxPointers(1)
+        .onEnd((event) => {
+          const isDraggedRight = event.translationX > 60;
+          const isFlickedRight = event.velocityX > 350;
+
+          if (isDraggedRight || isFlickedRight) {
+            runOnJS(triggerOpenServerDrawer)();
+          }
+        }),
+    [],
+    // eslint-disable-line react-hooks/exhaustive-deps -- intentionally empty: gesture must stay stable, see comment above
+  );
 
   const visibleFeedItems = useMemo(
     () =>
@@ -1956,19 +1997,6 @@ const selectedChannel = useMemo(() => {
     scrollY.current = currentOffsetY;
   };
 
-  const openServerDrawer = useCallback(() => {
-    if (!selectedServerId) {
-      const nextServer =
-        communityServers.find((server) => server.membershipState === "joined") ||
-        communityServers[0] ||
-        null;
-      if (nextServer) {
-        setSelectedServerId(nextServer.id);
-      }
-    }
-    setServerDrawerVisible(true);
-  }, [communityServers, selectedServerId]);
-
   const openSearchExperience = useCallback(() => {
     setSearchExpanded(true);
     setSearchCommitted(false);
@@ -2521,13 +2549,46 @@ const handleSelectChannel = useCallback(
   );
 
   const openImageViewer = useCallback(
-    (images: string[], startIndex: number) => {
+    (images: string[], startIndex: number, postId?: string) => {
       setCurrentImages(images);
       setCurrentImageIndex(startIndex);
+      setCurrentImageViewerPostId(postId ?? null);
       setImageViewerVisible(true);
     },
     [],
   );
+
+  // Looked up live (not snapshotted at open-time) so the fullscreen viewer's
+  // like/comment counts and heart state always reflect the same data the
+  // feed itself is showing — including changes made from the feed while the
+  // viewer is open.
+  const currentImageViewerPost = useMemo(
+    () =>
+      currentImageViewerPostId
+        ? feedItems.find(
+            (item): item is PostFeedItem =>
+              item.type === "post" && item.id === currentImageViewerPostId,
+          )
+        : undefined,
+    [feedItems, currentImageViewerPostId],
+  );
+
+  const handleImageViewerLike = useCallback(() => {
+    if (!currentImageViewerPost) return;
+    handleLike(currentImageViewerPost.id, currentImageViewerPost.likedBy || []);
+  }, [currentImageViewerPost, handleLike]);
+
+  const handleImageViewerComment = useCallback(() => {
+    if (!currentImageViewerPost) return;
+    setImageViewerVisible(false);
+    // Reuses the same CommentModal instance/state already wired up for
+    // notification deep-links (see "Comment Modal (from notification)"
+    // below) instead of mounting a second CommentModal.
+    setNotificationModalPostId(currentImageViewerPost.id);
+    setNotificationModalCommentId(null);
+    setNotificationModalReplyId(null);
+    setNotificationModalOpenReply(false);
+  }, [currentImageViewerPost]);
 
   const handleFilePress = useCallback(
     (url: string, mimeType: string) => {
@@ -3069,11 +3130,8 @@ const renderEmptyState = () => {
   // ─────────────────────────────────────────────────────────────────────────
 
 return (
-    <SafeAreaView
-      style={styles.container}
-      edges={["top", "left", "right"]}
-      {...drawerPanResponder.panHandlers}
-    >
+    <GestureDetector gesture={panGesture}>
+      <SafeAreaView style={styles.container}>
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <View style={styles.header}>
         {searchExpanded ? (
@@ -3396,6 +3454,14 @@ return (
         startIndex={currentImageIndex}
         visible={imageViewerVisible}
         onClose={() => setImageViewerVisible(false)}
+        showActions={!!currentImageViewerPost}
+        likesCount={currentImageViewerPost?.likeCount ?? 0}
+        commentsCount={currentImageViewerPost?.commentCount ?? 0}
+        isLiked={
+          currentImageViewerPost?.likedBy?.includes(user?.uid || "") || false
+        }
+        onLike={handleImageViewerLike}
+        onComment={handleImageViewerComment}
       />
 
       {/* ── FAB Menu ────────────────────────────────────────────────────── */}
@@ -3508,7 +3574,8 @@ return (
           autoOpenReplyThread={notificationModalOpenReply}
         />
       )}
-    </SafeAreaView>
+   </SafeAreaView>
+    </GestureDetector>
   );
 };
 

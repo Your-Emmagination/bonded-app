@@ -1,6 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps */
-/*profileScreen.tsx  */
 import { uploadProfileImage } from "@/utils/cloudinaryUpload";
+import ImageZoomViewer from "../components/ImageZoomViewer";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import {
@@ -37,13 +37,11 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  TouchableWithoutFeedback,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
 
-// Types
 type Student = {
   firstname?: string;
   lastname?: string;
@@ -66,7 +64,6 @@ type EditData = {
   selectedTab?: TabKey;
 };
 
-// Constants
 const TABS: {
   key: TabKey;
   label: string;
@@ -105,68 +102,66 @@ const ProfileScreen = () => {
     [student?.firstname, student?.lastname],
   );
   const studentIdDisplay = useMemo(
-    () => student?.studentID ?? user?.email?.split("@")[0] ?? "â€”",
+    () => student?.studentID ?? user?.email?.split("@")[0] ?? "—",
     [student?.studentID, user?.email],
   );
 
-  const profileIdLabel = useMemo(() => getProfileIdLabel(student?.role), [student?.role]);
-  // Main auth listener with automatic online status
+  const profileIdLabel = useMemo(
+    () => getProfileIdLabel(student?.role),
+    [student?.role],
+  );
+
   useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
+    let unsubscribeProfile: (() => void) | null = null;
+
+    const unsubscribeAuth = auth.onAuthStateChanged((currentUser) => {
       setUser(currentUser);
+
+      if (unsubscribeProfile) {
+        unsubscribeProfile();
+        unsubscribeProfile = null;
+      }
 
       if (currentUser) {
         const email = currentUser.email ?? "";
         const studentID = email.split("@")[0] || currentUser.uid;
 
-        // Set user online immediately when authenticated
-        try {
-          await setDoc(
-            doc(db, "students", studentID),
-            { isOnline: true },
-            { merge: true },
-          );
-        } catch (error) {
-          console.error("Error setting online status:", error);
-        }
+        setDoc(doc(db, "students", studentID), { isOnline: true }, { merge: true }).catch(
+          (error) => console.error("Error setting online status:", error),
+        );
 
-        // Listen to profile changes
-        const unsubscribeProfile = onSnapshot(
+        unsubscribeProfile = onSnapshot(
           doc(db, "students", studentID),
           (docSnapshot) => {
             if (docSnapshot.exists()) {
               const data = docSnapshot.data() as Student;
               setStudent(data);
               setProfileImage(data.profileImage);
-              setEditedData({
+              setEditedData((prev) => ({
+                ...prev,
                 yearlvl: data.yearlvl,
                 email: data.email || "",
-                selectedTab: "info",
-              });
+              }));
             }
           },
           (error) => {
-            // Only log if user is still authenticated
             if (auth.currentUser) {
               console.error("Error listening to profile:", error);
             }
           },
         );
-
-        return () => {
-          unsubscribeProfile();
-        };
       } else {
-        // User logged out - clear state
         setStudent(null);
         setProfileImage(undefined);
       }
     });
 
-    return unsubscribe;
+    return () => {
+      if (unsubscribeProfile) unsubscribeProfile();
+      unsubscribeAuth();
+    };
   }, []);
 
-  // Handle app state changes (background/foreground)
   useEffect(() => {
     const subscription = AppState.addEventListener(
       "change",
@@ -177,24 +172,8 @@ const ProfileScreen = () => {
         const studentID = email.split("@")[0] || user.uid;
 
         try {
-          if (nextAppState === "active") {
-            // App came to foreground - set online
-            await setDoc(
-              doc(db, "students", studentID),
-              { isOnline: true },
-              { merge: true },
-            );
-          } else if (
-            nextAppState === "background" ||
-            nextAppState === "inactive"
-          ) {
-            // App went to background - set offline
-            await setDoc(
-              doc(db, "students", studentID),
-              { isOnline: false },
-              { merge: true },
-            );
-          }
+          const isOnline = nextAppState === "active";
+          await setDoc(doc(db, "students", studentID), { isOnline }, { merge: true });
         } catch (error) {
           console.error("Error updating online status:", error);
         }
@@ -211,15 +190,17 @@ const ProfileScreen = () => {
       if (!student?.studentID || !auth.currentUser) return;
 
       try {
+        const payload = { ...data };
         if (
-          editedData.email?.endsWith("@student.csap") ||
-          editedData.email?.endsWith("@teacher.csap") ||
-          editedData.email?.endsWith("@admin.csap")
+          payload.email?.endsWith("@student.csap") ||
+          payload.email?.endsWith("@teacher.csap") ||
+          payload.email?.endsWith("@admin.csap")
         ) {
-          delete editedData.email; // Prevent saving fake login email
+          delete payload.email;
         }
-        await updateDoc(doc(db, "students", student.studentID), data);
-        setStudent((prev) => (prev ? { ...prev, ...data } : prev));
+
+        await updateDoc(doc(db, "students", student.studentID), payload);
+        setStudent((prev) => (prev ? { ...prev, ...payload } : prev));
       } catch (error) {
         console.error("Error updating student:", error);
         throw error;
@@ -256,7 +237,6 @@ const ProfileScreen = () => {
 
         if (!result.canceled && result.assets?.[0]?.uri) {
           const uri = result.assets[0].uri;
-          // Use the profile-specific upload function
           const cloudinaryUrl = await uploadProfileImage(uri);
 
           setProfileImage(cloudinaryUrl);
@@ -331,15 +311,11 @@ const ProfileScreen = () => {
   }, [user, editedData.currentPassword, editedData.newPassword]);
 
   const handleLogout = useCallback(async () => {
-    console.log("Logout button pressed – starting process");
-
-    // Confirmation step – platform-specific
     let confirmed: boolean;
 
     if (Platform.OS === "web") {
       confirmed = window.confirm("Are you sure you want to log out?");
     } else {
-      // Native: use Alert
       confirmed = await new Promise<boolean>((resolve) => {
         Alert.alert(
           "Log Out",
@@ -357,10 +333,7 @@ const ProfileScreen = () => {
       });
     }
 
-    if (!confirmed) {
-      console.log("Logout cancelled by user");
-      return;
-    }
+    if (!confirmed) return;
 
     try {
       if (user) {
@@ -373,7 +346,6 @@ const ProfileScreen = () => {
               { isOnline: false },
               { merge: true },
             );
-            console.log("Offline status set to false");
           } catch (err) {
             console.warn("Offline status failed:", err);
           }
@@ -381,14 +353,10 @@ const ProfileScreen = () => {
       }
 
       await signOut(auth);
-      console.log("signOut completed successfully");
 
-      // Redirect
       if (Platform.OS === "web") {
-        console.log("Web redirect: using window.location.replace");
         window.location.replace("/LoginScreen");
       } else {
-        console.log("Native redirect: using router");
         router.replace("/LoginScreen");
       }
     } catch (e: any) {
@@ -405,13 +373,15 @@ const ProfileScreen = () => {
     Animated.spring(scaleAnim, {
       toValue: 1,
       useNativeDriver: true,
+      friction: 7,
+      tension: 40,
     }).start();
   }, [scaleAnim]);
 
   const closeModal = useCallback(() => {
     Animated.timing(scaleAnim, {
       toValue: 0,
-      duration: 200,
+      duration: 180,
       useNativeDriver: true,
     }).start(() => setEditModalVisible(false));
   }, [scaleAnim]);
@@ -478,9 +448,18 @@ const ProfileScreen = () => {
     }, [handleScreenBack]),
   );
 
+  const displayEmail =
+    student?.email &&
+    !student.email.endsWith("@student.csap") &&
+    !student.email.endsWith("@teacher.csap") &&
+    !student.email.endsWith("@admin.csap")
+      ? student.email
+      : "No email added";
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.contentShell}>
+        {/* Header Block */}
         <View style={styles.headerShell}>
           <View style={styles.headerRow}>
             {canNavigateBack ? (
@@ -489,7 +468,7 @@ const ProfileScreen = () => {
                 onPress={() => {
                   void handleScreenBack();
                 }}
-                activeOpacity={0.82}
+                activeOpacity={0.7}
               >
                 <Ionicons name="arrow-back" size={20} color="#fffaf7" />
               </TouchableOpacity>
@@ -499,110 +478,139 @@ const ProfileScreen = () => {
 
             <View style={styles.headerCopy}>
               <Text style={styles.header}>Profile</Text>
-              <Text style={styles.headerSubtext}>Manage your account, status, and photo</Text>
+              <Text style={styles.headerSubtext}>
+                Manage your account, status, and photo
+              </Text>
             </View>
 
             <View style={styles.headerBackSpacer} />
           </View>
         </View>
 
-        <ScrollView contentContainerStyle={styles.scroll}>
-        {/* Profile Card */}
-        <View style={styles.profileCard}>
-          <TouchableOpacity
-            onPress={openImageViewer}
-            onLongPress={() => {
-              handleTabChange("photo");
-              setEditModalVisible(true);
-            }}
-            disabled={loading}
-            activeOpacity={0.9}
-          >
-            {imageUri ? (
-              <Image source={{ uri: imageUri }} style={styles.profileImage} />
-            ) : (
-              <View style={styles.placeholder}>
-                <Ionicons name="person" size={50} color="#e0a53d" />
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Profile Header Card */}
+          <View style={styles.profileCard}>
+            <TouchableOpacity
+              onPress={openImageViewer}
+              onLongPress={() => {
+                handleTabChange("photo");
+                setEditModalVisible(true);
+              }}
+              disabled={loading}
+              activeOpacity={0.88}
+              style={styles.avatarWrapper}
+            >
+              {imageUri ? (
+                <Image source={{ uri: imageUri }} style={styles.profileImage} />
+              ) : (
+                <View style={styles.placeholder}>
+                  <Ionicons name="person" size={48} color="#e0a53d" />
+                </View>
+              )}
+              <View style={styles.editBadge}>
+                <Ionicons name="camera" size={14} color="#fff" />
               </View>
-            )}
-            <View style={styles.editBadge}>
-              <Ionicons name="camera" size={16} color="#fff" />
-            </View>
-            <View
-              style={[
-                styles.statusBadge,
-                { backgroundColor: student?.isOnline ? "#0f0" : "#999" },
-              ]}
+              <View
+                style={[
+                  styles.statusBadge,
+                  { backgroundColor: student?.isOnline ? "#00e676" : "#999" },
+                ]}
+              />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.statusBtn}
+              onPress={toggleOnlineStatus}
+              activeOpacity={0.75}
+            >
+              <View
+                style={[
+                  styles.statusDot,
+                  { backgroundColor: student?.isOnline ? "#00e676" : "#999" },
+                ]}
+              />
+              <Text
+                style={{
+                  color: student?.isOnline ? "#00e676" : "#c4a39b",
+                  fontWeight: "600",
+                }}
+              >
+                {student?.isOnline ? "Online" : "Offline"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Grouped Personal Information Card */}
+<View style={styles.section}>
+  <View style={styles.sectionTitleRow}>
+    <Ionicons name="person" size={18} color="#5f0909" />
+    <Text style={styles.sectionTitle}>Personal Information</Text>
+  </View>
+  <View style={styles.goldCard}>
+    <CardItemRow
+      icon="person-outline"
+      label="Full Name"
+      value={fullName}
+      isLocked={true}
+    />
+    <View style={styles.rowDivider} />
+    {/* No lock, no chevron — edited cleanly via Edit Profile button */}
+    <CardItemRow
+      icon="mail-outline"
+      label="Email Address"
+      value={displayEmail}
+      isLocked={false}
+    />
+  </View>
+</View>
+
+{/* Grouped Academic Information Card */}
+<View style={styles.section}>
+  <View style={styles.sectionTitleRow}>
+    <Ionicons name="school" size={18} color="#5f0909" />
+    <Text style={styles.sectionTitle}>Academic Information</Text>
+  </View>
+  <View style={styles.goldCard}>
+    <CardItemRow
+      icon="school-outline"
+      label="Course / Program"
+      value={student?.course ?? "—"}
+      isLocked={true}
+    />
+    <View style={styles.rowDivider} />
+    {/* Locked: Year level auto-increments or managed by admin */}
+    <CardItemRow
+      icon="trending-up-outline"
+      label="Year Level"
+      value={student?.yearlvl ?? "—"}
+      isLocked={true}
+    />
+    <View style={styles.rowDivider} />
+    <CardItemRow
+      icon="card-outline"
+      label={profileIdLabel}
+      value={studentIdDisplay}
+      isLocked={true}
+    />
+  </View>
+</View>
+
+          {/* Actions Section */}
+          <View style={styles.section}>
+            <ActionButton
+              icon="create-outline"
+              text="Edit Profile"
+              onPress={() => setEditModalVisible(true)}
             />
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.statusBtn}
-            onPress={toggleOnlineStatus}
-          >
-            <View
-              style={[
-                styles.statusDot,
-                { backgroundColor: student?.isOnline ? "#0f0" : "#999" },
-              ]}
+            <ActionButton
+              icon="log-out-outline"
+              text="Log Out"
+              onPress={handleLogout}
             />
-            <Text style={{ color: student?.isOnline ? "#0f0" : "#999" }}>
-              {student?.isOnline ? "Online" : "Offline"}
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Personal Info Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Personal Info</Text>
-          <InfoRow icon="person-outline" label="Name" value={fullName} />
-          <InfoRow
-            icon="mail-outline"
-            label="Email"
-            value={
-              student?.email &&
-              !student.email.endsWith("@student.csap") &&
-              !student.email.endsWith("@teacher.csap") &&
-              !student.email.endsWith("@admin.csap")
-                ? student.email
-                : "No email added"
-            }
-          />
-        </View>
-
-        {/* Information Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Information</Text>
-          <InfoRow
-            icon="school-outline"
-            label="Course"
-            value={student?.course ?? "â€”"}
-          />
-          <InfoRow
-            icon="trending-up-outline"
-            label="Year Level"
-            value={student?.yearlvl ?? "â€”"}
-          />
-          <InfoRow
-            icon="card-outline"
-            label={profileIdLabel}
-            value={studentIdDisplay}
-          />
-        </View>
-
-        {/* Actions Section */}
-        <View style={styles.section}>
-          <ActionButton
-            icon="create-outline"
-            text="Edit Profile"
-            onPress={() => setEditModalVisible(true)}
-          />
-          <ActionButton
-            icon="log-out-outline"
-            text="Log Out"
-            onPress={handleLogout}
-          />
-        </View>
+          </View>
         </ScrollView>
       </View>
 
@@ -622,46 +630,76 @@ const ProfileScreen = () => {
       />
 
       {/* Full Image Viewer Modal */}
-      <ImageViewerModal
+      <ImageZoomViewer
+        images={imageUri ? [imageUri] : []}
+        startIndex={0}
         visible={viewImageVisible}
-        imageUri={imageUri}
         onClose={() => setViewImageVisible(false)}
+        showActions={false}
       />
     </SafeAreaView>
   );
 };
 
-const InfoRow = ({
-  icon,
-  label,
-  value,
-}: {
-  icon: keyof typeof Ionicons.glyphMap;
-  label: string;
-  value: string;
-}) => (
-  <View style={styles.infoCard}>
-    <Ionicons name={icon} size={20} color="#e0a53d" />
-    <View style={{ marginLeft: 12 }}>
-      <Text style={styles.infoLabel}>{label}</Text>
-      <Text style={styles.infoValue}>{value}</Text>
+// Updated CardItemRow Component
+const CardItemRow = React.memo(
+  ({
+    icon,
+    label,
+    value,
+    isLocked,
+  }: {
+    icon: keyof typeof Ionicons.glyphMap;
+    label: string;
+    value: string;
+    isLocked?: boolean;
+  }) => (
+    <View style={styles.cardItemRow}>
+      <View style={styles.iconBox}>
+        <Ionicons name={icon} size={18} color="#5f0909" />
+      </View>
+      <View style={{ marginLeft: 12, flex: 1 }}>
+        <Text style={styles.infoLabel}>{label}</Text>
+        <Text style={styles.infoValue}>{value}</Text>
+      </View>
+      {/* Shows lock if read-only/admin managed, nothing if editable via Edit Profile */}
+      {isLocked && (
+        <Ionicons
+          name="lock-closed"
+          size={16}
+          color="#e0a53d"
+          style={{ marginLeft: 8 }}
+        />
+      )}
     </View>
-  </View>
+  ),
 );
 
-const ActionButton = ({
-  icon,
-  text,
-  onPress,
-}: {
-  icon: keyof typeof Ionicons.glyphMap;
-  text: string;
-  onPress: () => void;
-}) => (
-  <TouchableOpacity style={styles.actionButton} onPress={onPress}>
-    <Ionicons name={icon} size={22} color="#e0a53d" />
-    <Text style={styles.actionText}>{text}</Text>
-  </TouchableOpacity>
+const ActionButton = React.memo(
+  ({
+    icon,
+    text,
+    onPress,
+  }: {
+    icon: keyof typeof Ionicons.glyphMap;
+    text: string;
+    onPress: () => void;
+  }) => (
+    <TouchableOpacity
+      style={styles.actionButton}
+      onPress={onPress}
+      activeOpacity={0.75}
+    >
+      <Ionicons name={icon} size={20} color="#e0a53d" />
+      <Text style={styles.actionText}>{text}</Text>
+      <Ionicons
+        name="chevron-forward"
+        size={18}
+        color="#9b766c"
+        style={{ marginLeft: "auto" }}
+      />
+    </TouchableOpacity>
+  ),
 );
 
 const EditModal = ({
@@ -702,7 +740,6 @@ const EditModal = ({
       >
         <Text style={styles.modalHeader}>Edit Profile</Text>
 
-        {/* Tab Navigation */}
         <View style={styles.tabRow}>
           {TABS.map(({ key, label, icon }) => (
             <TouchableOpacity
@@ -712,6 +749,7 @@ const EditModal = ({
                 styles.tabButton,
                 editedData.selectedTab === key && styles.tabButtonActive,
               ]}
+              activeOpacity={0.8}
             >
               <Ionicons
                 name={icon}
@@ -731,13 +769,12 @@ const EditModal = ({
           ))}
         </View>
 
-        {/* Tab Content */}
         <View style={styles.tabContent}>
           {loading ? (
             <ActivityIndicator
               size="large"
               color="#e0a53d"
-              style={{ marginVertical: 20 }}
+              style={{ marginVertical: 24 }}
             />
           ) : (
             <>
@@ -772,6 +809,7 @@ const EditModal = ({
   </Modal>
 );
 
+// Cleaned-up InfoTab for Edit Modal (Email only)
 const InfoTab = ({
   editedData,
   onDataChange,
@@ -782,19 +820,15 @@ const InfoTab = ({
   onSave: () => void;
 }) => (
   <>
+    <Text style={styles.inputLabel}>Personal Email Address</Text>
     <TextInput
       style={styles.input}
-      placeholder="Add your email (optional)"
+      placeholder="Enter email address"
       placeholderTextColor="rgba(155,118,108,0.6)"
+      value={editedData.email ?? ""}
       onChangeText={(text: string) => onDataChange("email", text)}
       keyboardType="email-address"
       autoCapitalize="none"
-    />
-
-    <Text style={styles.inputLabel}>Year Level</Text>
-    <YearLevelDropdown
-      value={editedData.yearlvl ?? ""}
-      onChange={(val) => onDataChange("yearlvl", val)}
     />
 
     <TouchableOpacity style={styles.primaryBtn} onPress={onSave}>
@@ -817,6 +851,7 @@ const PasswordTab = ({
 
   return (
     <>
+      <Text style={styles.inputLabel}>Current Password</Text>
       <View style={styles.passwordInputWrapper}>
         <TextInput
           style={styles.passwordInput}
@@ -832,12 +867,13 @@ const PasswordTab = ({
         >
           <Ionicons
             name={showCurrentPassword ? "eye-off-outline" : "eye-outline"}
-            size={22}
+            size={20}
             color="#9b766c"
           />
         </TouchableOpacity>
       </View>
 
+      <Text style={styles.inputLabel}>New Password</Text>
       <View style={styles.passwordInputWrapper}>
         <TextInput
           style={styles.passwordInput}
@@ -853,7 +889,7 @@ const PasswordTab = ({
         >
           <Ionicons
             name={showNewPassword ? "eye-off-outline" : "eye-outline"}
-            size={22}
+            size={20}
             color="#9b766c"
           />
         </TouchableOpacity>
@@ -871,7 +907,7 @@ const PhotoTab = ({
 }: {
   onImagePick: (useCamera: boolean) => void;
 }) => (
-  <View style={{ marginTop: 10 }}>
+  <View style={{ marginTop: 6 }}>
     <TouchableOpacity
       style={styles.modalOption}
       onPress={() => onImagePick(false)}
@@ -889,96 +925,69 @@ const PhotoTab = ({
   </View>
 );
 
-const ImageViewerModal = ({
-  visible,
-  imageUri,
-  onClose,
-}: {
-  visible: boolean;
-  imageUri?: string;
-  onClose: () => void;
-}) => (
-  <Modal
-    visible={visible}
-    transparent
-    animationType="fade"
-    onRequestClose={onClose}
-  >
-    <TouchableWithoutFeedback onPress={onClose}>
-      <View style={styles.fullImageModal}>
-        <View style={styles.fullImageInner}>
-          {imageUri && (
-            <Image
-              source={{ uri: imageUri }}
-              style={styles.fullImage}
-              resizeMode="contain"
-            />
-          )}
-        </View>
-      </View>
-    </TouchableWithoutFeedback>
-  </Modal>
-);
 
 type YearLevelDropdownProps = {
   value: string;
   onChange: (val: string) => void;
 };
 
-const YearLevelDropdown: React.FC<YearLevelDropdownProps> = ({
-  value,
-  onChange,
-}) => {
-  const [open, setOpen] = useState(false);
-  const [items, setItems] = useState([
-    { label: "1st Year", value: "1st Year" },
-    { label: "2nd Year", value: "2nd Year" },
-    { label: "3rd Year", value: "3rd Year" },
-    { label: "4th Year", value: "4th Year" },
-    { label: "Graduate", value: "Graduate" },
-  ]);
+const YearLevelDropdown: React.FC<YearLevelDropdownProps> = React.memo(
+  ({ value, onChange }) => {
+    const [open, setOpen] = useState(false);
+    const [items, setItems] = useState([
+      { label: "1st Year", value: "1st Year" },
+      { label: "2nd Year", value: "2nd Year" },
+      { label: "3rd Year", value: "3rd Year" },
+      { label: "4th Year", value: "4th Year" },
+      { label: "Graduate", value: "Graduate" },
+    ]);
 
-  return (
-    <View style={{ zIndex: 1000, marginBottom: 10 }}>
-      <DropDownPicker
-        open={open}
-        value={value}
-        items={items}
-        setOpen={setOpen}
-        setValue={(callback) => {
-          const newVal = callback(value);
-          onChange(newVal);
-        }}
-        setItems={setItems}
-        placeholder="Select Year Level"
-        placeholderStyle={styles.placeholderStyle}
-        style={styles.dropdown}
-        dropDownContainerStyle={styles.dropdownContainer}
-        textStyle={styles.dropdownText}
-        arrowIconStyle={styles.arrowIcon}
-        tickIconStyle={styles.tickIcon}
-        listItemContainerStyle={styles.listItemContainer}
-        listItemLabelStyle={styles.listItemLabel}
-      />
-    </View>
-  );
-};
+    return (
+      <View style={{ zIndex: 1000, marginBottom: 12 }}>
+        <DropDownPicker
+          open={open}
+          value={value}
+          items={items}
+          setOpen={setOpen}
+          setValue={(callback) => {
+            const newVal = callback(value);
+            onChange(newVal);
+          }}
+          setItems={setItems}
+          placeholder="Select Year Level"
+          placeholderStyle={styles.placeholderStyle}
+          style={styles.dropdown}
+          dropDownContainerStyle={styles.dropdownContainer}
+          textStyle={styles.dropdownText}
+          arrowIconStyle={styles.arrowIcon}
+          tickIconStyle={styles.tickIcon}
+          listItemContainerStyle={styles.listItemContainer}
+          listItemLabelStyle={styles.listItemLabel}
+        />
+      </View>
+    );
+  },
+);
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#f6f1ed" },
-  contentShell: {
-    flex: 1,
-    backgroundColor: "#f6f1ed",
-  },
+  contentShell: { flex: 1, backgroundColor: "#f6f1ed" },
   headerShell: {
-    margin: 16,
-    marginBottom: 4,
-    paddingHorizontal: 20,
-    paddingVertical: 18,
-    borderRadius: 22,
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderRadius: 20,
     backgroundColor: "#5f0909",
     borderWidth: 1,
     borderColor: "#8f3a2b",
+
+    shadowColor: "#5f0909",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 4,
   },
   headerRow: {
     flexDirection: "row",
@@ -1002,130 +1011,171 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
   },
   header: {
     color: "#fffaf7",
-    fontSize: 22,
-    fontWeight: "bold",
+    fontSize: 20,
+    fontWeight: "700",
     textAlign: "center",
-    letterSpacing: 1,
+    letterSpacing: 0.5,
   },
   headerSubtext: {
     color: "#f0d2c2",
-    fontSize: 13,
+    fontSize: 12,
     textAlign: "center",
-    marginTop: 6,
+    marginTop: 2,
   },
-  dropdown: {
-    backgroundColor: "#fffaf7",
-    borderColor: "#e0a53d",
-    borderWidth: 1,
-    borderRadius: 10,
-    minHeight: 50,
-  },
-  dropdownContainer: {
-    backgroundColor: "#f6f1ed",
-    borderColor: "#e0a53d",
-    borderWidth: 1,
-    borderRadius: 10,
-  },
-  dropdownText: { color: "#4d1b17", fontSize: 16 },
-  placeholderStyle: { color: "rgba(155,118,108,0.6)" },
-  listItemContainer: {
-    borderBottomColor: "#fffaf7",
-    borderBottomWidth: 0.5,
-  },
-  listItemLabel: { color: "#4d1b17" },
-  arrowIcon: { tintColor: "#e0a53d" } as any,
-  tickIcon: { tintColor: "#e0a53d" } as any,
-  scroll: { paddingBottom: 100 },
+  scroll: { paddingBottom: 60 },
   profileCard: {
     alignItems: "center",
     backgroundColor: "#5f0909",
-    margin: 16,
-    padding: 20,
-    borderRadius: 20,
+    marginHorizontal: 16,
+    marginTop: 12,
+    padding: 24,
+    borderRadius: 22,
     borderWidth: 1,
     borderColor: "#e0a53d",
+
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  avatarWrapper: {
+    position: "relative",
+    marginBottom: 12,
   },
   profileImage: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: 104,
+    height: 104,
+    borderRadius: 52,
     borderWidth: 3,
     borderColor: "#e0a53d",
   },
   placeholder: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: 104,
+    height: 104,
+    borderRadius: 52,
     backgroundColor: "#f0e7e2",
     justifyContent: "center",
     alignItems: "center",
   },
   editBadge: {
     position: "absolute",
-    bottom: 5,
-    right: 5,
+    bottom: 2,
+    right: 2,
     backgroundColor: "#e0a53d",
     borderRadius: 16,
-    padding: 5,
+    width: 30,
+    height: 30,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 2,
+    borderColor: "#5f0909",
   },
   statusBadge: {
     position: "absolute",
-    top: 5,
-    right: 5,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
+    top: 4,
+    right: 4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: "#5f0909",
   },
   statusBtn: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginTop: 10,
-    backgroundColor: "rgba(255,250,247,0.12)",
-    paddingHorizontal: 12,
+    paddingHorizontal: 16,
     paddingVertical: 8,
-    borderRadius: 999,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,250,247,0.12)",
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.28)",
   },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
-  section: { marginHorizontal: 16, marginTop: 24 },
+  section: { marginHorizontal: 16, marginTop: 20 },
+  sectionTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 8,
+  },
   sectionTitle: {
     color: "#5f0909",
     fontWeight: "700",
-    marginBottom: 12,
-    fontSize: 15,
-    letterSpacing: 0.3,
+    fontSize: 14,
+    letterSpacing: 0.5,
   },
-  infoCard: {
+  goldCard: {
+    backgroundColor: "#fffaf7",
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: "#e0a53d",
+    paddingHorizontal: 14,
+    paddingVertical: 4,
+
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 5,
+    elevation: 3,
+  },
+  cardItemRow: {
     flexDirection: "row",
     alignItems: "center",
-    padding: 12,
-    backgroundColor: "#fffaf7",
-    borderRadius: 12,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: "#f0e7e2",
+    paddingVertical: 12,
   },
-  infoLabel: { color: "#9b766c", fontSize: 12 },
-  infoValue: { color: "#4d1b17", fontSize: 16 },
+  rowDivider: {
+    height: 1,
+    backgroundColor: "rgba(224,165,61,0.25)",
+  },
+  iconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: "#f0e7e2",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  infoLabel: {
+    color: "#9b766c",
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  infoValue: {
+    color: "#4d1b17",
+    fontSize: 14,
+    fontWeight: "600",
+    marginTop: 2,
+  },
   actionButton: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "#fffaf7",
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 14,
     marginBottom: 10,
     borderWidth: 1,
     borderColor: "#e8d3b2",
     borderLeftWidth: 4,
     borderLeftColor: "#e0a53d",
+
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
+    elevation: 2,
   },
-  actionText: { color: "#4d1b17", fontSize: 16, marginLeft: 12 },
+  actionText: {
+    color: "#4d1b17",
+    fontSize: 15,
+    fontWeight: "600",
+    marginLeft: 12,
+  },
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.72)",
@@ -1136,27 +1186,24 @@ const styles = StyleSheet.create({
     width: "90%",
     maxWidth: 400,
     backgroundColor: "#fffaf7",
-    borderRadius: 20,
+    borderRadius: 22,
     paddingVertical: 20,
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
     elevation: 8,
-
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.22)",
   },
   modalHeader: {
     color: "#5f0909",
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "bold",
     textAlign: "center",
-    marginBottom: 18,
+    marginBottom: 16,
   },
   tabRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
     backgroundColor: "#f0e7e2",
-    borderRadius: 10,
+    borderRadius: 12,
     padding: 4,
     gap: 4,
   },
@@ -1164,27 +1211,32 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderRadius: 10,
-    minWidth: 0,
   },
   tabButtonActive: { backgroundColor: "#5f0909" },
   tabText: {
     color: "#9b766c",
-    fontSize: 12,
+    fontSize: 11,
     textAlign: "center",
     fontWeight: "600",
-    flexWrap: "wrap",
   },
   tabTextActive: { color: "#fff" },
-  tabContent: { marginVertical: 10, padding: 12 },
+  tabContent: { marginVertical: 12 },
+  inputLabel: {
+    color: "#9b766c",
+    fontSize: 12,
+    marginBottom: 4,
+    marginLeft: 2,
+    fontWeight: "600",
+  },
   input: {
     backgroundColor: "#f0e7e2",
     color: "#4d1b17",
-    borderRadius: 8,
+    borderRadius: 10,
     padding: 12,
-    marginBottom: 10,
-    fontSize: 15,
+    marginBottom: 12,
+    fontSize: 14,
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.32)",
   },
@@ -1192,38 +1244,38 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "#f0e7e2",
-    borderRadius: 8,
-    marginBottom: 10,
-    paddingRight: 12,
+    borderRadius: 10,
+    marginBottom: 12,
+    paddingRight: 8,
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.32)",
   },
-  passwordInput: { flex: 1, color: "#4d1b17", padding: 12, fontSize: 15 },
+  passwordInput: { flex: 1, color: "#4d1b17", padding: 12, fontSize: 14 },
   eyeIconPassword: { padding: 8 },
   primaryBtn: {
     backgroundColor: "#5f0909",
     borderRadius: 10,
-    paddingVertical: 12,
+    paddingVertical: 14,
     alignItems: "center",
-    marginTop: 5,
+    marginTop: 6,
     shadowColor: "#5f0909",
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
     elevation: 3,
     borderWidth: 1,
     borderColor: "#8f3a2b",
   },
-  primaryText: { color: "#fff", fontWeight: "700", fontSize: 15 },
+  primaryText: { color: "#fff", fontWeight: "700", fontSize: 14 },
   closeBtn: {
     backgroundColor: "#f5efeb",
     borderRadius: 10,
     paddingVertical: 12,
     alignItems: "center",
-    marginTop: 10,
+    marginTop: 4,
     borderWidth: 1,
     borderColor: "#f0e7e2",
   },
-  closeText: { color: "#9b766c", fontWeight: "600", fontSize: 15 },
+  closeText: { color: "#9b766c", fontWeight: "600", fontSize: 14 },
   modalOption: {
     flexDirection: "row",
     alignItems: "center",
@@ -1234,28 +1286,26 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.24)",
   },
-  optionText: { color: "#4d1b17", fontSize: 16, marginLeft: 12 },
-  fullImageModal: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.97)",
-    justifyContent: "center",
-    alignItems: "center",
+  optionText: { color: "#4d1b17", fontSize: 15, marginLeft: 12, fontWeight: "500" },
+  dropdown: {
+    backgroundColor: "#fffaf7",
+    borderColor: "#e0a53d",
+    borderWidth: 1,
+    borderRadius: 10,
+    minHeight: 48,
   },
-  fullImageInner: {
-    width: "100%",
-    height: "100%",
-    justifyContent: "center",
-    alignItems: "center",
+  dropdownContainer: {
+    backgroundColor: "#f6f1ed",
+    borderColor: "#e0a53d",
+    borderWidth: 1,
+    borderRadius: 10,
   },
-  fullImage: { width: "100%", height: "100%" },
-  inputLabel: {
-    color: "#9b766c",
-    fontSize: 14,
-    marginBottom: 6,
-    marginLeft: 2,
-    fontWeight: "600",
-  },
-  statusText: { fontSize: 14, fontWeight: "500" },
+  dropdownText: { color: "#4d1b17", fontSize: 14 },
+  placeholderStyle: { color: "rgba(155,118,108,0.6)" },
+  listItemContainer: { borderBottomColor: "#fffaf7", borderBottomWidth: 0.5 },
+  listItemLabel: { color: "#4d1b17" },
+  arrowIcon: { tintColor: "#e0a53d" } as any,
+  tickIcon: { tintColor: "#e0a53d" } as any,
 });
 
 export default ProfileScreen;

@@ -1,4 +1,5 @@
 // app/(main)/(tabs)/DashboardScreen.tsx
+const YEAR_LEVEL_OPTIONS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "Graduated"];
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { 
   View, 
@@ -453,7 +454,38 @@ export default function DashboardScreen() {
     },
     [router],
   );
+const handleYearLevelChange = useCallback(
+  (managedUser: ManagedUserRecord, nextYearLvl: string) => {
+    if (!canOpenManageUsers) return;
+    if (managedUser.yearlvl === nextYearLvl) return;
 
+    Alert.alert(
+      "Update Year Level",
+      `Change ${getManagedUserName(managedUser)}'s year level to ${nextYearLvl}?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Update",
+          onPress: async () => {
+            try {
+              setManagedUserBusyId(managedUser.id);
+              await updateDoc(doc(db, "students", managedUser.id), {
+                yearlvl: nextYearLvl,
+                updatedAt: serverTimestamp(),
+              });
+            } catch (error) {
+              console.error("Error updating year level:", error);
+              Alert.alert("Error", "Failed to update year level.");
+            } finally {
+              setManagedUserBusyId(null);
+            }
+          },
+        },
+      ]
+    );
+  },
+  [canOpenManageUsers]
+);
   const handleRoleChange = useCallback(
     (managedUser: ManagedUserRecord, nextRole: UserRole) => {
       if (!canOpenManageUsers) return;
@@ -825,6 +857,38 @@ export default function DashboardScreen() {
 
                     {isExpanded && (
                       <View style={styles.manageUserExpandedPanel}>
+                        <Text style={[styles.manageUserExpandedTitle, { marginTop: 16 }]}>Set Year Level</Text>
+<View style={styles.roleOptionGrid}>
+  {YEAR_LEVEL_OPTIONS.map((yearOption) => {
+    const isSelected = managedUser.yearlvl === yearOption;
+    return (
+      <TouchableOpacity
+        key={`${managedUser.id}-${yearOption}`}
+        style={[
+          styles.roleOptionButton,
+          isSelected && styles.roleOptionButtonSelected,
+        ]}
+        onPress={() => handleYearLevelChange(managedUser, yearOption)}
+        disabled={isBusy}
+        activeOpacity={0.82}
+      >
+        <Ionicons
+          name="school-outline"
+          size={16}
+          color={isSelected ? "#fffaf7" : "#5f0909"}
+        />
+        <Text
+          style={[
+            styles.roleOptionText,
+            isSelected && styles.roleOptionTextSelected,
+          ]}
+        >
+          {yearOption}
+        </Text>
+      </TouchableOpacity>
+    );
+  })}
+</View>
                         <Text style={styles.manageUserExpandedTitle}>Set role</Text>
                         <Text style={styles.manageUserExpandedText}>
                           Choose the access level that best matches this account.

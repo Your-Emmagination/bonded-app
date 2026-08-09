@@ -16,6 +16,8 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
+import { runOnJS } from "react-native-reanimated";
 import type {
   CommunityChannel,
   CommunityServer,
@@ -377,14 +379,38 @@ export default function ServerDrawer({
   const canLeaveServer =
     membershipState === "joined" && currentUserRole !== "admin";
 
+  // ── Edge-swipe navigation: ServerDrawer → HomeScreen ────────────────────
+  // The drawer renders inside a Modal (its own native layer), so this needs
+  // its own gesture rather than relying on one in HomeScreen underneath.
+  // Starts near the RIGHT edge only; a horizontal left swipe reuses the
+  // same onClose() used by the backdrop tap and the "Home" button.
+  const edgeSwipeCloseGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .hitSlop({ right: 0, width: 32 }) // Activation zone limited to the right screen edge (~32px)
+        .activeOffsetX(-20) // Requires an intentful leftward drag before the gesture activates
+        .failOffsetY([-15, 15]) // Yields to vertical scrolling (rail / channel list) immediately
+        .maxPointers(1)
+        .onEnd((event) => {
+          const isDraggedLeft = event.translationX < -60;
+          const isFlickedLeft = event.velocityX < -350;
+
+          if (isDraggedLeft || isFlickedLeft) {
+            runOnJS(onClose)();
+          }
+        }),
+    [onClose],
+  );
+
   return (
     <>
       <Modal visible={visible} transparent animationType="none" onRequestClose={onClose}>
-        <View style={styles.overlay}>
+        <GestureHandlerRootView style={styles.overlay}>
           <Animated.View style={[styles.backdrop, { opacity: fadeAnim }]}>
             <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
           </Animated.View>
 
+          <GestureDetector gesture={edgeSwipeCloseGesture}>
           <Animated.View
             style={[
               styles.drawerShell,
@@ -611,7 +637,8 @@ export default function ServerDrawer({
               )}
             </View>
           </Animated.View>
-        </View>
+          </GestureDetector>
+        </GestureHandlerRootView>
       </Modal>
 
       <Modal visible={createVisible} transparent animationType="fade" onRequestClose={() => setCreateVisible(false)}>

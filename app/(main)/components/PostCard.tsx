@@ -86,7 +86,7 @@ interface PostCardProps {
   onLike: (postId: string, likedBy: string[]) => void;
   onProfileClick: (userId?: string) => void;
   onTagClick: (taggedUserId: string) => void;
-  onImagePress?: (images: string[], startIndex: number) => void;
+  onImagePress?: (images: string[], startIndex: number, postId?: string) => void;
   onFilePress: (url: string, mimeType: string) => void;
   getTimeAgo: (timestamp: any) => string;
   onCommentCountUpdate?: (postId: string, newCount: number) => void;
@@ -256,7 +256,7 @@ const PostCard: React.FC<PostCardProps> = ({
                     onPress={() => {
                       if (onImagePress) {
                         const urls = imageFiles.map((f) => f.url);
-                        onImagePress(urls, index);
+                        onImagePress(urls, index, post.id);
                       }
                     }}
                   >
