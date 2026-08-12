@@ -12,6 +12,7 @@ import {
   ActivityIndicator,
   Alert,
 } from "react-native";
+import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import {
@@ -446,62 +447,39 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
     setLoadingGifs(true);
     setGifError(null);
     try {
-      const API_KEY = "AIzaSyCFwGab5AO3lSHEBTxTDIVgOwFt4YvCWEI";
-      const CLIENT_KEY = "bonded-app";
+      // Replace with your actual Giphy API key
+      const GIPHY_API_KEY = "UAisLETyclXOiTF4eGtbxACJ3VM3hv6G"; 
       const limit = 20;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-      const response = await fetch(
-        `https://tenor.googleapis.com/v2/search?${new URLSearchParams({
-          q: query,
-          key: API_KEY,
-          client_key: CLIENT_KEY,
-          limit: String(limit),
-          media_filter: "gif",
-          country: "US",
-        }).toString()}`,
-        {
-          signal: controller.signal,
-          headers: { Accept: "application/json" },
-        },
-      );
+      const params = new URLSearchParams({
+        api_key: GIPHY_API_KEY,
+        q: query.trim(),
+        limit: String(limit),
+        rating: "g",
+        lang: "en",
+      });
 
-      clearTimeout(timeoutId);
+      const response = await fetch(`https://api.giphy.com/v1/gifs/search?${params.toString()}`);
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`GIF search failed (${response.status}): ${errorText}`);
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const data = await response.json();
 
-      if (data.results && data.results.length > 0) {
-        setGifResults(data.results);
-        setGifError(null);
+      if (data.data && data.data.length > 0) {
+        setGifResults(data.data);
       } else {
         setGifResults([]);
-        setGifError("No GIFs found for this search");
+        setGifError("No GIFs found for your search query.");
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error("Error searching GIFs:", error);
-
-      if (error.name === "AbortError") {
-        setGifError("Connection timeout. Please check your internet and try again.");
-      } else if (error.message?.includes("401") || error.message?.includes("403") || error.message?.includes("429")) {
-        setGifError("GIF search is temporarily unavailable. Please try again later.");
-      } else if (error.message?.includes("network") || error.message?.includes("Failed to fetch")) {
-        setGifError("No internet connection. Please check your network and try again.");
-      } else {
-        setGifError("Unable to load GIFs. Please try again later.");
-      }
-
-      setGifResults([]);
+      setGifError("Failed to search GIFs. Please try again.");
     } finally {
       setLoadingGifs(false);
     }
   };
-
   const handleSelectGif = (gifUrl: string) => {
     setSelectedGif(gifUrl);
     setShowGifModal(false);
@@ -574,13 +552,20 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         )}
 
         {selectedGif && (
-          <View style={composerStyles.gifPreviewCompact}>
-            <Image source={{ uri: selectedGif }} style={composerStyles.gifImageCompact} />
-            <TouchableOpacity style={composerStyles.removeGifBtn} onPress={() => setSelectedGif(null)}>
-              <Ionicons name="close-circle" size={16} color="#e0a53d" />
-            </TouchableOpacity>
-          </View>
-        )}
+  <View style={composerStyles.gifPreviewCompact}>
+    <Image 
+      source={{ uri: selectedGif }} 
+      style={composerStyles.gifImageCompact} 
+      resizeMode="cover"
+    />
+    <TouchableOpacity 
+      style={composerStyles.removeGifBtn} 
+      onPress={() => setSelectedGif(null)}
+    >
+      <Ionicons name="close-circle" size={16} color="#e0a53d" />
+    </TouchableOpacity>
+  </View>
+)}
 
         {!isExpanded ? (
           <TouchableOpacity
@@ -590,7 +575,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
           >
             <View style={composerStyles.userAvatarSmall}>
               {resolveAvatarUri(currentUser) ? (
-                <Image source={{ uri: resolveAvatarUri(currentUser)! }} style={composerStyles.avatarImage} />
+                <Image source={{ uri: avatarThumb(resolveAvatarUri(currentUser), AVATAR_SIZE_SMALL) }} style={composerStyles.avatarImage} />
               ) : (
                 <Text style={composerStyles.avatarTextSmall}>
                   {currentUser?.firstname?.[0]?.toUpperCase() || "U"}
@@ -956,21 +941,31 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               </View>
             ) : gifResults.length > 0 ? (
               <FlatList
-                data={gifResults}
-                numColumns={2}
-                keyExtractor={(_, index) => index.toString()}
-                renderItem={({ item }) => {
-                  const gifUrl = item?.media_formats?.gif?.url;
-                  const thumbnailUrl = item?.media_formats?.tinygif?.url || gifUrl;
-                  if (!gifUrl || !thumbnailUrl) return null;
-                  return (
-                    <TouchableOpacity style={composerStyles.gifItem} onPress={() => handleSelectGif(gifUrl)}>
-                      <Image source={{ uri: thumbnailUrl }} style={composerStyles.gifThumbnail} resizeMode="cover" />
-                    </TouchableOpacity>
-                  );
-                }}
-                contentContainerStyle={composerStyles.gifGrid}
-              />
+  data={gifResults}
+  numColumns={2}
+  keyExtractor={(item) => item.id}
+  renderItem={({ item }) => {
+    // Extract full GIF and small thumbnail preview
+    const gifUrl = item.images?.original?.url;
+    const thumbnailUrl = item.images?.fixed_height_small?.url || item.images?.fixed_width?.url;
+
+    if (!gifUrl || !thumbnailUrl) return null;
+
+    return (
+      <TouchableOpacity
+        style={composerStyles.gifItem}
+        onPress={() => handleSelectGif(gifUrl)}
+      >
+        <Image
+          source={{ uri: thumbnailUrl }}
+          style={composerStyles.gifThumbnail}
+          resizeMode="cover"
+        />
+      </TouchableOpacity>
+    );
+  }}
+  contentContainerStyle={composerStyles.gifGrid}
+/>
             ) : (
               <View style={composerStyles.gifEmptyContainer}>
                 <Ionicons name="images-outline" size={48} color="#f0e7e2" />

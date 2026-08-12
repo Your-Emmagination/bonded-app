@@ -1,5 +1,6 @@
 // PollCard.tsx 
 import { Ionicons } from "@expo/vector-icons";
+import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -77,7 +78,7 @@ interface PollCardProps {
   onDelete?: (pollId: string) => void | Promise<void>;
 }
 
-const PollCard = ({
+const PollCard = React.memo<PollCardProps>(({
   poll,
   isHighlighted = false,
   currentUserId,
@@ -314,7 +315,7 @@ const handleAddOption = async () => {
                 <ActivityIndicator size="small" color="#956a5f" />
               ) : isIdentityVisible ? (
                 authorAvatarUri ? (
-                  <Image source={{ uri: authorAvatarUri }} style={styles.avatarImage} />
+                  <Image source={{ uri: avatarThumb(authorAvatarUri, AVATAR_SIZE_SMALL) }} style={styles.avatarImage} />
                 ) : (
                   <Text style={[styles.avatarText, { color: roleColor }]}>
                     {(
@@ -394,7 +395,7 @@ const handleAddOption = async () => {
               style={styles.imageContainer}
             >
               <Image
-                source={{ uri: poll.imageUrl }}
+                source={{ uri: feedImage(poll.imageUrl, FEED_IMAGE_WIDTH) }}
                 style={styles.pollImage}
                 resizeMode="cover"
               />
@@ -654,7 +655,8 @@ const handleAddOption = async () => {
       )}
     </View>
   );
-};
+});
+PollCard.displayName = "PollCard";
 
 export default PollCard;
 

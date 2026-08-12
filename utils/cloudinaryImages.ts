@@ -18,6 +18,8 @@
 // Non-Cloudinary URLs (GIFs from Giphy/Tenor, local file:// picker previews,
 // etc.) are returned unchanged — this is safe to apply everywhere.
 
+import { PixelRatio } from "react-native";
+
 export type CloudinaryTransformOptions = {
   /** Target width in px (device-independent; dpr_auto handles pixel density). */
   width?: number;
@@ -35,6 +37,30 @@ export type CloudinaryTransformOptions = {
 };
 
 const CLOUDINARY_UPLOAD_MARKER = "/upload/";
+
+// Canonical display sizes, shared across every screen instead of each one
+// picking its own ad-hoc number. Two things this buys us:
+//  1. Far fewer distinct cache keys overall — faster global CDN warm-up,
+//     more cross-user cache hits.
+//  2. utils/cloudinaryUpload.ts's eager-warming step can pre-generate
+//     exactly these sizes right after upload, so real screens always hit
+//     an already-warm URL instead of triggering a cold generation.
+// If a new avatar/image spot is added later, reuse one of these rather
+// than introducing a new one-off size.
+export const AVATAR_SIZE_SMALL = 56; // inline/list avatars (feed, comments, members, headers — displayed 32-58px)
+export const AVATAR_SIZE_LARGE = 120; // profile-screen avatars (displayed 104-120px)
+export const FEED_IMAGE_WIDTH = 400; // post/poll/message/comment images and GIFs
+export const FULLSCREEN_IMAGE_WIDTH = 430; // baseline logical viewport width for the fullscreen viewer
+
+// React Native's Image component doesn't send DPR client hints the way a
+// browser <img> does, so Cloudinary's own "dpr_auto" has nothing to key
+// off and would just serve 1x. Instead we read the device's actual pixel
+// ratio here and bake it into the requested pixel dimensions — callers
+// still just pass logical/CSS-like sizes (e.g. 40 for a 40x40 avatar).
+// Capped at 3x since anything beyond that is imperceptible and just wastes
+// bandwidth.
+const scaleForDevice = (px: number): number =>
+  Math.round(px * Math.min(PixelRatio.get(), 3));
 
 /**
  * Returns a resized/compressed delivery URL for a Cloudinary-hosted image.
@@ -64,39 +90,44 @@ export const getCloudinaryUrl = (
   if (height) segments.push(`h_${Math.round(height)}`);
   segments.push(`c_${resolvedCrop}`);
   if (gravity) segments.push(`g_${gravity}`);
-  segments.push("q_auto", "f_auto", "dpr_auto");
+  segments.push("q_auto", "f_auto");
 
   const transform = segments.join(",");
   return `${url.slice(0, markerIndex + CLOUDINARY_UPLOAD_MARKER.length)}${transform}/${afterMarker}`;
 };
 
 /**
- * Small, face-cropped avatar/profile-picture thumbnail. Use for avatars in
- * feeds, comment lists, member lists, headers — anywhere shown small.
- * Default 96px covers up to a ~48pt avatar at 2x density.
+ * Small, face-cropped avatar/profile-picture thumbnail. `size` is the
+ * logical size the avatar is displayed at (e.g. pass 40 for a 40x40 style)
+ * — device pixel ratio is applied automatically. Use for avatars in feeds,
+ * comment lists, member lists, headers — anywhere shown small.
  */
 export const avatarThumb = (
   url: string | undefined | null,
-  size: number = 96,
-): string | undefined =>
-  getCloudinaryUrl(url, { width: size, height: size, crop: "fill", gravity: "face" });
+  size: number = AVATAR_SIZE_SMALL,
+): string | undefined => {
+  const px = scaleForDevice(size);
+  return getCloudinaryUrl(url, { width: px, height: px, crop: "fill", gravity: "face" });
+};
 
 /**
- * Post/message/poll image sized for feed display. Scales down to fit
- * within the given width without cropping — preserves the original aspect
- * ratio and framing.
+ * Post/message/poll image sized for feed display. `width` is the logical
+ * display width — device pixel ratio is applied automatically. Scales down
+ * to fit within that width without cropping, preserving aspect ratio.
  */
 export const feedImage = (
   url: string | undefined | null,
-  width: number = 900,
-): string | undefined => getCloudinaryUrl(url, { width, crop: "limit" });
+  width: number = FEED_IMAGE_WIDTH,
+): string | undefined => getCloudinaryUrl(url, { width: scaleForDevice(width), crop: "limit" });
 
 /**
- * Larger variant for the fullscreen pinch-zoom viewer. Still capped (not
- * the literal original) since even a fullscreen phone view rarely needs
- * more than ~1600px on the long edge, but detail holds up fine when zoomed.
+ * Larger variant for the fullscreen pinch-zoom viewer. `width` is the
+ * logical viewport width — device pixel ratio is applied automatically.
+ * Still capped (not the literal original) since even a fullscreen phone
+ * view rarely needs more than ~1800px on the long edge after DPR scaling,
+ * but detail holds up fine when zoomed.
  */
 export const fullscreenImage = (
   url: string | undefined | null,
-  width: number = 1600,
-): string | undefined => getCloudinaryUrl(url, { width, crop: "limit" });
+  width: number = FULLSCREEN_IMAGE_WIDTH,
+): string | undefined => getCloudinaryUrl(url, { width: scaleForDevice(width), crop: "limit" });

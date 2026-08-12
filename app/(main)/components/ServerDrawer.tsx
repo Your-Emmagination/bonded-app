@@ -18,6 +18,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
+import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
 import type {
   CommunityChannel,
   CommunityServer,
@@ -160,7 +161,7 @@ function RailAvatar({
         ]}
       >
         {server.logoUri ? (
-          <Image source={{ uri: server.logoUri }} style={styles.railAvatarImage} />
+          <Image source={{ uri: avatarThumb(server.logoUri, AVATAR_SIZE_SMALL) }} style={styles.railAvatarImage} />
         ) : (
           <Text style={styles.railAvatarEmoji}>{server.emoji || "🏫"}</Text>
         )}
@@ -478,7 +479,7 @@ export default function ServerDrawer({
                       <View style={styles.heroBadge}>
                         {selectedServer.logoUri ? (
                           <Image
-                            source={{ uri: selectedServer.logoUri }}
+                            source={{ uri: avatarThumb(selectedServer.logoUri, AVATAR_SIZE_SMALL) }}
                             style={styles.heroBadgeImage}
                           />
                         ) : (
@@ -858,7 +859,7 @@ export default function ServerDrawer({
                   >
                     <View style={styles.memberAvatar}>
                       {member.avatarUri ? (
-                        <Image source={{ uri: member.avatarUri }} style={styles.memberAvatarImage} />
+                        <Image source={{ uri: avatarThumb(member.avatarUri, AVATAR_SIZE_SMALL) }} style={styles.memberAvatarImage} />
                       ) : (
                         <Text style={styles.memberAvatarText}>
                           {(member.name?.[0] || "M").toUpperCase()}

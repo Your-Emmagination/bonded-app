@@ -1,5 +1,5 @@
 // Updated CommentModal.tsx 
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -13,15 +13,23 @@ import {
   Alert,
   Linking,
   Dimensions,
-  PanResponder,
   KeyboardEvent ,
   Keyboard,
   Animated,
   Platform,
 } from "react-native";
+import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
+import ReanimatedAnimated, {
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from "react-native-reanimated";
 
 import {
   collection,
@@ -247,7 +255,7 @@ const CommentItem: React.FC<{
           >
             {isIdentityVisible ? (
               avatarUri ? (
-                <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
+                <Image source={{ uri: avatarThumb(avatarUri, AVATAR_SIZE_SMALL) }} style={styles.avatarImage} />
               ) : (
                 <Text style={[styles.avatarText, { color: roleColor }]}>
                   {(authorData?.firstname?.[0] || displayName[0] || "A").toUpperCase()}
@@ -304,7 +312,7 @@ const CommentItem: React.FC<{
 
       {gifFiles.length > 0 && (
         <View style={styles.commentGifContainer}>
-          <Image source={{ uri: gifFiles[0].url }} style={styles.commentGif} resizeMode="cover" />
+          <Image source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }} style={styles.commentGif} resizeMode="cover" />
         </View>
       )}
 
@@ -315,7 +323,7 @@ const CommentItem: React.FC<{
           style={styles.commentImageContainer}
         >
           <Image
-            source={{ uri: imageFiles[0].url }}
+            source={{ uri: feedImage(imageFiles[0].url, FEED_IMAGE_WIDTH) }}
             style={[styles.commentImageFull, { height: imageHeight }]}
             resizeMode="cover"
           />
@@ -477,8 +485,8 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const insets = useSafeAreaInsets();
   const hiddenComposerPadding = Math.max(insets.bottom, Platform.OS === "android" ? 16 : 12);
 
-  const translateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
-  const backdropOpacity = useRef(new Animated.Value(0)).current;
+  const translateY = useSharedValue(SCREEN_HEIGHT);
+  const backdropOpacity = useSharedValue(0);
 
   useEffect(() => {
     const showSub = Keyboard.addListener(
@@ -524,63 +532,59 @@ const CommentModal: React.FC<CommentModalProps> = ({
 
   useEffect(() => {
     if (internalVisible) {
-      Animated.parallel([
-        Animated.timing(translateY, { toValue: 0, duration: 300, useNativeDriver: true }),
-        Animated.timing(backdropOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
-      ]).start();
+      translateY.value = withTiming(0, { duration: 300 });
+      backdropOpacity.value = withTiming(1, { duration: 300 });
     }
-  }, [backdropOpacity, internalVisible, translateY]);
+  }, [internalVisible]);
 
   const closeAndNavigate = useCallback((navigateFn?: () => void) => {
-    Animated.parallel([
-      Animated.timing(translateY, { toValue: SCREEN_HEIGHT, duration: 300, useNativeDriver: true }),
-      Animated.timing(backdropOpacity, { toValue: 0, duration: 300, useNativeDriver: true }),
-    ]).start(() => {
-      setInternalVisible(false);
-      onClose();
-      if (navigateFn) navigateFn();
+    translateY.value = withTiming(SCREEN_HEIGHT, { duration: 300 });
+    backdropOpacity.value = withTiming(0, { duration: 300 }, (finished) => {
+      if (finished) {
+        runOnJS(setInternalVisible)(false);
+        runOnJS(onClose)();
+        if (navigateFn) runOnJS(navigateFn)();
+      }
     });
-  }, [backdropOpacity, onClose, translateY]);
+  }, [onClose]);
 
   const handleClose = useCallback(() => closeAndNavigate(), [closeAndNavigate]);
 
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (evt, gestureState) => {
-        const isDraggingDown = gestureState.dy > 10;
-        const isVertical = Math.abs(gestureState.dy) > Math.abs(gestureState.dx) * 2;
-        return isDraggingDown && isVertical;
-      },
-      onPanResponderGrant: () => {},
-      onPanResponderMove: (evt, gestureState) => {
-        if (gestureState.dy > 0) {
-          translateY.setValue(gestureState.dy);
-          const opacity = 1 - (gestureState.dy / SCREEN_HEIGHT);
-          backdropOpacity.setValue(Math.max(0, opacity));
-        }
-      },
-      onPanResponderRelease: (evt, gestureState) => {
-        if (gestureState.dy > 150 || gestureState.vy > 0.8) {
-          handleClose();
-        } else {
-          Animated.parallel([
-            Animated.spring(translateY, {
-              toValue: 0,
-              useNativeDriver: true,
-              tension: 65,
-              friction: 10,
-            }),
-            Animated.timing(backdropOpacity, {
-              toValue: 1,
-              duration: 200,
-              useNativeDriver: true,
-            }),
-          ]).start();
-        }
-      },
-    })
-  ).current;
+  const dragGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        // Mirrors the original onMoveShouldSetPanResponder gate: only
+        // capture drags that are meaningfully downward and mostly vertical.
+        .activeOffsetY(10)
+        .failOffsetX([-20, 20])
+        .onUpdate((event) => {
+          if (event.translationY > 0) {
+            translateY.value = event.translationY;
+            const opacity = 1 - event.translationY / SCREEN_HEIGHT;
+            backdropOpacity.value = Math.max(0, opacity);
+          }
+        })
+        .onEnd((event) => {
+          // RNGH reports velocity in px/s, whereas the old PanResponder's
+          // vy was roughly px/ms — 0.8 px/ms ≈ 800 px/s, same threshold.
+          if (event.translationY > 150 || event.velocityY > 800) {
+            runOnJS(handleClose)();
+            return;
+          }
+
+          translateY.value = withSpring(0, { damping: 22, stiffness: 210 });
+          backdropOpacity.value = withTiming(1, { duration: 200 });
+        }),
+    [handleClose],
+  );
+
+  const backdropAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: backdropOpacity.value,
+  }));
+
+  const modalContainerAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: translateY.value }],
+  }));
 
   useEffect(() => {
     const backHandler = BackHandler.addEventListener("hardwareBackPress", () => {
@@ -1119,136 +1123,181 @@ const CommentModal: React.FC<CommentModalProps> = ({
   return (
     <>
 <Modal visible={internalVisible} animationType="none" transparent onRequestClose={handleClose}>
-  <View style={styles.modalOverlay}>
-    <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
+  <GestureHandlerRootView style={styles.modalOverlay}>
+    <ReanimatedAnimated.View style={[styles.backdrop, backdropAnimatedStyle]}>
       <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={handleClose} />
-    </Animated.View>
+    </ReanimatedAnimated.View>
 
-    <Animated.View
-      style={[
-        styles.modalContainer,
-        { paddingTop: insets.top, transform: [{ translateY }] },
-      ]}
-    >
-      <View {...panResponder.panHandlers}>
+    <ReanimatedAnimated.View
+  style={[
+    styles.modalContainer,
+    { paddingTop: insets.top },
+    modalContainerAnimatedStyle,
+  ]}
+>
+  <View style={{ flex: 1 }}>
+    {/* ✅ Apply GestureDetector ONLY to the top handle/header zone */}
+    <GestureDetector gesture={dragGesture}>
+      <View style={styles.dragHandleZone}>
         <View style={styles.dragIndicatorContainer}>
           <View style={styles.dragIndicator} />
         </View>
 
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Comments ({comments.length})</Text>
-        </View>
-
-        <View style={styles.sortContainer}>
-          <TouchableOpacity
-            style={[styles.sortButton, sortBy === "latest" && styles.sortButtonActive]}
-            onPress={() => setSortBy("latest")}
-          >
-            <Ionicons
-              name="time-outline"
-              size={14}
-              color={sortBy === "latest" ? "#e0a53d" : "#9b766c"}
-            />
-            <Text style={[styles.sortText, sortBy === "latest" && styles.sortTextActive]}>
-              Latest
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.sortButton, sortBy === "relevant" && styles.sortButtonActive]}
-            onPress={() => setSortBy("relevant")}
-          >
-            <Ionicons
-              name="trending-up-outline"
-              size={14}
-              color={sortBy === "relevant" ? "#e0a53d" : "#9b766c"}
-            />
-            <Text style={[styles.sortText, sortBy === "relevant" && styles.sortTextActive]}>
-              Relevant
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.sortButton, sortBy === "all" && styles.sortButtonActive]}
-            onPress={() => setSortBy("all")}
-          >
-            <Ionicons
-              name="list-outline"
-              size={14}
-              color={sortBy === "all" ? "#e0a53d" : "#9b766c"}
-            />
-            <Text style={[styles.sortText, sortBy === "all" && styles.sortTextActive]}>
-              All
-            </Text>
-          </TouchableOpacity>
+          <Text style={styles.headerTitle}>
+            Comments ({comments.length})
+          </Text>
         </View>
       </View>
+    </GestureDetector>
 
-
-      <View style={styles.contentArea}>
-        <FlatList
-          ref={flatListRef}
-          data={displayedComments}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) =>
-            loading ? null : (
-              <CommentItem
-                item={{
-                  ...item,
-                  onImagePress: handleImagePress,
-                  onLinkPress: handleLinkPress,
-                  onTagClick: handleTagClick,
-                  onFilePress: handleFilePress,
-                }}
-                user={user}
-                onLike={handleLikeComment}
-                onProfileClick={handleProfileClick}
-                onReply={handleReply}
-                onOptionsPress={handleCommentOptions}
-                getTimeAgo={getTimeAgo}
-                isHighlighted={item.id === initialCommentId}
-              />
-            )
-          }
-          ListHeaderComponent={
-            loading ? (
-              <ActivityIndicator color="#e0a53d" style={{ marginTop: 40 }} />
-            ) : displayedComments.length === 0 ? (
-              <View style={styles.emptyContainer}>
-                <Ionicons name="chatbubbles-outline" size={48} color="#9b766c" />
-                <Text style={styles.emptyText}>No comments yet</Text>
-                <Text style={styles.emptySubText}>Be the first to comment!</Text>
-              </View>
-            ) : null
-          }
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-          style={{ flex: 1 }}
+    {/* Sort options remain outside or inside the gesture zone as needed */}
+    <View style={styles.sortContainer}>
+      <TouchableOpacity
+        style={[
+          styles.sortButton,
+          sortBy === "latest" && styles.sortButtonActive,
+        ]}
+        onPress={() => setSortBy("latest")}
+      >
+        <Ionicons
+          name="time-outline"
+          size={14}
+          color={sortBy === "latest" ? "#e0a53d" : "#9b766c"}
         />
+        <Text
+          style={[
+            styles.sortText,
+            sortBy === "latest" && styles.sortTextActive,
+          ]}
+        >
+          Latest
+        </Text>
+      </TouchableOpacity>
 
-        {user && (
-          <Animated.View
-            style={[
-              styles.composerWrapper,
-              {
-                marginBottom: composerBottom,
-                paddingBottom: keyboardHeight > 0 ? 8 : hiddenComposerPadding,
-              },
-            ]}
-          >
-            <CommentComposer
-              currentUser={user}
-              onSend={handleSend}
-              placeholder="Write a comment..."
-              autoExpand={true}
+      <TouchableOpacity
+        style={[
+          styles.sortButton,
+          sortBy === "relevant" && styles.sortButtonActive,
+        ]}
+        onPress={() => setSortBy("relevant")}
+      >
+        <Ionicons
+          name="trending-up-outline"
+          size={14}
+          color={sortBy === "relevant" ? "#e0a53d" : "#9b766c"}
+        />
+        <Text
+          style={[
+            styles.sortText,
+            sortBy === "relevant" && styles.sortTextActive,
+          ]}
+        >
+          Relevant
+        </Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={[
+          styles.sortButton,
+          sortBy === "all" && styles.sortButtonActive,
+        ]}
+        onPress={() => setSortBy("all")}
+      >
+        <Ionicons
+          name="list-outline"
+          size={14}
+          color={sortBy === "all" ? "#e0a53d" : "#9b766c"}
+        />
+        <Text
+          style={[
+            styles.sortText,
+            sortBy === "all" && styles.sortTextActive,
+          ]}
+        >
+          All
+        </Text>
+      </TouchableOpacity>
+    </View>
+
+    {/* FlatList and Composer now scroll freely without triggering dismiss gestures */}
+    <View style={styles.contentArea}>
+      <FlatList
+        ref={flatListRef}
+        data={displayedComments}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) =>
+          loading ? null : (
+            <CommentItem
+              item={{
+                ...item,
+                onImagePress: handleImagePress,
+                onLinkPress: handleLinkPress,
+                onTagClick: handleTagClick,
+                onFilePress: handleFilePress,
+              }}
+              user={user}
+              onLike={handleLikeComment}
+              onProfileClick={handleProfileClick}
+              onReply={handleReply}
+              onOptionsPress={handleCommentOptions}
+              getTimeAgo={getTimeAgo}
+              isHighlighted={item.id === initialCommentId}
             />
-          </Animated.View>
-        )}
-      </View>
-    </Animated.View>
+          )
+        }
+        ListHeaderComponent={
+          loading ? (
+            <ActivityIndicator
+              color="#e0a53d"
+              style={{ marginTop: 40 }}
+            />
+          ) : displayedComments.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Ionicons
+                name="chatbubbles-outline"
+                size={48}
+                color="#9b766c"
+              />
+              <Text style={styles.emptyText}>No comments yet</Text>
+              <Text style={styles.emptySubText}>
+                Be the first to comment!
+              </Text>
+            </View>
+          ) : null
+        }
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={
+          Platform.OS === "ios" ? "interactive" : "on-drag"
+        }
+        style={{ flex: 1 }}
+      />
+
+      {user && (
+        <Animated.View
+          style={[
+            styles.composerWrapper,
+            {
+              marginBottom: composerBottom,
+              paddingBottom:
+                keyboardHeight > 0 ? 8 : hiddenComposerPadding,
+            },
+          ]}
+        >
+          <CommentComposer
+            currentUser={user}
+            onSend={handleSend}
+            placeholder="Write a comment..."
+            autoExpand={true}
+          />
+        </Animated.View>
+      )}
+    </View>
   </View>
+</ReanimatedAnimated.View>
+  </GestureHandlerRootView>
 </Modal>
 
 {selectedComment && (
@@ -1467,6 +1516,10 @@ modalContainer: {
     borderTopWidth: 1,
     borderTopColor: "#f0e7e2",
   },
+  dragHandleZone: {
+  width: "100%",
+  backgroundColor: "#5f0909",
+},
   actionBtn: {
     flexDirection: "row",
     alignItems: "center",

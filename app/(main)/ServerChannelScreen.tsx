@@ -12,6 +12,7 @@ import {
   updateDoc,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import {
   ActivityIndicator,
   Alert,
@@ -23,7 +24,6 @@ import {
   Keyboard,
   KeyboardEvent,
   Linking,
-  PanResponder,
   Platform,
   StyleSheet,
   Text,
@@ -31,6 +31,14 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import ReanimatedAnimated, {
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from "react-native-reanimated";
 import { auth, db } from "../../Firebase_configure";
 import CommentComposer from "./components/CommentComposer";
 import { createMentionNotifications, resolveMentionRecipientIds } from "@/utils/notifications";
@@ -221,7 +229,7 @@ function MessageBubble({
         >
           <View style={styles.avatar}>
             {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
+              <Image source={{ uri: avatarThumb(avatarUri, AVATAR_SIZE_SMALL) }} style={styles.avatarImage} />
             ) : (
               <Text style={styles.avatarText}>
                 {(item.username?.[0] || "A").toUpperCase()}
@@ -261,11 +269,11 @@ function MessageBubble({
           ) : null}
 
           {gifFiles.map((file) => (
-            <Image key={file.url} source={{ uri: file.url }} style={styles.messageImage} />
+            <Image key={file.url} source={{ uri: feedImage(file.url, FEED_IMAGE_WIDTH) }} style={styles.messageImage} />
           ))}
 
           {imageFiles.map((file) => (
-            <Image key={file.url} source={{ uri: file.url }} style={styles.messageImage} />
+            <Image key={file.url} source={{ uri: feedImage(file.url, FEED_IMAGE_WIDTH) }} style={styles.messageImage} />
           ))}
 
           {docs.map((file) => (
@@ -362,41 +370,24 @@ export default function ServerChannelScreen() {
   const listRef = useRef<FlatList<ThreadMessage>>(null);
   const composerBottom = useRef(new Animated.Value(0)).current;
 
-  const translateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
-  const overlayOpacity = useRef(new Animated.Value(0)).current;
+  const translateY = useSharedValue(SCREEN_HEIGHT);
+  const overlayOpacity = useSharedValue(0);
 
   const closeToDrawer = useCallback(() => {
-    Animated.parallel([
-      Animated.timing(translateY, {
-        toValue: SCREEN_HEIGHT,
-        duration: 240,
-        useNativeDriver: true,
-      }),
-      Animated.timing(overlayOpacity, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }),
-    ]).start(() => {
-      requestServerDrawerReopen();
-      router.back();
+    translateY.value = withTiming(SCREEN_HEIGHT, { duration: 240 });
+    overlayOpacity.value = withTiming(0, { duration: 200 }, (finished) => {
+      if (finished) {
+        runOnJS(requestServerDrawerReopen)();
+        runOnJS(router.back)();
+      }
     });
-  }, [overlayOpacity, router, translateY]);
+  }, [router]);
 
   useEffect(() => {
-    Animated.parallel([
-      Animated.timing(translateY, {
-        toValue: 0,
-        duration: 280,
-        useNativeDriver: true,
-      }),
-      Animated.timing(overlayOpacity, {
-        toValue: 1,
-        duration: 220,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [overlayOpacity, translateY]);
+    translateY.value = withTiming(0, { duration: 280 });
+    overlayOpacity.value = withTiming(1, { duration: 220 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount, same as the original PanResponder-based version
+  }, []);
 
   useEffect(() => {
     const backHandler = BackHandler.addEventListener("hardwareBackPress", () => {
@@ -721,60 +712,63 @@ export default function ServerChannelScreen() {
     ],
   );
 
-  const panResponder = useMemo(
+  const dragGesture = useMemo(
     () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gestureState) =>
-          gestureState.dy > 12 &&
-          Math.abs(gestureState.dy) > Math.abs(gestureState.dx) * 1.6,
-        onPanResponderMove: (_, gestureState) => {
-          if (gestureState.dy > 0) {
-            translateY.setValue(gestureState.dy);
-            overlayOpacity.setValue(Math.max(0.4, 1 - gestureState.dy / SCREEN_HEIGHT));
+      Gesture.Pan()
+        // Mirrors the original onMoveShouldSetPanResponder gate: only
+        // capture drags that are meaningfully downward and more vertical
+        // than horizontal, so horizontal scrolling/swiping elsewhere isn't
+        // affected.
+        .activeOffsetY(12)
+        .failOffsetX([-20, 20])
+        .onUpdate((event) => {
+          if (event.translationY > 0) {
+            translateY.value = event.translationY;
+            overlayOpacity.value = Math.max(0.4, 1 - event.translationY / SCREEN_HEIGHT);
           }
-        },
-        onPanResponderRelease: (_, gestureState) => {
-          if (gestureState.dy > 130 || gestureState.vy > 0.8) {
-            closeToDrawer();
+        })
+        .onEnd((event) => {
+          // RNGH reports velocity in px/s, whereas the old PanResponder's
+          // vy was roughly px/ms — 0.8 px/ms ≈ 800 px/s, same threshold.
+          if (event.translationY > 130 || event.velocityY > 800) {
+            runOnJS(closeToDrawer)();
             return;
           }
 
-          Animated.parallel([
-            Animated.spring(translateY, {
-              toValue: 0,
-              useNativeDriver: true,
-              tension: 68,
-              friction: 12,
-            }),
-            Animated.timing(overlayOpacity, {
-              toValue: 1,
-              duration: 180,
-              useNativeDriver: true,
-            }),
-          ]).start();
-        },
-      }),
-    [closeToDrawer, overlayOpacity, translateY],
+          translateY.value = withSpring(0, { damping: 20, stiffness: 220 });
+          overlayOpacity.value = withTiming(1, { duration: 180 });
+        }),
+    [closeToDrawer],
   );
+
+  const backdropAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: overlayOpacity.value,
+  }));
+
+  const sheetAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: translateY.value }],
+  }));
 
   return (
     <View style={styles.root}>
-      <Animated.View style={[styles.backdrop, { opacity: overlayOpacity }]} />
-      <Animated.View
+      <ReanimatedAnimated.View style={[styles.backdrop, backdropAnimatedStyle]} />
+      <ReanimatedAnimated.View
         style={[
           styles.sheet,
           {
             paddingTop: insets.top,
             paddingBottom: Math.max(insets.bottom, 12),
-            transform: [{ translateY }],
           },
+          sheetAnimatedStyle,
         ]}
       >
         <SafeAreaView style={styles.container} edges={["left", "right"]}>
-          <View style={styles.dragZone} {...panResponder.panHandlers}>
-            <View style={styles.dragHandle} />
-            <Text style={styles.dragText}>Swipe down to return to the drawer</Text>
-          </View>
+          <GestureDetector gesture={dragGesture}>
+            <View style={styles.dragZone}>
+              <View style={styles.dragHandle} />
+              <Text style={styles.dragText}>Swipe down to return to the drawer</Text>
+            </View>
+          </GestureDetector>
 
           <View style={[styles.header, { borderBottomColor: `${resolvedServerAccent}55` }]}>
             <View style={styles.headerCopy}>
@@ -837,7 +831,7 @@ export default function ServerChannelScreen() {
             </Animated.View>
           )}
         </SafeAreaView>
-      </Animated.View>
+      </ReanimatedAnimated.View>
     </View>
   );
 }

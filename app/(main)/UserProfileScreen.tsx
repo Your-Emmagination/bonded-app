@@ -13,6 +13,7 @@ import {
   orderBy,
 } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
+import { AVATAR_SIZE_LARGE, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import {
   BackHandler,
   ScrollView,
@@ -428,7 +429,7 @@ const UserProfileScreen = () => {
           >
             <View style={styles.profileImageContainer}>
               {profileImageUri ? (
-                <ExpoImage source={{ uri: profileImageUri }} style={styles.profileImage} contentFit="cover" />
+                <ExpoImage source={{ uri: avatarThumb(profileImageUri, AVATAR_SIZE_LARGE) }} style={styles.profileImage} contentFit="cover" />
               ) : (
                 <View style={styles.placeholder}>
                   <Ionicons name="person" size={50} color="#e0a53d" />
@@ -497,7 +498,7 @@ const UserProfileScreen = () => {
                 <Text style={styles.postContent}>{post.content || ""}</Text>
                 {post.imageUrl && (
                   <TouchableOpacity onPress={() => openImageViewer(post.imageUrl!)}>
-                    <Image source={{ uri: post.imageUrl }} style={styles.postImage} resizeMode="cover" />
+                    <Image source={{ uri: feedImage(post.imageUrl, FEED_IMAGE_WIDTH) }} style={styles.postImage} resizeMode="cover" />
                   </TouchableOpacity>
                 )}
                 <View style={styles.postFooter}>

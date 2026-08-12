@@ -2,6 +2,7 @@ import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
+import { getDoc } from "firebase/firestore";
 import {
   collection,
   doc,
@@ -12,6 +13,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Image, RefreshControl, Alert } from "react-native";
 import {
   ActivityIndicator,
   Animated,
@@ -49,6 +51,7 @@ type NotificationItem = {
   entityId?: string;
   parentId?: string | null;
   actorName: string;
+  actorAvatar?: string; // Add avatar URL support
   message: string;
   preview?: string | null;
   createdAt?: any;
@@ -78,6 +81,7 @@ const NotificationsScreen = () => {
   const [selectedFilter, setSelectedFilter] = useState<FilterOption>("All");
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const scaleAnim = useRef(new Animated.Value(0)).current;
   const router = useRouter();
 
@@ -154,7 +158,8 @@ const NotificationsScreen = () => {
   };
   const relativeTimeNow = useRelativeTimeNow();
 
-  const getTimeSection = useCallback((value?: any): TimeSection => {
+ const getTimeSection = useCallback(
+  (value?: any): TimeSection => {
     const date = value?.toDate ? value.toDate() : value ? new Date(value) : null;
     if (!date || Number.isNaN(date.getTime())) {
       return "Older";
@@ -162,21 +167,32 @@ const NotificationsScreen = () => {
 
     const now = new Date(relativeTimeNow);
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const target = new Date(
-      date.getFullYear(),
-      date.getMonth(),
-      date.getDate(),
-    );
+    const target = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
     const diffDays = Math.floor(
-      (today.getTime() - target.getTime()) / (1000 * 60 * 60 * 24),
+      (today.getTime() - target.getTime()) / (1000 * 60 * 60 * 24)
     );
 
+    // 1. Today & Yesterday
     if (diffDays <= 0) return "Today";
     if (diffDays === 1) return "Yesterday";
+
+    // 2. Rolling 7 Days (Covers notifications 2–7 days old smoothly)
     if (diffDays <= 7) return "This Week";
-    if (diffDays <= 30) return "This Month";
+
+    // 3. Current Calendar Month
+    if (
+      date.getMonth() === now.getMonth() &&
+      date.getFullYear() === now.getFullYear()
+    ) {
+      return "This Month";
+    }
+
+    // 4. Everything else
     return "Older";
-  }, [relativeTimeNow]);
+  },
+  [relativeTimeNow]
+);
 
   const getTimeAgo = (value?: any) => {
     const date = value?.toDate ? value.toDate() : value ? new Date(value) : null;
@@ -201,7 +217,11 @@ const NotificationsScreen = () => {
       year: date.getFullYear() !== now.getFullYear() ? "numeric" : undefined,
     });
   };
-
+const onRefresh = useCallback(() => {
+  setRefreshing(true);
+  // Snapshot listener automatically syncs, just toggle spinner briefly
+  setTimeout(() => setRefreshing(false), 800);
+}, []);
   const groupedNotifications = useMemo(() => {
     const filteredNotifications =
       selectedFilter === "All"
@@ -246,50 +266,67 @@ const NotificationsScreen = () => {
     }
   };
 
-  const handleNotificationPress = async (notification: NotificationItem) => {
-    await markAsRead(notification.id);
+ const handleNotificationPress = async (notification: NotificationItem) => {
+  // 1. Mark as read first so notification isn't stuck as "unread"
+  await markAsRead(notification.id);
 
-    if (!notification.entityType || !notification.entityId) {
-      return;
-    }
+  if (!notification.entityType || !notification.entityId) {
+    return;
+  }
 
-    if (notification.entityType === "event") {
-      router.push({
-        pathname: "/EventCalendarScreen",
-        params: {
-          eventId: notification.entityId,
-        },
-      });
-      return;
-    }
-
-    const targetPostId =
-      notification.entityType === "post"
-        ? notification.entityId
-        : notification.entityType === "comment"
-          ? notification.parentId || undefined
-          : undefined;
-    const targetCommentId =
-      notification.entityType === "comment"
-        ? notification.entityId
-        : notification.entityType === "reply"
-          ? notification.parentId || undefined
-          : undefined;
-    const targetReplyId =
-      notification.entityType === "reply" ? notification.entityId : undefined;
-
+  if (notification.entityType === "event") {
     router.push({
-      pathname: "/(main)/(tabs)/HomeScreen",
-      params: {
-        notificationKey: `${notification.id}-${Date.now()}`,
-        notificationPostId: targetPostId,
-        notificationCommentId: targetCommentId,
-        notificationReplyId: targetReplyId,
-        notificationOpenReply:
-          notification.entityType === "reply" ? "1" : "0",
-      },
+      pathname: "/EventCalendarScreen",
+      params: { eventId: notification.entityId },
     });
-  };
+    return;
+  }
+
+  // 2. Resolve target post ID
+  const targetPostId =
+    notification.entityType === "post"
+      ? notification.entityId
+      : notification.entityType === "comment" || notification.entityType === "reply"
+        ? notification.parentId || undefined
+        : undefined;
+
+  // 3. Verify target post exists before navigating
+  if (targetPostId) {
+    try {
+      const postRef = doc(db, "posts", targetPostId);
+      const postSnap = await getDoc(postRef);
+
+      if (!postSnap.exists()) {
+        Alert.alert(
+          "Content Unavailable",
+          "This post or comment has been deleted or removed."
+        );
+        return; // Stop navigation
+      }
+    } catch (error) {
+      console.error("Error checking post existence:", error);
+    }
+  }
+    const targetCommentId =
+    notification.entityType === "comment"
+      ? notification.entityId
+      : notification.entityType === "reply"
+        ? notification.parentId || undefined
+        : undefined;
+  const targetReplyId =
+    notification.entityType === "reply" ? notification.entityId : undefined;
+
+   router.push({
+    pathname: "/(main)/(tabs)/HomeScreen",
+    params: {
+      notificationKey: `${notification.id}-${Date.now()}`,
+      notificationPostId: targetPostId,
+      notificationCommentId: targetCommentId,
+      notificationReplyId: targetReplyId,
+      notificationOpenReply: notification.entityType === "reply" ? "1" : "0",
+    },
+  });
+};
 
   const markAllAsRead = async () => {
     const unreadNotifications = notifications.filter(
@@ -361,53 +398,67 @@ const NotificationsScreen = () => {
   );
 
   const renderNotificationItem = ({ item }: { item: NotificationItem }) => {
-    const colors = getNotificationColors(item.type);
+  const colors = getNotificationColors(item.type);
 
-    return (
-      <TouchableOpacity
-        style={[
-          styles.notificationItem,
-          item.type === "emergency" && styles.emergencyItem,
-          !item.read && styles.unreadItem,
-          item.type === "emergency" && !item.read && styles.emergencyUnreadItem,
-        ]}
-        onPress={() => handleNotificationPress(item)}
-        activeOpacity={0.85}
-      >
-        <View style={[styles.iconContainer, { backgroundColor: colors.bg }]}>
-          <Ionicons
-            name={getIconName(item.type)}
-            size={20}
-            color={colors.icon}
-          />
-        </View>
-
-        <View style={styles.notificationContent}>
-          <Text style={styles.notificationText}>
-            <Text style={styles.username}>{item.actorName}</Text>
-            <Text style={styles.contentText}> {item.message}</Text>
-          </Text>
-
-          {!!item.preview && (
-            <Text style={styles.previewText} numberOfLines={2}>
-              {item.preview}
+  return (
+    <TouchableOpacity
+      style={[
+        styles.notificationItem,
+        item.type === "emergency" && styles.emergencyItem,
+        !item.read && styles.unreadItem,
+        item.type === "emergency" && !item.read && styles.emergencyUnreadItem,
+      ]}
+      onPress={() => handleNotificationPress(item)}
+      activeOpacity={0.7}
+    >
+      {/* Avatar Container with Badge Overlay */}
+      <View style={styles.avatarContainer}>
+        {item.actorAvatar ? (
+          <Image source={{ uri: item.actorAvatar }} style={styles.avatarImage} />
+        ) : (
+          <View style={[styles.avatarPlaceholder, { backgroundColor: colors.bg }]}>
+            <Text style={[styles.avatarInitial, { color: colors.icon }]}>
+              {item.actorName?.charAt(0).toUpperCase() || "?"}
             </Text>
-          )}
-
-          <Text style={styles.timestamp}>{getTimeAgo(item.createdAt)}</Text>
-        </View>
-
-        {!item.read && (
-          <View
-            style={[
-              styles.unreadDot,
-              item.type === "emergency" && styles.emergencyUnreadDot,
-            ]}
-          />
+          </View>
         )}
-      </TouchableOpacity>
-    );
-  };
+        
+        {/* Type Icon Badge Overlay */}
+        <View style={[styles.badgeOverlay, { backgroundColor: colors.icon }]}>
+          <Ionicons name={getIconName(item.type)} size={10} color="#ffffff" />
+        </View>
+      </View>
+
+      {/* Main Content Area */}
+      <View style={styles.notificationContent}>
+        <Text style={styles.notificationText}>
+          <Text style={styles.username}>{item.actorName}</Text>
+          <Text style={styles.contentText}> {item.message}</Text>
+        </Text>
+
+        {!!item.preview && (
+          <View style={styles.previewBox}>
+            <Text style={styles.previewText} numberOfLines={2}>
+              "{item.preview}"
+            </Text>
+          </View>
+        )}
+
+        <Text style={styles.timestamp}>{getTimeAgo(item.createdAt)}</Text>
+      </View>
+
+      {/* Unread Status Dot */}
+      {!item.read && (
+        <View
+          style={[
+            styles.unreadDot,
+            item.type === "emergency" && styles.emergencyUnreadDot,
+          ]}
+        />
+      )}
+    </TouchableOpacity>
+  );
+};
 
   return (
     <SafeAreaView style={styles.container}>
@@ -451,17 +502,29 @@ const NotificationsScreen = () => {
           renderEmptyState()
         ) : (
           <SectionList
-            sections={groupedNotifications}
-            keyExtractor={(item) => item.id}
-            renderItem={renderNotificationItem}
-            renderSectionHeader={({ section: { title } }) => (
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>{title}</Text>
-              </View>
-            )}
-            contentContainerStyle={styles.listContent}
-            showsVerticalScrollIndicator={false}
-          />
+  sections={groupedNotifications}
+  keyExtractor={(item) => item.id}
+  renderItem={renderNotificationItem}
+  stickySectionHeadersEnabled={true} // 👈 Keeps section header visible on scroll
+  renderSectionHeader={({ section: { title } }) => (
+    <View style={styles.timePillContainer}>
+      <View style={styles.goldEdgeTimePill}>
+        <Text style={styles.timePillText}>{title.toUpperCase()}</Text>
+      </View>
+    </View>
+  )}
+  contentContainerStyle={styles.listContent}
+  showsVerticalScrollIndicator={false}
+
+  refreshControl={
+    <RefreshControl
+      refreshing={refreshing}
+      onRefresh={onRefresh}
+      tintColor="#e0a53d"
+      colors={["#e0a53d"]}
+    />
+  }
+/>
         )}
       </View>
 
@@ -533,6 +596,36 @@ const NotificationsScreen = () => {
 };
 
 const styles = StyleSheet.create({
+  // Add background match in style so list items don't bleed through sticky header
+timePillContainer: {
+  paddingHorizontal: 16,
+  paddingTop: 12,
+  paddingBottom: 6,
+  alignItems: "flex-start",
+  backgroundColor: "#f6f1ed", // 👈 Matches content shell background
+},
+goldEdgeTimePill: {
+  backgroundColor: "#f0e7e2", // Light cream fill matching your theme
+  paddingHorizontal: 18,
+  paddingVertical: 6,
+  borderRadius: 999, // Oval / pill shape
+  
+  // Gold Edge Border
+  borderWidth: 1.5,
+  borderColor: "#e0a53d",
+
+  shadowColor: "#000",
+  shadowOffset: { width: 0, height: 1 },
+  shadowOpacity: 0.05,
+  shadowRadius: 2,
+  elevation: 1,
+},
+timePillText: {
+  color: "#5f0909", // CSAP Dark Maroon text
+  fontSize: 12,
+  fontWeight: "800",
+  letterSpacing: 0.8,
+},
   container: {
     flex: 1,
     backgroundColor: "#5f0909",
@@ -645,28 +738,67 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#dfc9c1",
   },
-  notificationItem: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    backgroundColor: "#fffaf7",
-    marginHorizontal: 12,
-    marginBottom: 8,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "#f0e7e2",
-    shadowColor: "#5f0909",
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 1,
-  },
-  unreadItem: {
-    backgroundColor: "#fff4ee",
-    borderLeftWidth: 3,
-    borderLeftColor: "#e0a53d",
-    borderColor: "rgba(224,165,61,0.34)",
-  },
+ notificationItem: {
+  flexDirection: "row",
+  alignItems: "flex-start",
+  paddingHorizontal: 16,
+  paddingVertical: 14,
+  backgroundColor: "#fffaf7",
+  marginHorizontal: 16,
+  marginBottom: 10,
+  borderRadius: 14,
+  borderWidth: 1,
+  borderColor: "#e8d3b2",
+  borderLeftWidth: 4,
+  borderLeftColor: "#e0a53d",
+  shadowColor: "#000",
+  shadowOffset: { width: 0, height: 2 },
+  shadowOpacity: 0.04,
+  shadowRadius: 4,
+  elevation: 2,
+},
+ unreadItem: {
+  backgroundColor: "#fff8f5", // Light tint contrast for unread items
+  borderLeftWidth: 4,
+  borderLeftColor: "#e0a53d",
+  borderColor: "rgba(224,165,61,0.34)",
+},
+/* Avatar & Badge Overlay Styling */
+avatarContainer: {
+  position: "relative",
+  width: 44,
+  height: 44,
+  marginRight: 12,
+},
+avatarImage: {
+  width: 44,
+  height: 44,
+  borderRadius: 22,
+  backgroundColor: "#e0e0e0",
+},
+avatarPlaceholder: {
+  width: 44,
+  height: 44,
+  borderRadius: 22,
+  justifyContent: "center",
+  alignItems: "center",
+},
+avatarInitial: {
+  fontSize: 16,
+  fontWeight: "bold",
+},
+badgeOverlay: {
+  position: "absolute",
+  bottom: -2,
+  right: -2,
+  width: 18,
+  height: 18,
+  borderRadius: 9,
+  justifyContent: "center",
+  alignItems: "center",
+  borderWidth: 2,
+  borderColor: "#fffaf7",
+},
   emergencyItem: {
     backgroundColor: "#fff1f1",
     borderColor: "rgba(255,45,45,0.36)",
@@ -683,40 +815,49 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginRight: 12,
   },
-  notificationContent: {
-    flex: 1,
-  },
+ notificationContent: {
+  flex: 1,
+},
   notificationText: {
-    color: "#4d1b17",
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  username: {
-    fontWeight: "700",
-    color: "#5f0909",
-  },
-  contentText: {
-    color: "#7a3b2e",
-  },
+  color: "#333333",
+  fontSize: 14,
+  lineHeight: 20,
+},
+ username: {
+  fontWeight: "700",
+  color: "#5f0909",
+},
+ contentText: {
+  color: "#4a4a4a",
+},
+previewBox: {
+  marginTop: 6,
+  paddingHorizontal: 10,
+  paddingVertical: 6,
+  backgroundColor: "rgba(0,0,0,0.03)",
+  borderRadius: 8,
+  borderLeftWidth: 2,
+  borderLeftColor: "#dfc9c1",
+},
   previewText: {
-    color: "#9b766c",
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 4,
-  },
-  timestamp: {
-    color: "#9b766c",
-    fontSize: 12,
-    marginTop: 6,
-  },
+  color: "#666666",
+  fontSize: 13,
+  lineHeight: 18,
+  fontStyle: "italic",
+},
+ timestamp: {
+  color: "#999999",
+  fontSize: 12,
+  marginTop: 6,
+},
   unreadDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: "#e0a53d",
-    marginLeft: 8,
-    marginTop: 8,
-  },
+  width: 8,
+  height: 8,
+  borderRadius: 4,
+  backgroundColor: "#e0a53d",
+  marginLeft: 8,
+  marginTop: 6,
+},
   emergencyUnreadDot: {
     backgroundColor: "#ff2d2d",
   },

@@ -14,6 +14,7 @@ import {
   Image,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { avatarThumb } from "@/utils/cloudinaryImages";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { onAuthStateChanged } from "firebase/auth";
 import {
@@ -777,7 +778,7 @@ const handleYearLevelChange = useCallback(
                         <View style={styles.manageUserAvatar}>
                           {managedUser.profileImage ? (
                             <Image
-                              source={{ uri: managedUser.profileImage }}
+                              source={{ uri: avatarThumb(managedUser.profileImage, 50) }}
                               style={styles.manageUserAvatarImage}
                             />
                           ) : (

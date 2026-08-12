@@ -15,6 +15,7 @@ import DropDownPicker from "react-native-dropdown-picker";
 
 import { getProfileIdLabel } from "@/utils/profileLabels";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import { AVATAR_SIZE_LARGE, avatarThumb } from "@/utils/cloudinaryImages";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import React, {
   useCallback,
@@ -504,7 +505,7 @@ const ProfileScreen = () => {
               style={styles.avatarWrapper}
             >
               {imageUri ? (
-                <Image source={{ uri: imageUri }} style={styles.profileImage} />
+                <Image source={{ uri: avatarThumb(imageUri, AVATAR_SIZE_LARGE) }} style={styles.profileImage} />
               ) : (
                 <View style={styles.placeholder}>
                   <Ionicons name="person" size={48} color="#e0a53d" />

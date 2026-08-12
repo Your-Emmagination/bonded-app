@@ -1,4 +1,37 @@
 /* eslint-disable no-empty-pattern */
+import { hasAiAssistantMention, isAiAssistantId } from "@/utils/aiAssistant";
+import { getAiErrorMessage } from "@/utils/aiConfig";
+import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
+import {
+  AI_REQUEST_COOLDOWN_MS,
+  requestAiReplyFromWorker,
+  reserveAiCooldown,
+} from "@/utils/aiWorker";
+import { resolveAvatarUri } from "@/utils/avatar";
+import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
+import {
+  canViewModeratedContent,
+  getModerationPreviewText,
+  requestModerationDecision,
+} from "@/utils/contentModeration";
+import {
+  createMentionNotifications,
+  createNotification,
+  removeLikeNotification,
+  resolveMentionRecipientIds,
+  upsertLikeNotification,
+} from "@/utils/notifications";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
+import {
+  canDeleteContent,
+  canViewAnonymousIdentity,
+  getRoleColor,
+  getRoleDisplayName,
+  getUserData,
+  parseUserRole,
+  UserRole,
+} from "@/utils/rbac";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import {
@@ -6,8 +39,8 @@ import {
   arrayRemove,
   arrayUnion,
   collection,
-  deleteField,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   increment,
@@ -38,42 +71,10 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { db } from "../../../Firebase_configure";
-import {
-  createMentionNotifications,
-  createNotification,
-  removeLikeNotification,
-  resolveMentionRecipientIds,
-  upsertLikeNotification,
-} from "@/utils/notifications";
-import { hasAiAssistantMention, isAiAssistantId } from "@/utils/aiAssistant";
-import { getAiErrorMessage } from "@/utils/aiConfig";
-import {
-  AI_REQUEST_COOLDOWN_MS,
-  requestAiReplyFromWorker,
-  reserveAiCooldown,
-} from "@/utils/aiWorker";
-import {
-  canViewModeratedContent,
-  getModerationPreviewText,
-  requestModerationDecision,
-} from "@/utils/contentModeration";
-import { resolveAvatarUri } from "@/utils/avatar";
-import {
-  canDeleteContent,
-  canViewAnonymousIdentity,
-  getRoleColor,
-  getRoleDisplayName,
-  getUserData,
-  parseUserRole,
-  UserRole,
-} from "@/utils/rbac";
-import CommentComposer from "./CommentComposer";
 import AiReplyCard from "./AiReplyCard";
+import CommentComposer from "./CommentComposer";
 import ExpandableText from "./ExpandableText";
 import ImageZoomViewer from "./ImageZoomViewer";
-import { buildUserProfileHref } from "@/utils/profileNavigation";
-import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
-import { useRelativeTimeNow } from "@/utils/relativeTime";
 
 const REPLY_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
 
@@ -267,7 +268,7 @@ const ReplyBubble: React.FC<{
               >
                 {isIdentityVisible && avatarUri ? (
                   <Image
-                    source={{ uri: avatarUri }}
+                    source={{ uri: avatarThumb(avatarUri, AVATAR_SIZE_SMALL) }}
                     style={styles.avatarImg}
                   />
                 ) : isIdentityVisible ? (
@@ -401,7 +402,7 @@ const ReplyBubble: React.FC<{
           {gifFiles.length > 0 && (
             <View style={styles.gifContainer}>
               <Image
-                source={{ uri: gifFiles[0].url }}
+                source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }}
                 style={styles.gifImage}
                 resizeMode="cover"
               />
@@ -421,7 +422,7 @@ const ReplyBubble: React.FC<{
               style={styles.imageContainer}
             >
               <Image
-                source={{ uri: imageFiles[0].url }}
+                source={{ uri: feedImage(imageFiles[0].url, FEED_IMAGE_WIDTH) }}
                 style={styles.imagePreview}
                 resizeMode="cover"
               />

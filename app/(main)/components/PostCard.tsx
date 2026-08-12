@@ -1,6 +1,7 @@
 // components/PostCard.tsx
 
 import { resolveAvatarUri } from "@/utils/avatar";
+import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import {
   canDeleteContent,
@@ -32,6 +33,7 @@ import {
 import AiReplyCard from "./AiReplyCard";
 import CommentModal from "./CommentModal";
 import ExpandableText from "./ExpandableText";
+import VideoPostMedia from "./VideoPostMedia";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const AVATAR_COLUMN_WIDTH = 40;
@@ -95,7 +97,7 @@ interface PostCardProps {
   onDelete?: (postId: string) => void | Promise<void>;
 }
 
-const PostCard: React.FC<PostCardProps> = ({
+const PostCard = React.memo<PostCardProps>(({
   post,
   isLiked,
   isHighlighted = false,
@@ -153,8 +155,9 @@ const PostCard: React.FC<PostCardProps> = ({
     (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif"),
   );
   const gifFiles = (post.files || []).filter((f) => f.mimeType.includes("gif"));
+  const videoFiles = (post.files || []).filter((f) => f.mimeType.startsWith("video/"));
   const nonImageFiles = (post.files || []).filter(
-    (f) => !f.mimeType.startsWith("image/"),
+    (f) => !f.mimeType.startsWith("image/") && !f.mimeType.startsWith("video/"),
   );
 
   if (post.imageUrl && !imageFiles.find((f) => f.url === post.imageUrl)) {
@@ -227,10 +230,22 @@ const PostCard: React.FC<PostCardProps> = ({
           {gifFiles.length > 0 && (
             <View style={styles.mediaContainer}>
               <Image
-                source={{ uri: gifFiles[0].url }}
+                source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }}
                 style={styles.gif}
                 resizeMode="cover"
               />
+            </View>
+          )}
+
+          {videoFiles.length > 0 && (
+            <View>
+              {videoFiles.map((video, index) => (
+                <VideoPostMedia
+                  key={`${video.url}-${index}`}
+                  uri={video.url}
+                  width={IMAGE_WIDTH}
+                />
+              ))}
             </View>
           )}
 
@@ -261,7 +276,7 @@ const PostCard: React.FC<PostCardProps> = ({
                     }}
                   >
                     <Image
-                      source={{ uri: item.url }}
+                      source={{ uri: feedImage(item.url, FEED_IMAGE_WIDTH) }}
                       style={styles.carouselImage}
                       resizeMode="cover"
                     />
@@ -391,7 +406,8 @@ const PostCard: React.FC<PostCardProps> = ({
       )}
     </View>
   );
-};
+});
+PostCard.displayName = "PostCard";
 
 // eslint-disable-next-line react/display-name
 const LikeUserRow = React.memo(
@@ -426,7 +442,7 @@ const LikeUserRow = React.memo(
       >
         <View style={styles.likeAvatar}>
           {user?.profileImage ? (
-            <Image source={{ uri: user.profileImage }} style={styles.likeAvatarImage} />
+            <Image source={{ uri: avatarThumb(user.profileImage, AVATAR_SIZE_SMALL) }} style={styles.likeAvatarImage} />
           ) : (
             <Text style={styles.likeAvatarText}>
               {(user?.firstname?.[0] || "U").toUpperCase()}
@@ -536,7 +552,7 @@ const PostAvatar: React.FC<{
         {authorLoading ? (
           <ActivityIndicator size="small" color="#956a5f" />
         ) : isIdentityVisible && resolveAvatarUri(authorData) ? (
-          <Image source={{ uri: resolveAvatarUri(authorData)! }} style={styles.avatarImage} />
+          <Image source={{ uri: avatarThumb(resolveAvatarUri(authorData), AVATAR_SIZE_SMALL) }} style={styles.avatarImage} />
         ) : isIdentityVisible ? (
           <Text style={[styles.avatarText, { color: roleColor }]}>
             {(

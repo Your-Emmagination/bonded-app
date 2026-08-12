@@ -37,6 +37,7 @@ import {
   Image,
   Linking,
   Modal,
+  Platform,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -56,6 +57,7 @@ import {
 import { useNetworkStatus } from "@/utils/networkUtils";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { resolveAvatarUri } from "@/utils/avatar";
+import { avatarThumb } from "@/utils/cloudinaryImages";
 import {
   getStudentDocIdFromAuthUser,
   getUserDataByAuthUser,
@@ -437,6 +439,16 @@ const HomeScreen = () => {
   const insets = useSafeAreaInsets();
   const [user, setUser] = useState<User | null>(null);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
+  // Mirrors feedItems for callbacks (handleLike, handlePollVote) that need to
+  // read the current feed without depending on the array itself — feedItems
+  // gets a new reference on every realtime Firestore update, and depending
+  // on it directly would recreate those callbacks (and therefore bust
+  // React.memo on every visible PostCard/PollCard) on every such update,
+  // not just when the user interacts.
+  const feedItemsRef = useRef<FeedItem[]>([]);
+  useEffect(() => {
+    feedItemsRef.current = feedItems;
+  }, [feedItems]);
   const [fabMenuVisible, setFabMenuVisible] = useState(false);
   const [serverDrawerVisible, setServerDrawerVisible] = useState(false);
   const [searchExpanded, setSearchExpanded] = useState(false);
@@ -1689,7 +1701,7 @@ const selectedChannel = useMemo(() => {
 
       const postRef = doc(db, "posts", postId);
       const hasLiked = currentLikedBy.includes(user.uid);
-      let currentPost = feedItems.find(
+      let currentPost = feedItemsRef.current.find(
         (item): item is PostFeedItem =>
           item.type === "post" && item.id === postId,
       );
@@ -1741,7 +1753,7 @@ const selectedChannel = useMemo(() => {
         Alert.alert("Error", "Failed to like post. Please try again.");
       }
     },
-    [currentUserProfile, feedItems, isOffline, user],
+    [currentUserProfile, isOffline, user],
   );
 
   // ── Scroll to post from notification
@@ -1816,7 +1828,7 @@ const selectedChannel = useMemo(() => {
       }
 
       const pollRef = doc(db, "polls", pollId);
-      const poll = feedItems.find(
+      const poll = feedItemsRef.current.find(
         (item): item is PollFeedItem =>
           item.id === pollId && item.type === "poll",
       );
@@ -1851,7 +1863,7 @@ const selectedChannel = useMemo(() => {
         Alert.alert("Error", "Failed to vote. Please try again.");
       }
     },
-    [feedItems, isOffline, isPollExpired, user],
+    [isOffline, isPollExpired, user],
   );
 
   const addOptionToPoll = useCallback(
@@ -3239,6 +3251,16 @@ return (
             keyExtractor={(item) => item.id}
             onScroll={handleScroll}
             scrollEventThrottle={16}
+            // Virtualization tuning: feed items are image-heavy, so keep the
+            // render window small rather than the RN defaults (which lean
+            // toward rendering ~21 screens' worth of items). Off-screen rows
+            // beyond this window get unmounted (removeClippedSubviews) so
+            // their images aren't held in memory while scrolled far away.
+            initialNumToRender={6}
+            maxToRenderPerBatch={6}
+            windowSize={7}
+            updateCellsBatchingPeriod={50}
+            removeClippedSubviews={Platform.OS === "android"}
             contentContainerStyle={
               visibleFeedItems.length === 0
                 ? styles.emptyListContent
@@ -3372,7 +3394,7 @@ return (
                     <View style={styles.onlineAvatarWrap}>
                       {student.profileImage ? (
                         <Image
-                          source={{ uri: student.profileImage }}
+                          source={{ uri: avatarThumb(student.profileImage, 48) }}
                           style={styles.onlineAvatarImage}
                         />
                       ) : (

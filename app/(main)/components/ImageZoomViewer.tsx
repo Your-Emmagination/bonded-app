@@ -1,5 +1,6 @@
 // components/ImageZoomViewer.tsx
 import { Ionicons } from "@expo/vector-icons";
+import { FULLSCREEN_IMAGE_WIDTH, fullscreenImage } from "@/utils/cloudinaryImages";
 import React, { useCallback, useRef, useState } from "react";
 import {
   Animated,
@@ -194,7 +195,13 @@ const ZoomPage: React.FC<{
                 onHandlerStateChange={onPinchStateChange}
               >
                 <Animated.Image
-                  source={{ uri }}
+                  // Pinch-zoom here goes up to 4x (see baseScale clamp
+                  // above); request extra width so zoomed-in detail stays
+                  // sharp, while still capping well below arbitrary
+                  // original resolutions. Uses the shared constant (not the
+                  // actual device width) so this matches what
+                  // utils/cloudinaryUpload.ts eagerly warms at upload time.
+                  source={{ uri: fullscreenImage(uri, FULLSCREEN_IMAGE_WIDTH * 3) }}
                   style={[
                     { width, height },
                     {

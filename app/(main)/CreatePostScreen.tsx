@@ -38,6 +38,7 @@ import {
   uploadPostFile,
   uploadPostGif,
   uploadPostImage,
+  uploadPostVideo,
 } from "@/utils/cloudinaryUpload";
 import {
   createMentionNotifications,
@@ -236,6 +237,49 @@ const CreatePostScreen = () => {
     }
   };
 
+  const pickVideos = async () => {
+    try {
+      if (files.length >= MAX_FILES) {
+        Alert.alert(
+          "Maximum Files Reached",
+          `You can only attach up to ${MAX_FILES} files per post.`,
+        );
+        return;
+      }
+
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "video/*",
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+
+      if (!result.canceled && result.assets?.length > 0) {
+        const remainingSlots = MAX_FILES - files.length;
+        const filesToAdd = result.assets.slice(0, remainingSlots);
+
+        if (result.assets.length > remainingSlots) {
+          Alert.alert(
+            "File Limit",
+            `Only ${remainingSlots} more video(s) can be added. Maximum is ${MAX_FILES} files per post.`,
+          );
+        }
+
+        const newVideos = filesToAdd.map((picked) => ({
+          uri: picked.uri || "",
+          mimeType: picked.mimeType?.startsWith("video/")
+            ? picked.mimeType
+            : "video/mp4",
+          name: picked.name ?? `video_${Date.now()}.mp4`,
+        }));
+
+        setFiles((current) => [...current, ...newVideos]);
+      }
+    } catch (error) {
+      console.error("Error picking videos:", error);
+      Alert.alert("Error", "Failed to pick video(s)");
+    }
+  };
+
   const handlePost = async () => {
     if (!auth.currentUser) {
       Alert.alert("Login required", "You must be signed in to create a post.");
@@ -261,6 +305,8 @@ const CreatePostScreen = () => {
 
         if (file.mimeType.startsWith("image/")) {
           uploadedUrl = await uploadPostImage(file.uri);
+        } else if (file.mimeType.startsWith("video/")) {
+          uploadedUrl = await uploadPostVideo(file.uri);
         } else {
           uploadedUrl = await uploadPostFile(file.uri);
         }
@@ -569,7 +615,7 @@ const CreatePostScreen = () => {
     setLinkTitle("");
   };
 
-  const searchGifs = async (query: string) => {
+ const searchGifs = async (query: string) => {
     if (!query.trim()) {
       setGifResults([]);
       setGifError(null);
@@ -579,12 +625,20 @@ const CreatePostScreen = () => {
     setLoadingGifs(true);
     setGifError(null);
     try {
-      const API_KEY = "AIzaSyCFwGab5AO3lSHEBTxTDIVgOwFt4YvCWEI";
+      // Paste your Giphy API Key here (Get one free at https://developers.giphy.com)
+      const GIPHY_API_KEY = "UAisLETyclXOiTF4eGtbxACJ3VM3hv6G";
       const limit = 20;
+
+      const params = new URLSearchParams({
+        api_key: GIPHY_API_KEY,
+        q: query.trim(),
+        limit: String(limit),
+        rating: "g",
+        lang: "en",
+      });
+
       const response = await fetch(
-        `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(
-          query,
-        )}&key=${API_KEY}&limit=${limit}&media_filter=gif`,
+        `https://api.giphy.com/v1/gifs/search?${params.toString()}`
       );
 
       if (!response.ok) {
@@ -593,16 +647,15 @@ const CreatePostScreen = () => {
 
       const data = await response.json();
 
-      if (data.results && data.results.length > 0) {
-        setGifResults(data.results);
+      if (data.data && data.data.length > 0) {
+        setGifResults(data.data);
       } else {
         setGifResults([]);
+        setGifError("No GIFs found for your search query.");
       }
     } catch (error) {
       console.error("Error searching GIFs:", error);
-      setGifError(
-        "Failed to search GIFs. Please check your internet connection and try again.",
-      );
+      setGifError("Failed to search GIFs. Please try again.");
     } finally {
       setLoadingGifs(false);
     }
@@ -796,6 +849,13 @@ const CreatePostScreen = () => {
                       source={{ uri: f.uri }}
                       style={styles.imagePreview}
                     />
+                  ) : f.mimeType.startsWith("video/") ? (
+                    <View style={styles.videoPreview}>
+                      <Ionicons name="videocam" size={40} color="#4f9cff" />
+                      <Text style={styles.documentName} numberOfLines={1}>
+                        {f.name}
+                      </Text>
+                    </View>
                   ) : (
                     <View style={styles.documentPreview}>
                       <Ionicons
@@ -843,6 +903,17 @@ const CreatePostScreen = () => {
                   name="images"
                   size={24}
                   color={files.length >= MAX_FILES ? "#5a6380" : "#4f9cff"}
+                />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.iconButton}
+                onPress={pickVideos}
+                disabled={files.length >= MAX_FILES}
+              >
+                <Ionicons
+                  name="videocam"
+                  size={24}
+                  color={files.length >= MAX_FILES ? "#5a6380" : "#7a0020"}
                 />
               </TouchableOpacity>
               <TouchableOpacity
@@ -1103,33 +1174,33 @@ const CreatePostScreen = () => {
                   </TouchableOpacity>
                 </View>
               ) : gifResults.length > 0 ? (
-                <FlatList
-                  data={gifResults}
-                  numColumns={2}
-                  keyExtractor={(item, index) => index.toString()}
-                  renderItem={({ item }) => {
-                    const gifUrl = item?.media_formats?.gif?.url;
-                    const thumbnailUrl =
-                      item?.media_formats?.tinygif?.url ||
-                      item?.media_formats?.gif?.url;
+               <FlatList
+  data={gifResults}
+  numColumns={2}
+  keyExtractor={(item, index) => item.id || index.toString()}
+  renderItem={({ item }) => {
+    // ✅ Updated to match Giphy API schema
+    const images = item?.images;
+    const gifUrl = images?.original?.url || images?.downsized_medium?.url;
+    const thumbnailUrl = images?.fixed_width_small?.url || images?.preview_gif?.url || gifUrl;
 
-                    if (!gifUrl || !thumbnailUrl) return null;
+    if (!gifUrl || !thumbnailUrl) return null;
 
-                    return (
-                      <TouchableOpacity
-                        style={styles.gifItem}
-                        onPress={() => handleSelectGif(gifUrl)}
-                      >
-                        <Image
-                          source={{ uri: thumbnailUrl }}
-                          style={styles.gifThumbnail}
-                          resizeMode="cover"
-                        />
-                      </TouchableOpacity>
-                    );
-                  }}
-                  contentContainerStyle={styles.gifGrid}
-                />
+    return (
+      <TouchableOpacity
+        style={styles.gifItem}
+        onPress={() => handleSelectGif(gifUrl)}
+      >
+        <Image
+          source={{ uri: thumbnailUrl }}
+          style={styles.gifThumbnail}
+          resizeMode="cover"
+        />
+      </TouchableOpacity>
+    );
+  }}
+  contentContainerStyle={styles.gifGrid}
+/>
               ) : (
                 <View style={styles.gifEmptyContainer}>
                   <Ionicons name="images-outline" size={64} color="#5a6380" />
@@ -1357,6 +1428,15 @@ const styles = StyleSheet.create({
   filePreview: {
     marginBottom: 10,
     position: "relative",
+  },
+  videoPreview: {
+    width: 110,
+    height: 90,
+    borderRadius: 12,
+    backgroundColor: "#eef4ff",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 8,
   },
   imagePreview: { width: "100%", height: 250, borderRadius: 12 },
   documentPreview: {

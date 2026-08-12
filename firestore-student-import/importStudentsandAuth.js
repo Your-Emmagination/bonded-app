@@ -106,7 +106,6 @@ fs.createReadStream(csvFilePath)
             userId: studentID,
 
             // Profile
-            profileImage: null,
             bio: "",
             isOnline: false,
 
