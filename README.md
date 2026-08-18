@@ -247,3 +247,6 @@ hooks/
 ```
 
 The app uses **Expo Router** with file-based routing.
+
+# FastAPI for ai image detector
+uvicorn app:app --host 0.0.0.0 --port 8000

@@ -87,7 +87,6 @@ import {
   readCommunityChannelLastSeenMap,
   type CommunityChannelLastSeenMap,
 } from "@/utils/communityUnread";
-import { canViewModeratedContent } from "@/utils/contentModeration";
 import { subscribeHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 
@@ -127,6 +126,7 @@ type Post = {
   likeCount?: number;
   commentCount?: number;
   likedBy?: string[];
+  bookmarkedBy?: string[];
   serverId?: string | null;
   channelId?: string | null;
   pinnedAt?: any;
@@ -362,6 +362,7 @@ const areFeedItemsEquivalent = (first: FeedItem, second: FeedItem) => {
       getTimestampValue(first.createdAt) ===
         getTimestampValue(second.createdAt) &&
       areStringArraysEqual(first.likedBy || [], second.likedBy || []) &&
+      areStringArraysEqual(first.bookmarkedBy || [], second.bookmarkedBy || []) &&
       areTaggedUsersEqual(
         first.taggedUsers || [],
         second.taggedUsers || [],
@@ -449,6 +450,12 @@ const HomeScreen = () => {
   useEffect(() => {
     feedItemsRef.current = feedItems;
   }, [feedItems]);
+
+  // Tracks post ids with a like toggle currently in flight, so a fast
+  // double-tap on the same post can't fire two requests before the first
+  // one resolves (which would desync the like count/likedBy from what's
+  // actually saved). Different posts can still be liked concurrently.
+  const likeInFlightRef = useRef<Set<string>>(new Set());
   const [fabMenuVisible, setFabMenuVisible] = useState(false);
   const [serverDrawerVisible, setServerDrawerVisible] = useState(false);
   const [searchExpanded, setSearchExpanded] = useState(false);
@@ -697,18 +704,18 @@ const selectedChannel = useMemo(() => {
 
   const visibleFeedItems = useMemo(
     () =>
-      feedItems.filter(
-        (item) =>
-          isGlobalFeedItem(item) &&
-          canViewModeratedContent({
-            moderationStatus: item.moderationStatus,
-            realUserId: item.type === "post" ? item.realUserId : item.userId,
-            userId: item.userId,
-            viewerUserId: user?.uid,
-            viewerRole: currentUserRole,
-          }),
-      ),
-    [currentUserRole, feedItems, user?.uid],
+      feedItems.filter((item) => {
+        if (!isGlobalFeedItem(item)) return false;
+
+        // IMPORTANT: Home is never the moderation-review surface.
+        // Pending and rejected content must stay out of Home even when the
+        // viewer is an admin/teacher/moderator. Staff review pending content
+        // from the Moderation Queue instead. Legacy documents without a
+        // moderationStatus are treated as approved for backward compatibility.
+        const status = String(item.moderationStatus ?? "approved").toLowerCase();
+        return status === "approved";
+      }),
+    [feedItems],
   );
 
   const selectedServerJoinRequests = useMemo(
@@ -1053,6 +1060,15 @@ const selectedChannel = useMemo(() => {
       }),
     );
   }, []);
+
+  const handleEditPost = useCallback((postId: string) => {
+    const target = feedItemsRef.current?.find((item: any) => item.type === "post" && item.id === postId) as any;
+    if (target && (target.realUserId || target.userId) !== user?.uid) {
+      Alert.alert("Access Denied", "You can only edit your own posts.");
+      return;
+    }
+    router.push({ pathname: "/CreatePostScreen", params: { editPostId: postId } });
+  }, [router, user?.uid]);
 
   const handleDeletePost = useCallback(
     async (postId: string) => {
@@ -1698,6 +1714,8 @@ const selectedChannel = useMemo(() => {
         Alert.alert("No Connection", "Cannot like posts while offline.");
         return;
       }
+      if (likeInFlightRef.current.has(postId)) return;
+      likeInFlightRef.current.add(postId);
 
       const postRef = doc(db, "posts", postId);
       const hasLiked = currentLikedBy.includes(user.uid);
@@ -1751,6 +1769,8 @@ const selectedChannel = useMemo(() => {
       } catch (error) {
         console.error("Error updating like:", error);
         Alert.alert("Error", "Failed to like post. Please try again.");
+      } finally {
+        likeInFlightRef.current.delete(postId);
       }
     },
     [currentUserProfile, isOffline, user],
@@ -2132,6 +2152,15 @@ const handleSelectChannel = useCallback(
       accent?: string,
       isPublic?: boolean,
       emoji?: string,
+      logoUri?: string,
+      titleColor?: string,
+      titleSize?: number,
+      titleAlign?: "left" | "center" | "right",
+      titleEdge?: "none" | "subtle" | "strong",
+      titleStroke?: "none" | "subtle" | "medium" | "strong",
+      titleStrokeColor?: string,
+      titleStrokeSize?: number,
+      descriptionSize?: number,
     ) => {
       if (!user?.uid) return;
       if (isOffline) {
@@ -2151,6 +2180,15 @@ const handleSelectChannel = useCallback(
         description: description?.trim() || "",
         accent: accent || nextServer.accent,
         emoji: emoji || nextServer.emoji,
+        logoUri: logoUri || null,
+        titleColor: titleColor || "#fffaf7",
+        titleSize: titleSize || 22,
+        titleAlign: titleAlign || "left",
+        titleEdge: titleEdge || "none",
+        titleStroke: titleStroke || "none",
+        titleStrokeColor: titleStrokeColor || "#000000",
+        titleStrokeSize: titleStrokeSize ?? 0,
+        descriptionSize: descriptionSize || 13,
         isPublic: isPublic ?? true,
         requiresApproval: true,
         createdBy: user.uid,
@@ -2194,7 +2232,24 @@ const handleSelectChannel = useCallback(
       if (patch.accent !== undefined) updatePayload.accent = patch.accent;
       if (patch.isPublic !== undefined) updatePayload.isPublic = patch.isPublic;
       if (patch.logoUri !== undefined) updatePayload.logoUri = patch.logoUri;
-      if (patch.bannerUri !== undefined) updatePayload.bannerUri = patch.bannerUri;
+      if (patch.titleColor !== undefined) updatePayload.titleColor = patch.titleColor;
+      if (patch.titleSize !== undefined) updatePayload.titleSize = patch.titleSize;
+      if (patch.titleAlign !== undefined) updatePayload.titleAlign = patch.titleAlign;
+      if (patch.titleEdge !== undefined) {
+       updatePayload.titleEdge = patch.titleEdge;
+      }
+      if (patch.titleStroke !== undefined) {
+      updatePayload.titleStroke = patch.titleStroke;
+      }
+      if (patch.titleStrokeColor !== undefined) {
+      updatePayload.titleStrokeColor = patch.titleStrokeColor;
+      }
+      if (patch.titleStrokeSize !== undefined) {
+        updatePayload.titleStrokeSize = patch.titleStrokeSize;
+      }
+      if (patch.descriptionSize !== undefined) {
+      updatePayload.descriptionSize = patch.descriptionSize;
+      }
       if ((patch as { emoji?: string }).emoji !== undefined) {
         updatePayload.emoji = (patch as { emoji?: string }).emoji;
       }
@@ -2795,6 +2850,7 @@ const handleSelectChannel = useCallback(
       if (item.type === "post") {
         const post = item as Post;
         const isLiked = post.likedBy?.includes(user?.uid || "") || false;
+        
         return (
           <PostCard
             post={post}
@@ -2806,6 +2862,7 @@ const handleSelectChannel = useCallback(
             currentUserId={user?.uid}
             onLike={handleLike}
             onDelete={handleDeletePost}
+            onEdit={handleEditPost}
             canPin={["admin", "teacher", "moderator"].includes(currentUserRole || "")}
             onTogglePin={handleTogglePinnedPost}
             onProfileClick={handlePostCardProfileClick}
@@ -2813,6 +2870,13 @@ const handleSelectChannel = useCallback(
             onImagePress={openImageViewer}
             onFilePress={handleFilePress}
             getTimeAgo={getTimeAgo}
+            // Ensure comment modal triggers directly from PostCard
+            onCommentPress={(postId) => {
+              setNotificationModalPostId(postId);
+              setNotificationModalCommentId(null);
+              setNotificationModalReplyId(null);
+              setNotificationModalOpenReply(false);
+            }}
           />
         );
       }

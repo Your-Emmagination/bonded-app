@@ -1,11 +1,13 @@
 import { Ionicons } from "@expo/vector-icons";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import * as ImagePicker from "expo-image-picker";
 import {
-  Alert,
   Animated,
   Dimensions,
   Image,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,10 +17,12 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import ConfirmDialog from "./ConfirmDialog";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
 import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
+import { uploadServerImage } from "@/utils/cloudinaryUpload";
 import type {
   CommunityChannel,
   CommunityServer,
@@ -30,9 +34,16 @@ export type ServerEditPatch = {
   description: string;
   accent: string;
   isPublic: boolean;
-  bannerUri?: string;
-  logoUri?: string;
+  logoUri?: string | null;
   emoji?: string;
+  titleColor?: string;
+  titleSize?: number;
+  titleAlign?: "left" | "center" | "right";
+  titleEdge?: "none" | "subtle" | "strong";
+  titleStroke?: "none" | "subtle" | "medium" | "strong";
+  titleStrokeColor?: string;
+  titleStrokeSize?: number;
+  descriptionSize?: number;
 };
 
 export type ServerMemberPreview = {
@@ -63,6 +74,15 @@ type ServerDrawerProps = {
     accent?: string,
     isPublic?: boolean,
     emoji?: string,
+    logoUri?: string,
+    titleColor?: string,
+    titleSize?: number,
+    titleAlign?: "left" | "center" | "right",
+    titleEdge?: "none" | "subtle" | "strong",
+    titleStroke?: "none" | "subtle" | "medium" | "strong",
+    titleStrokeColor?: string,
+    titleStrokeSize?: number,
+    descriptionSize?: number,
   ) => void | Promise<void>;
   onEditServer?: (
     serverId: string,
@@ -123,6 +143,33 @@ function ColorPicker({
             value === accent && styles.colorSwatchSelected,
           ]}
           onPress={() => onChange(accent)}
+          activeOpacity={0.8}
+        />
+      ))}
+    </View>
+  );
+}
+
+function TitleColorPicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (nextValue: string) => void;
+}) {
+  const colors = ["#fffaf7", "#ffffff", "#f6d365", "#dca33d", "#8f3a2b", "#2f7d6b", "#4568a8", "#7f5cf0", "#c04e8a"];
+  return (
+    <View style={styles.colorRow}>
+      {colors.map((color) => (
+        <TouchableOpacity
+          key={color}
+          style={[
+            styles.colorSwatch,
+            { backgroundColor: color },
+            value === color && styles.colorSwatchSelected,
+            color === "#fffaf7" || color === "#ffffff" ? styles.lightColorSwatch : null,
+          ]}
+          onPress={() => onChange(color)}
           activeOpacity={0.8}
         />
       ))}
@@ -246,6 +293,15 @@ export default function ServerDrawer({
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   const [createVisible, setCreateVisible] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
   const [editVisible, setEditVisible] = useState(false);
   const [threadVisible, setThreadVisible] = useState(false);
   const [membersVisible, setMembersVisible] = useState(false);
@@ -255,6 +311,17 @@ export default function ServerDrawer({
   const [createAccent, setCreateAccent] = useState(PRESET_ACCENTS[0]);
   const [createPublic, setCreatePublic] = useState(true);
   const [createEmoji, setCreateEmoji] = useState("🏫");
+  const [createIconMode, setCreateIconMode] = useState<"emoji" | "image">("emoji");
+  const [createLogoUri, setCreateLogoUri] = useState<string | null>(null);
+  const [createTitleColor, setCreateTitleColor] = useState("#fffaf7");
+  const [createTitleSize, setCreateTitleSize] = useState(22);
+  const [createTitleAlign, setCreateTitleAlign] = useState<"left" | "center" | "right">("left");
+  const [createTitleEdge, setCreateTitleEdge] = useState<"none" | "subtle" | "strong">("none");
+  const [createTitleStroke, setCreateTitleStroke] = useState<"none" | "subtle" | "medium" | "strong">("none");
+  const [createTitleStrokeColor, setCreateTitleStrokeColor] = useState("#000000");
+  const [createTitleStrokeSize, setCreateTitleStrokeSize] = useState(0);
+  const [createDescriptionSize, setCreateDescriptionSize] = useState(13);
+  const [createImageUploading, setCreateImageUploading] = useState<"logo" | null>(null);
 
   const [editServerId, setEditServerId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -262,6 +329,17 @@ export default function ServerDrawer({
   const [editAccent, setEditAccent] = useState(PRESET_ACCENTS[0]);
   const [editPublic, setEditPublic] = useState(true);
   const [editEmoji, setEditEmoji] = useState("🏫");
+  const [editIconMode, setEditIconMode] = useState<"emoji" | "image">("emoji");
+  const [editLogoUri, setEditLogoUri] = useState<string | null>(null);
+  const [editTitleColor, setEditTitleColor] = useState("#fffaf7");
+  const [editTitleSize, setEditTitleSize] = useState(22);
+  const [editTitleAlign, setEditTitleAlign] = useState<"left" | "center" | "right">("left");
+  const [editTitleEdge, setEditTitleEdge] = useState<"none" | "subtle" | "strong">("none");
+  const [editTitleStroke, setEditTitleStroke] = useState<"none" | "subtle" | "medium" | "strong">("none");
+  const [editTitleStrokeColor, setEditTitleStrokeColor] = useState("#000000");
+  const [editTitleStrokeSize, setEditTitleStrokeSize] =useState(0);
+  const [editDescriptionSize, setEditDescriptionSize] = useState(13);
+  const [editImageUploading, setEditImageUploading] = useState<"logo" | null>(null);
 
   const [threadName, setThreadName] = useState("");
   const [threadEmoji, setThreadEmoji] = useState("💬");
@@ -314,17 +392,84 @@ export default function ServerDrawer({
     setEditAccent(server.accent);
     setEditPublic(server.isPublic ?? true);
     setEditEmoji(server.emoji || "🏫");
+    setEditLogoUri(server.logoUri || null);
+    setEditTitleColor(server.titleColor || "#fffaf7");
+    setEditTitleSize(server.titleSize || 22);
+    setEditTitleAlign(server.titleAlign || "left");
+    setEditTitleEdge(server.titleEdge || "none");
+    setEditTitleStroke(server.titleStroke || "none");
+    setEditTitleStrokeColor(server.titleStrokeColor || "#000000");
+    setEditTitleStrokeSize(server.titleStrokeSize ?? 0)
+    setEditDescriptionSize(server.descriptionSize || 13);
+    setEditIconMode(server.logoUri ? "image" : "emoji");
     setEditVisible(true);
   };
 
+  const pickServerImage = async (kind: "logo") => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.86,
+      });
+
+      if (result.canceled || !result.assets[0]?.uri) return;
+
+      setCreateImageUploading(kind);
+      const url = await uploadServerImage(result.assets[0].uri);
+      if (kind === "logo") {
+        setCreateLogoUri(url);
+        setCreateIconMode("image");
+      }
+    } catch (error) {
+      console.error(`Failed to upload server ${kind}`, error);
+    } finally {
+      setCreateImageUploading(null);
+    }
+  };
+
+  const pickEditServerImage = async (kind: "logo") => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.86,
+      });
+
+      if (result.canceled || !result.assets[0]?.uri) return;
+
+      setEditImageUploading(kind);
+      const url = await uploadServerImage(result.assets[0].uri);
+      if (kind === "logo") {
+        setEditLogoUri(url);
+        setEditIconMode("image");
+      }
+    } catch (error) {
+      console.error(`Failed to upload server ${kind} while editing`, error);
+    } finally {
+      setEditImageUploading(null);
+    }
+  };
+
   const handleCreate = async () => {
-    if (!createName.trim()) return;
+    if (!createName.trim() || createImageUploading) return;
     await onCreateServer?.(
       createName.trim(),
       createDesc.trim(),
       createAccent,
       createPublic,
       createEmoji.trim() || "🏫",
+      createIconMode === "image" ? createLogoUri || undefined : undefined,
+      createTitleColor,
+      createTitleSize,
+      createTitleAlign,
+      createTitleEdge,
+      createTitleStroke,
+      createTitleStrokeColor,
+      createTitleStrokeSize,
+      createDescriptionSize,
     );
     setCreateVisible(false);
     setCreateName("");
@@ -332,33 +477,53 @@ export default function ServerDrawer({
     setCreateAccent(PRESET_ACCENTS[0]);
     setCreatePublic(true);
     setCreateEmoji("🏫");
+    setCreateIconMode("emoji");
+    setCreateLogoUri(null);
+    setCreateTitleColor("#fffaf7");
+    setCreateTitleSize(22);
+    setCreateTitleAlign("left");
+    setCreateTitleEdge("none");
+    setCreateTitleStroke("none");
+    setCreateTitleStrokeColor("#000000");
+    setCreateTitleStrokeSize(0);
+    setCreateDescriptionSize(13);
   };
 
   const handleSaveEdit = async () => {
-    if (!editServerId) return;
+    if (!editServerId || editImageUploading) return;
     await onEditServer?.(editServerId, {
       name: editName.trim(),
       description: editDesc.trim(),
       accent: editAccent,
       isPublic: editPublic,
       emoji: editEmoji.trim() || "🏫",
+      logoUri: editIconMode === "image" ? editLogoUri : null,
+      titleColor: editTitleColor,
+      titleSize: editTitleSize,
+      titleAlign: editTitleAlign,
+      titleEdge: editTitleEdge,
+      titleStroke: editTitleStroke,
+      titleStrokeColor: editTitleStrokeColor,
+      titleStrokeSize: editTitleStrokeSize,
+      descriptionSize: editDescriptionSize,
     });
     setEditVisible(false);
   };
 
   const handleDeleteServer = () => {
     if (!editServerId || currentUserRole !== "admin") return;
-    Alert.alert("Delete Server", "This server will disappear for everyone.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          await onDeleteServer?.(editServerId);
-          setEditVisible(false);
-        },
+    setConfirmDialog({
+      title: "Delete Server",
+      description: "This server will disappear for everyone.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        await onDeleteServer?.(editServerId);
+        setEditVisible(false);
       },
-    ]);
+    });
   };
 
   const handleCreateThread = async () => {
@@ -419,6 +584,10 @@ export default function ServerDrawer({
             ]}
           >
             <View style={[styles.rail, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }]}>
+              <View style={styles.communityRailLabel}>
+                <Ionicons name="people-outline" size={15} color="#fffaf7" />
+                <Text style={styles.communityRailLabelText}>COMMUNITY</Text>
+              </View>
               <ScrollView
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={styles.railContent}
@@ -476,6 +645,7 @@ export default function ServerDrawer({
                     showsVerticalScrollIndicator={false}
                   >
                     <View style={[styles.heroCard, { backgroundColor: selectedServer.accent }]}>
+                      <View style={styles.heroContent}>
                       <View style={styles.heroBadge}>
                         {selectedServer.logoUri ? (
                           <Image
@@ -488,8 +658,81 @@ export default function ServerDrawer({
                           </Text>
                         )}
                       </View>
-                      <Text style={styles.heroTitle}>{selectedServer.name}</Text>
-                      <Text style={styles.heroSubtitle}>
+                      {(() => {
+  const strokeSize = selectedServer.titleStrokeSize ?? 0;
+  const strokeColor = selectedServer.titleStrokeColor || "#000000";
+  const titleSize = selectedServer.titleSize || 22;
+  const titleAlign = selectedServer.titleAlign || "left";
+
+  const strokeOffsets: [number, number][] = [];
+
+  if (
+    selectedServer.titleStroke !== "none" &&
+    strokeSize > 0
+  ) {
+    const steps = Math.max(24, strokeSize * 12);
+
+    for (let i = 0; i < steps; i++) {
+      const angle = (i / steps) * Math.PI * 2;
+
+      strokeOffsets.push([
+        Math.round(Math.cos(angle) * strokeSize),
+        Math.round(Math.sin(angle) * strokeSize),
+      ]);
+    }
+  }
+
+  return (
+    <View
+      style={{
+        position: "relative",
+        width: "100%",
+      }}
+    >
+      {strokeOffsets.map(([x, y], index) => (
+        <Text
+          key={`title-stroke-${index}`}
+          style={[
+            styles.heroTitle,
+            {
+              position: "absolute",
+              left: x,
+              top: y,
+
+              width: "100%",
+
+              color: strokeColor,
+              fontSize: titleSize,
+              textAlign: titleAlign,
+            },
+          ]}
+          pointerEvents="none"
+        >
+          {selectedServer.name}
+        </Text>
+      ))}
+
+      <Text
+        style={[
+          styles.heroTitle,
+          {
+            color: selectedServer.titleColor || "#fffaf7",
+            fontSize: titleSize,
+            textAlign: titleAlign,
+          },
+        ]}
+      >
+        {selectedServer.name}
+      </Text>
+    </View>
+  );
+})()}
+                      <Text
+                        style={[
+                          styles.heroSubtitle,
+                          { fontSize: selectedServer.descriptionSize || 13 },
+                        ]}
+                      >
                         {selectedServer.description || "Community workspace"}
                       </Text>
                       <View style={styles.heroMetaRow}>
@@ -515,6 +758,7 @@ export default function ServerDrawer({
                             {selectedServer.isPublic ? "Public" : "Private"}
                           </Text>
                         </View>
+                      </View>
                       </View>
                     </View>
 
@@ -643,7 +887,16 @@ export default function ServerDrawer({
       </Modal>
 
       <Modal visible={createVisible} transparent animationType="fade" onRequestClose={() => setCreateVisible(false)}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
+        >
+          <ScrollView
+            contentContainerStyle={styles.modalKeyboardContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Create Server</Text>
@@ -659,6 +912,9 @@ export default function ServerDrawer({
               onChangeText={setCreateName}
               placeholder="Engineering projects"
               placeholderTextColor="#b89a92"
+              autoCapitalize="words"
+              returnKeyType="done"
+              blurOnSubmit
             />
 
             <Text style={styles.fieldLabel}>Description</Text>
@@ -671,16 +927,168 @@ export default function ServerDrawer({
               multiline
             />
 
-            <Text style={styles.fieldLabel}>Icon Emoji</Text>
-            <TextInput
-              style={styles.input}
-              value={createEmoji}
-              onChangeText={setCreateEmoji}
-              placeholder="🏫"
-              placeholderTextColor="#b89a92"
-              maxLength={3}
-            />
+            <Text style={styles.fieldLabel}>Server Icon</Text>
+            <View style={styles.mediaChoiceRow}>
+              <TouchableOpacity
+                style={[styles.mediaChoice, createIconMode === "emoji" && { borderColor: createAccent, backgroundColor: `${createAccent}12` }]}
+                onPress={() => setCreateIconMode("emoji")}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.mediaChoiceEmoji}>{createEmoji || "🏫"}</Text>
+                <View style={styles.mediaChoiceCopy}>
+                  <Text style={styles.mediaChoiceTitle}>Emoji</Text>
+                  <Text style={styles.mediaChoiceHint}>Simple server icon</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.mediaChoice, createIconMode === "image" && { borderColor: createAccent, backgroundColor: `${createAccent}12` }]}
+                onPress={() => pickServerImage("logo")}
+                activeOpacity={0.8}
+                disabled={createImageUploading === "logo"}
+              >
+                {createLogoUri ? (
+                  <Image source={{ uri: createLogoUri }} style={styles.mediaChoiceImage} />
+                ) : (
+                  <Ionicons name="image-outline" size={24} color="#8f3a2b" />
+                )}
+                <View style={styles.mediaChoiceCopy}>
+                  <Text style={styles.mediaChoiceTitle}>{createImageUploading === "logo" ? "Uploading…" : "Image"}</Text>
+                  <Text style={styles.mediaChoiceHint}>Use a custom server icon</Text>
+                </View>
+              </TouchableOpacity>
+            </View>
 
+            {createIconMode === "emoji" && (
+              <TextInput
+                style={styles.input}
+                value={createEmoji}
+                onChangeText={setCreateEmoji}
+                placeholder="🏫"
+                placeholderTextColor="#b89a92"
+                maxLength={3}
+              />
+            )}
+
+            <Text style={styles.fieldLabel}>Server Title</Text>
+            <View style={styles.titleSizeRow}>
+              {[18, 22, 26, 30].map((size) => (
+                <TouchableOpacity
+                  key={size}
+                  style={[styles.titleSizeButton, createTitleSize === size && { borderColor: createAccent, backgroundColor: `${createAccent}12` }]}
+                  onPress={() => setCreateTitleSize(size)}
+                >
+                  <Text style={[styles.titleSizeButtonText, { fontSize: size === 18 ? 12 : size === 22 ? 14 : size === 26 ? 16 : 18 }]}>Aa</Text>
+                  <Text style={styles.titleSizeLabel}>{size}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.fieldLabel}>Title Color</Text>
+            <TitleColorPicker value={createTitleColor} onChange={setCreateTitleColor} />
+
+            <Text style={styles.fieldLabel}>Title Alignment</Text>
+            <View style={styles.optionRow}>
+              {[
+                ["left", "Left", "text-outline"],
+                ["center", "Center", "reorder-three-outline"],
+                ["right", "Right", "text-outline"],
+              ].map(([value, label, icon]) => (
+                <TouchableOpacity
+                  key={value}
+                  style={[styles.optionButton, createTitleAlign === value && { borderColor: createAccent, backgroundColor: `${createAccent}12` }]}
+                  onPress={() => setCreateTitleAlign(value as "left" | "center" | "right")}
+                >
+                  <Ionicons name={icon as any} size={16} color="#5f0909" />
+                  <Text style={styles.optionButtonText}>{label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.fieldLabel}>Title Edge</Text>
+            <View style={styles.optionRow}>
+              {[
+                ["none", "None"],
+                ["subtle", "Subtle"],
+                ["strong", "Strong"],
+              ].map(([value, label]) => (
+                <TouchableOpacity
+                  key={value}
+                  style={[styles.optionButton, createTitleEdge === value && { borderColor: createAccent, backgroundColor: `${createAccent}12` }]}
+                  onPress={() => setCreateTitleEdge(value as "none" | "subtle" | "strong")}
+                >
+                  <Text style={styles.optionButtonText}>{label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.fieldLabel}>Description Font Size</Text>
+            <View style={styles.optionRow}>
+              {[11, 13, 15, 17].map((size) => (
+                <TouchableOpacity
+                  key={size}
+                  style={[styles.optionButton, createDescriptionSize === size && { borderColor: createAccent, backgroundColor: `${createAccent}12` }]}
+                  onPress={() => setCreateDescriptionSize(size)}
+                >
+                  <Text style={styles.optionButtonText}>{size}px</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+             <Text style={styles.fieldLabel}>Title Stroke</Text>
+
+<View style={styles.optionRow}>
+  {[
+    ["none", "None"],
+    ["subtle", "Subtle"],
+    ["medium", "Medium"],
+    ["strong", "Strong"],
+  ].map(([value, label]) => (
+    <TouchableOpacity
+      key={value}
+      style={[
+        styles.optionButton,
+        createTitleStroke === value && {
+          borderColor: createAccent,
+          backgroundColor: `${createAccent}12`,
+        },
+      ]}
+      onPress={() =>
+        setCreateTitleStroke(
+          value as "none" | "subtle" | "medium" | "strong"
+        )
+      }
+    >
+      <Text style={styles.optionButtonText}>{label}</Text>
+    </TouchableOpacity>
+  ))}
+</View>
+
+<Text style={styles.fieldLabel}>Stroke Color</Text>
+
+<TitleColorPicker
+  value={createTitleStrokeColor}
+  onChange={setCreateTitleStrokeColor}
+/>
+<Text style={styles.fieldLabel}>Stroke Size</Text>
+
+<View style={styles.optionRow}>
+  {[0, 1, 2, 3, 4, 5].map((size) => (
+    <TouchableOpacity
+      key={size}
+      style={[
+        styles.optionButton,
+        createTitleStrokeSize === size && {
+          borderColor: createAccent,
+          backgroundColor: `${createAccent}12`,
+        },
+      ]}
+      onPress={() => setCreateTitleStrokeSize(size)}
+      activeOpacity={0.8}
+    >
+      <Text style={styles.optionButtonText}>
+        {size}px
+      </Text>
+    </TouchableOpacity>
+  ))}
+</View>
             <Text style={styles.fieldLabel}>Accent</Text>
             <ColorPicker value={createAccent} onChange={setCreateAccent} />
 
@@ -712,11 +1120,21 @@ export default function ServerDrawer({
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
       </Modal>
 
       <Modal visible={editVisible} transparent animationType="fade" onRequestClose={() => setEditVisible(false)}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
+        >
+          <ScrollView
+            contentContainerStyle={styles.modalKeyboardContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Manage Server</Text>
@@ -726,7 +1144,14 @@ export default function ServerDrawer({
             </View>
 
             <Text style={styles.fieldLabel}>Server Name</Text>
-            <TextInput style={styles.input} value={editName} onChangeText={setEditName} />
+            <TextInput
+              style={styles.input}
+              value={editName}
+              onChangeText={setEditName}
+              autoCapitalize="words"
+              returnKeyType="done"
+              blurOnSubmit
+            />
 
             <Text style={styles.fieldLabel}>Description</Text>
             <TextInput
@@ -736,9 +1161,168 @@ export default function ServerDrawer({
               multiline
             />
 
-            <Text style={styles.fieldLabel}>Icon Emoji</Text>
-            <TextInput style={styles.input} value={editEmoji} onChangeText={setEditEmoji} maxLength={3} />
+            <Text style={styles.fieldLabel}>Server Icon</Text>
+            <View style={styles.mediaChoiceRow}>
+              <TouchableOpacity
+                style={[styles.mediaChoice, editIconMode === "emoji" && { borderColor: editAccent, backgroundColor: `${editAccent}12` }]}
+                onPress={() => setEditIconMode("emoji")}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.mediaChoiceEmoji}>{editEmoji || "🏫"}</Text>
+                <View style={styles.mediaChoiceCopy}>
+                  <Text style={styles.mediaChoiceTitle}>Emoji</Text>
+                  <Text style={styles.mediaChoiceHint}>Use a simple server icon</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.mediaChoice, editIconMode === "image" && { borderColor: editAccent, backgroundColor: `${editAccent}12` }]}
+                onPress={() => pickEditServerImage("logo")}
+                activeOpacity={0.8}
+                disabled={editImageUploading === "logo"}
+              >
+                {editLogoUri ? (
+                  <Image source={{ uri: editLogoUri }} style={styles.mediaChoiceImage} />
+                ) : (
+                  <Ionicons name="image-outline" size={24} color="#8f3a2b" />
+                )}
+                <View style={styles.mediaChoiceCopy}>
+                  <Text style={styles.mediaChoiceTitle}>{editImageUploading === "logo" ? "Uploading…" : "Image"}</Text>
+                  <Text style={styles.mediaChoiceHint}>Use a custom server icon</Text>
+                </View>
+              </TouchableOpacity>
+            </View>
 
+            {editIconMode === "emoji" && (
+              <TextInput
+                style={styles.input}
+                value={editEmoji}
+                onChangeText={setEditEmoji}
+                placeholder="🏫"
+                placeholderTextColor="#b89a92"
+                maxLength={3}
+              />
+            )}
+
+            <Text style={styles.fieldLabel}>Server Title</Text>
+            <View style={styles.titleSizeRow}>
+              {[18, 22, 26, 30].map((size) => (
+                <TouchableOpacity
+                  key={size}
+                  style={[styles.titleSizeButton, editTitleSize === size && { borderColor: editAccent, backgroundColor: `${editAccent}12` }]}
+                  onPress={() => setEditTitleSize(size)}
+                >
+                  <Text style={[styles.titleSizeButtonText, { fontSize: size === 18 ? 12 : size === 22 ? 14 : size === 26 ? 16 : 18 }]}>Aa</Text>
+                  <Text style={styles.titleSizeLabel}>{size}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.fieldLabel}>Title Color</Text>
+            <TitleColorPicker value={editTitleColor} onChange={setEditTitleColor} />
+
+            <Text style={styles.fieldLabel}>Title Alignment</Text>
+            <View style={styles.optionRow}>
+              {[
+                ["left", "Left", "text-outline"],
+                ["center", "Center", "reorder-three-outline"],
+                ["right", "Right", "text-outline"],
+              ].map(([value, label, icon]) => (
+                <TouchableOpacity
+                  key={value}
+                  style={[styles.optionButton, editTitleAlign === value && { borderColor: editAccent, backgroundColor: `${editAccent}12` }]}
+                  onPress={() => setEditTitleAlign(value as "left" | "center" | "right")}
+                >
+                  <Ionicons name={icon as any} size={16} color="#5f0909" />
+                  <Text style={styles.optionButtonText}>{label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.fieldLabel}>Title Edge</Text>
+            <View style={styles.optionRow}>
+              {[
+                ["none", "None"],
+                ["subtle", "Subtle"],
+                ["strong", "Strong"],
+              ].map(([value, label]) => (
+                <TouchableOpacity
+                  key={value}
+                  style={[styles.optionButton, editTitleEdge === value && { borderColor: editAccent, backgroundColor: `${editAccent}12` }]}
+                  onPress={() => setEditTitleEdge(value as "none" | "subtle" | "strong")}
+                >
+                  <Text style={styles.optionButtonText}>{label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.fieldLabel}>Description Font Size</Text>
+            <View style={styles.optionRow}>
+              {[11, 13, 15, 17].map((size) => (
+                <TouchableOpacity
+                  key={size}
+                  style={[styles.optionButton, editDescriptionSize === size && { borderColor: editAccent, backgroundColor: `${editAccent}12` }]}
+                  onPress={() => setEditDescriptionSize(size)}
+                >
+                  <Text style={styles.optionButtonText}>{size}px</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+<Text style={styles.fieldLabel}>Title Stroke</Text>
+
+<View style={styles.optionRow}>
+  {[
+    ["none", "None"],
+    ["subtle", "Subtle"],
+    ["medium", "Medium"],
+    ["strong", "Strong"],
+  ].map(([value, label]) => (
+    <TouchableOpacity
+      key={value}
+      style={[
+        styles.optionButton,
+        editTitleStroke === value && {
+          borderColor: editAccent,
+          backgroundColor: `${editAccent}12`,
+        },
+      ]}
+      onPress={() =>
+        setEditTitleStroke(
+          value as "none" | "subtle" | "medium" | "strong"
+        )
+      }
+    >
+      <Text style={styles.optionButtonText}>{label}</Text>
+    </TouchableOpacity>
+  ))}
+</View>
+
+<Text style={styles.fieldLabel}>Stroke Color</Text>
+
+<TitleColorPicker
+  value={editTitleStrokeColor}
+  onChange={setEditTitleStrokeColor}
+/>
+<Text style={styles.fieldLabel}>Stroke Size</Text>
+
+<View style={styles.optionRow}>
+  {[0, 1, 2, 3, 4, 5].map((size) => (
+    <TouchableOpacity
+      key={size}
+      style={[
+        styles.optionButton,
+        editTitleStrokeSize === size && {
+          borderColor: editAccent,
+          backgroundColor: `${editAccent}12`,
+        },
+      ]}
+      onPress={() => setEditTitleStrokeSize(size)}
+      activeOpacity={0.8}
+    >
+      <Text style={styles.optionButtonText}>
+        {size}px
+      </Text>
+    </TouchableOpacity>
+  ))}
+</View>
             <Text style={styles.fieldLabel}>Accent</Text>
             <ColorPicker value={editAccent} onChange={setEditAccent} />
 
@@ -775,7 +1359,8 @@ export default function ServerDrawer({
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
       </Modal>
 
       <Modal visible={threadVisible} transparent animationType="fade" onRequestClose={() => setThreadVisible(false)}>
@@ -885,6 +1470,17 @@ export default function ServerDrawer({
           </View>
         </View>
       </Modal>
+      <ConfirmDialog
+        visible={!!confirmDialog}
+        title={confirmDialog?.title ?? ""}
+        description={confirmDialog?.description}
+        confirmText={confirmDialog?.confirmText}
+        cancelText={confirmDialog?.cancelText}
+        destructive={confirmDialog?.destructive ?? false}
+        singleAction={confirmDialog?.singleAction ?? false}
+        onConfirm={() => confirmDialog?.onConfirm()}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </>
   );
 }
@@ -905,6 +1501,24 @@ const styles = StyleSheet.create({
     width: RAIL_WIDTH,
     backgroundColor: "#1e0303",
     alignItems: "center",
+  },
+  communityRailLabel: {
+    width: 68,
+    minHeight: 54,
+    borderRadius: 14,
+    backgroundColor: "#350909",
+    borderWidth: 1,
+    borderColor: "rgba(255,250,247,0.14)",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    marginBottom: 8,
+  },
+  communityRailLabelText: {
+    color: "#fffaf7",
+    fontSize: 8.5,
+    fontWeight: "900",
+    letterSpacing: 0.7,
   },
   railContent: {
     alignItems: "center",
@@ -1025,8 +1639,155 @@ const styles = StyleSheet.create({
   },
   heroCard: {
     borderRadius: 24,
-    padding: 18,
     marginBottom: 16,
+    overflow: "hidden",
+  },
+  heroContent: {
+  paddingHorizontal: 10,
+  paddingTop: 18,
+  paddingBottom: 18,
+  width: "100%",
+},
+  titleSizeRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 14,
+  },
+  titleSizeButton: {
+    width: 58,
+    minHeight: 54,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: "#dfc9c1",
+    backgroundColor: "#fffaf7",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+  },
+  titleSizeButtonText: {
+    color: "#5f0909",
+    fontWeight: "800",
+  },
+  titleSizeLabel: {
+    color: "#8d7770",
+    fontSize: 10,
+    fontWeight: "700",
+  },
+  optionRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 14,
+    flexWrap: "wrap",
+  },
+  optionButton: {
+    minWidth: 74,
+    minHeight: 40,
+    paddingHorizontal: 12,
+    borderRadius: 11,
+    borderWidth: 1.5,
+    borderColor: "#dfc9c1",
+    backgroundColor: "#fffaf7",
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 5,
+  },
+  optionButtonText: {
+    color: "#5f0909",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  mediaChoiceRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 12,
+  },
+  mediaChoice: {
+    flex: 1,
+    minHeight: 72,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: "#dfc9c1",
+    backgroundColor: "#fffaf7",
+    padding: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  mediaChoiceEmoji: {
+    fontSize: 26,
+    width: 34,
+    textAlign: "center",
+  },
+  mediaChoiceImage: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+  },
+  mediaChoiceCopy: {
+    flex: 1,
+  },
+  mediaChoiceTitle: {
+    color: "#5f0909",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  mediaChoiceHint: {
+    color: "#8d7770",
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 2,
+  },
+  optionalLabel: {
+    color: "#a58d84",
+    fontWeight: "500",
+  },
+  bannerPicker: {
+    minHeight: 78,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: "#dfc9c1",
+    backgroundColor: "#fffaf7",
+    overflow: "hidden",
+    marginBottom: 12,
+  },
+  bannerPickerWithImage: {
+    height: 112,
+  },
+  bannerPickerImage: {
+    width: "100%",
+    height: "100%",
+  },
+  bannerPickerEmpty: {
+    flex: 1,
+    minHeight: 78,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  mediaClearRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: -4,
+    marginBottom: 12,
+  },
+  mediaClearButton: {
+    minHeight: 34,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#dfc9c1",
+    backgroundColor: "#fffaf7",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  mediaClearText: {
+    color: "#8f3a2b",
+    fontSize: 11,
+    fontWeight: "700",
   },
   heroBadge: {
     width: 58,
@@ -1045,10 +1806,23 @@ const styles = StyleSheet.create({
   heroBadgeEmoji: {
     fontSize: 28,
   },
-  heroTitle: {
-    color: "#fffaf7",
-    fontSize: 22,
-    fontWeight: "800",
+ heroTitle: {
+  color: "#fffaf7",
+  fontSize: 22,
+  fontWeight: "800",
+  lineHeight: 34,
+  textAlign: "center",
+  width: "100%",
+},
+  heroTitleEdgeSubtle: {
+    textShadowColor: "rgba(0,0,0,0.38)",
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 2,
+  },
+  heroTitleEdgeStrong: {
+    textShadowColor: "rgba(0,0,0,0.68)",
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 4,
   },
   heroSubtitle: {
     color: "rgba(255,250,247,0.86)",
@@ -1330,6 +2104,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 20,
   },
+  modalKeyboardContent: {
+    flexGrow: 1,
+    justifyContent: "center",
+    paddingVertical: 20,
+  },
   modalCard: {
     backgroundColor: "#fffaf7",
     borderRadius: 22,
@@ -1452,6 +2231,9 @@ const styles = StyleSheet.create({
   colorSwatchSelected: {
     borderColor: "#3d0808",
     transform: [{ scale: 1.12 }],
+  },
+  lightColorSwatch: {
+    borderColor: "#c9b8b0",
   },
   switchRow: {
     flexDirection: "row",

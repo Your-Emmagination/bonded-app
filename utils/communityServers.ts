@@ -29,6 +29,14 @@ export type CommunityServer = {
   emoji?: string;
   logoUri?: string;
   bannerUri?: string;
+  titleColor?: string;
+  titleSize?: number;
+  titleAlign?: "left" | "center" | "right";
+  titleEdge?: "none" | "subtle" | "strong";
+  titleStroke?: "none" | "subtle" | "medium" | "strong";
+  titleStrokeColor?: string;
+  titleStrokeSize?: number;
+  descriptionSize?: number;
   tagline?: string;
   description?: string;
   verified?: boolean;
@@ -181,6 +189,14 @@ function ensureCustomServerShape(
     emoji: server.emoji ?? DEFAULT_SERVER_EMOJI,
     logoUri: server.logoUri,
     bannerUri: server.bannerUri,
+    titleColor: server.titleColor ?? "#fffaf7",
+    titleSize: server.titleSize ?? 22,
+    titleAlign: server.titleAlign ?? "left",
+    titleEdge: server.titleEdge ?? "none",
+    titleStroke: server.titleStroke ?? "none",
+    titleStrokeColor: server.titleStrokeColor ?? "#000000",
+    titleStrokeSize: server.titleStrokeSize ?? 0,
+    descriptionSize: server.descriptionSize ?? 13,
     tagline: server.tagline,
     isPublic: server.isPublic ?? true,
     requiresApproval: server.requiresApproval ?? true,

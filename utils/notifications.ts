@@ -21,7 +21,8 @@ export type NotificationType =
   | "mention"
   | "activity"
   | "event"
-  | "emergency";
+  | "emergency"
+  | "moderation";
 
 export type NotificationEntityType =
   | "post"
@@ -389,6 +390,55 @@ export const createEmergencyNotifications = async ({
       }),
     ),
   );
+};
+
+export type ModerationNotificationInput = {
+  recipientId?: string | null;
+  moderator: NotificationActor;
+  entityType: Exclude<NotificationEntityType, "event" | "emergency">;
+  entityId: string;
+  reasons?: string[];
+  preview?: string | null;
+  parentId?: string | null;
+};
+
+const MODERATION_ENTITY_LABEL: Record<
+  Exclude<NotificationEntityType, "event" | "emergency">,
+  string
+> = {
+  post: "post",
+  comment: "comment",
+  reply: "reply",
+};
+
+/**
+ * Notifies a student when a moderator removes their flagged content, so it
+ * doesn't just silently disappear from their feed with no explanation.
+ */
+export const createModerationNotification = async ({
+  recipientId,
+  moderator,
+  entityType,
+  entityId,
+  reasons,
+  preview,
+  parentId,
+}: ModerationNotificationInput) => {
+  const label = MODERATION_ENTITY_LABEL[entityType];
+  const reasonSuffix = reasons?.length
+    ? ` (${reasons.join(", ")})`
+    : "";
+
+  await createNotification({
+    recipientId,
+    actor: moderator,
+    type: "moderation",
+    entityType,
+    entityId,
+    parentId,
+    preview,
+    message: `removed your ${label} for violating community guidelines${reasonSuffix}`,
+  });
 };
 
 export const subscribeToUnreadNotificationCount = (

@@ -83,6 +83,7 @@ const ProfileScreen = () => {
     selectedTab: "info",
   });
   const [profileImage, setProfileImage] = useState<string>();
+  const [pendingProfileImage, setPendingProfileImage] = useState<string | null>(null);
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [viewImageVisible, setViewImageVisible] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -237,12 +238,8 @@ const ProfileScreen = () => {
         });
 
         if (!result.canceled && result.assets?.[0]?.uri) {
-          const uri = result.assets[0].uri;
-          const cloudinaryUrl = await uploadProfileImage(uri);
-
-          setProfileImage(cloudinaryUrl);
-          await updateStudent({ profileImage: cloudinaryUrl });
-          Alert.alert("Success", "Profile photo updated!");
+          setPendingProfileImage(result.assets[0].uri);
+          setEditModalVisible(true);
         }
       } catch (error: any) {
         Alert.alert("Error", `Failed to update photo: ${error.message}`);
@@ -252,6 +249,23 @@ const ProfileScreen = () => {
     },
     [updateStudent],
   );
+
+  const commitPendingProfileImage = useCallback(async () => {
+    if (!pendingProfileImage) return;
+    setLoading(true);
+    try {
+      const cloudinaryUrl = await uploadProfileImage(pendingProfileImage);
+      await updateStudent({ profileImage: cloudinaryUrl });
+      setProfileImage(cloudinaryUrl);
+      setPendingProfileImage(null);
+      setEditModalVisible(false);
+      Alert.alert("Success", "Profile photo updated!");
+    } catch (error: any) {
+      Alert.alert("Error", `Failed to update photo: ${error?.message || "Please try again."}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [pendingProfileImage, updateStudent]);
 
   const toggleOnlineStatus = useCallback(async () => {
     if (!student || !auth.currentUser) return;
@@ -607,6 +621,11 @@ const ProfileScreen = () => {
               onPress={() => setEditModalVisible(true)}
             />
             <ActionButton
+              icon="bookmark-outline"
+              text="Saved Posts"
+              onPress={() => router.push("/(main)/BookmarksScreen" as any)}
+            />
+            <ActionButton
               icon="log-out-outline"
               text="Log Out"
               onPress={handleLogout}
@@ -627,6 +646,9 @@ const ProfileScreen = () => {
         onSave={handleSave}
         onChangePassword={handleChangePassword}
         onImagePick={handleImagePick}
+        pendingProfileImage={pendingProfileImage}
+        onCommitImage={commitPendingProfileImage}
+        onCancelImage={() => setPendingProfileImage(null)}
         loading={loading}
       />
 
@@ -715,6 +737,9 @@ const EditModal = ({
   onChangePassword,
   onImagePick,
   loading,
+  pendingProfileImage,
+  onCommitImage,
+  onCancelImage,
 }: {
   visible: boolean;
   scaleAnim: Animated.Value;
@@ -727,6 +752,9 @@ const EditModal = ({
   onChangePassword: () => void;
   onImagePick: (useCamera: boolean) => void;
   loading: boolean;
+  pendingProfileImage: string | null;
+  onCommitImage: () => void;
+  onCancelImage: () => void;
 }) => (
   <Modal
     visible={visible}
@@ -796,7 +824,13 @@ const EditModal = ({
               )}
 
               {editedData.selectedTab === "photo" && (
-                <PhotoTab onImagePick={onImagePick} />
+                <PhotoTab
+                  onImagePick={onImagePick}
+                  previewUri={pendingProfileImage}
+                  onCommit={onCommitImage}
+                  onCancel={onCancelImage}
+                  loading={loading}
+                />
               )}
             </>
           )}
@@ -904,25 +938,39 @@ const PasswordTab = ({
 };
 
 const PhotoTab = ({
-  onImagePick,
+  onImagePick, previewUri, onCommit, onCancel, loading,
 }: {
   onImagePick: (useCamera: boolean) => void;
+  previewUri: string | null;
+  onCommit: () => void;
+  onCancel: () => void;
+  loading: boolean;
 }) => (
   <View style={{ marginTop: 6 }}>
-    <TouchableOpacity
-      style={styles.modalOption}
-      onPress={() => onImagePick(false)}
-    >
+    {previewUri && (
+      <View style={{ alignItems: "center", marginBottom: 14 }}>
+        <Image source={{ uri: previewUri }} style={{ width: 110, height: 110, borderRadius: 55, borderWidth: 3, borderColor: "#e0a53d" }} />
+        <Text style={{ marginTop: 8, color: "#7a3b2e", fontWeight: "600" }}>Preview</Text>
+      </View>
+    )}
+    <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(false)} disabled={loading}>
       <Ionicons name="images-outline" size={20} color="#e0a53d" />
       <Text style={styles.optionText}>Choose from Gallery</Text>
     </TouchableOpacity>
-    <TouchableOpacity
-      style={styles.modalOption}
-      onPress={() => onImagePick(true)}
-    >
+    <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(true)} disabled={loading}>
       <Ionicons name="camera-outline" size={20} color="#e0a53d" />
       <Text style={styles.optionText}>Take Photo</Text>
     </TouchableOpacity>
+    {previewUri && (
+      <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+        <TouchableOpacity style={[styles.closeBtn, { flex: 1 }]} onPress={onCancel} disabled={loading}>
+          <Text style={styles.closeText}>Cancel</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.primaryBtn, { flex: 1, marginTop: 0 }]} onPress={onCommit} disabled={loading}>
+          {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryText}>Done</Text>}
+        </TouchableOpacity>
+      </View>
+    )}
   </View>
 );
 

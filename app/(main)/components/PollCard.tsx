@@ -3,7 +3,6 @@ import { Ionicons } from "@expo/vector-icons";
 import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  Alert,
   ActivityIndicator,
   Dimensions,
   Image,
@@ -14,6 +13,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import ConfirmDialog from "./ConfirmDialog";
 import {
   canDeleteContent,
   canViewAnonymousIdentity,
@@ -95,6 +95,15 @@ const PollCard = React.memo<PollCardProps>(({
 }: PollCardProps) => {
   const expired = isPollExpired(poll.expiresAt);
   const [authorData, setAuthorData] = useState<UserData | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [revealed, setRevealed] = useState(false);
   const [showAddOptionForm, setShowAddOptionForm] = useState(false);
@@ -292,14 +301,16 @@ const handleAddOption = async () => {
 
   const handleMorePress = () => {
     if (!canDelete || !onDelete) return;
-    Alert.alert("Poll Options", undefined, [
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: () => onDelete(poll.id),
+    setConfirmDialog({
+      title: "Delete Poll",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: () => {
+        setConfirmDialog(null);
+        onDelete(poll.id);
       },
-      { text: "Cancel", style: "cancel" },
-    ]);
+    });
   };
 
   return (
@@ -653,6 +664,17 @@ const handleAddOption = async () => {
           onCommentAdded={handleCommentAdded}
         />
       )}
+      <ConfirmDialog
+        visible={!!confirmDialog}
+        title={confirmDialog?.title ?? ""}
+        description={confirmDialog?.description}
+        confirmText={confirmDialog?.confirmText}
+        cancelText={confirmDialog?.cancelText}
+        destructive={confirmDialog?.destructive ?? false}
+        singleAction={confirmDialog?.singleAction ?? false}
+        onConfirm={() => confirmDialog?.onConfirm()}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </View>
   );
 });

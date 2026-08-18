@@ -14,7 +14,9 @@ import {
   Image,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { avatarThumb } from "@/utils/cloudinaryImages";
+import { avatarThumb, feedImage } from "@/utils/cloudinaryImages";
+import ImageZoomViewer from "../components/ImageZoomViewer";
+import { createModerationNotification } from "@/utils/notifications";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { onAuthStateChanged } from "firebase/auth";
 import {
@@ -106,8 +108,10 @@ export default function DashboardScreen() {
       isAnonymous?: boolean;
       reasons: string[];
       createdAt?: any;
+      imageUrl?: string | null;
     }[]
   >([]);
+  const [moderationImageViewerUrl, setModerationImageViewerUrl] = useState<string | null>(null);
   const [moderationBusyId, setModerationBusyId] = useState<string | null>(null);
   const [managedUsers, setManagedUsers] = useState<ManagedUserRecord[]>([]);
   const [managedUserSearch, setManagedUserSearch] = useState("");
@@ -221,7 +225,28 @@ export default function DashboardScreen() {
   useEffect(() => {
     if (!auth.currentUser) return;
 
-    const unsubscribers: (() => void)[] = [];
+  const extractPreviewImageUrl = (
+    item: any,
+    type: "post" | "poll" | "comment" | "reply" | "message",
+  ): string | null => {
+    if (type === "poll") {
+      return typeof item.imageUrl === "string" ? item.imageUrl : null;
+    }
+
+    const files = Array.isArray(item.files) ? item.files : [];
+    const firstImage = files.find(
+      (f: any) =>
+        typeof f?.mimeType === "string" &&
+        f.mimeType.startsWith("image/") &&
+        !f.mimeType.includes("gif"),
+    );
+    if (firstImage?.url) return firstImage.url;
+
+    // Legacy single-image field still used by some older posts.
+    return typeof item.imageUrl === "string" ? item.imageUrl : null;
+  };
+
+  const unsubscribers: (() => void)[] = [];
     const subscribePending = (
       collectionName: string,
       type: "post" | "poll" | "comment" | "reply" | "message",
@@ -245,6 +270,7 @@ export default function DashboardScreen() {
                 ? item.moderationReasons
                 : [],
               createdAt: item.createdAt,
+              imageUrl: extractPreviewImageUrl(item, type),
             }));
           return [...remaining, ...pendingItems].sort((a, b) => {
             const first = a.createdAt?.toMillis?.() || 0;
@@ -372,10 +398,14 @@ export default function DashboardScreen() {
     }
   };
 
-  const handleDeleteModeration = async (
-    itemId: string,
-    type: "post" | "poll" | "comment" | "reply" | "message",
-  ) => {
+  const handleDeleteModeration = async (item: {
+    id: string;
+    type: "post" | "poll" | "comment" | "reply" | "message";
+    text: string;
+    realUserId?: string | null;
+    userId?: string | null;
+    reasons: string[];
+  }) => {
     Alert.alert("Delete Content", "This will permanently remove the restricted content.", [
       { text: "Cancel", style: "cancel" },
       {
@@ -383,8 +413,30 @@ export default function DashboardScreen() {
         style: "destructive",
         onPress: async () => {
           try {
-            setModerationBusyId(itemId);
-            await deleteDoc(doc(db, getCollectionNameForType(type), itemId));
+            setModerationBusyId(item.id);
+            await deleteDoc(doc(db, getCollectionNameForType(item.type), item.id));
+
+            const recipientId = item.realUserId || item.userId;
+            if (
+              recipientId &&
+              recipientId !== "anonymous" &&
+              (item.type === "post" || item.type === "comment" || item.type === "reply")
+            ) {
+              await createModerationNotification({
+                recipientId,
+                moderator: {
+                  id: auth.currentUser?.uid || "moderation-system",
+                  name: auth.currentUser?.displayName || "A moderator",
+                },
+                entityType: item.type,
+                entityId: item.id,
+                reasons: item.reasons,
+                preview: item.text,
+              }).catch((error) => {
+                // Don't let a notification failure look like the delete itself failed.
+                console.error("Error sending moderation notification:", error);
+              });
+            }
           } catch (error) {
             console.error("Error deleting content:", error);
             Alert.alert("Error", "Failed to delete content.");
@@ -627,7 +679,7 @@ const handleYearLevelChange = useCallback(
                 icon="flag-outline"
                 label="View Reports"
                 color="#ff5c93"
-                onPress={() => console.log("Reports - Coming Soon")}
+                onPress={() => router.push("/ReportManagementScreen" as any)}
               />
               {canOpenAiMemory && (
                 <ActionButton
@@ -660,6 +712,23 @@ const handleYearLevelChange = useCallback(
                 </Text>
               </View>
             </View>
+
+            {userRole === "admin" && (
+              <TouchableOpacity
+                style={styles.registerUsersButton}
+                onPress={() => router.push("/AdminRegisterUserScreen")}
+                activeOpacity={0.84}
+              >
+                <View style={styles.registerUsersButtonIcon}>
+                  <Ionicons name="person-add-outline" size={18} color="#7a0020" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.registerUsersButtonTitle}>Register Users</Text>
+                  <Text style={styles.registerUsersButtonText}>Add one account or import your campus CSV</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color="#a0786e" />
+              </TouchableOpacity>
+            )}
 
             <View style={styles.manageUsersInsightRow}>
               <InsightPill
@@ -967,6 +1036,18 @@ const handleYearLevelChange = useCallback(
                   <Text style={styles.reviewBody} numberOfLines={4}>
                     {item.text}
                   </Text>
+                  {!!item.imageUrl && (
+                    <TouchableOpacity
+                      activeOpacity={0.9}
+                      onPress={() => setModerationImageViewerUrl(item.imageUrl!)}
+                    >
+                      <Image
+                        source={{ uri: feedImage(item.imageUrl, 240) }}
+                        style={styles.reviewImage}
+                        resizeMode="cover"
+                      />
+                    </TouchableOpacity>
+                  )}
                   {!!item.reasons.length && (
                     <Text style={styles.reviewReason}>{item.reasons.join(" • ")}</Text>
                   )}
@@ -988,7 +1069,7 @@ const handleYearLevelChange = useCallback(
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.reviewButton, styles.reviewDelete]}
-                      onPress={() => handleDeleteModeration(item.id, item.type)}
+                      onPress={() => handleDeleteModeration(item)}
                       disabled={moderationBusyId === item.id}
                     >
                       <Text style={styles.reviewDeleteText}>Delete</Text>
@@ -1021,6 +1102,13 @@ const handleYearLevelChange = useCallback(
         </View>
         </ScrollView>
       </View>
+      <ImageZoomViewer
+        images={moderationImageViewerUrl ? [moderationImageViewerUrl] : []}
+        startIndex={0}
+        visible={!!moderationImageViewerUrl}
+        onClose={() => setModerationImageViewerUrl(null)}
+        showActions={false}
+      />
     </SafeAreaView>
   );
 }
@@ -1230,6 +1318,36 @@ const styles = StyleSheet.create({
     color: "#4d1b17",
     fontSize: 15,
     fontWeight: "600",
+  },
+  registerUsersButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: "#fffaf7",
+    borderWidth: 1,
+    borderColor: "#eadbd4",
+    borderRadius: 16,
+    padding: 14,
+    marginTop: 12,
+    marginBottom: 14,
+  },
+  registerUsersButtonIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "#f6e8e7",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  registerUsersButtonTitle: {
+    color: "#5f0909",
+    fontWeight: "800",
+    fontSize: 14,
+  },
+  registerUsersButtonText: {
+    color: "#9b766c",
+    fontSize: 11.5,
+    marginTop: 2,
   },
   manageUsersHero: {
     backgroundColor: "#5f0909",
@@ -1633,6 +1751,13 @@ const styles = StyleSheet.create({
     color: "#4d1b17",
     fontSize: 14,
     lineHeight: 21,
+  },
+  reviewImage: {
+    width: "100%",
+    height: 160,
+    borderRadius: 10,
+    marginTop: 8,
+    backgroundColor: "#f2dfd4",
   },
   reviewReason: {
     color: "#a61f1f",

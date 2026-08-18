@@ -1,4 +1,4 @@
-const DEFAULT_MODEL = "llama-3.1-8b-instant";
+const DEFAULT_MODEL = "openai/gpt-oss-20b";
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MAX_CONTEXT_MESSAGES = 12;
 const EXACT_BLOCKLIST = ["shabu", "weed", "marijuana", "vape", "nudes", "porn", "suicide"];
@@ -103,7 +103,23 @@ async function moderateTextWithGroq(env, text, scope) {
         content: `Scope: ${scope || "general"}\nContent: ${text}`,
       },
     ],
-    response_format: { type: "json_object" },
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "moderation_decision",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            status: { type: "string", enum: ["approved", "pending"] },
+            reasons: { type: "array", items: { type: "string" } },
+            matchedKeywords: { type: "array", items: { type: "string" } },
+          },
+          required: ["status", "reasons", "matchedKeywords"],
+          additionalProperties: false,
+        },
+      },
+    },
   });
 
   const groqPayload = await groqResponse.json().catch(() => null);

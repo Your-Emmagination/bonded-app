@@ -1,5 +1,6 @@
 //createpostscreen.tsx
 import { Ionicons } from "@expo/vector-icons";
+import ConfirmDialog from "./components/ConfirmDialog";
 import * as DocumentPicker from "expo-document-picker";
 import { router, useLocalSearchParams } from "expo-router";
 import {
@@ -7,6 +8,7 @@ import {
   collection,
   deleteField,
   doc,
+  getDoc,
   getDocs,
   serverTimestamp,
   updateDoc,
@@ -68,6 +70,8 @@ import { summarizeAiVisibleContent } from "@/utils/aiContext";
 import {
   getModerationPreviewText,
   requestModerationDecision,
+  requestImageModeration,
+  requestVideoModeration,
 } from "@/utils/contentModeration";
 import { resolveUserRoleForAuthUser } from "@/utils/rbac";
 
@@ -91,6 +95,7 @@ type CreatePostRouteParams = {
   channelId?: string | string[];
   serverName?: string | string[];
   channelLabel?: string | string[];
+  editPostId?: string | string[];
 };
 
 const getSingleParam = (value?: string | string[]) =>
@@ -101,7 +106,14 @@ const CreatePostScreen = () => {
   const [files, setFiles] = useState<
     { uri: string; mimeType: string; name: string }[]
   >([]);
+  const [existingFiles, setExistingFiles] = useState<
+    { url: string; mimeType: string; name?: string }[]
+  >([]);
   const [uploading, setUploading] = useState(false);
+  const [blockedDialog, setBlockedDialog] = useState<{
+    title: string;
+    description: string;
+  } | null>(null);
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [taggedUsers, setTaggedUsers] = useState<Student[]>([]);
   const [showTagModal, setShowTagModal] = useState(false);
@@ -125,8 +137,10 @@ const CreatePostScreen = () => {
   const [gifError, setGifError] = useState<string | null>(null);
 
   const insets = useSafeAreaInsets();
-  const { serverId, channelId, serverName, channelLabel } =
+  const { serverId, channelId, serverName, channelLabel, editPostId } =
     useLocalSearchParams<CreatePostRouteParams>();
+  const selectedEditPostId = getSingleParam(editPostId) || null;
+  const isEditMode = !!selectedEditPostId;
   const selectedServerId = getSingleParam(serverId) || null;
   const selectedChannelId = getSingleParam(channelId) || null;
   const selectedServerName = getSingleParam(serverName) || null;
@@ -135,6 +149,40 @@ const CreatePostScreen = () => {
   useEffect(() => {
     fetchStudents();
   }, []);
+
+  useEffect(() => {
+    if (!selectedEditPostId || !auth.currentUser) return;
+    const loadPostForEdit = async () => {
+      try {
+        const snap = await getDoc(doc(db, "posts", selectedEditPostId));
+        if (!snap.exists()) {
+          Alert.alert("Post Not Found", "This post no longer exists.", [{ text: "OK", onPress: () => router.back() }]);
+          return;
+        }
+        const data: any = snap.data();
+        const ownerId = data.realUserId || data.userId;
+        if (ownerId !== auth.currentUser?.uid) {
+          Alert.alert("Access Denied", "You can only edit your own posts.", [{ text: "OK", onPress: () => router.back() }]);
+          return;
+        }
+        setContent(data.content || "");
+        setIsAnonymous(!!data.isAnonymous);
+        setAttachedLink(data.link || null);
+        setExistingFiles(Array.isArray(data.files) ? data.files : []);
+        setTaggedUsers(Array.isArray(data.taggedUsers) ? data.taggedUsers.map((tag: any) => ({
+          id: tag.id,
+          firstname: tag.name || "User",
+          lastname: "",
+          email: "",
+          studentID: tag.studentID || "",
+        })) : []);
+      } catch (error) {
+        console.error("Error loading post for edit:", error);
+        Alert.alert("Error", "Failed to load the post.", [{ text: "OK", onPress: () => router.back() }]);
+      }
+    };
+    loadPostForEdit();
+  }, [selectedEditPostId]);
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
@@ -289,30 +337,97 @@ const CreatePostScreen = () => {
     if (
       !content.trim() &&
       files.length === 0 &&
+      existingFiles.length === 0 &&
       !selectedGif &&
       !attachedLink
     ) {
       Alert.alert("Empty Post", "Please add content, a file, GIF, or link.");
       return;
     }
+setUploading(true);
 
-    setUploading(true);
-    try {
-      const uploadedUrls = [];
+try {
+  // ─────────────────────────────────────────────────────────────
+  // STEP 1: AI MODERATE MEDIA BEFORE UPLOADING
+  // approved = continue, review = pending queue, blocked = stop.
+  let mediaRequiresReview = false;
 
-      for (const file of files) {
-        let uploadedUrl: string;
+  // STEP 2: UPLOAD MEDIA ONLY AFTER AI CHECK
+  // ─────────────────────────────────────────────────────────────
 
-        if (file.mimeType.startsWith("image/")) {
-          uploadedUrl = await uploadPostImage(file.uri);
-        } else if (file.mimeType.startsWith("video/")) {
-          uploadedUrl = await uploadPostVideo(file.uri);
-        } else {
-          uploadedUrl = await uploadPostFile(file.uri);
-        }
+  const uploadedUrls = [];
 
-        uploadedUrls.push({ url: uploadedUrl, mimeType: file.mimeType });
-      }
+for (const file of files) {
+  // ─────────────────────────────────────────────
+  // IMAGE AI MODERATION
+  // ─────────────────────────────────────────────
+  if (file.mimeType.startsWith("image/")) {
+    console.log("[Post Moderation] Checking image with Python AI...");
+
+    const imageDecision = await requestImageModeration(file.uri);
+
+    console.log(
+      "[Post Moderation] Image AI result:",
+      JSON.stringify(imageDecision),
+    );
+
+    if (imageDecision.decision === "blocked") {
+      setBlockedDialog({
+        title: "Post Blocked",
+        description: "This image cannot be posted because it was detected as inappropriate.",
+      });
+      return;
+    }
+
+    if (imageDecision.decision === "review") {
+      mediaRequiresReview = true;
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // VIDEO AI MODERATION
+  // ─────────────────────────────────────────────
+  if (file.mimeType.startsWith("video/")) {
+    console.log("[Post Moderation] Checking video with Python AI...");
+
+    const videoDecision = await requestVideoModeration(file.uri);
+
+    console.log(
+      "[Post Moderation] Video AI result:",
+      JSON.stringify(videoDecision),
+    );
+
+    if (videoDecision.decision === "blocked") {
+      setBlockedDialog({
+        title: "Post Blocked",
+        description: "This video cannot be posted because it was detected as inappropriate.",
+      });
+      return;
+    }
+
+    if (videoDecision.decision === "review") {
+      mediaRequiresReview = true;
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // ONLY UPLOAD AFTER MEDIA MODERATION
+  // ─────────────────────────────────────────────
+  let uploadedUrl: string;
+
+  if (file.mimeType.startsWith("image/")) {
+    uploadedUrl = await uploadPostImage(file.uri);
+  } else if (file.mimeType.startsWith("video/")) {
+    uploadedUrl = await uploadPostVideo(file.uri);
+  } else {
+    uploadedUrl = await uploadPostFile(file.uri);
+  }
+
+  uploadedUrls.push({
+    url: uploadedUrl,
+    mimeType: file.mimeType,
+  });
+}
 
       if (selectedGif) {
         const uploadedGifUrl = await uploadPostGif(selectedGif);
@@ -336,9 +451,45 @@ const CreatePostScreen = () => {
         (user, index, self) =>
           index === self.findIndex((u) => u.id === user.id),
       );
+      let firstName = "";
+      let lastName = "";
+
+      if (!isAnonymous) {
+        try {
+          const studentsSnapshot = await getDocs(collection(db, "students"));
+          const currentUid = user?.uid || "";
+          const currentEmail = user?.email?.trim().toLowerCase() || "";
+          const currentStudentID = currentEmail.split("@")[0];
+
+          const currentStudent = studentsSnapshot.docs.find((studentDoc) => {
+            const data = studentDoc.data();
+            const docId = studentDoc.id.trim().toLowerCase();
+            const dataUid = String(data.uid ?? data.userId ?? "").trim();
+            const dataEmail = String(data.email ?? "").trim().toLowerCase();
+            const dataStudentID = String(data.studentID ?? "").trim().toLowerCase();
+
+            return (
+              docId === currentUid.toLowerCase() ||
+              dataUid === currentUid ||
+              (currentEmail && dataEmail === currentEmail) ||
+              (currentStudentID && dataStudentID === currentStudentID)
+            );
+          });
+
+          if (currentStudent) {
+            const data = currentStudent.data();
+            firstName = String(data.firstname ?? data.firstName ?? "").trim();
+            lastName = String(data.lastname ?? data.lastName ?? "").trim();
+          }
+        } catch (profileError) {
+          console.warn("[CreatePost] Could not resolve student name:", profileError);
+        }
+      }
+
+      const resolvedStudentName = `${firstName} ${lastName}`.trim();
       const displayName = isAnonymous
         ? `Anonymous${Math.floor(Math.random() * 10000)}`
-        : user?.displayName || user?.email?.split("@")[0] || "User";
+        : resolvedStudentName || user?.displayName?.trim() || user?.email?.split("@")[0] || "User";
       const aiPrompt = summarizeAiVisibleContent({
         text: content,
         username: displayName,
@@ -355,48 +506,111 @@ const CreatePostScreen = () => {
           studentID: u.studentID,
         })),
       });
+      
       const moderationDecision = await requestModerationDecision({
-        text: aiPrompt,
+        // Text moderation must inspect only the actual user text.
+        // A media-only post should not be turned into an artificial
+        // "Empty Post" text by the AI context summarizer.
+        text: content.trim(),
         scope: "post",
         serverId: selectedServerId,
         channelId: selectedChannelId,
         authorId: user?.uid,
         authorRole: await resolveUserRoleForAuthUser(user),
       });
+      const finalModerationStatus:
+        | "approved"
+        | "pending"
+        | "rejected" =
+        moderationDecision.status === "pending" || mediaRequiresReview
+          ? "pending"
+          : moderationDecision.status;
+
+const finalModerationReasons = [
+  ...moderationDecision.reasons,
+  ...(mediaRequiresReview
+    ? ["Media flagged for AI moderator review."]
+    : []),
+];
+
+      // Rejected content must never be written to Firestore.
+      // Pending content is intentionally written so it can appear in the
+      // moderation queue, but it must remain hidden from user feeds.
+      if (finalModerationStatus === "rejected") {
+        setBlockedDialog({
+          title: "Post Blocked",
+          description:
+            "This post was blocked because it contains restricted content. If you think this is a mistake, contact a moderator.",
+        });
+        return;
+      }
 
       const postData: any = {
-        content: content,
-        files: uploadedUrls,
-        userId: isAnonymous ? "anonymous" : user?.uid,
-        realUserId: user?.uid,
-        username: displayName,
-        isAnonymous: isAnonymous,
-        taggedUsers: uniqueTaggedUsers.map((u) => ({
-          id: u.id,
-          name: isAiAssistantId(u.id)
-            ? AI_ASSISTANT_NAME
-            : isEveryoneMentionId(u.id)
-              ? EVERYONE_MENTION_TAG.name
-              : `${u.firstname} ${u.lastname}`,
-          studentID: u.studentID,
-        })),
-        createdAt: serverTimestamp(),
-        likeCount: 0,
-        commentCount: 0,
-        serverId: selectedServerId,
-        channelId: selectedChannelId,
-        moderationStatus: moderationDecision.status,
-        moderationReasons: moderationDecision.reasons,
-        moderatedAtMs: Date.now(),
-      };
+  content: content.trim(),
+  files: uploadedUrls,
 
+  userId: isAnonymous ? "anonymous" : user?.uid,
+  realUserId: user?.uid,
+
+  username: displayName,
+  authorName: displayName,
+
+  isAnonymous,
+
+  taggedUsers: uniqueTaggedUsers.map((u) => ({
+    id: u.id,
+    name: isAiAssistantId(u.id)
+      ? AI_ASSISTANT_NAME
+      : isEveryoneMentionId(u.id)
+        ? EVERYONE_MENTION_TAG.name
+        : `${u.firstname} ${u.lastname}`,
+    studentID: u.studentID,
+  })),
+
+  createdAt: serverTimestamp(),
+
+  likeCount: 0,
+  commentCount: 0,
+
+  serverId: selectedServerId,
+  channelId: selectedChannelId,
+
+  moderationStatus: finalModerationStatus,
+  moderationReasons: finalModerationReasons,
+  moderatedAtMs: Date.now(),
+};
       if (attachedLink) {
         postData.link = attachedLink;
       }
 
-      const postRef = await addDoc(collection(db, "posts"), postData);
+      let postRef: any;
+      if (isEditMode && selectedEditPostId) {
+        await updateDoc(doc(db, "posts", selectedEditPostId), {
+          content: content.trim(),
+          files: uploadedUrls,
+          taggedUsers: uniqueTaggedUsers.map((u) => ({
+            id: u.id,
+            name: isAiAssistantId(u.id) ? AI_ASSISTANT_NAME : isEveryoneMentionId(u.id) ? EVERYONE_MENTION_TAG.name : `${u.firstname} ${u.lastname}`.trim(),
+            studentID: u.studentID,
+          })),
+          isAnonymous,
+          link: attachedLink || deleteField(),
+          moderationStatus: finalModerationStatus,
+          moderationReasons: finalModerationReasons,
+          moderatedAtMs: Date.now(),
+          updatedAt: serverTimestamp(),
+        });
+        Alert.alert(
+          finalModerationStatus === "pending" ? "Sent For Review" : "Success",
+          finalModerationStatus === "pending" ? "Your edited post was sent for moderator review." : "Your post has been updated.",
+        );
+        router.back();
+        return;
+      }
 
-      if (moderationDecision.status !== "pending") {
+      postRef = await addDoc(collection(db, "posts"), postData);
+
+      if (finalModerationStatus !== "pending") {
         const mentionRecipientIds = await resolveMentionRecipientIds({
           taggedUserIds: uniqueTaggedUsers
             .map((tag) => tag.id)
@@ -419,9 +633,9 @@ const CreatePostScreen = () => {
       }
 
       if (
-        moderationDecision.status !== "pending" &&
+        finalModerationStatus !== "pending" &&
         uniqueTaggedUsers.some((tag) => isAiAssistantId(tag.id))
-      ) {
+        ) {
         const cooldown = await reserveAiCooldown(
           selectedServerId || "home",
           selectedChannelId || "feed",
@@ -471,9 +685,13 @@ const CreatePostScreen = () => {
         }
       }
 
+      // Use finalModerationStatus, not moderationDecision.status — the text
+      // decision alone misses the case where only the image/video was
+      // flagged (mediaRequiresReview). That case previously showed "Success"
+      // even though the post was actually saved as pending.
       Alert.alert(
-        moderationDecision.status === "pending" ? "Sent For Review" : "Success",
-        moderationDecision.status === "pending"
+        finalModerationStatus === "pending" ? "Sent For Review" : "Success",
+        finalModerationStatus === "pending"
           ? "Your post was flagged for moderator review and is now pending approval."
           : "Your post has been created!",
       );
@@ -708,7 +926,7 @@ const CreatePostScreen = () => {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Create Post</Text>
+          <Text style={styles.headerTitle}>{isEditMode ? "Edit Post" : "Create Post"}</Text>
           <TouchableOpacity onPress={() => router.back()}>
             <Ionicons name="close" size={28} color="#7a3b2e" />
           </TouchableOpacity>
@@ -840,6 +1058,26 @@ const CreatePostScreen = () => {
             </View>
           )}
 
+          {existingFiles.length > 0 && (
+            <View style={styles.filePreviewContainer}>
+              {existingFiles.map((f, i) => (
+                <View key={`existing-${i}`} style={styles.filePreview}>
+                  {f.mimeType?.startsWith("image/") ? (
+                    <Image source={{ uri: f.url }} style={styles.imagePreview} />
+                  ) : (
+                    <View style={styles.documentPreview}>
+                      <Ionicons name={f.mimeType?.startsWith("video/") ? "videocam" : "document-text"} size={40} color="#4f9cff" />
+                      <Text style={styles.documentName} numberOfLines={1}>{f.name || "Attached file"}</Text>
+                    </View>
+                  )}
+                  <TouchableOpacity style={styles.removeFile} onPress={() => setExistingFiles((current) => current.filter((_, idx) => idx !== i))}>
+                    <Ionicons name="close-circle" size={22} color="#e0a53d" />
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </View>
+          )}
+
           {files.length > 0 && (
             <View style={styles.filePreviewContainer}>
               {files.map((f, i) => (
@@ -959,7 +1197,7 @@ const CreatePostScreen = () => {
             {uploading ? (
               <ActivityIndicator color="#fff" />
             ) : (
-              <Text style={styles.postButtonText}>Post</Text>
+              <Text style={styles.postButtonText}>{isEditMode ? "Save Changes" : "Post"}</Text>
             )}
           </TouchableOpacity>
         </View>
@@ -1216,6 +1454,16 @@ const CreatePostScreen = () => {
         </Modal>
       </KeyboardAvoidingView>
       </View>
+      <ConfirmDialog
+        visible={!!blockedDialog}
+        title={blockedDialog?.title ?? ""}
+        description={blockedDialog?.description}
+        singleAction
+        confirmText="OK"
+        destructive
+        onConfirm={() => setBlockedDialog(null)}
+        onCancel={() => setBlockedDialog(null)}
+      />
     </SafeAreaView>
   );
 };

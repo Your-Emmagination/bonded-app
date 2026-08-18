@@ -13,7 +13,8 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Image, RefreshControl, Alert } from "react-native";
+import { Image, RefreshControl } from "react-native";
+import ConfirmDialog from "../components/ConfirmDialog";
 import {
   ActivityIndicator,
   Animated,
@@ -34,7 +35,8 @@ type NotificationType =
   | "mention"
   | "activity"
   | "event"
-  | "emergency";
+  | "emergency"
+  | "moderation";
 type TimeSection = "Today" | "Yesterday" | "This Week" | "This Month" | "Older";
 type FilterOption =
   | "All"
@@ -77,6 +79,15 @@ const FILTER_OPTIONS: FilterOption[] = [
 
 const NotificationsScreen = () => {
   const [user, setUser] = useState<User | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [selectedFilter, setSelectedFilter] = useState<FilterOption>("All");
   const [showFilterModal, setShowFilterModal] = useState(false);
@@ -297,10 +308,13 @@ const onRefresh = useCallback(() => {
       const postSnap = await getDoc(postRef);
 
       if (!postSnap.exists()) {
-        Alert.alert(
-          "Content Unavailable",
-          "This post or comment has been deleted or removed."
-        );
+        setConfirmDialog({
+          title: "This Content is Unavailable",
+          description: "This content was deleted or removed due to (homosexual, foul language, or offensive remarks) comments.",
+          confirmText: "OK",
+          singleAction: true,
+          onConfirm: () => setConfirmDialog(null),
+        });
         return; // Stop navigation
       }
     } catch (error) {
@@ -363,6 +377,8 @@ const onRefresh = useCallback(() => {
         return "calendar";
       case "emergency":
         return "warning";
+      case "moderation":
+        return "shield-outline";
       default:
         return "notifications";
     }
@@ -382,6 +398,8 @@ const onRefresh = useCallback(() => {
         return { icon: "#e0a53d", bg: "#e0a53d20" };
       case "emergency":
         return { icon: "#ff2d2d", bg: "#ff2d2d22" };
+      case "moderation":
+        return { icon: "#e0913d", bg: "#e0913d22" };
       default:
         return { icon: "#b88f87", bg: "#b88f8720" };
     }
@@ -591,6 +609,17 @@ const onRefresh = useCallback(() => {
           </Animated.View>
         </TouchableOpacity>
       </Modal>
+      <ConfirmDialog
+        visible={!!confirmDialog}
+        title={confirmDialog?.title ?? ""}
+        description={confirmDialog?.description}
+        confirmText={confirmDialog?.confirmText}
+        cancelText={confirmDialog?.cancelText}
+        destructive={confirmDialog?.destructive ?? false}
+        singleAction={confirmDialog?.singleAction ?? false}
+        onConfirm={() => confirmDialog?.onConfirm()}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </SafeAreaView>
   );
 };

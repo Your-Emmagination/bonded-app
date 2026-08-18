@@ -12,7 +12,7 @@ import {
 const CLOUDINARY_CLOUD_NAME = "dutkd2ih4";
 const CLOUDINARY_UPLOAD_PRESET = "bonded_app_preset"; 
 
-export type UploadFolder = "profile_images" | "post_images" | "post_files" | "post_gifs" | "post_videos";
+export type UploadFolder = "profile_images" | "post_images" | "post_files" | "post_gifs" | "post_videos" | "server_images";
 
 interface CloudinaryUploadOptions {
   uri: string;
@@ -148,6 +148,13 @@ const warmCloudinaryCache = (secureUrl: string, folder: UploadFolder): void => {
         ...warmFeedSize(secureUrl, FULLSCREEN_IMAGE_WIDTH * 3),
       ];
       break;
+    case "server_images":
+      // Server logos and banners are displayed as bounded UI images.
+      urlsToWarm = [
+        ...warmAvatarSize(secureUrl, AVATAR_SIZE_SMALL),
+        ...warmFeedSize(secureUrl, FULLSCREEN_IMAGE_WIDTH),
+      ];
+      break;
     case "post_images":
       // Post photos are shown in-feed and in the fullscreen viewer.
       urlsToWarm = [
@@ -190,6 +197,8 @@ const generateFileName = (folder: UploadFolder): string => {
       return `profile_${timestamp}_${random}.jpg`;
     case "post_images":
       return `post_img_${timestamp}_${random}.jpg`;
+    case "server_images":
+      return `server_img_${timestamp}_${random}.jpg`;
     case "post_gifs":
       return `post_gif_${timestamp}_${random}.gif`;
     case "post_videos":
@@ -262,6 +271,17 @@ export const uploadPostImage = async (uri: string): Promise<string> => {
   return uploadToCloudinary({
     uri,
     folder: "post_images",
+    resourceType: "image",
+  });
+};
+
+/**
+ * Upload a server logo or banner image.
+ */
+export const uploadServerImage = async (uri: string): Promise<string> => {
+  return uploadToCloudinary({
+    uri,
+    folder: "server_images",
     resourceType: "image",
   });
 };

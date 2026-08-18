@@ -1,16 +1,17 @@
 // app/LoginScreen.tsx
 import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
+import ConfirmDialog from "./(main)/components/ConfirmDialog";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { StatusBar } from "expo-status-bar";
-import { signInWithEmailAndPassword } from "firebase/auth";
+import { sendPasswordResetEmail, signInWithEmailAndPassword } from "firebase/auth";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Animated,
   Image,
   Keyboard,
+  KeyboardAvoidingView,
   Modal,
   Platform,
   ScrollView,
@@ -165,6 +166,15 @@ export default function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showTerms, setShowTerms] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
@@ -247,16 +257,14 @@ export default function LoginScreen() {
   }, []);
 
 const handleTermsDecline = useCallback(() => {
-  Alert.alert(
-    "Terms Required",
-    "You must accept the Terms & Conditions to use BondED.",
-    [
-      {
-        text: "Continue Reading",
-        style: "cancel",
-      },
-    ]
-  );
+  setConfirmDialog({
+    title: "Terms Required",
+    description: "You must accept the Terms & Conditions to use BondED.",
+    confirmText: "Continue Reading",
+    singleAction: true,
+    destructive: false,
+    onConfirm: () => setConfirmDialog(null),
+  });
 }, []);
 
   const handleSignin = useCallback(async () => {
@@ -326,6 +334,51 @@ const handleTermsDecline = useCallback(() => {
     }
   }, [studentID, password, loading, shakeAnimation]);
 
+  const handleForgotPassword = useCallback(async () => {
+    if (loading) return;
+
+    const trimmedID = studentID.trim();
+    if (!trimmedID) {
+      setError("Enter your ID above, then tap \"Forgot password?\"");
+      shakeAnimation();
+      return;
+    }
+
+    let email = trimmedID.toLowerCase();
+    if (!email.includes("@")) {
+      if (email.startsWith("teach-")) email += "@teacher.csap";
+      else if (email.startsWith("admin-")) email += "@admin.csap";
+      else email += "@student.csap";
+    }
+
+    try {
+      await sendPasswordResetEmail(auth, email);
+    } catch (err: any) {
+      if (err.code === "auth/invalid-email") {
+        setError("That ID doesn't look right — check it and try again.");
+        shakeAnimation();
+        return;
+      }
+      if (err.code === "auth/network-request-failed") {
+        setError("Network error. Check your connection and try again.");
+        shakeAnimation();
+        return;
+      }
+      // For auth/user-not-found and anything else, fall through to the same
+      // "sent" message below — don't reveal whether an account exists for
+      // this ID, so this can't be used to enumerate valid accounts.
+    }
+
+    setConfirmDialog({
+      title: "Check Your Email",
+      description: `If an account exists for ${email}, we've sent a password reset link to it.`,
+      confirmText: "OK",
+      singleAction: true,
+      destructive: false,
+      onConfirm: () => setConfirmDialog(null),
+    });
+  }, [studentID, loading, shakeAnimation]);
+
   return (
     <SafeAreaView edges={["left", "right", "bottom"]} style={styles.container}>
       <StatusBar style="light" backgroundColor="#5f0909" />
@@ -336,7 +389,10 @@ const handleTermsDecline = useCallback(() => {
         onDecline={handleTermsDecline}
       />
 
-      <View style={styles.keyboardView}>
+      <KeyboardAvoidingView
+        style={styles.keyboardView}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
         <ScrollView
           style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
@@ -430,6 +486,15 @@ const handleTermsDecline = useCallback(() => {
                   </TouchableOpacity>
                 </View>
 
+                <TouchableOpacity
+                  style={styles.forgotPasswordLink}
+                  onPress={handleForgotPassword}
+                  activeOpacity={0.7}
+                  disabled={loading}
+                >
+                  <Text style={styles.forgotPasswordText}>Forgot password?</Text>
+                </TouchableOpacity>
+
                 {error && (
                   <Animated.View style={styles.errorContainer}>
                     <Ionicons name="alert-circle" size={18} color="#ffb4ab" />
@@ -471,7 +536,18 @@ const handleTermsDecline = useCallback(() => {
             </View>
           </Animated.View>
         </ScrollView>
-      </View>
+      </KeyboardAvoidingView>
+      <ConfirmDialog
+        visible={!!confirmDialog}
+        title={confirmDialog?.title ?? ""}
+        description={confirmDialog?.description}
+        confirmText={confirmDialog?.confirmText}
+        cancelText={confirmDialog?.cancelText}
+        destructive={confirmDialog?.destructive ?? false}
+        singleAction={confirmDialog?.singleAction ?? false}
+        onConfirm={() => confirmDialog?.onConfirm()}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </SafeAreaView>
   );
 }
@@ -722,6 +798,18 @@ const styles = StyleSheet.create({
   },
   eyeIcon: {
     padding: 8,
+  },
+  forgotPasswordLink: {
+    alignSelf: "flex-end",
+    marginTop: -8,
+    marginBottom: 14,
+    paddingVertical: 4,
+    paddingHorizontal: 2,
+  },
+  forgotPasswordText: {
+    color: "#dfb85e",
+    fontSize: 13,
+    fontWeight: "600",
   },
   errorContainer: {
     flexDirection: "row",

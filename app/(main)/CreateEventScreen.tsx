@@ -1,11 +1,13 @@
 // CreateEventScreen.tsx
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker"; 
-import { useRouter } from "expo-router";
-import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { addDoc, collection, doc, getDoc, serverTimestamp, updateDoc } from "firebase/firestore";
 import React, { useCallback, useEffect, useState } from "react";
 import {
   Alert,
+  KeyboardAvoidingView,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -30,6 +32,9 @@ type CalendarEvent = {
 
 const CreateEventScreen = () => {
   const router = useRouter();
+  const { eventId } = useLocalSearchParams<{ eventId?: string | string[] }>();
+  const resolvedEventId = Array.isArray(eventId) ? eventId[0] : eventId;
+  const isEditMode = !!resolvedEventId;
   const [currentUserRole, setCurrentUserRole] = useState<
     UserRole | undefined
   >();
@@ -54,6 +59,33 @@ const CreateEventScreen = () => {
     };
     fetchUserRole();
   }, []);
+
+  useEffect(() => {
+    if (!resolvedEventId) return;
+    const loadEvent = async () => {
+      try {
+        const snap = await getDoc(doc(db, "events", resolvedEventId));
+        if (!snap.exists()) {
+          Alert.alert("Event Not Found", "The event no longer exists.", [{ text: "OK", onPress: () => router.back() }]);
+          return;
+        }
+        const data = snap.data() as CalendarEvent;
+        setForm({
+          title: data.title || "",
+          description: data.description || "",
+          date: data.date || new Date().toISOString().split("T")[0],
+          startTime: data.startTime,
+          endTime: data.endTime,
+          category: data.category || "morning",
+          notifyUsers: false,
+        });
+      } catch (error) {
+        console.error("Error loading event:", error);
+        Alert.alert("Error", "Failed to load event.", [{ text: "OK", onPress: () => router.back() }]);
+      }
+    };
+    loadEvent();
+  }, [resolvedEventId, router]);
 
   // Check if user can manage events
   const canManageEvents = useCallback(() => {
@@ -120,22 +152,30 @@ const CreateEventScreen = () => {
         currentUserData
           ? `${currentUserData.firstname} ${currentUserData.lastname}`.trim()
           : auth.currentUser.displayName || auth.currentUser.email || "Unknown";
-      const createdEventRef = await addDoc(collection(db, "events"), {
+      const eventPayload = {
         ...form,
-        createdBy: auth.currentUser.uid,
-        createdByName:
-          currentUserData
-            ? `${currentUserData.firstname} ${currentUserData.lastname}`.trim() ||
-              auth.currentUser.displayName ||
-              auth.currentUser.email ||
-              "Unknown"
-            : auth.currentUser.displayName || auth.currentUser.email || "Unknown",
-        createdAt: serverTimestamp(),
-      });
+        updatedAt: serverTimestamp(),
+      };
+      let createdEventRef: any = null;
+      if (isEditMode && resolvedEventId) {
+        await updateDoc(doc(db, "events", resolvedEventId), eventPayload);
+      } else {
+        createdEventRef = await addDoc(collection(db, "events"), {
+          ...form,
+          createdBy: auth.currentUser.uid,
+          createdByName:
+            currentUserData
+              ? `${currentUserData.firstname} ${currentUserData.lastname}`.trim() ||
+                auth.currentUser.displayName || auth.currentUser.email || "Unknown"
+              : auth.currentUser.displayName || auth.currentUser.email || "Unknown",
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
 
-      let successMessage = "Event created successfully!";
+      let successMessage = isEditMode ? "Event updated successfully!" : "Event created successfully!";
 
-      if (form.notifyUsers) {
+      if (form.notifyUsers && !isEditMode && createdEventRef) {
         const notificationResults = await Promise.allSettled([
           createBroadcastEventNotifications({
             actor: {
@@ -189,13 +229,16 @@ const CreateEventScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.contentShell}>
+      <KeyboardAvoidingView
+        style={styles.contentShell}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color="#7a3b2e" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Create Event</Text>
+        <Text style={styles.headerTitle}>{isEditMode ? "Edit Event" : "Create Event"}</Text>
         <View style={{ width: 24 }} />
       </View>
 
@@ -365,10 +408,10 @@ const CreateEventScreen = () => {
         disabled={loading}
       >
         <Text style={styles.submitButtonText}>
-          {loading ? "Creating..." : "Create Event"}
+          {loading ? (isEditMode ? "Saving..." : "Creating...") : (isEditMode ? "Save Changes" : "Create Event")}
         </Text>
       </TouchableOpacity>
-      </View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 };

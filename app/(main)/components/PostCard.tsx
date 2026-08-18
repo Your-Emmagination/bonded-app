@@ -1,6 +1,7 @@
 // components/PostCard.tsx
 
 import { resolveAvatarUri } from "@/utils/avatar";
+import ConfirmDialog from "./ConfirmDialog";
 import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import {
@@ -8,16 +9,17 @@ import {
   canViewAnonymousIdentity,
   getRoleColor,
   getRoleDisplayName,
+  getStudentDocIdFromAuthUser,
   getUserData,
   parseUserRole,
   UserData,
   UserRole,
 } from "@/utils/rbac";
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { useIsFocused } from "@react-navigation/native";
 import {
   ActivityIndicator,
-  Alert,
   Dimensions,
   Image,
   Linking,
@@ -30,10 +32,12 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import AiReplyCard from "./AiReplyCard";
-import CommentModal from "./CommentModal";
-import ExpandableText from "./ExpandableText";
-import VideoPostMedia from "./VideoPostMedia";
+import AiReplyCard from "../components/AiReplyCard";
+import CommentModal from "../components/CommentModal";
+import ExpandableText from "../components/ExpandableText";
+import VideoPostMedia from "../components/VideoPostMedia";
+import { doc, updateDoc, arrayUnion, arrayRemove } from "firebase/firestore";
+import { db, auth } from "@/Firebase_configure";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const AVATAR_COLUMN_WIDTH = 40;
@@ -61,6 +65,8 @@ type Post = {
   files?: FileAttachment[];
   link?: { url: string; title: string };
   username?: string;
+  authorName?: string;
+  displayName?: string;
   userId?: string;
   realUserId?: string;
   isAnonymous?: boolean;
@@ -69,6 +75,7 @@ type Post = {
   likeCount?: number;
   commentCount?: number;
   likedBy?: string[];
+  bookmarkedBy?: string[];
   role?: string;
   aiReply?: {
     text?: string;
@@ -78,13 +85,17 @@ type Post = {
   };
   pinnedAt?: any;
 };
-
+interface VideoPlayerProps {
+  videoUrl: string;
+  isPlaying: boolean;
+}
 interface PostCardProps {
   post: Post;
   isLiked: boolean;
   isHighlighted?: boolean;
   currentUserRole?: UserRole;
   currentUserId?: string;
+  onCommentPress?: (postId: string) => void;
   onLike: (postId: string, likedBy: string[]) => void;
   onProfileClick: (userId?: string) => void;
   onTagClick: (taggedUserId: string) => void;
@@ -95,7 +106,21 @@ interface PostCardProps {
   canPin?: boolean;
   onTogglePin?: (postId: string, shouldPin: boolean) => void;
   onDelete?: (postId: string) => void | Promise<void>;
+  onEdit?: (postId: string) => void;
 }
+
+/* Helper Component for Video Playback Focus Handling */
+const VideoMediaItem = ({ url, width }: { url: string; width: number }) => {
+  const isFocused = useIsFocused();
+
+  return (
+    <VideoPostMedia
+      uri={url}
+      width={width}
+      isPlaying={isFocused}
+    />
+  );
+};
 
 const PostCard = React.memo<PostCardProps>(({
   post,
@@ -113,12 +138,31 @@ const PostCard = React.memo<PostCardProps>(({
   canPin = false,
   onTogglePin,
   onDelete,
+  onEdit,
 }) => {
   const [showCommentsModal, setShowCommentsModal] = useState(false);
   const [showLikesModal, setShowLikesModal] = useState(false);
   const [authorData, setAuthorData] = useState<UserData | null>(null);
   const [authorLoading, setAuthorLoading] = useState(true);
   const [activeImageIndex, setActiveImageIndex] = useState(0);
+
+  // Bookmark State
+  const activeUserId = currentUserId || auth.currentUser?.uid;
+  const [isBookmarked, setIsBookmarked] = useState<boolean>(
+    activeUserId ? post.bookmarkedBy?.includes(activeUserId) ?? false : false
+  );
+  // Guards against rapid double-taps firing two toggle requests before the
+  // first one resolves (which could desync isBookmarked from Firestore).
+  const isBookmarkingRef = useRef(false);
+
+  // Keep isBookmarked in sync when the post data refreshes (pull-to-refresh,
+  // remount, bookmarking the same post from elsewhere, etc). Previously this
+  // only ran once on mount, so bookmarkedBy changes after that were ignored.
+  useEffect(() => {
+    setIsBookmarked(
+      activeUserId ? post.bookmarkedBy?.includes(activeUserId) ?? false : false
+    );
+  }, [activeUserId, post.bookmarkedBy]);
 
   useEffect(() => {
     let isActive = true;
@@ -179,6 +223,52 @@ const PostCard = React.memo<PostCardProps>(({
     }
   };
 
+  const handleToggleBookmark = async () => {
+    if (!activeUserId) return;
+    // Ignore taps while a previous toggle is still in flight — otherwise a
+    // fast double-tap fires two requests before the first resolves, which
+    // can leave isBookmarked out of sync with what actually got saved.
+    if (isBookmarkingRef.current) return;
+    isBookmarkingRef.current = true;
+
+    // This app keys profile documents by "students/{studentId}" (uid or
+    // email-prefix) — there is no "users" collection, so writing there was
+    // always rejected by security rules. Resolve the same doc id every
+    // other screen already uses for the signed-in user's own profile.
+    const studentDocId = getStudentDocIdFromAuthUser(auth.currentUser) || activeUserId;
+
+    const previousState = isBookmarked;
+    setIsBookmarked(!previousState);
+
+    try {
+      const studentRef = doc(db, "students", studentDocId);
+      const postRef = doc(db, "posts", post.id);
+
+      // Write to BOTH sides: the owner's own bookmarkedPostIds (in case
+      // other screens, like "Saved Posts", read from there) and the post's
+      // own bookmarkedBy (which is what this component reads to decide the
+      // icon state). Previously only one side was written, so the field
+      // this component actually reads never updated.
+      await Promise.all([
+        updateDoc(studentRef, {
+          bookmarkedPostIds: previousState
+            ? arrayRemove(post.id)
+            : arrayUnion(post.id),
+        }),
+        updateDoc(postRef, {
+          bookmarkedBy: previousState
+            ? arrayRemove(activeUserId)
+            : arrayUnion(activeUserId),
+        }),
+      ]);
+    } catch (error) {
+      console.error("Error updating bookmark:", error);
+      setIsBookmarked(previousState);
+    } finally {
+      isBookmarkingRef.current = false;
+    }
+  };
+
   const taggedUsers = post.taggedUsers ?? [];
 
   return (
@@ -205,6 +295,7 @@ const PostCard = React.memo<PostCardProps>(({
             canPin={canPin}
             onTogglePin={onTogglePin}
             onDelete={onDelete}
+            onEdit={onEdit}
           />
 
           {post.content && (
@@ -238,11 +329,11 @@ const PostCard = React.memo<PostCardProps>(({
           )}
 
           {videoFiles.length > 0 && (
-            <View>
+            <View style={styles.mediaContainer}>
               {videoFiles.map((video, index) => (
-                <VideoPostMedia
+                <VideoMediaItem
                   key={`${video.url}-${index}`}
-                  uri={video.url}
+                  url={video.url}
                   width={IMAGE_WIDTH}
                 />
               ))}
@@ -260,7 +351,6 @@ const PostCard = React.memo<PostCardProps>(({
                 overScrollMode="never"
                 onScroll={handleScroll}
                 scrollEventThrottle={16}
-                // Optional: Snap alignment optimizations
                 snapToAlignment="center"
                 disableIntervalMomentum={true}
               >
@@ -327,11 +417,14 @@ const PostCard = React.memo<PostCardProps>(({
               <Ionicons name="chatbubble-outline" size={19} color="#956a5f" />
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.actionButton}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={handleToggleBookmark}
+            >
               <MaterialIcons
-                name="bookmark-outline"
+                name={isBookmarked ? "bookmark" : "bookmark-outline"}
                 size={21}
-                color="#956a5f"
+                color={isBookmarked ? "#a61f1f" : "#956a5f"}
               />
             </TouchableOpacity>
           </View>
@@ -409,7 +502,6 @@ const PostCard = React.memo<PostCardProps>(({
 });
 PostCard.displayName = "PostCard";
 
-// eslint-disable-next-line react/display-name
 const LikeUserRow = React.memo(
   ({
     userId,
@@ -457,6 +549,7 @@ const LikeUserRow = React.memo(
     );
   },
 );
+LikeUserRow.displayName = "LikeUserRow";
 
 const TaggedUsersDisplay = ({
   taggedUsers,
@@ -557,6 +650,7 @@ const PostAvatar: React.FC<{
           <Text style={[styles.avatarText, { color: roleColor }]}>
             {(
               authorData?.firstname?.[0] ||
+              post.authorName?.[0] ||
               post.username?.[0] ||
               "A"
             ).toUpperCase()}
@@ -580,6 +674,7 @@ const PostHeader: React.FC<{
   canPin?: boolean;
   onTogglePin?: (postId: string, shouldPin: boolean) => void;
   onDelete?: (postId: string) => void | Promise<void>;
+  onEdit?: (postId: string) => void;
 }> = ({
   post,
   authorData,
@@ -590,10 +685,16 @@ const PostHeader: React.FC<{
   canPin = false,
   onTogglePin,
   onDelete,
+  onEdit,
 }) => {
   const [revealed, setRevealed] = useState(false);
+  const [showPostActions, setShowPostActions] = useState(false);
+
   const authorUserId = post.realUserId || post.userId;
-  const authorRole = parseUserRole(authorData?.role) ?? parseUserRole(post.role);
+
+  const authorRole =
+    parseUserRole(authorData?.role) ?? parseUserRole(post.role);
+
   const roleColor = getRoleColor(authorRole || "student");
 
   const canSeeIdentity = canViewAnonymousIdentity(
@@ -602,8 +703,12 @@ const PostHeader: React.FC<{
     post.isAnonymous ?? false,
   );
 
-  const canShowEyeIcon = (post.isAnonymous ?? true) && canSeeIdentity;
-  const isIdentityVisible = !post.isAnonymous || (revealed && canSeeIdentity);
+  const canShowEyeIcon =
+    (post.isAnonymous ?? true) && canSeeIdentity;
+
+  const isIdentityVisible =
+    !post.isAnonymous || (revealed && canSeeIdentity);
+
   const canDelete = canDeleteContent({
     viewerRole: currentUserRole,
     viewerUserId: currentUserId,
@@ -611,21 +716,39 @@ const PostHeader: React.FC<{
     authorRole,
   });
 
-  const displayName = isIdentityVisible
-    ? authorData
-      ? `${authorData.firstname} ${authorData.lastname}`
-      : post.username || "User"
-    : "Anonymous";
+  const getAuthorDisplayName = () => {
+    if (!isIdentityVisible) {
+      return "Anonymous";
+    }
+
+    const firstName = authorData?.firstname?.trim() || "";
+    const lastName = authorData?.lastname?.trim() || "";
+
+    const fullName = `${firstName} ${lastName}`.trim();
+
+    return (
+      fullName ||
+      post.authorName?.trim() ||
+      post.username?.trim() ||
+      "User"
+    );
+  };
+
+  const displayName = getAuthorDisplayName();
 
   const canClickProfile =
     isIdentityVisible &&
     !!authorData?.userId &&
     authorData.userId !== "anonymous";
+
   const isPinned = !!post.pinnedAt;
-  const canOpenOptions = canPin || canDelete;
+
+  const canEdit = authorUserId === currentUserId && !!onEdit;
+  const canOpenOptions = canPin || canDelete || canEdit;
 
   const handleProfileClick = () => {
     if (!canClickProfile) return;
+
     if (authorData?.userId === currentUserId) {
       onProfileClick("self");
     } else {
@@ -640,32 +763,26 @@ const PostHeader: React.FC<{
 
   const handleMorePress = () => {
     if (!canOpenOptions) return;
+    setShowPostActions(true);
+  };
 
-    const options: {
-      text: string;
-      style?: "cancel" | "default" | "destructive";
-      onPress?: () => void;
-    }[] = [];
+  const closePostActions = () => {
+    setShowPostActions(false);
+  };
 
-    if (canPin && onTogglePin) {
-      options.push({
-        text: isPinned ? "Unpin Post" : "Pin Post",
-        onPress: () => onTogglePin(post.id, !isPinned),
-      });
-    }
+  const handleEditPost = () => {
+    closePostActions();
+    onEdit?.(post.id);
+  };
 
-    if (canDelete && onDelete) {
-      options.push({
-        text: "Delete",
-        style: "destructive",
-        onPress: () => onDelete(post.id),
-      });
-    }
+  const handleTogglePin = () => {
+    closePostActions();
+    onTogglePin?.(post.id, !isPinned);
+  };
 
-    Alert.alert("Post Options", undefined, [
-      ...options,
-      { text: "Cancel", style: "cancel" },
-    ]);
+  const handleDeletePost = () => {
+    closePostActions();
+    onDelete?.(post.id);
   };
 
   return (
@@ -676,21 +793,33 @@ const PostHeader: React.FC<{
             onPress={handleProfileClick}
             disabled={!canClickProfile}
           >
-            <Text style={styles.username}>{displayName}</Text>
+            <Text style={styles.username}>
+              {displayName}
+            </Text>
           </TouchableOpacity>
 
-          {isIdentityVisible && authorRole && authorRole !== "student" && (
-            <View
-              style={[
-                styles.roleChip,
-                { backgroundColor: roleColor + "20", borderColor: roleColor },
-              ]}
-            >
-              <Text style={[styles.roleChipText, { color: roleColor }]}>
-                {getRoleDisplayName(authorRole)}
-              </Text>
-            </View>
-          )}
+          {isIdentityVisible &&
+            authorRole &&
+            authorRole !== "student" && (
+              <View
+                style={[
+                  styles.roleChip,
+                  {
+                    backgroundColor: roleColor + "20",
+                    borderColor: roleColor,
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.roleChipText,
+                    { color: roleColor },
+                  ]}
+                >
+                  {getRoleDisplayName(authorRole)}
+                </Text>
+              </View>
+            )}
 
           {canShowEyeIcon && (
             <TouchableOpacity
@@ -698,9 +827,17 @@ const PostHeader: React.FC<{
               style={styles.eyeButton}
             >
               <Ionicons
-                name={revealed ? "eye-off-outline" : "eye-outline"}
+                name={
+                  revealed
+                    ? "eye-off-outline"
+                    : "eye-outline"
+                }
                 size={14}
-                color={revealed ? "#a61f1f" : "#956a5f"}
+                color={
+                  revealed
+                    ? "#a61f1f"
+                    : "#956a5f"
+                }
               />
             </TouchableOpacity>
           )}
@@ -709,23 +846,128 @@ const PostHeader: React.FC<{
         <View style={styles.headerRight}>
           {isPinned && (
             <View style={styles.pinnedBadge}>
-              <Ionicons name="pin" size={11} color="#fffaf7" />
-              <Text style={styles.pinnedBadgeText}>Pinned</Text>
+              <Ionicons
+                name="pin"
+                size={11}
+                color="#fffaf7"
+              />
+              <Text style={styles.pinnedBadgeText}>
+                Pinned
+              </Text>
             </View>
           )}
+
           {canOpenOptions && (
             <TouchableOpacity
               style={styles.moreButton}
               activeOpacity={0.7}
               onPress={handleMorePress}
             >
-              <Ionicons name="ellipsis-horizontal" size={18} color="#8f6a60" />
+              <Ionicons
+                name="ellipsis-horizontal"
+                size={18}
+                color="#8f6a60"
+              />
             </TouchableOpacity>
           )}
         </View>
       </View>
 
-      <Text style={styles.timestamp}>{getTimeAgo(post.createdAt)}</Text>
+      <Text style={styles.timestamp}>
+        {getTimeAgo(post.createdAt)}
+      </Text>
+
+      <Modal
+        visible={showPostActions}
+        transparent
+        animationType="fade"
+        onRequestClose={closePostActions}
+      >
+        <TouchableOpacity
+          style={styles.actionMenuOverlay}
+          activeOpacity={1}
+          onPress={closePostActions}
+        >
+          <TouchableOpacity
+            activeOpacity={1}
+            style={styles.actionMenuContainer}
+            onPress={(event) => event.stopPropagation()}
+          >
+            <View style={styles.actionMenuHeader}>
+              <Text style={styles.actionMenuTitle}>Post Actions</Text>
+              <TouchableOpacity
+                style={styles.actionMenuCloseButton}
+                onPress={closePostActions}
+                accessibilityLabel="Close post actions"
+              >
+                <Ionicons name="close" size={20} color="#8f6a60" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.actionMenuDivider} />
+
+            {canEdit && (
+              <TouchableOpacity
+                style={styles.actionMenuItem}
+                activeOpacity={0.75}
+                onPress={handleEditPost}
+              >
+                <View style={styles.actionMenuItemIcon}>
+                  <Ionicons name="create-outline" size={20} color="#8f6a60" />
+                </View>
+                <Text style={styles.actionMenuItemText}>Edit Post</Text>
+              </TouchableOpacity>
+            )}
+
+            {canPin && onTogglePin && (
+              <TouchableOpacity
+                style={styles.actionMenuItem}
+                activeOpacity={0.75}
+                onPress={handleTogglePin}
+              >
+                <View style={styles.actionMenuItemIcon}>
+                  <Ionicons
+                    name={isPinned ? "pin" : "pin-outline"}
+                    size={20}
+                    color="#8f6a60"
+                  />
+                </View>
+                <Text style={styles.actionMenuItemText}>
+                  {isPinned ? "Unpin Post" : "Pin Post"}
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {canDelete && onDelete && (
+              <TouchableOpacity
+                style={styles.actionMenuItem}
+                activeOpacity={0.75}
+                onPress={handleDeletePost}
+              >
+                <View style={[styles.actionMenuItemIcon, styles.deleteActionIcon]}>
+                  <Ionicons name="trash-outline" size={20} color="#a61f1f" />
+                </View>
+                <Text style={[styles.actionMenuItemText, styles.deleteActionText]}>
+                  Delete Post
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            <View style={styles.actionMenuDivider} />
+
+            <TouchableOpacity
+              style={[styles.actionMenuItem, styles.cancelActionItem]}
+              activeOpacity={0.75}
+              onPress={closePostActions}
+            >
+              <View style={styles.actionMenuItemIcon}>
+                <Ionicons name="close-outline" size={20} color="#8f6a60" />
+              </View>
+              <Text style={styles.actionMenuItemText}>Cancel</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 };
@@ -780,28 +1022,42 @@ const FilesList: React.FC<{
 /* ==================== LINK PREVIEW ==================== */
 const LinkPreview: React.FC<{ link: { url: string; title: string } }> = ({
   link,
-}) => (
-  <TouchableOpacity
-    style={styles.linkPreview}
-    onPress={() =>
-      Linking.openURL(link.url).catch(() =>
-        Alert.alert("Error", "Cannot open link"),
-      )
-    }
-    activeOpacity={0.7}
-  >
-    <Ionicons name="link" size={14} color="#c28724" />
-    <View style={{ flex: 1, marginLeft: 6 }}>
-      <Text style={styles.linkTitle} numberOfLines={1}>
-        {link.title}
-      </Text>
-      <Text style={styles.linkUrl} numberOfLines={1}>
-        {link.url}
-      </Text>
-    </View>
-    <Ionicons name="open-outline" size={13} color="#956a5f" />
-  </TouchableOpacity>
-);
+}) => {
+  const [linkError, setLinkError] = useState(false);
+
+  return (
+    <>
+      <TouchableOpacity
+        style={styles.linkPreview}
+        onPress={() =>
+          Linking.openURL(link.url).catch(() => setLinkError(true))
+        }
+        activeOpacity={0.7}
+      >
+        <Ionicons name="link" size={14} color="#c28724" />
+        <View style={{ flex: 1, marginLeft: 6 }}>
+          <Text style={styles.linkTitle} numberOfLines={1}>
+            {link.title}
+          </Text>
+          <Text style={styles.linkUrl} numberOfLines={1}>
+            {link.url}
+          </Text>
+        </View>
+        <Ionicons name="open-outline" size={13} color="#956a5f" />
+      </TouchableOpacity>
+      <ConfirmDialog
+        visible={linkError}
+        title="Error"
+        description="Cannot open link"
+        confirmText="OK"
+        singleAction
+        destructive
+        onConfirm={() => setLinkError(false)}
+        onCancel={() => setLinkError(false)}
+      />
+    </>
+  );
+};
 
 const styles = StyleSheet.create({
   postCard: {
@@ -997,6 +1253,82 @@ const styles = StyleSheet.create({
     paddingBottom: 4,
     alignSelf: "flex-start",
   },
+  actionMenuOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(35, 18, 14, 0.42)",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 24,
+  },
+  actionMenuContainer: {
+    width: "100%",
+    maxWidth: 360,
+    backgroundColor: "#fffaf7",
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#ead8cf",
+    overflow: "hidden",
+    shadowColor: "#4f1c17",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 14,
+    elevation: 8,
+  },
+  actionMenuHeader: {
+    minHeight: 56,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 18,
+  },
+  actionMenuTitle: {
+    color: "#4f1c17",
+    fontSize: 17,
+    fontWeight: "700",
+  },
+  actionMenuCloseButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#f8eee8",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  actionMenuDivider: {
+    height: 1,
+    backgroundColor: "#ead8cf",
+  },
+  actionMenuItem: {
+    minHeight: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 12,
+  },
+  actionMenuItemIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: "#f8eee8",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  actionMenuItemText: {
+    flex: 1,
+    color: "#4f1c17",
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  deleteActionIcon: {
+    backgroundColor: "#fbe9e5",
+  },
+  deleteActionText: {
+    color: "#a61f1f",
+  },
+  cancelActionItem: {
+    paddingBottom: 12,
+  },
   pinnedBadge: {
     flexDirection: "row",
     alignItems: "center",
@@ -1120,12 +1452,11 @@ const styles = StyleSheet.create({
   linkTitle: {
     color: "#4f1c17",
     fontSize: 13,
-    fontWeight: "600",
-    marginBottom: 2,
   },
   linkUrl: {
     color: "#8f6a60",
-    fontSize: 12,
+    fontSize: 11.5,
+    marginTop: 1,
   },
 });
 

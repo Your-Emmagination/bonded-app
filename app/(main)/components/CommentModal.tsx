@@ -5,6 +5,7 @@ import {
   Text,
   Modal,
   TouchableOpacity,
+  TextInput,
   StyleSheet,
   FlatList,
   Image,
@@ -87,6 +88,8 @@ import ImageZoomViewer from "./ImageZoomViewer";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
+import ConfirmDialog from "./ConfirmDialog";
+import ContentActionMenu from "./ContentActionMenu";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const KEYBOARD_COMPOSER_LIFT = Platform.OS === "android" ? 14 : 8;
@@ -476,6 +479,19 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [isNavigating, setIsNavigating] = useState(false); 
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [editingComment, setEditingComment] = useState<Comment | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const [savingCommentEdit, setSavingCommentEdit] = useState(false);
+  const [commentActionMenu, setCommentActionMenu] = useState<Comment | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
   const relativeTimeNow = useRelativeTimeNow();
   const composerBottom = useRef(new Animated.Value(0)).current;
 
@@ -801,10 +817,14 @@ const CommentModal: React.FC<CommentModalProps> = ({
 
     if (!shouldTriggerAi || moderationDecision.status === "pending") {
       if (moderationDecision.status === "pending") {
-        Alert.alert(
-          "Comment Pending Review",
-          "This comment was flagged and is waiting for moderator approval.",
-        );
+        setConfirmDialog({
+          title: "Comment Pending Review",
+          description: "This comment was flagged and is waiting for moderator approval.",
+          confirmText: "OK",
+          singleAction: true,
+          destructive: false,
+          onConfirm: () => setConfirmDialog(null),
+        });
       }
       return;
     }
@@ -871,7 +891,14 @@ const CommentModal: React.FC<CommentModalProps> = ({
       await updateDoc(commentRef, {
         aiReply: deleteField(),
       }).catch(() => undefined);
-      Alert.alert("AI Unavailable", getAiErrorMessage(error));
+      setConfirmDialog({
+        title: "AI Unavailable",
+        description: getAiErrorMessage(error),
+        confirmText: "OK",
+        singleAction: true,
+        destructive: true,
+        onConfirm: () => setConfirmDialog(null),
+      });
     }
   };
 
@@ -950,74 +977,91 @@ const CommentModal: React.FC<CommentModalProps> = ({
 
   const handleDeleteComment = useCallback(
     async (comment: Comment) => {
-      Alert.alert("Delete Comment", "This will permanently remove the comment and its replies.", [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              const repliesSnapshot = await getDocs(
-                query(collection(db, "replies"), where("commentId", "==", comment.id)),
-              );
-
-              await Promise.all(repliesSnapshot.docs.map((replyDoc) => deleteDoc(replyDoc.ref)));
-              await deleteDoc(doc(db, "comments", comment.id));
-              await decrementParentCommentCount();
-
-              if (selectedComment?.id === comment.id) {
-                setReplyModalVisible(false);
-                setSelectedComment(null);
-              }
-            } catch (error) {
-              console.error("Error deleting comment:", error);
-              Alert.alert("Error", "Failed to delete comment.");
+      setConfirmDialog({
+        title: "Delete Comment?",
+        description: "This will permanently remove the comment and its replies.",
+        confirmText: "Delete",
+        destructive: true,
+        onConfirm: async () => {
+          try {
+            const repliesSnapshot = await getDocs(
+              query(collection(db, "replies"), where("commentId", "==", comment.id)),
+            );
+            await Promise.all(repliesSnapshot.docs.map((replyDoc) => deleteDoc(replyDoc.ref)));
+            await deleteDoc(doc(db, "comments", comment.id));
+            await decrementParentCommentCount();
+            if (selectedComment?.id === comment.id) {
+              setReplyModalVisible(false);
+              setSelectedComment(null);
             }
-          },
+          } catch (error) {
+            console.error("Error deleting comment:", error);
+            setConfirmDialog({ title: "Error", description: "Failed to delete comment.", confirmText: "OK", singleAction: true, destructive: true, onConfirm: () => setConfirmDialog(null) });
+            return;
+          }
+          setConfirmDialog(null);
         },
-      ]);
+      });
     },
     [decrementParentCommentCount, selectedComment?.id],
   );
 
   const handleCommentOptions = useCallback(
-    (comment: Comment, authorRole?: UserRole) => {
-      const authorUserId = comment.realUserId || comment.userId;
-      const viewerRole = parseUserRole(user?.role);
-      const isOwner = authorUserId === user?.uid;
-      const canDelete = canDeleteContent({
-        viewerRole,
-        viewerUserId: user?.uid,
-        authorUserId,
-        authorRole,
-      });
-
-      const options: {
-        text: string;
-        style?: "cancel" | "default" | "destructive";
-        onPress?: () => void;
-      }[] = [
-        {
-          text: "Reply",
-          onPress: () => handleReply(comment),
-        },
-      ];
-
-      if (canDelete) {
-        options.push({
-          text: "Delete",
-          style: "destructive",
-          onPress: () => handleDeleteComment(comment),
-        });
-      }
-
-      Alert.alert("Comment Options", undefined, [
-        ...options,
-        { text: "Cancel", style: "cancel" },
-      ]);
+    (comment: Comment, _authorRole?: UserRole) => {
+      setCommentActionMenu(comment);
     },
-    [handleDeleteComment, user?.role, user?.uid],
+    [],
   );
+
+  const getCommentActionItems = useCallback((comment: Comment) => {
+    const authorUserId = comment.realUserId || comment.userId;
+    const viewerRole = parseUserRole(user?.role);
+    const authorRole = parseUserRole(comment.role);
+    const isOwner = authorUserId === user?.uid;
+    const canDelete = canDeleteContent({
+      viewerRole,
+      viewerUserId: user?.uid,
+      authorUserId,
+      authorRole,
+    });
+
+    const actions: { label: string; icon: keyof typeof Ionicons.glyphMap; onPress: () => void; destructive?: boolean }[] = [
+      {
+        label: "Reply",
+        icon: "chatbubble-outline",
+        onPress: () => {
+          setCommentActionMenu(null);
+          handleReply(comment);
+        },
+      },
+    ];
+
+    if (isOwner) {
+      actions.push({
+        label: "Edit Comment",
+        icon: "create-outline",
+        onPress: () => {
+          setCommentActionMenu(null);
+          setEditingComment(comment);
+          setEditingText(comment.text);
+        },
+      });
+    }
+
+    if (canDelete) {
+      actions.push({
+        label: "Delete Comment",
+        icon: "trash-outline",
+        destructive: true,
+        onPress: () => {
+          setCommentActionMenu(null);
+          handleDeleteComment(comment);
+        },
+      });
+    }
+
+    return actions;
+  }, [handleDeleteComment, handleReply, user?.role, user?.uid]);
 
   const handleProfileClick = useCallback((comment: Comment, profileDocId?: string | null) => {
     const isCommentAnonymous = comment.isAnonymous ?? true;
@@ -1079,9 +1123,23 @@ const CommentModal: React.FC<CommentModalProps> = ({
     Linking.canOpenURL(url)
       .then((supported) => {
         if (supported) Linking.openURL(url);
-        else Alert.alert("Invalid Link", "Cannot open this URL");
+        else setConfirmDialog({
+          title: "Invalid Link",
+          description: "Cannot open this URL",
+          confirmText: "OK",
+          singleAction: true,
+          destructive: true,
+          onConfirm: () => setConfirmDialog(null),
+        });
       })
-      .catch(() => Alert.alert("Error", "Failed to open link"));
+      .catch(() => setConfirmDialog({
+        title: "Error",
+        description: "Failed to open link",
+        confirmText: "OK",
+        singleAction: true,
+        destructive: true,
+        onConfirm: () => setConfirmDialog(null),
+      }));
   };
 
   const handleFilePress = async (url: string, filename: string) => {
@@ -1090,11 +1148,25 @@ const CommentModal: React.FC<CommentModalProps> = ({
       if (supported) {
         await Linking.openURL(url);
       } else {
-        Alert.alert("Error", "Cannot open this file");
+        setConfirmDialog({
+          title: "Error",
+          description: "Cannot open this file",
+          confirmText: "OK",
+          singleAction: true,
+          destructive: true,
+          onConfirm: () => setConfirmDialog(null),
+        });
       }
     } catch (error) {
       console.error("Error opening file:", error);
-      Alert.alert("Error", "Failed to open file");
+      setConfirmDialog({
+        title: "Error",
+        description: "Failed to open file",
+        confirmText: "OK",
+        singleAction: true,
+        destructive: true,
+        onConfirm: () => setConfirmDialog(null),
+      });
     }
   };
 
@@ -1324,11 +1396,99 @@ const CommentModal: React.FC<CommentModalProps> = ({
   visible={imageViewerVisible}
   onClose={() => setImageViewerVisible(false)}
 />
+
+<ContentActionMenu
+  visible={!!commentActionMenu}
+  title="Comment Actions"
+  actions={commentActionMenu ? getCommentActionItems(commentActionMenu) : []}
+  onClose={() => setCommentActionMenu(null)}
+/>
+
+<ConfirmDialog
+  visible={!!confirmDialog}
+  title={confirmDialog?.title ?? ""}
+  description={confirmDialog?.description}
+  confirmText={confirmDialog?.confirmText ?? "Confirm"}
+  cancelText={confirmDialog?.cancelText}
+  destructive={confirmDialog?.destructive ?? true}
+  singleAction={confirmDialog?.singleAction ?? false}
+  onConfirm={() => confirmDialog?.onConfirm()}
+  onCancel={() => setConfirmDialog(null)}
+/>
+
+<Modal visible={!!editingComment} transparent animationType="fade" onRequestClose={() => !savingCommentEdit && setEditingComment(null)}>
+  <View style={styles.editOverlay}>
+    <View style={styles.editCard}>
+      <Text style={styles.editTitle}>Edit Comment</Text>
+      <TextInput
+        style={styles.editInput}
+        value={editingText}
+        onChangeText={setEditingText}
+        multiline
+        autoFocus
+        placeholder="Write your comment..."
+        placeholderTextColor="#b88f87"
+        editable={!savingCommentEdit}
+      />
+      <View style={styles.editButtonRow}>
+        <TouchableOpacity style={styles.editCancelButton} onPress={() => setEditingComment(null)} disabled={savingCommentEdit}>
+          <Text style={styles.editCancelText}>Cancel</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.editSaveButton}
+          disabled={savingCommentEdit}
+          onPress={async () => {
+            const nextText = editingText.trim();
+            if (!nextText || !editingComment) {
+              setConfirmDialog({
+                title: "Invalid Comment",
+                description: "Comment text cannot be empty.",
+                confirmText: "OK",
+                singleAction: true,
+                destructive: true,
+                onConfirm: () => setConfirmDialog(null),
+              });
+              return;
+            }
+            setSavingCommentEdit(true);
+            try {
+              await updateDoc(doc(db, "comments", editingComment.id), { text: nextText, updatedAt: serverTimestamp() });
+              setEditingComment(null);
+            } catch (error) {
+              console.error("Error editing comment:", error);
+              setConfirmDialog({
+                title: "Error",
+                description: "Failed to update comment.",
+                confirmText: "OK",
+                singleAction: true,
+                destructive: true,
+                onConfirm: () => setConfirmDialog(null),
+              });
+            } finally {
+              setSavingCommentEdit(false);
+            }
+          }}
+        >
+          {savingCommentEdit ? <ActivityIndicator color="#fff" /> : <Text style={styles.editSaveText}>Save</Text>}
+        </TouchableOpacity>
+      </View>
+    </View>
+  </View>
+</Modal>
     </>
   );
 };
 
 const styles = StyleSheet.create({
+  editOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "center", padding: 24 },
+  editCard: { backgroundColor: "#fffaf7", borderRadius: 18, padding: 18, borderWidth: 1, borderColor: "#eadbd4" },
+  editTitle: { color: "#4d1b17", fontSize: 18, fontWeight: "700", marginBottom: 12 },
+  editInput: { minHeight: 120, maxHeight: 220, backgroundColor: "#f6f1ed", borderWidth: 1, borderColor: "#eadbd4", borderRadius: 12, padding: 12, color: "#4d1b17", textAlignVertical: "top" },
+  editButtonRow: { flexDirection: "row", gap: 10, marginTop: 14 },
+  editCancelButton: { flex: 1, minHeight: 44, borderRadius: 12, backgroundColor: "#f0e7e2", alignItems: "center", justifyContent: "center" },
+  editCancelText: { color: "#7a3b2e", fontWeight: "700" },
+  editSaveButton: { flex: 1, minHeight: 44, borderRadius: 12, backgroundColor: "#7a0020", alignItems: "center", justifyContent: "center" },
+  editSaveText: { color: "#fff", fontWeight: "700" },
   modalOverlay: { flex: 1 },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.82)" },
 modalContainer: {

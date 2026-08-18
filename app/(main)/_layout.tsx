@@ -62,6 +62,20 @@ export default function MainLayout() {
         }}
       />
       <Stack.Screen
+        name="BookmarksScreen"
+        options={{
+          animation: "fade",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
+      />
+      <Stack.Screen
+        name="ReportManagementScreen"
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
+      />
+      <Stack.Screen
         name="ServerChannelScreen"
         options={{
           animation: "none",

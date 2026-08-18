@@ -11,7 +11,6 @@ import {
 } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
 import {
-  Alert,
   FlatList,
   Modal,
   ScrollView,
@@ -20,6 +19,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import ConfirmDialog from "./components/ConfirmDialog";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
 import { getUserData, UserRole } from "@/utils/rbac";
@@ -49,6 +49,15 @@ const EventCalendarScreen = () => {
   const { eventId } = useLocalSearchParams<{ eventId?: string | string[] }>();
   const resolvedEventId = Array.isArray(eventId) ? eventId[0] : eventId;
   const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
   const [groupedEvents, setGroupedEvents] = useState<GroupedEvents>({});
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<CalendarEvent[]>([]);
@@ -145,22 +154,36 @@ const EventCalendarScreen = () => {
   };
 
   const handleDeleteEvent = async (eventId: string) => {
-    Alert.alert("Delete Event", "Are you sure you want to delete this event?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            await deleteDoc(doc(db, "events", eventId));
-            Alert.alert("Success", "Event deleted successfully");
-          } catch (error) {
-            console.error("Error deleting event:", error);
-            Alert.alert("Error", "Failed to delete event");
-          }
-        },
+    setConfirmDialog({
+      title: "Delete Event",
+      description: "Are you sure you want to delete this event?",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: async () => {
+        try {
+          await deleteDoc(doc(db, "events", eventId));
+          setConfirmDialog({
+            title: "Success",
+            description: "Event deleted successfully",
+            confirmText: "OK",
+            singleAction: true,
+            destructive: false,
+            onConfirm: () => setConfirmDialog(null),
+          });
+        } catch (error) {
+          console.error("Error deleting event:", error);
+          setConfirmDialog({
+            title: "Error",
+            description: "Failed to delete event",
+            confirmText: "OK",
+            singleAction: true,
+            destructive: true,
+            onConfirm: () => setConfirmDialog(null),
+          });
+        }
       },
-    ]);
+    });
   };
 
   const canManageEvents = () => {
@@ -315,15 +338,19 @@ const EventCalendarScreen = () => {
                   <View style={styles.eventHeader}>
                     <Text style={styles.eventCardTitle}>{event.title}</Text>
                     {canManageEvents() && (
-                      <TouchableOpacity
-                        onPress={() => handleDeleteEvent(event.id)}
-                      >
-                        <Ionicons
-                          name="trash-outline"
-                          size={20}
-                          color="#e0a53d"
-                        />
-                      </TouchableOpacity>
+                      <View style={{ flexDirection: "row", gap: 12 }}>
+                        <TouchableOpacity
+                          onPress={() => {
+                            setModalVisible(false);
+                            router.push({ pathname: "/CreateEventScreen", params: { eventId: event.id } });
+                          }}
+                        >
+                          <Ionicons name="create-outline" size={20} color="#7a3b2e" />
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => handleDeleteEvent(event.id)}>
+                          <Ionicons name="trash-outline" size={20} color="#e0a53d" />
+                        </TouchableOpacity>
+                      </View>
                     )}
                   </View>
 
@@ -375,6 +402,17 @@ const EventCalendarScreen = () => {
         </View>
       </Modal>
       </View>
+      <ConfirmDialog
+        visible={!!confirmDialog}
+        title={confirmDialog?.title ?? ""}
+        description={confirmDialog?.description}
+        confirmText={confirmDialog?.confirmText}
+        cancelText={confirmDialog?.cancelText}
+        destructive={confirmDialog?.destructive ?? false}
+        singleAction={confirmDialog?.singleAction ?? false}
+        onConfirm={() => confirmDialog?.onConfirm()}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </SafeAreaView>
   );
 };

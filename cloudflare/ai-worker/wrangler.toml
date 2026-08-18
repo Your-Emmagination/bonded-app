@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2026-04-30"
 
 [vars]
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL = "openai/gpt-oss-20b"
 ALLOWED_ORIGIN = "*"
 
 [observability.logs]

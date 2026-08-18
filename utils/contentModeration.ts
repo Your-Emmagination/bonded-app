@@ -1,6 +1,6 @@
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-import { getAiWorkerUrl } from "./aiConfig";
+import { getAiWorkerUrl, getMediaAiUrl } from "./aiConfig";
 
 export type ModerationStatus = "approved" | "pending" | "rejected";
 
@@ -332,6 +332,145 @@ export const requestModerationDecision = async (
 
 const isValidSeverity = (value: unknown): value is ModerationSeverity =>
   ["low", "medium", "high", "critical"].includes(value as string);
+
+export type MediaModerationResult = {
+  decision: "approved" | "review" | "blocked";
+  inappropriate_probability: number;
+  appropriate_probability: number;
+};
+
+export const requestImageModeration = async (
+  uri: string,
+): Promise<MediaModerationResult> => {
+  const workerUrl = getMediaAiUrl();
+
+  if (!workerUrl) {
+    // No media AI configured at all — nothing to check against, so don't
+    // block posting, but don't rubber-stamp it as "safe" either.
+    return {
+      decision: "review",
+      inappropriate_probability: 0,
+      appropriate_probability: 0,
+    };
+  }
+
+  try {
+    const formData = new FormData();
+
+    formData.append("file", {
+      uri,
+      name: `moderation_${Date.now()}.jpg`,
+      type: "image/jpeg",
+    } as any);
+
+    const response = await withTimeout(
+      fetch(`${workerUrl}/moderate/image`, {
+        method: "POST",
+        body: formData,
+      }),
+      DEFAULT_TIMEOUT_MS,
+    );
+
+    if (!response.ok) {
+      throw new Error(`Image moderation failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+
+    return {
+      decision:
+        result.decision === "blocked"
+          ? "blocked"
+          : result.decision === "review"
+            ? "review"
+            : "approved",
+      inappropriate_probability:
+        Number(result.inappropriate_probability) || 0,
+      appropriate_probability:
+        Number(result.appropriate_probability) || 0,
+    };
+  } catch (error) {
+    console.error(
+      "[Moderation] Image AI request failed:",
+      error,
+    );
+
+    // Do not break the application if the AI server is unavailable — but
+    // fail CLOSED, not open. Auto-approving every image whenever the AI
+    // server is down/unreachable means an outage silently disables image
+    // moderation entirely. Sending it to manual review instead keeps a
+    // human in the loop until the AI server is reachable again.
+    return {
+      decision: "review",
+      inappropriate_probability: 0,
+      appropriate_probability: 0,
+    };
+  }
+};
+
+export const requestVideoModeration = async (
+  uri: string,
+): Promise<MediaModerationResult> => {
+  const workerUrl = getMediaAiUrl();
+
+  if (!workerUrl) {
+    return {
+      decision: "review",
+      inappropriate_probability: 0,
+      appropriate_probability: 0,
+    };
+  }
+
+  try {
+    const formData = new FormData();
+
+    formData.append("file", {
+      uri,
+      name: `moderation_${Date.now()}.mp4`,
+      type: "video/mp4",
+    } as any);
+
+    const response = await withTimeout(
+      fetch(`${workerUrl}/moderate/video`, {
+        method: "POST",
+        body: formData,
+      }),
+      30_000,
+    );
+
+    if (!response.ok) {
+      throw new Error(`Video moderation failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+
+    return {
+      decision:
+        result.decision === "blocked"
+          ? "blocked"
+          : result.decision === "review"
+            ? "review"
+            : "approved",
+      inappropriate_probability:
+        Number(result.inappropriate_probability) || 0,
+      appropriate_probability:
+        Number(result.appropriate_probability) || 0,
+    };
+  } catch (error) {
+    console.error(
+      "[Moderation] Video AI request failed:",
+      error,
+    );
+
+    // Fail closed to manual review rather than silently auto-approving —
+    // see the matching comment in requestImageModeration above.
+    return {
+      decision: "review",
+      inappropriate_probability: 0,
+      appropriate_probability: 0,
+    };
+  }
+};
 
 // ─── Viewer access ────────────────────────────────────────────────────────────
 

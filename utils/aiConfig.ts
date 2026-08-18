@@ -1,10 +1,18 @@
 import Constants from "expo-constants";
 
 const DEFAULT_AI_WORKER_URL = "https://bonded-ai-worker.encaboemmz77.workers.dev";
+// Python FastAPI server for image/video moderation.
+// NOTE: this is a LAN-only dev IP and only works on the same local network as
+// that machine. It must NOT be relied on in production builds — always set
+// EXPO_PUBLIC_MEDIA_AI_URL (or extra.mediaAiUrl) to a publicly reachable,
+// HTTPS URL before shipping, or every image/video will silently fail closed
+// to "approved" (see requestImageModeration/requestVideoModeration).
+const DEFAULT_MEDIA_AI_URL = "http://192.168.68.102:8000";
 const AI_REQUEST_TIMEOUT_MS = 25_000;
 
 type ExtraConfig = {
   aiWorkerUrl?: string;
+  mediaAiUrl?: string;
 };
 
 const getTrimmedValue = (value: unknown): string => {
@@ -14,7 +22,7 @@ const getTrimmedValue = (value: unknown): string => {
 
 const getExpoExtra = (): ExtraConfig => {
   const expoConfigExtra = (Constants.expoConfig?.extra ?? {}) as ExtraConfig;
-  if (expoConfigExtra.aiWorkerUrl) {
+  if (expoConfigExtra.aiWorkerUrl || expoConfigExtra.mediaAiUrl) {
     return expoConfigExtra;
   }
 
@@ -32,6 +40,20 @@ export const getAiWorkerUrl = (): string => {
   return DEFAULT_AI_WORKER_URL;
 };
 
+export const getMediaAiUrl = (): string => {
+  const envValue = getTrimmedValue(process.env.EXPO_PUBLIC_MEDIA_AI_URL);
+  if (envValue) return envValue;
+
+  const extraValue = getTrimmedValue(getExpoExtra().mediaAiUrl);
+  if (extraValue) return extraValue;
+
+  return DEFAULT_MEDIA_AI_URL;
+};
+
+/** True when the media AI URL is still the LAN-only dev default. */
+export const isUsingDefaultMediaAiUrl = (): boolean =>
+  getMediaAiUrl() === DEFAULT_MEDIA_AI_URL;
+
 export const getAiConfigDiagnostics = () => {
   const envValue = getTrimmedValue(process.env.EXPO_PUBLIC_AI_WORKER_URL);
   const extraValue = getTrimmedValue(getExpoExtra().aiWorkerUrl);
@@ -40,6 +62,18 @@ export const getAiConfigDiagnostics = () => {
   return {
     resolvedUrl,
     source: envValue ? "env" : extraValue ? "expo-extra" : "fallback",
+  } as const;
+};
+
+export const getMediaAiConfigDiagnostics = () => {
+  const envValue = getTrimmedValue(process.env.EXPO_PUBLIC_MEDIA_AI_URL);
+  const extraValue = getTrimmedValue(getExpoExtra().mediaAiUrl);
+  const resolvedUrl = getMediaAiUrl();
+
+  return {
+    resolvedUrl,
+    source: envValue ? "env" : extraValue ? "expo-extra" : "fallback",
+    isDefaultLanUrl: resolvedUrl === DEFAULT_MEDIA_AI_URL,
   } as const;
 };
 
