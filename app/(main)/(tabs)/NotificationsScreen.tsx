@@ -301,7 +301,8 @@ const onRefresh = useCallback(() => {
         ? notification.parentId || undefined
         : undefined;
 
-  // 3. Verify target post exists before navigating
+  // 3. Verify target post exists before navigating.
+  // Keep the existing deleted-post message unchanged.
   if (targetPostId) {
     try {
       const postRef = doc(db, "posts", targetPostId);
@@ -321,7 +322,49 @@ const onRefresh = useCallback(() => {
       console.error("Error checking post existence:", error);
     }
   }
-    const targetCommentId =
+
+  // 4. For comment/reply notifications, verify the referenced content still exists.
+  // If the comment/reply was deleted, show a specific unavailable message instead
+  // of navigating to an empty comment thread.
+  if (notification.entityType === "comment") {
+    try {
+      const commentSnap = await getDoc(doc(db, "comments", notification.entityId));
+
+      if (!commentSnap.exists()) {
+        setConfirmDialog({
+          title: "Content not available",
+          description: "This comment has been deleted or is no longer available.",
+          confirmText: "OK",
+          singleAction: true,
+          onConfirm: () => setConfirmDialog(null),
+        });
+        return;
+      }
+    } catch (error) {
+      console.error("Error checking comment existence:", error);
+    }
+  }
+
+  if (notification.entityType === "reply") {
+    try {
+      const replySnap = await getDoc(doc(db, "replies", notification.entityId));
+
+      if (!replySnap.exists()) {
+        setConfirmDialog({
+          title: "Content not available",
+          description: "This reply has been deleted or is no longer available.",
+          confirmText: "OK",
+          singleAction: true,
+          onConfirm: () => setConfirmDialog(null),
+        });
+        return;
+      }
+    } catch (error) {
+      console.error("Error checking reply existence:", error);
+    }
+  }
+
+  const targetCommentId =
     notification.entityType === "comment"
       ? notification.entityId
       : notification.entityType === "reply"

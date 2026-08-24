@@ -1,4 +1,5 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/firestore");
 const { initializeApp } = require("firebase-admin/app");
 const {
   getAuth,
@@ -181,6 +182,528 @@ async function requireAdmin(request) {
     );
   }
 }
+
+const EXPO_PUSH_API_URL = "https://exp.host/--/api/v2/push/send";
+
+const NOTIFICATION_SOUND_OPTIONS = {
+  default: { sound: "notif_default.wav", channelId: "sound_default" },
+  chime: { sound: "notif_chime.wav", channelId: "sound_chime" },
+  pop: { sound: "notif_pop.wav", channelId: "sound_pop" },
+  bubble: { sound: "notif_bubble.wav", channelId: "sound_bubble" },
+  alert: { sound: "notif_alert.wav", channelId: "sound_alert" },
+  silent: { sound: null, channelId: "sound_silent" },
+};
+
+const EMERGENCY_SOUND = { sound: "default", channelId: "emergency" };
+
+function normalizeExpoPushTokens(value) {
+  if (typeof value === "string") {
+    return /^Expo(nent)?PushToken\[[A-Za-z0-9\-_]+\]$/.test(value)
+      ? [value]
+      : [];
+  }
+
+  if (!Array.isArray(value)) return [];
+
+  return value.filter(
+    (item) =>
+      typeof item === "string" &&
+      /^Expo(nent)?PushToken\[[A-Za-z0-9\-_]+\]$/.test(item),
+  );
+}
+
+function notificationTitle(notification) {
+  const actor = String(notification.actorName || "BondED").trim() || "BondED";
+
+  switch (notification.type) {
+    case "event":
+      return "New event";
+    case "emergency":
+      return "Emergency alert";
+    case "moderation":
+      return "BondED moderation";
+    default:
+      return actor;
+  }
+}
+
+async function sendExpoPushMessages(messages) {
+  if (!messages.length) return 0;
+
+  let sent = 0;
+
+  for (let index = 0; index < messages.length; index += 100) {
+    const batch = messages.slice(index, index + 100);
+    const response = await fetch(EXPO_PUSH_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(batch),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      throw new Error(`Expo push send failed: ${response.status} ${errorBody}`);
+    }
+
+    const result = await response.json().catch(() => null);
+    const tickets = Array.isArray(result?.data) ? result.data : [];
+    const rejected = tickets.filter((ticket) => ticket?.status === "error");
+    if (rejected.length) {
+      console.error("Expo push ticket errors:", rejected);
+    }
+
+    sent += batch.length;
+  }
+
+  return sent;
+}
+
+/**
+ * Every Firestore notification becomes a push notification here.
+ * This is intentionally server-side: students must never be allowed to list
+ * or read another student's push token. Admin SDK can safely read the token
+ * and sound preference and then send through Expo.
+ */
+exports.sendNotificationPush = onDocumentCreated(
+  "notifications/{notificationId}",
+  async (event) => {
+    const snapshot = event.data;
+    if (!snapshot) return;
+
+    const notification = snapshot.data() || {};
+    const recipientId = clean(notification.recipientId);
+    if (!recipientId) return;
+
+    const [tokenSnap, settingsSnap] = await Promise.all([
+      db.collection("userPushTokens").doc(recipientId).get(),
+      db.collection("userNotificationSettings").doc(recipientId).get(),
+    ]);
+
+    if (!tokenSnap.exists) return;
+
+    const tokenData = tokenSnap.data() || {};
+    const tokens = normalizeExpoPushTokens(tokenData.expoPushTokens);
+    if (!tokens.length) return;
+
+    const type = clean(notification.type);
+    const soundId = String(settingsSnap.data()?.soundId || "default");
+    const soundOption =
+      type === "emergency"
+        ? EMERGENCY_SOUND
+        : NOTIFICATION_SOUND_OPTIONS[soundId] || NOTIFICATION_SOUND_OPTIONS.default;
+
+    const entityType = clean(notification.entityType);
+    const entityId = clean(notification.entityId);
+    const parentId = clean(notification.parentId);
+
+    const messages = tokens.map((token) => ({
+      to: token,
+      title: notificationTitle(notification),
+      body: String(notification.message || "You have a new BondED notification."),
+      sound: soundOption.sound,
+      priority: "high",
+      channelId: soundOption.channelId,
+      data: {
+        notificationId: snapshot.id,
+        screen: entityType === "event" ? "event-calendar" : "notifications",
+        entityType,
+        entityId,
+        parentId,
+      },
+    }));
+
+    try {
+      await sendExpoPushMessages(messages);
+    } catch (error) {
+      console.error(
+        `Push delivery failed for notification ${snapshot.id}:`,
+        error,
+      );
+    }
+  },
+);
+
+
+
+const MODERATION_WORKER_URL =
+  process.env.MODERATION_WORKER_URL ||
+  "https://bonded-ai-worker.encaboemmz77.workers.dev";
+
+async function requestServerModeration({ text, hasMedia }) {
+  if (hasMedia) {
+    return {
+      status: "pending",
+      reasons: [
+        "Post contains media and requires moderator review before publishing.",
+      ],
+      matchedKeywords: [],
+      moderationSource: "server-media-review",
+    };
+  }
+
+  const response = await fetch(MODERATION_WORKER_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "moderate",
+      text: String(text || "").trim(),
+      scope: "post",
+    }),
+  });
+
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      `Moderation worker failed: HTTP ${response.status} ${
+        payload?.error || "Unknown error"
+      }`,
+    );
+  }
+
+  return {
+    status: payload?.status === "rejected" ? "rejected" :
+      payload?.status === "pending" ? "pending" : "approved",
+    reasons: Array.isArray(payload?.reasons) ? payload.reasons : [],
+    matchedKeywords: Array.isArray(payload?.matchedKeywords)
+      ? payload.matchedKeywords
+      : [],
+    moderationSource: "server-worker",
+  };
+}
+
+
+const AI_WORKER_URL =
+  process.env.AI_WORKER_URL ||
+  "https://bonded-ai-worker.encaboemmz77.workers.dev";
+
+const AI_ASSISTANT_ID = "ai-assistant";
+const EVERYONE_MENTION_ID = "everyone-mention";
+
+function cleanNotificationIdPart(value) {
+  return String(value || "").replace(/[/.#$[\]]/g, "_");
+}
+
+function notificationPreview(value, maxLength = 120) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength - 3)}...`
+    : normalized;
+}
+
+async function createServerMentionNotifications({
+  postId,
+  postData,
+  actorId,
+}) {
+  const taggedUsers = Array.isArray(postData.taggedUsers)
+    ? postData.taggedUsers
+    : [];
+
+  const taggedIds = [...new Set(
+    taggedUsers
+      .map((tag) => clean(tag?.id))
+      .filter(Boolean),
+  )];
+
+  if (!taggedIds.length) return;
+
+  const recipientIds = new Set(
+    taggedIds.filter(
+      (id) => id !== AI_ASSISTANT_ID && id !== EVERYONE_MENTION_ID && id !== actorId,
+    ),
+  );
+
+  if (taggedIds.includes(EVERYONE_MENTION_ID)) {
+    const serverId = clean(postData.serverId);
+
+    if (serverId) {
+      const membershipSnapshot = await db
+        .collection("communityServerMemberships")
+        .where("serverId", "==", serverId)
+        .get();
+
+      membershipSnapshot.docs.forEach((item) => {
+        const data = item.data() || {};
+        if (String(data.status || "joined") === "removed") return;
+        const userId = clean(data.userId);
+        if (userId && userId !== actorId) recipientIds.add(userId);
+      });
+
+      const serverSnapshot = await db.collection("communityServers").doc(serverId).get();
+      if (serverSnapshot.exists) {
+        const serverData = serverSnapshot.data() || {};
+        const ownerId = clean(serverData.ownerId || serverData.createdBy);
+        if (ownerId && ownerId !== actorId) recipientIds.add(ownerId);
+      }
+    } else {
+      const studentsSnapshot = await db.collection("students").get();
+      studentsSnapshot.docs.forEach((item) => {
+        const data = item.data() || {};
+        const userId = clean(data.userId || item.id);
+        if (userId && userId !== actorId) recipientIds.add(userId);
+      });
+    }
+  }
+
+  if (!recipientIds.size) return;
+
+  const actorName = clean(postData.isAnonymous ? "Anonymous" : postData.authorName || postData.username) || "Someone";
+  const preview = notificationPreview(postData.content);
+  const batch = db.batch();
+
+  for (const recipientId of recipientIds) {
+    const notificationId = [
+      "mention",
+      cleanNotificationIdPart(recipientId),
+      cleanNotificationIdPart(postId),
+    ].join("_");
+
+    const ref = db.collection("notifications").doc(notificationId);
+    batch.set(ref, {
+      recipientId,
+      actorId,
+      actorName,
+      actorProfileImage: postData.authorProfileImage || null,
+      actorIsAnonymous: Boolean(postData.isAnonymous),
+      type: "mention",
+      entityType: "post",
+      entityId: postId,
+      parentId: null,
+      message: "mentioned you in a post",
+      preview,
+      read: false,
+      createdAt: FieldValue.serverTimestamp(),
+    }, { merge: false });
+  }
+
+  await batch.commit();
+}
+
+async function reserveServerAiCooldown({ actorId, serverId, channelId, cooldownMs = 15000 }) {
+  const safeActor = clean(actorId) || "unknown";
+  const safeServer = clean(serverId) || "home";
+  const safeChannel = clean(channelId) || "feed";
+  const docId = [safeActor, safeServer, safeChannel]
+    .map(cleanNotificationIdPart)
+    .join("_");
+  const ref = db.collection("aiCooldowns").doc(docId);
+  const now = Date.now();
+
+  return db.runTransaction(async (transaction) => {
+    const snap = await transaction.get(ref);
+    const lastRequestedAtMs = Number(snap.data()?.lastRequestedAtMs || 0);
+    const remainingMs = Math.max(0, cooldownMs - (now - lastRequestedAtMs));
+
+    if (remainingMs > 0) {
+      return { allowed: false, remainingMs };
+    }
+
+    transaction.set(ref, {
+      actorId: safeActor,
+      serverId: safeServer,
+      channelId: safeChannel,
+      lastRequestedAtMs: now,
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    return { allowed: true, remainingMs: 0 };
+  });
+}
+
+async function requestServerAiReply({ postId, postData }) {
+  const prompt = clean(postData.aiPrompt);
+  if (!prompt) return null;
+
+  const response = await fetch(AI_WORKER_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      serverId: clean(postData.serverId) || "home",
+      channelId: clean(postData.channelId) || "feed",
+      sourceMessageId: postId,
+      sourceUserId: clean(postData.userId) || "unknown",
+      prompt,
+      memoryBlocks: [],
+      contextMessages: [
+        {
+          role: "user",
+          name: clean(postData.isAnonymous ? "Anonymous" : postData.authorName || postData.username) || "User",
+          content: prompt,
+        },
+      ],
+    }),
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.error || `AI worker failed: HTTP ${response.status}`);
+  }
+
+  const reply = clean(payload?.reply);
+  if (!reply) throw new Error("AI worker returned an empty reply.");
+
+  return { reply, model: payload?.model || null };
+}
+
+async function runApprovedPostSideEffects(snapshot) {
+  if (!snapshot?.exists) return;
+  const data = snapshot.data() || {};
+  if (data.moderationStatus !== "approved") return;
+  if (data.publishedSideEffectsAtMs) return;
+
+  const actorId = clean(data.userId || data.realUserId);
+  if (!actorId) return;
+
+  await createServerMentionNotifications({
+    postId: snapshot.id,
+    postData: data,
+    actorId,
+  });
+
+  const taggedUsers = Array.isArray(data.taggedUsers) ? data.taggedUsers : [];
+  const hasAiMention = taggedUsers.some(
+    (tag) => clean(tag?.id) === AI_ASSISTANT_ID,
+  );
+
+  if (hasAiMention) {
+    const cooldown = await reserveServerAiCooldown({
+      actorId,
+      serverId: data.serverId,
+      channelId: data.channelId,
+    });
+
+    if (cooldown.allowed) {
+      try {
+        await snapshot.ref.update({
+          aiReply: {
+            text: "",
+            status: "generating",
+            generatedAtMs: Date.now(),
+          },
+        });
+
+        const result = await requestServerAiReply({
+          postId: snapshot.id,
+          postData: data,
+        });
+
+        if (result) {
+          await snapshot.ref.update({
+            aiReply: {
+              text: result.reply,
+              model: result.model,
+              status: "completed",
+              generatedAtMs: Date.now(),
+            },
+          });
+        }
+      } catch (error) {
+        console.error(`Approved post @AI request failed for ${snapshot.id}:`, error);
+        await snapshot.ref.update({
+          aiReply: {
+            text: "",
+            status: "failed",
+            error: String(error?.message || error),
+            generatedAtMs: Date.now(),
+          },
+        }).catch(() => undefined);
+      }
+    }
+  }
+
+  await snapshot.ref.update({
+    publishedSideEffectsAtMs: Date.now(),
+    publishedSideEffectsAt: FieldValue.serverTimestamp(),
+  });
+}
+
+async function moderatePostSnapshot(snapshot) {
+  if (!snapshot?.exists) return;
+
+  const data = snapshot.data() || {};
+  if (data.moderationStatus !== "pending") return;
+
+  const text = String(data.content || "").trim();
+  const files = Array.isArray(data.files) ? data.files : [];
+
+  try {
+    const decision = await requestServerModeration({
+      text,
+      hasMedia: files.length > 0,
+    });
+
+    await snapshot.ref.update({
+      moderationStatus: decision.status,
+      moderationReasons: decision.reasons,
+      moderationMatchedKeywords: decision.matchedKeywords,
+      moderationSource: decision.moderationSource,
+      moderatedAtMs: Date.now(),
+      moderatedAt: FieldValue.serverTimestamp(),
+      ...(decision.status === "approved"
+        ? { publishedSideEffectsAtMs: null, publishedSideEffectsAt: null }
+        : {}),
+    });
+
+    if (decision.status === "approved") {
+      // Refresh the document because the trigger snapshot still contains the
+      // pre-moderation pending state.
+      const approvedSnapshot = await snapshot.ref.get();
+      await runApprovedPostSideEffects(approvedSnapshot);
+    }
+  } catch (error) {
+    // Fail closed: a moderation outage must never publish unreviewed content.
+    console.error(
+      `Server moderation failed for post ${snapshot.id}; leaving it pending.`,
+      error,
+    );
+
+    await snapshot.ref.update({
+      moderationStatus: "pending",
+      moderationReasons: [
+        "Automatic moderation could not complete. This post requires review.",
+      ],
+      moderationSource: "server-fallback",
+      moderationError: String(error?.message || error),
+      moderatedAtMs: null,
+    });
+  }
+}
+
+exports.moderatePostOnCreate = onDocumentCreated(
+  "posts/{postId}",
+  async (event) => {
+    await moderatePostSnapshot(event.data);
+  },
+);
+
+exports.moderatePostOnUpdate = onDocumentUpdated(
+  "posts/{postId}",
+  async (event) => {
+    const before = event.data?.before;
+    const after = event.data?.after;
+    if (!before?.exists || !after?.exists) return;
+
+    const beforeData = before.data() || {};
+    const afterData = after.data() || {};
+
+    // Only re-run moderation when the user changed the content or media and
+    // the document has been put back into the pending state.
+    const contentChanged =
+      String(beforeData.content || "") !== String(afterData.content || "");
+    const filesChanged =
+      JSON.stringify(beforeData.files || []) !==
+      JSON.stringify(afterData.files || []);
+
+    if (
+      afterData.moderationStatus === "pending" &&
+      (contentChanged || filesChanged)
+    ) {
+      await moderatePostSnapshot(after);
+    }
+  },
+);
 
 exports.registerUser = onCall(
   async (request) => {

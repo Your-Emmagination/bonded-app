@@ -1,6 +1,7 @@
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 import { getAiWorkerUrl, getMediaAiUrl } from "./aiConfig";
+import { auth } from "../Firebase_configure";
 
 export type ModerationStatus = "approved" | "pending" | "rejected";
 
@@ -59,9 +60,14 @@ const EXACT_BLOCKLIST: string[] = [
   "marijuana",
   "cannabis",
   "vape",
+  "nude",
   "nudes",
+  "nudity",
+  "naked",
   "porn",
   "pornography",
+  "drug",
+  "drugs",
   "suicide",
   "meth",
   "cocaine",
@@ -72,6 +78,27 @@ const EXACT_BLOCKLIST: string[] = [
 ];
 
 /** Phrases matched anywhere as a substring. */
+const IMMEDIATE_BLOCKLIST = new Set([
+  "shabu",
+  "meth",
+  "cocaine",
+  "heroin",
+  "fentanyl",
+  "nude",
+  "nudes",
+  "nudity",
+  "naked",
+  "porn",
+  "pornography",
+  "drug",
+  "drugs",
+  "child porn",
+  "cp link",
+  "buy drugs",
+  "sell drugs",
+  "drug dealer",
+]);
+
 const SUBSTRING_BLOCKLIST: string[] = [
   "kill yourself",
   "kys",
@@ -112,12 +139,17 @@ const SEVERITY_MAP: Record<string, ModerationSeverity> = {
   heroin: "high",
   fentanyl: "high",
   cocaine: "high",
+  drug: "high",
+  drugs: "high",
   "drug dealer": "high",
   "buy drugs": "high",
   "sell drugs": "high",
   porn: "medium",
   pornography: "medium",
+  nude: "medium",
   nudes: "medium",
+  nudity: "medium",
+  naked: "medium",
   "sex video": "medium",
   "onlyfans link": "medium",
   "snapchat nudes": "medium",
@@ -220,9 +252,15 @@ export const runLocalModerationRules = (value?: string | null): ModerationDecisi
   }
 
   const severity = getHighestSeverity(allMatches);
+  const shouldBlockImmediately = allMatches.some((match) =>
+    IMMEDIATE_BLOCKLIST.has(match),
+  );
 
   return {
-    status: severity === "critical" ? "rejected" : "pending",
+    status:
+      shouldBlockImmediately || severity === "critical"
+        ? "rejected"
+        : "pending",
     reasons: buildReasonMessages(allMatches, severity),
     matchedKeywords: matchedKeywords.length > 0 ? matchedKeywords : undefined,
     matchedPatterns: matchedPatterns.length > 0 ? matchedPatterns : undefined,
@@ -243,6 +281,78 @@ const buildReasonMessages = (
     reasons.push("Content flagged as high severity — pending staff review.");
   }
   return reasons;
+};
+
+/**
+ * Server-authoritative moderation for an already-created Firestore document.
+ * The client may only create the document as `pending`; the Worker changes it
+ * to approved/rejected/pending after verifying the caller and re-reading the
+ * document from Firestore.
+ */
+export const requestFirestoreModerationDecision = async (input: {
+  collectionName: "comments" | "replies" | "posts";
+  documentId: string;
+  scope: ModerationScope;
+}): Promise<ModerationDecision> => {
+  const workerUrl = getAiWorkerUrl();
+  const currentUser = auth.currentUser;
+  if (!workerUrl) throw new Error("Moderation Worker URL is not configured.");
+  if (!currentUser) throw new Error("You must be signed in to moderate this content.");
+
+  const idToken = await currentUser.getIdToken();
+  const response = await withTimeout(
+    fetch(workerUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        mode: "moderate-firestore-content",
+        collection: input.collectionName,
+        documentId: input.documentId,
+        scope: input.scope,
+      }),
+    }),
+    DEFAULT_TIMEOUT_MS,
+  );
+
+  const responseText = await response.text();
+  let payload: Record<string, unknown> | null = null;
+  try {
+    payload = responseText ? (JSON.parse(responseText) as Record<string, unknown>) : null;
+  } catch {
+    // handled below as a server error
+  }
+
+  if (!response.ok) {
+    const message =
+      typeof payload?.error === "string"
+        ? payload.error
+        : responseText.trim() || `HTTP ${response.status}`;
+    throw new Error(`Server moderation failed: ${message.slice(0, 500)}`);
+  }
+
+  const status = payload?.status;
+  if (status !== "approved" && status !== "pending" && status !== "rejected") {
+    throw new Error("Server moderation returned an invalid decision.");
+  }
+
+  return {
+    status,
+    reasons: Array.isArray(payload?.reasons) ? (payload.reasons as string[]) : [],
+    matchedKeywords: Array.isArray(payload?.matchedKeywords)
+      ? (payload.matchedKeywords as string[])
+      : [],
+    matchedPatterns: Array.isArray(payload?.matchedPatterns)
+      ? (payload.matchedPatterns as string[])
+      : [],
+    severity: isValidSeverity(payload?.severity) ? payload.severity : undefined,
+    model: typeof payload?.model === "string" ? payload.model : null,
+    ruleSource: payload?.ruleSource === "ai" || payload?.ruleSource === "exact" || payload?.ruleSource === "substring" || payload?.ruleSource === "pattern"
+      ? payload.ruleSource
+      : undefined,
+  };
 };
 
 // ─── Remote moderation ────────────────────────────────────────────────────────
@@ -292,16 +402,38 @@ export const requestModerationDecision = async (
 
     const response = await withTimeout(fetchPromise, input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
+    // Read the response as text first so we can show the actual server
+    // response when the moderation worker fails. This makes errors such as
+    // 401 (bad API key), 403 (permission), 429 (quota/rate limit), and
+    // 5xx (worker/provider failure) immediately visible in Metro/Expo logs.
+    const responseText = await response.text();
+
     let payload: Record<string, unknown> | null = null;
-    try {
-      payload = await response.json();
-    } catch {
-      // non-JSON body — fall through to localDecision
+    if (responseText) {
+      try {
+        payload = JSON.parse(responseText) as Record<string, unknown>;
+      } catch {
+        // Keep the raw response below for non-JSON error bodies.
+      }
     }
 
     if (!response.ok) {
-      const msg = typeof payload?.error === "string" ? payload.error : "Moderation request failed.";
-      throw new Error(msg);
+      const serverMessage =
+        typeof payload?.error === "string"
+          ? payload.error
+          : typeof payload?.message === "string"
+            ? payload.message
+            : responseText.trim();
+
+      const details = serverMessage
+        ? ` — ${serverMessage.slice(0, 500)}`
+        : "";
+
+      throw new Error(
+        `Moderation request failed: HTTP ${response.status}${
+          response.statusText ? ` ${response.statusText}` : ""
+        }${details}`,
+      );
     }
 
     if (
@@ -324,7 +456,14 @@ export const requestModerationDecision = async (
       } satisfies ModerationDecision;
     }
   } catch (error) {
-    console.error("[Moderation] Remote call failed, using local decision:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorName = error instanceof Error ? error.name : "UnknownError";
+
+    console.error(
+      `[Moderation] Remote call failed (${errorName}). Using local decision.`,
+      errorMessage,
+      `Worker: ${workerUrl}`,
+    );
   }
 
   return localDecision;

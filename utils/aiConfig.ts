@@ -7,7 +7,7 @@ const DEFAULT_AI_WORKER_URL = "https://bonded-ai-worker.encaboemmz77.workers.dev
 // EXPO_PUBLIC_MEDIA_AI_URL (or extra.mediaAiUrl) to a publicly reachable,
 // HTTPS URL before shipping, or every image/video will silently fail closed
 // to "approved" (see requestImageModeration/requestVideoModeration).
-const DEFAULT_MEDIA_AI_URL = "http://192.168.68.102:8000";
+const DEFAULT_MEDIA_AI_URL = "http://192.168.110.100:8000";
 const AI_REQUEST_TIMEOUT_MS = 25_000;
 
 type ExtraConfig = {

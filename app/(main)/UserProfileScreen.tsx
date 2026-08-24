@@ -11,6 +11,8 @@ import {
   where,
   onSnapshot,
   orderBy,
+  startAfter,
+  or,
 } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
 import { AVATAR_SIZE_LARGE, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
@@ -117,6 +119,14 @@ const UserProfileScreen = () => {
   const [posts, setPosts] = useState<Post[]>([]);
   const [polls, setPolls] = useState<Poll[]>([]);
   const [loading, setLoading] = useState(!initialStudentPreview);
+  const [loadingMorePosts, setLoadingMorePosts] = useState(false);
+  const [loadingMorePolls, setLoadingMorePolls] = useState(false);
+  const [hasMorePosts, setHasMorePosts] = useState(true);
+  const [hasMorePolls, setHasMorePolls] = useState(true);
+  const lastPostDocRef = React.useRef<any>(null);
+  const lastPollDocRef = React.useRef<any>(null);
+  const loadedPostIdsRef = React.useRef<Set<string>>(new Set());
+  const loadedPollIdsRef = React.useRef<Set<string>>(new Set());
 
   // Image viewer modal
   const [imageViewerVisible, setImageViewerVisible] = useState(false);
@@ -186,8 +196,14 @@ const UserProfileScreen = () => {
     let active = true;
     let unsubscribeProfile: (() => void) | null = null;
     const identityKey = resolvedUserId || resolvedProfileDocId || "";
-    const unsubscribePosts = fetchUserPosts(identityKey);
-    const unsubscribePolls = fetchUserPolls(identityKey);
+    lastPostDocRef.current = null;
+    lastPollDocRef.current = null;
+    loadedPostIdsRef.current.clear();
+    loadedPollIdsRef.current.clear();
+    setHasMorePosts(true);
+    setHasMorePolls(true);
+    void fetchUserPosts(identityKey);
+    void fetchUserPolls(identityKey);
 
     const resolveProfileDocId = async () => {
       const candidates: Array<Student & { id: string }> = [];
@@ -309,43 +325,107 @@ const UserProfileScreen = () => {
     return () => {
       active = false;
       unsubscribeProfile?.();
-      unsubscribePosts?.();
-      unsubscribePolls?.();
     };
   }, [navigateBack, profileDocId, userId]);
 
-  const fetchUserPosts = (uid: string) => {
-    const q = query(collection(db, "posts"), orderBy("createdAt", "desc"));
-    return onSnapshot(
-      q,
-      (snapshot) => {
-        const userPosts = snapshot.docs
-          .map((item) => ({
-            id: item.id,
-            ...item.data(),
-          }))
-          .filter((post: any) => post.realUserId === uid || post.userId === uid) as Post[];
-        setPosts(userPosts);
-      },
-      (error) => console.error("Error listening to user posts:", error)
-    );
+  const fetchUserPosts = async (uid: string) => {
+    try {
+      const q = query(
+        collection(db, "posts"),
+        or(where("realUserId", "==", uid), where("userId", "==", uid)),
+        orderBy("createdAt", "desc"),
+        limit(20),
+      );
+      const snapshot = await getDocs(q);
+      const userPosts = snapshot.docs.map((item) => ({
+        id: item.id,
+        ...item.data(),
+      })) as Post[];
+      loadedPostIdsRef.current = new Set(snapshot.docs.map((item) => item.id));
+      lastPostDocRef.current = snapshot.docs[snapshot.docs.length - 1] ?? null;
+      setHasMorePosts(snapshot.size === 20);
+      setPosts(userPosts);
+    } catch (error) {
+      console.error("Error fetching user posts:", error);
+      setPosts([]);
+      setHasMorePosts(false);
+    }
   };
 
-  const fetchUserPolls = (uid: string) => {
-    const q = query(collection(db, "polls"), orderBy("createdAt", "desc"));
-    return onSnapshot(
-      q,
-      (snapshot) => {
-        const userPolls = snapshot.docs
-          .map((item) => ({
-            id: item.id,
-            ...item.data(),
-          }))
-          .filter((poll: any) => poll.realUserId === uid || poll.userId === uid) as Poll[];
-        setPolls(userPolls);
-      },
-      (error) => console.error("Error listening to user polls:", error)
-    );
+  const fetchUserPolls = async (uid: string) => {
+    try {
+      const q = query(
+        collection(db, "polls"),
+        or(where("realUserId", "==", uid), where("userId", "==", uid)),
+        orderBy("createdAt", "desc"),
+        limit(20),
+      );
+      const snapshot = await getDocs(q);
+      const userPolls = snapshot.docs.map((item) => ({
+        id: item.id,
+        ...item.data(),
+      })) as Poll[];
+      loadedPollIdsRef.current = new Set(snapshot.docs.map((item) => item.id));
+      lastPollDocRef.current = snapshot.docs[snapshot.docs.length - 1] ?? null;
+      setHasMorePolls(snapshot.size === 20);
+      setPolls(userPolls);
+    } catch (error) {
+      console.error("Error fetching user polls:", error);
+      setPolls([]);
+      setHasMorePolls(false);
+    }
+  };
+
+  const loadMorePosts = async (uid: string) => {
+    if (loadingMorePosts || !hasMorePosts || !lastPostDocRef.current) return;
+    setLoadingMorePosts(true);
+    try {
+      const q = query(
+        collection(db, "posts"),
+        or(where("realUserId", "==", uid), where("userId", "==", uid)),
+        orderBy("createdAt", "desc"),
+        startAfter(lastPostDocRef.current),
+        limit(20),
+      );
+      const snapshot = await getDocs(q);
+      const morePosts = snapshot.docs
+        .filter((item) => !loadedPostIdsRef.current.has(item.id))
+        .map((item) => ({ id: item.id, ...item.data() })) as Post[];
+      snapshot.docs.forEach((item) => loadedPostIdsRef.current.add(item.id));
+      lastPostDocRef.current = snapshot.docs[snapshot.docs.length - 1] ?? lastPostDocRef.current;
+      setHasMorePosts(snapshot.size === 20);
+      if (morePosts.length) setPosts((prev) => [...prev, ...morePosts]);
+    } catch (error) {
+      console.error("Error loading more user posts:", error);
+    } finally {
+      setLoadingMorePosts(false);
+    }
+  };
+
+  const loadMorePolls = async (uid: string) => {
+    if (loadingMorePolls || !hasMorePolls || !lastPollDocRef.current) return;
+    setLoadingMorePolls(true);
+    try {
+      const q = query(
+        collection(db, "polls"),
+        or(where("realUserId", "==", uid), where("userId", "==", uid)),
+        orderBy("createdAt", "desc"),
+        startAfter(lastPollDocRef.current),
+        limit(20),
+      );
+      const snapshot = await getDocs(q);
+      const morePolls = snapshot.docs
+        .filter((item) => !loadedPollIdsRef.current.has(item.id))
+        .map((item) => ({ id: item.id, ...item.data() })) as Poll[];
+      snapshot.docs.forEach((item) => loadedPollIdsRef.current.add(item.id));
+      lastPollDocRef.current = snapshot.docs[snapshot.docs.length - 1] ?? lastPollDocRef.current;
+      setHasMorePolls(snapshot.size === 20);
+      if (morePolls.length) setPolls((prev) => [...prev, ...morePolls]);
+    } catch (error) {
+      console.error("Error loading more user polls:", error);
+    } finally {
+      setLoadingMorePolls(false);
+    }
   };
 
   const getTimeAgo = (timestamp: any) => {
@@ -517,6 +597,18 @@ const UserProfileScreen = () => {
               </View>
             ))
           )}
+          {hasMorePosts && posts.length > 0 && (
+            <TouchableOpacity
+              style={styles.loadMoreButton}
+              onPress={() => {
+                const uid = typeof userId === "string" ? userId : typeof profileDocId === "string" ? profileDocId : "";
+                if (uid) void loadMorePosts(uid);
+              }}
+              disabled={loadingMorePosts}
+            >
+              {loadingMorePosts ? <ActivityIndicator size="small" /> : <Text style={styles.loadMoreText}>Load more posts</Text>}
+            </TouchableOpacity>
+          )}
         </View>
 
         <View style={styles.section}>
@@ -538,6 +630,18 @@ const UserProfileScreen = () => {
                 <Text style={styles.pollTime}>{getTimeAgo(poll.createdAt)}</Text>
               </View>
             ))
+          )}
+          {hasMorePolls && polls.length > 0 && (
+            <TouchableOpacity
+              style={styles.loadMoreButton}
+              onPress={() => {
+                const uid = typeof userId === "string" ? userId : typeof profileDocId === "string" ? profileDocId : "";
+                if (uid) void loadMorePolls(uid);
+              }}
+              disabled={loadingMorePolls}
+            >
+              {loadingMorePolls ? <ActivityIndicator size="small" /> : <Text style={styles.loadMoreText}>Load more polls</Text>}
+            </TouchableOpacity>
           )}
         </View>
       </ScrollView>
@@ -773,4 +877,16 @@ const styles = StyleSheet.create({
     marginTop: 10,
     textAlign: "right",
   },
+  loadMoreButton: {
+    marginTop: 12,
+    paddingVertical: 12,
+    alignItems: "center",
+    borderRadius: 10,
+    backgroundColor: "#f3f3f3",
+  },
+  loadMoreText: {
+    fontWeight: "600",
+    color: "#c88d2b",
+  },
+
 });

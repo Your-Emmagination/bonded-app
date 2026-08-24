@@ -36,7 +36,7 @@ import AiReplyCard from "../components/AiReplyCard";
 import CommentModal from "../components/CommentModal";
 import ExpandableText from "../components/ExpandableText";
 import VideoPostMedia from "../components/VideoPostMedia";
-import { doc, updateDoc, arrayUnion, arrayRemove } from "firebase/firestore";
+import { addDoc, collection, doc, serverTimestamp, updateDoc, arrayUnion, arrayRemove } from "firebase/firestore";
 import { db, auth } from "@/Firebase_configure";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -689,8 +689,18 @@ const PostHeader: React.FC<{
 }) => {
   const [revealed, setRevealed] = useState(false);
   const [showPostActions, setShowPostActions] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [reportSubmitting, setReportSubmitting] = useState(false);
+  const [pendingReportReason, setPendingReportReason] = useState<string | null>(null);
+  const [reportFeedback, setReportFeedback] = useState<{
+    title: string;
+    description: string;
+    destructive: boolean;
+  } | null>(null);
 
   const authorUserId = post.realUserId || post.userId;
+  const reporterId = currentUserId || auth.currentUser?.uid;
+  const isOwnPost = !!reporterId && authorUserId === reporterId;
 
   const authorRole =
     parseUserRole(authorData?.role) ?? parseUserRole(post.role);
@@ -744,7 +754,7 @@ const PostHeader: React.FC<{
   const isPinned = !!post.pinnedAt;
 
   const canEdit = authorUserId === currentUserId && !!onEdit;
-  const canOpenOptions = canPin || canDelete || canEdit;
+  const canOpenOptions = canPin || canDelete || canEdit || !!currentUserId;
 
   const handleProfileClick = () => {
     if (!canClickProfile) return;
@@ -783,6 +793,58 @@ const PostHeader: React.FC<{
   const handleDeletePost = () => {
     closePostActions();
     onDelete?.(post.id);
+  };
+
+
+  const openReportModal = () => {
+    closePostActions();
+    setShowReportModal(true);
+  };
+
+  const submitReport = async (reason: string) => {
+    if (!reporterId) {
+      setPendingReportReason(null);
+      return;
+    }
+
+    if (isOwnPost) {
+      setPendingReportReason(null);
+      setReportFeedback({
+        title: "Report unavailable",
+        description: "You cannot report your own post.",
+        destructive: true,
+      });
+      return;
+    }
+
+    setReportSubmitting(true);
+    try {
+      await addDoc(collection(db, "reports"), {
+        reportedBy: reporterId,
+        contentType: "post",
+        contentId: post.id,
+        reason,
+        status: "pending",
+        createdAt: serverTimestamp(),
+      });
+
+      setPendingReportReason(null);
+      setReportFeedback({
+        title: "Report sent",
+        description: "Thank you. Your report has been sent to the moderation team for review.",
+        destructive: false,
+      });
+    } catch (error) {
+      console.error("Failed to report post:", error);
+      setPendingReportReason(null);
+      setReportFeedback({
+        title: "Couldn't send report",
+        description: "Please try again.",
+        destructive: true,
+      });
+    } finally {
+      setReportSubmitting(false);
+    }
   };
 
   return (
@@ -953,6 +1015,21 @@ const PostHeader: React.FC<{
               </TouchableOpacity>
             )}
 
+            {currentUserRole !== "admin" && !isOwnPost && (
+              <TouchableOpacity
+                style={styles.actionMenuItem}
+                activeOpacity={0.75}
+                onPress={openReportModal}
+              >
+                <View style={styles.actionMenuItemIcon}>
+                  <Ionicons name="flag-outline" size={20} color="#a61f1f" />
+                </View>
+                <Text style={[styles.actionMenuItemText, styles.reportActionText]}>
+                  Report Post
+                </Text>
+              </TouchableOpacity>
+            )}
+
             <View style={styles.actionMenuDivider} />
 
             <TouchableOpacity
@@ -968,6 +1045,96 @@ const PostHeader: React.FC<{
           </TouchableOpacity>
         </TouchableOpacity>
       </Modal>
+
+      <Modal
+        visible={showReportModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => !reportSubmitting && setShowReportModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.reportModalContainer}>
+            <View style={styles.modalHeader}>
+              <View>
+                <Text style={styles.modalTitle}>Report Post</Text>
+                <Text style={styles.reportModalSubtitle}>
+                  Why are you reporting this post?
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => !reportSubmitting && setShowReportModal(false)}
+                disabled={reportSubmitting}
+              >
+                <Ionicons name="close-circle-outline" size={28} color="#a61f1f" />
+              </TouchableOpacity>
+            </View>
+
+            {[
+              ["harassment_or_bullying", "Harassment or bullying", "person-remove-outline"],
+              ["hate_or_discrimination", "Hate or discrimination", "ban-outline"],
+              ["sexual_or_explicit_content", "Sexual or explicit content", "warning-outline"],
+              ["violence_or_threats", "Violence or threats", "alert-circle-outline"],
+              ["spam_or_scam", "Spam or scam", "megaphone-outline"],
+              ["other", "Other", "ellipsis-horizontal-circle-outline"],
+            ].map(([value, label, icon]) => (
+              <TouchableOpacity
+                key={value}
+                style={styles.reportReasonButton}
+                onPress={() => {
+                  setShowReportModal(false);
+                  setPendingReportReason(value);
+                }}
+                disabled={reportSubmitting}
+                activeOpacity={0.75}
+              >
+                <View style={styles.reportReasonIcon}>
+                  <Ionicons
+                    name={icon as keyof typeof Ionicons.glyphMap}
+                    size={19}
+                    color="#a61f1f"
+                  />
+                </View>
+                <Text style={styles.reportReasonText}>{label}</Text>
+                <Ionicons name="chevron-forward" size={18} color="#9b766c" />
+              </TouchableOpacity>
+            ))}
+
+            {reportSubmitting && (
+              <View style={styles.reportSubmitting}>
+                <ActivityIndicator color="#e0a53d" />
+                <Text style={styles.reportSubmittingText}>Submitting report...</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      <ConfirmDialog
+        visible={!!pendingReportReason}
+        title="Send report?"
+        description="This report will be sent to the moderation team for review."
+        confirmText="Send report"
+        destructive={true}
+        loading={reportSubmitting}
+        onConfirm={() => {
+          if (pendingReportReason) {
+            submitReport(pendingReportReason);
+          }
+        }}
+        onCancel={() => setPendingReportReason(null)}
+      />
+
+      <ConfirmDialog
+        visible={!!reportFeedback}
+        title={reportFeedback?.title ?? ""}
+        description={reportFeedback?.description}
+        confirmText="Done"
+        singleAction
+        destructive={reportFeedback?.destructive ?? false}
+        icon={reportFeedback?.destructive ? "alert-circle-outline" : "checkmark-circle-outline"}
+        onConfirm={() => setReportFeedback(null)}
+        onCancel={() => setReportFeedback(null)}
+      />
     </View>
   );
 };
@@ -1128,6 +1295,56 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   actionButton: { padding: 4 },
+  reportActionText: { color: "#a61f1f" },
+  reportModalContainer: {
+    width: "88%",
+    maxHeight: "80%",
+    backgroundColor: "#fffaf7",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#ead8cf",
+    overflow: "hidden",
+    paddingBottom: 8,
+  },
+  reportModalSubtitle: {
+    color: "#8f6a60",
+    fontSize: 13,
+    marginTop: 3,
+  },
+  reportReasonButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 13,
+    borderTopWidth: 1,
+    borderTopColor: "#f0e3dc",
+    gap: 12,
+  },
+  reportReasonIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#fff0ec",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  reportReasonText: {
+    flex: 1,
+    color: "#4f1c17",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  reportSubmitting: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 12,
+  },
+  reportSubmittingText: {
+    color: "#8f6a60",
+    fontSize: 13,
+  },
 
   statsRow: {
     flexDirection: "row",

@@ -667,12 +667,20 @@ const handleYearLevelChange = useCallback(
               />
               
               {userRole === "admin" && (
-                <ActionButton
-                  icon="people-outline"
-                  label="Manage Users"
-                  color="#ff9f43"
-                  onPress={scrollToManageUsers}
-                />
+                <>
+                  <ActionButton
+                    icon="people-outline"
+                    label="Manage Users"
+                    color="#ff9f43"
+                    onPress={scrollToManageUsers}
+                  />
+                  <ActionButton
+                    icon="school-outline"
+                    label="Manage Programs"
+                    color="#e0a53d"
+                    onPress={() => router.push("/AdminManageProgramsScreen" as any)}
+                  />
+                </>
               )}
               
               <ActionButton

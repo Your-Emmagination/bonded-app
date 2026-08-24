@@ -10,6 +10,8 @@ import {
   getDoc,
   getDocs,
   increment,
+  limit,
+  startAfter,
   onSnapshot,
   orderBy,
   query,
@@ -133,6 +135,7 @@ type Post = {
   pinnedBy?: string | null;
   aiReply?: { text: string; model?: string | null; generatedAtMs?: number; status?: string | null };
   moderationStatus?: string;
+  moderatedAtMs?: number;
   moderationReasons?: string[];
 };
 
@@ -163,6 +166,7 @@ type Poll = {
   serverId?: string | null;
   channelId?: string | null;
   moderationStatus?: string;
+  moderatedAtMs?: number;
   moderationReasons?: string[];
 };
 
@@ -270,7 +274,17 @@ const fuzzyMatchScore = (haystack: string, token: string): number => {
   if (index > -1) return Math.max(1, 6 - Math.floor(index / 3));
   return 0;
 };
+const isSameCalendarDay = (timestamp: any, target: Date): boolean => {
+  if (!timestamp || typeof timestamp.toDate !== "function") return false;
 
+  const date = timestamp.toDate();
+
+  return (
+    date.getFullYear() === target.getFullYear() &&
+    date.getMonth() === target.getMonth() &&
+    date.getDate() === target.getDate()
+  );
+};
 const computeAdvancedScore = (
   haystack: string,
   tokens: string[],
@@ -357,6 +371,10 @@ const areFeedItemsEquivalent = (first: FeedItem, second: FeedItem) => {
       first.userId === second.userId &&
       first.realUserId === second.realUserId &&
       first.isAnonymous === second.isAnonymous &&
+      String(first.moderationStatus ?? "approved").toLowerCase() ===
+        String(second.moderationStatus ?? "approved").toLowerCase() &&
+      areStringArraysEqual(first.moderationReasons || [], second.moderationReasons || []) &&
+      first.moderatedAtMs === second.moderatedAtMs &&
       first.likeCount === second.likeCount &&
       first.commentCount === second.commentCount &&
       getTimestampValue(first.createdAt) ===
@@ -1041,6 +1059,13 @@ const selectedChannel = useMemo(() => {
   const listenersSetup = useRef(false);
   const unsubscribePostsRef = useRef<(() => void) | null>(null);
   const unsubscribePollsRef = useRef<(() => void) | null>(null);
+  const lastPostDocRef = useRef<any>(null);
+  const lastPollDocRef = useRef<any>(null);
+  const loadedPostIdsRef = useRef<Set<string>>(new Set());
+  const loadedPollIdsRef = useRef<Set<string>>(new Set());
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMorePosts, setHasMorePosts] = useState(true);
+  const [hasMorePolls, setHasMorePolls] = useState(true);
 
   const { isOffline } = useNetworkStatus();
 
@@ -1602,9 +1627,17 @@ const selectedChannel = useMemo(() => {
     listenersSetup.current = true;
     setIsLoading(true);
 
+    lastPostDocRef.current = null;
+    lastPollDocRef.current = null;
+    loadedPostIdsRef.current.clear();
+    loadedPollIdsRef.current.clear();
+    setHasMorePosts(true);
+    setHasMorePolls(true);
+
     const qPosts = query(
       collection(db, "posts"),
       orderBy("createdAt", "desc"),
+      limit(20),
     );
     unsubscribePostsRef.current = onSnapshot(
       qPosts,
@@ -1618,6 +1651,9 @@ const selectedChannel = useMemo(() => {
           likedBy: [],
           ...d.data(),
         }));
+        snapshot.docs.forEach((d) => loadedPostIdsRef.current.add(d.id));
+        lastPostDocRef.current = snapshot.docs[snapshot.docs.length - 1] ?? null;
+        setHasMorePosts(snapshot.size === 20);
 
         fetchedPosts.forEach((post) => {
           if (post.type === "post" && !post.isAnonymous && post.userId) {
@@ -1643,6 +1679,7 @@ const selectedChannel = useMemo(() => {
     const qPolls = query(
       collection(db, "polls"),
       orderBy("createdAt", "desc"),
+      limit(20),
     );
     unsubscribePollsRef.current = onSnapshot(
       qPolls,
@@ -1656,6 +1693,9 @@ const selectedChannel = useMemo(() => {
             ...pollData,
           };
         });
+        snapshot.docs.forEach((d) => loadedPollIdsRef.current.add(d.id));
+        lastPollDocRef.current = snapshot.docs[snapshot.docs.length - 1] ?? null;
+        setHasMorePolls(snapshot.size === 20);
 
         fetchedPolls.forEach((poll) => {
           if (poll.type === "poll" && !poll.isAnonymous && poll.userId) {
@@ -1679,6 +1719,86 @@ const selectedChannel = useMemo(() => {
     return undefined;
   }, [user, isOffline, fetchUserRole, feedItems.length]);
 
+  const loadMoreFeed = useCallback(async () => {
+    if (isOffline || isLoadingMore || (!hasMorePosts && !hasMorePolls)) return;
+
+    setIsLoadingMore(true);
+    try {
+      const [postsSnapshot, pollsSnapshot] = await Promise.all([
+        hasMorePosts && lastPostDocRef.current
+          ? getDocs(
+              query(
+                collection(db, "posts"),
+                orderBy("createdAt", "desc"),
+                startAfter(lastPostDocRef.current),
+                limit(20),
+              ),
+            )
+          : Promise.resolve(null),
+        hasMorePolls && lastPollDocRef.current
+          ? getDocs(
+              query(
+                collection(db, "polls"),
+                orderBy("createdAt", "desc"),
+                startAfter(lastPollDocRef.current),
+                limit(20),
+              ),
+            )
+          : Promise.resolve(null),
+      ]);
+
+      const morePosts: PostFeedItem[] = postsSnapshot
+        ? postsSnapshot.docs
+            .filter((d) => !loadedPostIdsRef.current.has(d.id))
+            .map((d) => ({
+              type: "post" as const,
+              id: d.id,
+              likeCount: 0,
+              commentCount: 0,
+              likedBy: [],
+              ...d.data(),
+            }))
+        : [];
+      const morePolls: PollFeedItem[] = pollsSnapshot
+        ? pollsSnapshot.docs
+            .filter((d) => !loadedPollIdsRef.current.has(d.id))
+            .map((d) => ({
+              type: "poll" as const,
+              id: d.id,
+              ...(d.data() as Omit<Poll, "id">),
+            }))
+        : [];
+
+      postsSnapshot?.docs.forEach((d) => loadedPostIdsRef.current.add(d.id));
+      pollsSnapshot?.docs.forEach((d) => loadedPollIdsRef.current.add(d.id));
+      if (postsSnapshot) {
+        lastPostDocRef.current = postsSnapshot.docs[postsSnapshot.docs.length - 1] ?? lastPostDocRef.current;
+        setHasMorePosts(postsSnapshot.size === 20);
+      }
+      if (pollsSnapshot) {
+        lastPollDocRef.current = pollsSnapshot.docs[pollsSnapshot.docs.length - 1] ?? lastPollDocRef.current;
+        setHasMorePolls(pollsSnapshot.size === 20);
+      }
+
+      morePosts.forEach((post) => {
+        if (!post.isAnonymous && post.userId) fetchUserRole(post.userId);
+      });
+      morePolls.forEach((poll) => {
+        if (!poll.isAnonymous && poll.userId) fetchUserRole(poll.userId);
+      });
+
+      if (morePosts.length || morePolls.length) {
+        setFeedItems((prev) =>
+          sortFeedItems([...prev, ...morePosts, ...morePolls]),
+        );
+      }
+    } catch (error) {
+      console.error("Error loading more feed items:", error);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [fetchUserRole, hasMorePolls, hasMorePosts, isLoadingMore, isOffline]);
+
   // ── Cleanup on logout
   useEffect(() => {
     if (!user && listenersSetup.current) {
@@ -1686,6 +1806,12 @@ const selectedChannel = useMemo(() => {
       if (unsubscribePostsRef.current) unsubscribePostsRef.current();
       if (unsubscribePollsRef.current) unsubscribePollsRef.current();
       listenersSetup.current = false;
+      lastPostDocRef.current = null;
+      lastPollDocRef.current = null;
+      loadedPostIdsRef.current.clear();
+      loadedPollIdsRef.current.clear();
+      setHasMorePosts(true);
+      setHasMorePolls(true);
       setFeedItems([]);
     }
   }, [user]);
@@ -1699,7 +1825,17 @@ const selectedChannel = useMemo(() => {
       return;
     }
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 800);
+    lastPostDocRef.current = null;
+    lastPollDocRef.current = null;
+    loadedPostIdsRef.current.clear();
+    loadedPollIdsRef.current.clear();
+    setHasMorePosts(true);
+    setHasMorePolls(true);
+    if (unsubscribePostsRef.current) unsubscribePostsRef.current();
+    if (unsubscribePollsRef.current) unsubscribePollsRef.current();
+    listenersSetup.current = false;
+    setFeedItems([]);
+    setRefreshing(false);
   }, [isOffline]);
 
   const isPollExpired = useCallback((expiresAt: any) => {
@@ -2782,29 +2918,45 @@ const handleSelectChannel = useCallback(
   });
   const relativeTimeNow = useRelativeTimeNow();
 
+  // Keep Home post timestamps identical to ProfileScreen's "My Posts"
+  // Facebook-style display:
+  // Just now -> Xm -> Xh -> Yesterday at h:mm AM/PM ->
+  // Month day at h:mm AM/PM -> Month day, year.
   const getTimeAgo = useCallback((timestamp: any) => {
-    if (!timestamp || !timestamp.toDate) return "";
+    if (!timestamp || typeof timestamp.toDate !== "function") return "";
+
     const now = new Date(relativeTimeNow);
     const postDate = timestamp.toDate();
     const diffMs = now.getTime() - postDate.getTime();
     const diffSec = Math.floor(diffMs / 1000);
     const diffMin = Math.floor(diffSec / 60);
     const diffHour = Math.floor(diffMin / 60);
-    const diffDay = Math.floor(diffHour / 24);
-    const diffWeek = Math.floor(diffDay / 7);
 
     if (diffSec < 60) return "Just now";
-    if (diffMin < 60) return `${diffMin}m ago`;
-    if (diffHour < 24) return `${diffHour}h ago`;
-    if (diffDay < 7) return `${diffDay}d ago`;
-    if (diffWeek < 4) return `${diffWeek}w ago`;
+    if (diffMin < 60) return `${diffMin}m`;
+    if (isSameCalendarDay(timestamp, now)) return `${diffHour}h`;
 
-    return postDate.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year:
-        postDate.getFullYear() !== now.getFullYear() ? "numeric" : undefined,
+    const timePart = postDate.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
     });
+
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (isSameCalendarDay(timestamp, yesterday)) {
+      return `Yesterday at ${timePart}`;
+    }
+
+    const datePart = postDate.toLocaleDateString("en-US", {
+      month: "long",
+      day: "numeric",
+    });
+
+    if (postDate.getFullYear() === now.getFullYear()) {
+      return `${datePart} at ${timePart}`;
+    }
+
+    return `${datePart}, ${postDate.getFullYear()}`;
   }, [relativeTimeNow]);
 
   const formatLastSeen = useCallback((timestamp: any) => {
@@ -3314,6 +3466,8 @@ return (
             renderItem={renderFeedItem}
             keyExtractor={(item) => item.id}
             onScroll={handleScroll}
+            onEndReached={loadMoreFeed}
+            onEndReachedThreshold={0.65}
             scrollEventThrottle={16}
             // Virtualization tuning: feed items are image-heavy, so keep the
             // render window small rather than the RN defaults (which lean
@@ -3331,6 +3485,14 @@ return (
                 : styles.flatListContent
             }
             ListEmptyComponent={renderEmptyState}
+            ListFooterComponent={
+              isLoadingMore ? (
+                <View style={{ paddingVertical: 20, alignItems: "center" }}>
+                  <ActivityIndicator size="small" />
+                  <Text style={{ marginTop: 6, opacity: 0.7 }}>Loading more…</Text>
+                </View>
+              ) : null
+            }
             ListHeaderComponent={renderFeedHeader}
             refreshControl={
               <RefreshControl

@@ -1,8 +1,11 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import { uploadProfileImage } from "@/utils/cloudinaryUpload";
 import ImageZoomViewer from "../components/ImageZoomViewer";
+import PostCard from "../components/PostCard";
+import CommentModal from "../components/CommentModal";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import {
   EmailAuthProvider,
   User as FirebaseUser,
@@ -10,10 +13,28 @@ import {
   signOut,
   updatePassword,
 } from "firebase/auth";
-import { doc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDocs,
+  increment,
+  onSnapshot,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+} from "firebase/firestore";
 import DropDownPicker from "react-native-dropdown-picker";
 
 import { getProfileIdLabel } from "@/utils/profileLabels";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
+import {
+  removeLikeNotification,
+  upsertLikeNotification,
+} from "@/utils/notifications";
+import { resolveUserRoleForAuthUser, UserRole } from "@/utils/rbac";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { AVATAR_SIZE_LARGE, avatarThumb } from "@/utils/cloudinaryImages";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -31,6 +52,7 @@ import {
   AppState,
   BackHandler,
   Image,
+  Linking,
   Modal,
   Platform,
   ScrollView,
@@ -65,6 +87,60 @@ type EditData = {
   selectedTab?: TabKey;
 };
 
+type TaggedUser = { id: string; name: string; studentID: string };
+type FileAttachment = { url: string; mimeType: string; name?: string };
+
+type Post = {
+  id: string;
+  content?: string;
+  imageUrl?: string;
+  files?: FileAttachment[];
+  link?: { url: string; title: string };
+  username?: string;
+  authorName?: string;
+  userId?: string;
+  realUserId?: string;
+  isAnonymous?: boolean;
+  taggedUsers?: TaggedUser[];
+  createdAt?: any;
+  likeCount?: number;
+  commentCount?: number;
+  likedBy?: string[];
+  bookmarkedBy?: string[];
+  role?: string;
+  moderationStatus?: string;
+};
+
+type PostSortOption = "newest" | "oldest" | "mostLiked" | "mostCommented";
+
+const POST_SORT_OPTIONS: { key: PostSortOption; label: string }[] = [
+  { key: "newest", label: "Newest first" },
+  { key: "oldest", label: "Oldest first" },
+  { key: "mostLiked", label: "Most liked" },
+  { key: "mostCommented", label: "Most commented" },
+];
+
+const PROFILE_RETURN_ROUTE = "/(main)/(tabs)/ProfileScreen";
+
+const isSameCalendarDay = (timestamp: any, target: Date): boolean => {
+  if (!timestamp || typeof timestamp.toDate !== "function") return false;
+  const date = timestamp.toDate();
+  return (
+    date.getFullYear() === target.getFullYear() &&
+    date.getMonth() === target.getMonth() &&
+    date.getDate() === target.getDate()
+  );
+};
+
+// A post's own document has no field indicating it's still awaiting
+// review — that's what moderationStatus tracks. Approved (or legacy posts
+// with no moderationStatus at all) are the only ones visible here, same
+// rule Home and Saved Posts already use.
+const isApprovedPost = (post: Post): boolean => {
+  const status = post.moderationStatus;
+  return !status || status === "approved";
+};
+
 const TABS: {
   key: TabKey;
   label: string;
@@ -93,6 +169,23 @@ const ProfileScreen = () => {
   const resolvedReturnTo = Array.isArray(returnTo) ? returnTo[0] : returnTo;
   const canNavigateBack = navigation.canGoBack() || !!resolvedReturnTo;
 
+  // ─── My Posts ─────────────────────────────────────────────────────────
+  const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>();
+  const [myPosts, setMyPosts] = useState<Post[]>([]);
+  const [myPostsLoading, setMyPostsLoading] = useState(true);
+  const [postSearchQuery, setPostSearchQuery] = useState("");
+  const [postSortOption, setPostSortOption] = useState<PostSortOption>("newest");
+  const [showSortMenu, setShowSortMenu] = useState(false);
+  const [selectedDateFilter, setSelectedDateFilter] = useState<Date | null>(null);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [commentModalPostId, setCommentModalPostId] = useState<string | null>(null);
+  const [postImageViewerVisible, setPostImageViewerVisible] = useState(false);
+  const [postImages, setPostImages] = useState<string[]>([]);
+  const [postImageIndex, setPostImageIndex] = useState(0);
+  const [postImageViewerPostId, setPostImageViewerPostId] = useState<string | null>(null);
+  const likeInFlightRef = useRef<Set<string>>(new Set());
+  const relativeTimeNow = useRelativeTimeNow();
+
   const imageUri = useMemo(
     () => profileImage ?? student?.profileImage,
     [profileImage, student?.profileImage],
@@ -111,6 +204,116 @@ const ProfileScreen = () => {
   const profileIdLabel = useMemo(
     () => getProfileIdLabel(student?.role),
     [student?.role],
+  );
+
+  // Live listener on the signed-in user's own posts. realUserId is always
+  // set to the true auth uid on creation (even for anonymous posts), so a
+  // single query covers both anonymous and regular posts.
+  useEffect(() => {
+    if (!user?.uid) {
+      setMyPosts([]);
+      setMyPostsLoading(false);
+      return;
+    }
+
+    setMyPostsLoading(true);
+    const q = query(collection(db, "posts"), where("realUserId", "==", user.uid));
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        setMyPosts(snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as Post)));
+        setMyPostsLoading(false);
+      },
+      (error) => {
+        console.error("Error loading your posts:", error);
+        setMyPostsLoading(false);
+      },
+    );
+    return unsubscribe;
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (!user) {
+      setCurrentUserRole(undefined);
+      return;
+    }
+    resolveUserRoleForAuthUser(user).then((role) => setCurrentUserRole(role as UserRole));
+  }, [user]);
+
+  const approvedMyPosts = useMemo(() => myPosts.filter(isApprovedPost), [myPosts]);
+
+  const visiblePosts = useMemo(() => {
+    const trimmedQuery = postSearchQuery.trim().toLowerCase();
+
+    const filtered = approvedMyPosts.filter((post) => {
+      if (trimmedQuery && !post.content?.toLowerCase().includes(trimmedQuery)) {
+        return false;
+      }
+      if (selectedDateFilter && !isSameCalendarDay(post.createdAt, selectedDateFilter)) {
+        return false;
+      }
+      return true;
+    });
+
+    const getMillis = (timestamp: any) =>
+      timestamp && typeof timestamp.toMillis === "function" ? timestamp.toMillis() : 0;
+
+    const sorted = [...filtered];
+    switch (postSortOption) {
+      case "oldest":
+        sorted.sort((a, b) => getMillis(a.createdAt) - getMillis(b.createdAt));
+        break;
+      case "mostLiked":
+        sorted.sort((a, b) => (b.likeCount ?? 0) - (a.likeCount ?? 0));
+        break;
+      case "mostCommented":
+        sorted.sort((a, b) => (b.commentCount ?? 0) - (a.commentCount ?? 0));
+        break;
+      case "newest":
+      default:
+        sorted.sort((a, b) => getMillis(b.createdAt) - getMillis(a.createdAt));
+        break;
+    }
+    return sorted;
+  }, [approvedMyPosts, postSearchQuery, postSortOption, selectedDateFilter]);
+
+  const getTimeAgo = useCallback(
+    (timestamp: any) => {
+      if (!timestamp || typeof timestamp.toDate !== "function") return "";
+      const now = new Date(relativeTimeNow);
+      const postDate = timestamp.toDate();
+      const diffMs = now.getTime() - postDate.getTime();
+      const diffSec = Math.floor(diffMs / 1000);
+      const diffMin = Math.floor(diffSec / 60);
+      const diffHour = Math.floor(diffMin / 60);
+
+      if (diffSec < 60) return "Just now";
+      if (diffMin < 60) return `${diffMin}m`;
+      if (isSameCalendarDay(timestamp, now)) return `${diffHour}h`;
+
+      const timePart = postDate.toLocaleTimeString("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+      });
+
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      if (isSameCalendarDay(timestamp, yesterday)) {
+        return `Yesterday at ${timePart}`;
+      }
+
+      const datePart = postDate.toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+      });
+
+      if (postDate.getFullYear() === now.getFullYear()) {
+        return `${datePart} at ${timePart}`;
+      }
+
+      return `${datePart}, ${postDate.getFullYear()}`;
+    },
+    [relativeTimeNow],
   );
 
   useEffect(() => {
@@ -186,6 +389,158 @@ const ProfileScreen = () => {
       subscription.remove();
     };
   }, [user]);
+
+  // ─── My Posts: handlers ─────────────────────────────────────────────
+  const deleteCommentTree = useCallback(async (parentId: string) => {
+    const commentsSnapshot = await getDocs(
+      query(collection(db, "comments"), where("postId", "==", parentId)),
+    );
+    await Promise.all(
+      commentsSnapshot.docs.map(async (commentDoc) => {
+        const repliesSnapshot = await getDocs(
+          query(collection(db, "replies"), where("commentId", "==", commentDoc.id)),
+        );
+        await Promise.all(repliesSnapshot.docs.map((replyDoc) => deleteDoc(replyDoc.ref)));
+        await deleteDoc(commentDoc.ref);
+      }),
+    );
+  }, []);
+
+  const handleLike = useCallback(
+    async (postId: string, currentLikedBy: string[] = []) => {
+      if (!user) return;
+      if (likeInFlightRef.current.has(postId)) return;
+      likeInFlightRef.current.add(postId);
+
+      const post = myPosts.find((p) => p.id === postId);
+      const hasLiked = currentLikedBy.includes(user.uid);
+      const postRef = doc(db, "posts", postId);
+      const postOwnerId = post?.realUserId || post?.userId;
+      const actorName = user.displayName || user.email?.split("@")[0] || "Someone";
+
+      try {
+        await updateDoc(postRef, {
+          likedBy: hasLiked
+            ? currentLikedBy.filter((id) => id !== user.uid)
+            : [...currentLikedBy, user.uid],
+          likeCount: increment(hasLiked ? -1 : 1),
+        });
+
+        if (hasLiked) {
+          await removeLikeNotification({
+            recipientId: postOwnerId,
+            actorId: user.uid,
+            entityType: "post",
+            entityId: postId,
+          });
+        } else {
+          await upsertLikeNotification({
+            recipientId: postOwnerId,
+            actor: { id: user.uid, name: actorName, profileImage: null },
+            entityType: "post",
+            entityId: postId,
+            preview: post?.content,
+          });
+        }
+      } catch (error) {
+        console.error("Error liking post:", error);
+      } finally {
+        likeInFlightRef.current.delete(postId);
+      }
+    },
+    [myPosts, user],
+  );
+
+  const handleEditPost = useCallback(
+    (postId: string) => {
+      router.push({ pathname: "/CreatePostScreen", params: { editPostId: postId } });
+    },
+    [router],
+  );
+
+  const handleDeletePost = useCallback(
+    (postId: string) => {
+      Alert.alert(
+        "Delete Post",
+        "This will permanently remove the post, comments, and replies.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                await deleteCommentTree(postId);
+                await deleteDoc(doc(db, "posts", postId));
+              } catch (error) {
+                console.error("Error deleting post:", error);
+                Alert.alert("Error", "Failed to delete post.");
+              }
+            },
+          },
+        ],
+      );
+    },
+    [deleteCommentTree],
+  );
+
+  const openPostImageViewer = useCallback(
+    (images: string[], startIndex: number, postId?: string) => {
+      setPostImages(images);
+      setPostImageIndex(startIndex);
+      setPostImageViewerPostId(postId ?? null);
+      setPostImageViewerVisible(true);
+    },
+    [],
+  );
+
+  const handlePostFilePress = useCallback(
+    (url: string, mimeType: string) => {
+      if (mimeType.startsWith("image/")) {
+        openPostImageViewer([url], 0);
+        return;
+      }
+      let fileUrl = url;
+      if (mimeType.includes("pdf") && url.includes("cloudinary.com")) {
+        fileUrl = url.replace("/upload/", "/upload/fl_attachment/");
+      }
+      Linking.canOpenURL(fileUrl)
+        .then((supported) => {
+          if (supported) Linking.openURL(fileUrl);
+        })
+        .catch((err) => console.error("Error opening URL:", err));
+    },
+    [openPostImageViewer],
+  );
+
+  const handlePostProfileClick = useCallback(
+    (targetId?: string) => {
+      if (!targetId || targetId === user?.uid) return; // already on own profile
+      router.push(
+        buildUserProfileHref({ userId: targetId, returnTo: PROFILE_RETURN_ROUTE }) as any,
+      );
+    },
+    [router, user?.uid],
+  );
+
+  const handlePostTagClick = useCallback(
+    (taggedUserId: string) => {
+      if (taggedUserId === user?.uid) return;
+      router.push(
+        buildUserProfileHref({ userId: taggedUserId, returnTo: PROFILE_RETURN_ROUTE }) as any,
+      );
+    },
+    [router, user?.uid],
+  );
+
+  const postImageViewerPost = postImageViewerPostId
+    ? myPosts.find((p) => p.id === postImageViewerPostId)
+    : undefined;
+
+  const handleDateFilterChange = useCallback((_event: any, date?: Date) => {
+    setShowDatePicker(Platform.OS === "ios");
+    if (date) setSelectedDateFilter(date);
+  }, []);
 
   const updateStudent = useCallback(
     async (data: Partial<Student>) => {
@@ -626,13 +981,218 @@ const ProfileScreen = () => {
               onPress={() => router.push("/(main)/BookmarksScreen" as any)}
             />
             <ActionButton
+              icon="settings-outline"
+              text="Settings"
+              onPress={() => router.push("/(main)/SettingsScreen" as any)}
+            />
+            <ActionButton
               icon="log-out-outline"
               text="Log Out"
               onPress={handleLogout}
             />
           </View>
+
+          {/* My Posts Section */}
+          <View style={styles.section}>
+            <View style={styles.sectionTitleRow}>
+              <Ionicons name="grid-outline" size={18} color="#5f0909" />
+              <Text style={styles.sectionTitle}>My Posts</Text>
+            </View>
+
+            {/* Toolbar: search, sort, date filter */}
+            <View style={styles.postsToolbar}>
+              <View style={styles.searchBar}>
+                <Ionicons name="search-outline" size={16} color="#b88f87" />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="Search your posts"
+                  placeholderTextColor="#b88f87"
+                  value={postSearchQuery}
+                  onChangeText={setPostSearchQuery}
+                  returnKeyType="search"
+                />
+                {postSearchQuery.length > 0 && (
+                  <TouchableOpacity onPress={() => setPostSearchQuery("")}>
+                    <Ionicons name="close-circle" size={16} color="#b88f87" />
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <View style={styles.toolbarRow}>
+                <TouchableOpacity
+                  style={styles.toolbarChip}
+                  onPress={() => setShowSortMenu(true)}
+                  activeOpacity={0.75}
+                >
+                  <Ionicons name="swap-vertical-outline" size={14} color="#5f0909" />
+                  <Text style={styles.toolbarChipText}>
+                    {POST_SORT_OPTIONS.find((o) => o.key === postSortOption)?.label}
+                  </Text>
+                  <Ionicons name="chevron-down" size={14} color="#5f0909" />
+                </TouchableOpacity>
+
+                {selectedDateFilter ? (
+                  <View style={[styles.toolbarChip, styles.toolbarChipActive]}>
+                    <Ionicons name="calendar-outline" size={14} color="#fffaf7" />
+                    <Text style={[styles.toolbarChipText, styles.toolbarChipTextActive]}>
+                      {selectedDateFilter.toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                      })}
+                    </Text>
+                    <TouchableOpacity onPress={() => setSelectedDateFilter(null)}>
+                      <Ionicons name="close" size={14} color="#fffaf7" />
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.toolbarChip}
+                    onPress={() => setShowDatePicker(true)}
+                    activeOpacity={0.75}
+                  >
+                    <Ionicons name="calendar-outline" size={14} color="#5f0909" />
+                    <Text style={styles.toolbarChipText}>Date</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+
+            {showDatePicker && (
+              <DateTimePicker
+                value={selectedDateFilter ?? new Date()}
+                mode="date"
+                display="default"
+                maximumDate={new Date()}
+                onChange={handleDateFilterChange}
+              />
+            )}
+
+            {/* Post list */}
+            {myPostsLoading ? (
+              <View style={styles.postsEmptyState}>
+                <ActivityIndicator size="small" color="#a61f1f" />
+              </View>
+            ) : myPosts.length === 0 ? (
+              <View style={styles.postsEmptyState}>
+                <Ionicons name="albums-outline" size={32} color="#c9a89c" />
+                <Text style={styles.postsEmptyTitle}>You haven't posted anything yet</Text>
+              </View>
+            ) : approvedMyPosts.length === 0 ? (
+              <View style={styles.postsEmptyState}>
+                <Ionicons name="time-outline" size={32} color="#c9a89c" />
+                <Text style={styles.postsEmptyTitle}>
+                  Your post{myPosts.length > 1 ? "s are" : " is"} awaiting moderator review
+                </Text>
+              </View>
+            ) : visiblePosts.length === 0 ? (
+              <View style={styles.postsEmptyState}>
+                <Ionicons name="search-outline" size={32} color="#c9a89c" />
+                <Text style={styles.postsEmptyTitle}>No posts match your filters</Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    setPostSearchQuery("");
+                    setSelectedDateFilter(null);
+                  }}
+                >
+                  <Text style={styles.postsClearFiltersText}>Clear filters</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              visiblePosts.map((post) => (
+                <PostCard
+                  key={post.id}
+                  post={post as any}
+                  isLiked={post.likedBy?.includes(user?.uid || "") || false}
+                  currentUserRole={currentUserRole}
+                  currentUserId={user?.uid}
+                  onLike={handleLike}
+                  onProfileClick={handlePostProfileClick}
+                  onTagClick={handlePostTagClick}
+                  onImagePress={openPostImageViewer}
+                  onFilePress={handlePostFilePress}
+                  getTimeAgo={getTimeAgo}
+                  onCommentPress={(postId) => setCommentModalPostId(postId)}
+                  onEdit={handleEditPost}
+                  onDelete={handleDeletePost}
+                />
+              ))
+            )}
+          </View>
         </ScrollView>
       </View>
+
+      {/* Sort options menu */}
+      <Modal
+        visible={showSortMenu}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowSortMenu(false)}
+      >
+        <TouchableOpacity
+          style={styles.sortMenuBackdrop}
+          activeOpacity={1}
+          onPress={() => setShowSortMenu(false)}
+        >
+          <View style={styles.sortMenuCard}>
+            {POST_SORT_OPTIONS.map((option) => (
+              <TouchableOpacity
+                key={option.key}
+                style={styles.sortMenuOption}
+                onPress={() => {
+                  setPostSortOption(option.key);
+                  setShowSortMenu(false);
+                }}
+              >
+                <Text
+                  style={[
+                    styles.sortMenuOptionText,
+                    postSortOption === option.key && styles.sortMenuOptionTextActive,
+                  ]}
+                >
+                  {option.label}
+                </Text>
+                {postSortOption === option.key && (
+                  <Ionicons name="checkmark" size={16} color="#a61f1f" />
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Comment Modal for My Posts */}
+      {commentModalPostId && user?.uid && (
+        <CommentModal
+          visible={true}
+          onClose={() => setCommentModalPostId(null)}
+          postId={commentModalPostId}
+          currentUserId={user.uid}
+          currentUserRole={currentUserRole}
+        />
+      )}
+
+      {/* Image Viewer for My Posts */}
+      <ImageZoomViewer
+        images={postImages}
+        startIndex={postImageIndex}
+        visible={postImageViewerVisible}
+        onClose={() => setPostImageViewerVisible(false)}
+        showActions={!!postImageViewerPost}
+        likesCount={postImageViewerPost?.likeCount ?? 0}
+        commentsCount={postImageViewerPost?.commentCount ?? 0}
+        isLiked={postImageViewerPost?.likedBy?.includes(user?.uid || "") || false}
+        onLike={() => {
+          if (postImageViewerPost) {
+            handleLike(postImageViewerPost.id, postImageViewerPost.likedBy || []);
+          }
+        }}
+        onComment={() => {
+          if (postImageViewerPost) {
+            setPostImageViewerVisible(false);
+            setCommentModalPostId(postImageViewerPost.id);
+          }
+        }}
+      />
 
       {/* Edit Modal */}
       <EditModal
@@ -1355,6 +1915,82 @@ const styles = StyleSheet.create({
   listItemLabel: { color: "#4d1b17" },
   arrowIcon: { tintColor: "#e0a53d" } as any,
   tickIcon: { tintColor: "#e0a53d" } as any,
+
+  // My Posts
+  postsToolbar: { gap: 10, marginBottom: 12 },
+  searchBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#fffaf7",
+    borderWidth: 1,
+    borderColor: "#ead8cf",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    height: 40,
+  },
+  searchInput: { flex: 1, color: "#4d1b17", fontSize: 14 },
+  toolbarRow: { flexDirection: "row", gap: 8 },
+  toolbarChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#fffaf7",
+    borderWidth: 1,
+    borderColor: "#ead8cf",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  toolbarChipActive: {
+    backgroundColor: "#a61f1f",
+    borderColor: "#a61f1f",
+  },
+  toolbarChipText: { color: "#5f0909", fontSize: 12.5, fontWeight: "600" },
+  toolbarChipTextActive: { color: "#fffaf7" },
+  postsEmptyState: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 32,
+    gap: 8,
+  },
+  postsEmptyTitle: {
+    color: "#8f6a60",
+    fontSize: 13.5,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  postsClearFiltersText: {
+    color: "#a61f1f",
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 2,
+  },
+  sortMenuBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.4)",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 32,
+  },
+  sortMenuCard: {
+    width: "100%",
+    maxWidth: 320,
+    backgroundColor: "#fffaf7",
+    borderRadius: 16,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: "#f0e7e2",
+  },
+  sortMenuOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  sortMenuOptionText: { color: "#4d1b17", fontSize: 14.5 },
+  sortMenuOptionTextActive: { color: "#a61f1f", fontWeight: "700" },
 });
 
 export default ProfileScreen;

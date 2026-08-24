@@ -35,7 +35,8 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "usesCleartextTraffic": true
     },
     "web": {
       "output": "static",
@@ -48,7 +49,14 @@
         "expo-notifications",
         {
           "defaultChannel": "default",
-          "color": "#e0a53d"
+          "color": "#e0a53d",
+          "sounds": [
+            "./assets/sounds/notif_default.wav",
+            "./assets/sounds/notif_chime.wav",
+            "./assets/sounds/notif_pop.wav",
+            "./assets/sounds/notif_bubble.wav",
+            "./assets/sounds/notif_alert.wav"
+          ]
         }
       ],
       [

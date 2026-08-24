@@ -43,6 +43,8 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
+  startAfter,
   increment,
   serverTimestamp,
   deleteDoc,
@@ -66,7 +68,10 @@ import { getAiErrorMessage } from "@/utils/aiConfig";
 import {
   canViewModeratedContent,
   getModerationPreviewText,
+  runLocalModerationRules,
   requestModerationDecision,
+  requestFirestoreModerationDecision,
+  type ModerationDecision,
 } from "@/utils/contentModeration";
 import { resolveAvatarUri } from "@/utils/avatar";
 
@@ -470,6 +475,9 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const [comments, setComments] = useState<Comment[]>([]);
   const [displayedComments, setDisplayedComments] = useState<Comment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMoreComments, setHasMoreComments] = useState(true);
+  const lastCommentDocRef = useRef<any>(null);
   const [user, setUser] = useState<any>(() => buildCurrentUserPreview(auth.currentUser));
   const [sortBy, setSortBy] = useState<SortOption>("latest");
   const [replyModalVisible, setReplyModalVisible] = useState(false);
@@ -636,27 +644,29 @@ const CommentModal: React.FC<CommentModalProps> = ({
 
   useEffect(() => {
     if (!postId) return;
+    setLoading(true);
+    setHasMoreComments(true);
+    lastCommentDocRef.current = null;
+
     const q = query(
       collection(db, "comments"),
       where("postId", "==", postId),
-      orderBy("createdAt", "asc")
+      orderBy("createdAt", "desc"),
+      limit(20),
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
+      lastCommentDocRef.current = snapshot.docs[snapshot.docs.length - 1] || null;
+      setHasMoreComments(snapshot.size === 20);
       const fetchedComments = (snapshot.docs
-        .map((d) => ({
-          id: d.id,
-          ...d.data(),
-        })) as Comment[])
-        .filter((item) =>
-          canViewModeratedContent({
-            moderationStatus: item.moderationStatus,
-            realUserId: item.realUserId,
-            userId: item.userId,
-            viewerUserId: user?.uid,
-            viewerRole: user?.role,
-          }),
-        );
+        .map((d) => ({ id: d.id, ...d.data() })) as Comment[])
+        .filter((item) => canViewModeratedContent({
+          moderationStatus: item.moderationStatus,
+          realUserId: item.realUserId,
+          userId: item.userId,
+          viewerUserId: user?.uid,
+          viewerRole: user?.role,
+        }));
       setComments(fetchedComments);
       setLoading(false);
     });
@@ -740,6 +750,37 @@ const CommentModal: React.FC<CommentModalProps> = ({
     }
   }, [internalVisible]);
 
+  const loadMoreComments = useCallback(async () => {
+    if (loadingMore || !hasMoreComments || !lastCommentDocRef.current || !postId) return;
+    setLoadingMore(true);
+    try {
+      const nextQuery = query(
+        collection(db, "comments"),
+        where("postId", "==", postId),
+        orderBy("createdAt", "desc"),
+        startAfter(lastCommentDocRef.current),
+        limit(20),
+      );
+      const snapshot = await getDocs(nextQuery);
+      lastCommentDocRef.current = snapshot.docs[snapshot.docs.length - 1] || lastCommentDocRef.current;
+      setHasMoreComments(snapshot.size === 20);
+      const nextComments = (snapshot.docs
+        .map((d) => ({ id: d.id, ...d.data() })) as Comment[])
+        .filter((item) => canViewModeratedContent({
+          moderationStatus: item.moderationStatus,
+          realUserId: item.realUserId,
+          userId: item.userId,
+          viewerUserId: user?.uid,
+          viewerRole: user?.role,
+        }));
+      setComments((current) => [...current, ...nextComments.filter((next) => !current.some((item) => item.id === next.id))]);
+    } catch (error) {
+      console.error("Failed to load more comments:", error);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [hasMoreComments, loadingMore, postId, user?.role, user?.uid]);
+
   const handleSend = async (commentData: any) => {
     if (!user?.uid) return;
 
@@ -748,22 +789,67 @@ const CommentModal: React.FC<CommentModalProps> = ({
       postId,
       createdAt: serverTimestamp(),
     };
-    const moderationDecision = await requestModerationDecision({
-      text: getModerationPreviewText({
+    // Fast local gate: only clearly prohibited content blocks synchronously.
+    // Safe/ambiguous text is written as pending immediately; server moderation
+    // continues in the background so the composer can reset without waiting.
+    const localDecision = runLocalModerationRules(
+      getModerationPreviewText({
         text: commentData.text,
         linkTitle: commentData.link?.title,
         fileCount: commentData.files?.length,
       }),
-      scope: "comment",
-      serverId: postId,
-      channelId: postId,
-      authorId: user.uid,
-      authorRole: user.role,
-    });
-    newComment.moderationStatus = moderationDecision.status;
-    newComment.moderationReasons = moderationDecision.reasons;
-    newComment.moderatedAtMs = Date.now();
+    );
+
+    if (localDecision.status === "rejected") {
+      setConfirmDialog({
+        title: "Comment Blocked",
+        description: localDecision.reasons?.[0] || "This comment violates the community guidelines.",
+        confirmText: "OK",
+        singleAction: true,
+        destructive: true,
+        onConfirm: () => setConfirmDialog(null),
+      });
+      return;
+    }
+
+    // Never let the client self-approve. Every comment enters Firestore as pending.
+    newComment.moderationStatus = "pending";
+    newComment.moderationReasons = [];
+    newComment.moderatedAtMs = null;
     const commentRef = await addDoc(collection(db, "comments"), newComment);
+
+    void (async () => {
+      let moderationDecision: ModerationDecision;
+      try {
+      moderationDecision = await requestFirestoreModerationDecision({
+        collectionName: "comments",
+        documentId: commentRef.id,
+        scope: "comment",
+      });
+    } catch (error) {
+      console.warn("[Comment] Server moderation unavailable; comment remains pending:", error);
+      setConfirmDialog({
+        title: "Comment Pending Review",
+        description: "Automatic moderation is temporarily unavailable. Your comment is waiting for moderator approval.",
+        confirmText: "OK",
+        singleAction: true,
+        destructive: false,
+        onConfirm: () => setConfirmDialog(null),
+      });
+      return;
+    }
+    if (moderationDecision.status !== "approved") {
+      setConfirmDialog({
+        title: moderationDecision.status === "rejected" ? "Comment Blocked" : "Comment Pending Review",
+        description: moderationDecision.reasons?.[0] || (moderationDecision.status === "rejected" ? "This comment was blocked." : "This comment is waiting for moderator approval."),
+        confirmText: "OK",
+        singleAction: true,
+        destructive: moderationDecision.status === "rejected",
+        onConfirm: () => setConfirmDialog(null),
+      });
+      return;
+    }
+
     await updateDoc(doc(db, "posts", postId), {
       commentCount: increment(1),
     });
@@ -781,7 +867,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         isAnonymous: commentData.isAnonymous,
       };
 
-    if (moderationDecision.status !== "pending") {
+    if (moderationDecision.status === "approved") {
       await createNotification({
         recipientId: postOwnerId,
         actor,
@@ -815,17 +901,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
       hasAiAssistantMention(commentData.text) ||
       (commentData.taggedUsers || []).some((tag: any) => isAiAssistantId(tag.id));
 
-    if (!shouldTriggerAi || moderationDecision.status === "pending") {
-      if (moderationDecision.status === "pending") {
-        setConfirmDialog({
-          title: "Comment Pending Review",
-          description: "This comment was flagged and is waiting for moderator approval.",
-          confirmText: "OK",
-          singleAction: true,
-          destructive: false,
-          onConfirm: () => setConfirmDialog(null),
-        });
-      }
+    if (!shouldTriggerAi) {
       return;
     }
 
@@ -900,6 +976,9 @@ const CommentModal: React.FC<CommentModalProps> = ({
         onConfirm: () => setConfirmDialog(null),
       });
     }
+    })().catch((error) => {
+      console.error("[Comment] Background approval finalization failed:", error);
+    });
   };
 
   const handleLikeComment = async (commentId: string) => {
@@ -976,35 +1055,58 @@ const CommentModal: React.FC<CommentModalProps> = ({
   }, [postId]);
 
   const handleDeleteComment = useCallback(
-    async (comment: Comment) => {
-      setConfirmDialog({
-        title: "Delete Comment?",
-        description: "This will permanently remove the comment and its replies.",
-        confirmText: "Delete",
-        destructive: true,
-        onConfirm: async () => {
-          try {
-            const repliesSnapshot = await getDocs(
-              query(collection(db, "replies"), where("commentId", "==", comment.id)),
-            );
-            await Promise.all(repliesSnapshot.docs.map((replyDoc) => deleteDoc(replyDoc.ref)));
-            await deleteDoc(doc(db, "comments", comment.id));
-            await decrementParentCommentCount();
-            if (selectedComment?.id === comment.id) {
-              setReplyModalVisible(false);
-              setSelectedComment(null);
-            }
-          } catch (error) {
-            console.error("Error deleting comment:", error);
-            setConfirmDialog({ title: "Error", description: "Failed to delete comment.", confirmText: "OK", singleAction: true, destructive: true, onConfirm: () => setConfirmDialog(null) });
-            return;
+  async (comment: Comment) => {
+    setConfirmDialog({
+      title: "Delete Comment?",
+      description:
+        "This will permanently remove the comment and its replies.",
+      confirmText: "Delete",
+      destructive: true,
+      onConfirm: async () => {
+        // Close the confirmation dialog immediately.
+        setConfirmDialog(null);
+
+        try {
+          const repliesSnapshot = await getDocs(
+            query(
+              collection(db, "replies"),
+              where("commentId", "==", comment.id),
+            ),
+          );
+
+          await Promise.all(
+            repliesSnapshot.docs.map((replyDoc) =>
+              deleteDoc(replyDoc.ref),
+            ),
+          );
+
+          await deleteDoc(
+            doc(db, "comments", comment.id),
+          );
+
+          await decrementParentCommentCount();
+
+          if (selectedComment?.id === comment.id) {
+            setReplyModalVisible(false);
+            setSelectedComment(null);
           }
-          setConfirmDialog(null);
-        },
-      });
-    },
-    [decrementParentCommentCount, selectedComment?.id],
-  );
+        } catch (error) {
+          console.error("Error deleting comment:", error);
+
+          setConfirmDialog({
+            title: "Error",
+            description: "Failed to delete comment.",
+            confirmText: "OK",
+            singleAction: true,
+            destructive: true,
+            onConfirm: () => setConfirmDialog(null),
+          });
+        }
+      },
+    });
+  },
+  [decrementParentCommentCount, selectedComment?.id],
+);
 
   const handleCommentOptions = useCallback(
     (comment: Comment, _authorRole?: UserRole) => {
@@ -1338,6 +1440,9 @@ const CommentModal: React.FC<CommentModalProps> = ({
             </View>
           ) : null
         }
+        onEndReached={loadMoreComments}
+        onEndReachedThreshold={0.5}
+        ListFooterComponent={loadingMore ? <ActivityIndicator color="#e0a53d" style={{ marginVertical: 16 }} /> : null}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"

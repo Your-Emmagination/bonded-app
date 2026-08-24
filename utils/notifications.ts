@@ -11,7 +11,7 @@ import {
   setDoc,
   where,
 } from "firebase/firestore";
-import { db } from "../Firebase_configure";
+import { auth, db } from "../Firebase_configure";
 import { EVERYONE_MENTION_ID } from "./aiAssistant";
 
 export type NotificationType =
@@ -157,14 +157,72 @@ export const createNotification = async ({
     createdAt: serverTimestamp(),
   };
 
+  let savedNotificationId = notificationId;
+
   if (notificationId) {
     await setDoc(doc(db, NOTIFICATIONS_COLLECTION, notificationId), payload, {
       merge: true,
     });
+  } else {
+    const notificationRef = await addDoc(
+      collection(db, NOTIFICATIONS_COLLECTION),
+      payload,
+    );
+    savedNotificationId = notificationRef.id;
+  }
+
+  // Events and emergency broadcasts already have dedicated fan-out senders
+  // (they can send to many recipients at once), so do not send them a second
+  // time through the single-notification gateway.
+  if (type === "event" || type === "emergency") {
     return;
   }
 
-  await addDoc(collection(db, NOTIFICATIONS_COLLECTION), payload);
+  // Push notifications are sent by the dedicated Node.js backend.
+  // Cloudflare remains the AI backend; it is no longer used for push delivery.
+ console.log("PUSH DEBUG:", { savedNotificationId, hasUser: !!auth.currentUser });
+if (savedNotificationId && auth.currentUser) {
+    try {
+      const idToken = await auth.currentUser.getIdToken();
+      const backendUrl = (
+        process.env.EXPO_PUBLIC_BONDED_NOTIFICATION_BACKEND_URL || ""
+      ).replace(/\/$/, "");
+
+      if (!backendUrl) {
+        console.warn(
+          "Push notification backend URL is not configured. Set EXPO_PUBLIC_BONDED_NOTIFICATION_BACKEND_URL."
+        );
+        return;
+      }
+
+      const response = await fetch(`${backendUrl}/notifications/push`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          notificationId: savedNotificationId,
+        }),
+      });
+
+      const responseBody = await response.text().catch(() => "");
+
+      if (!response.ok) {
+        console.warn(
+          "Push notification backend failed:",
+          response.status,
+          responseBody,
+        );
+      } else {
+        console.log("Push notification backend response:", responseBody);
+      }
+    } catch (error) {
+      // Push delivery must never prevent the Firestore notification from
+      // being created or make likes/comments fail.
+      console.warn("Push notification backend error:", error);
+    }
+  }
 };
 
 export const upsertLikeNotification = async ({

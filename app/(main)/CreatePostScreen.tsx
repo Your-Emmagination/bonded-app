@@ -2,6 +2,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import ConfirmDialog from "./components/ConfirmDialog";
 import * as DocumentPicker from "expo-document-picker";
+import * as ImagePicker from "expo-image-picker";
 import { router, useLocalSearchParams } from "expo-router";
 import {
   addDoc,
@@ -43,10 +44,6 @@ import {
   uploadPostVideo,
 } from "@/utils/cloudinaryUpload";
 import {
-  createMentionNotifications,
-  resolveMentionRecipientIds,
-} from "@/utils/notifications";
-import {
   AI_ASSISTANT_NAME,
   AI_ASSISTANT_STUDENT,
   AI_MENTION_TOKEN,
@@ -60,13 +57,8 @@ import {
   isAiAssistantId,
   isEveryoneMentionId,
 } from "@/utils/aiAssistant";
-import {
-  AI_REQUEST_COOLDOWN_MS,
-  requestAiReplyFromWorker,
-  reserveAiCooldown,
-} from "@/utils/aiWorker";
-import { getAiErrorMessage } from "@/utils/aiConfig";
 import { summarizeAiVisibleContent } from "@/utils/aiContext";
+import { requestServerPostModeration } from "@/utils/aiWorker";
 import {
   getModerationPreviewText,
   requestModerationDecision,
@@ -236,6 +228,48 @@ const CreatePostScreen = () => {
     } catch (error) {
       console.error("Error fetching students:", error);
       Alert.alert("Error", "Failed to load students list");
+    }
+  };
+
+  const takePhoto = async () => {
+    try {
+      if (files.length >= MAX_FILES) {
+        Alert.alert(
+          "Maximum Files Reached",
+          `You can only attach up to ${MAX_FILES} files per post.`,
+        );
+        return;
+      }
+
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert(
+          "Camera Permission Required",
+          "Please allow BondEd to use your camera so you can take a photo for your post.",
+        );
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ["images"],
+        quality: 0.85,
+        allowsEditing: false,
+      });
+
+      if (result.canceled || !result.assets?.length) return;
+
+      const photo = result.assets[0];
+      setFiles((current) => [
+        ...current,
+        {
+          uri: photo.uri,
+          mimeType: photo.mimeType || "image/jpeg",
+          name: photo.fileName || `camera_${Date.now()}.jpg`,
+        },
+      ]);
+    } catch (error) {
+      console.error("Error taking photo:", error);
+      Alert.alert("Camera Error", "Failed to take a photo. Please try again.");
     }
   };
 
@@ -518,20 +552,23 @@ for (const file of files) {
         authorId: user?.uid,
         authorRole: await resolveUserRoleForAuthUser(user),
       });
-      const finalModerationStatus:
-        | "approved"
-        | "pending"
-        | "rejected" =
+      const localModerationStatus =
         moderationDecision.status === "pending" || mediaRequiresReview
           ? "pending"
           : moderationDecision.status;
 
-const finalModerationReasons = [
-  ...moderationDecision.reasons,
-  ...(mediaRequiresReview
-    ? ["Media flagged for AI moderator review."]
-    : []),
-];
+      const finalModerationReasons = [
+        ...moderationDecision.reasons,
+        ...(mediaRequiresReview
+          ? ["Media flagged for AI moderator review."]
+          : []),
+      ];
+
+      // Local moderation can block obvious violations before any write.
+      // Every non-rejected post is still written as PENDING. The trusted
+      // Cloud Function is responsible for changing it to approved/rejected.
+      const finalModerationStatus: "pending" | "rejected" =
+        localModerationStatus === "rejected" ? "rejected" : "pending";
 
       // Rejected content must never be written to Firestore.
       // Pending content is intentionally written so it can appear in the
@@ -549,11 +586,14 @@ const finalModerationReasons = [
   content: content.trim(),
   files: uploadedUrls,
 
-  userId: isAnonymous ? "anonymous" : user?.uid,
+  // Keep the authenticated UID as the ownership identity even when the
+  // public display is anonymous. Firestore rules depend on this invariant.
+  userId: user?.uid,
   realUserId: user?.uid,
 
   username: displayName,
   authorName: displayName,
+  aiPrompt,
 
   isAnonymous,
 
@@ -575,9 +615,9 @@ const finalModerationReasons = [
   serverId: selectedServerId,
   channelId: selectedChannelId,
 
-  moderationStatus: finalModerationStatus,
+  moderationStatus: "pending",
   moderationReasons: finalModerationReasons,
-  moderatedAtMs: Date.now(),
+  moderatedAtMs: null,
 };
       if (attachedLink) {
         postData.link = attachedLink;
@@ -594,15 +634,26 @@ const finalModerationReasons = [
             studentID: u.studentID,
           })),
           isAnonymous,
+          aiPrompt,
           link: attachedLink || deleteField(),
-          moderationStatus: finalModerationStatus,
+          moderationStatus: "pending",
           moderationReasons: finalModerationReasons,
-          moderatedAtMs: Date.now(),
+          moderatedAtMs: null,
           updatedAt: serverTimestamp(),
         });
+
+        let serverDecision: any = { status: "pending" };
+        try {
+          serverDecision = await requestServerPostModeration(selectedEditPostId);
+        } catch (moderationError) {
+          console.warn("[CreatePost] Server moderation unavailable; post remains pending:", moderationError);
+        }
+
         Alert.alert(
-          finalModerationStatus === "pending" ? "Sent For Review" : "Success",
-          finalModerationStatus === "pending" ? "Your edited post was sent for moderator review." : "Your post has been updated.",
+          serverDecision.status === "approved" ? "Success" : "Sent For Review",
+          serverDecision.status === "approved"
+            ? "Your edited post has been updated and approved."
+            : "Your edited post was sent for moderator review.",
         );
         router.back();
         return;
@@ -610,90 +661,22 @@ const finalModerationReasons = [
 
       postRef = await addDoc(collection(db, "posts"), postData);
 
-      if (finalModerationStatus !== "pending") {
-        const mentionRecipientIds = await resolveMentionRecipientIds({
-          taggedUserIds: uniqueTaggedUsers
-            .map((tag) => tag.id)
-            .filter((tagId) => !isAiAssistantId(tagId)),
-          actorId: user?.uid,
-          serverId: selectedServerId,
-        });
-        await createMentionNotifications({
-          recipientIds: mentionRecipientIds,
-          actor: {
-            id: user?.uid || "",
-            name: displayName,
-            isAnonymous,
-          },
-          entityType: "post",
-          entityId: postRef.id,
-          message: "mentioned you in a post",
-          preview: content,
-        });
+      // Firebase Spark has no deployable Cloud Functions. The post is always
+      // created as PENDING, then the trusted Cloudflare Worker re-reads the
+      // document and is the only non-staff path that can approve it. If the
+      // Worker is unavailable, the post safely stays pending.
+      let serverDecision: any = { status: "pending" };
+      try {
+        serverDecision = await requestServerPostModeration(postRef.id);
+      } catch (moderationError) {
+        console.warn("[CreatePost] Server moderation unavailable; post remains pending:", moderationError);
       }
 
-      if (
-        finalModerationStatus !== "pending" &&
-        uniqueTaggedUsers.some((tag) => isAiAssistantId(tag.id))
-        ) {
-        const cooldown = await reserveAiCooldown(
-          selectedServerId || "home",
-          selectedChannelId || "feed",
-          AI_REQUEST_COOLDOWN_MS,
-        );
-
-        if (cooldown.allowed) {
-          try {
-            await updateDoc(doc(db, "posts", postRef.id), {
-              aiReply: {
-                text: "",
-                status: "generating",
-                generatedAtMs: Date.now(),
-              },
-            });
-
-            const { reply, model } = await requestAiReplyFromWorker({
-              serverId: selectedServerId || "home",
-              channelId: selectedChannelId || "feed",
-              sourceMessageId: postRef.id,
-              sourceUserId: user?.uid || "unknown",
-              prompt: aiPrompt,
-              contextMessages: [
-                {
-                  role: "user",
-                  name: displayName,
-                  content: aiPrompt,
-                },
-              ],
-            });
-
-            await updateDoc(doc(db, "posts", postRef.id), {
-              aiReply: {
-                text: reply,
-                model,
-                status: "completed",
-                generatedAtMs: Date.now(),
-              },
-            });
-          } catch (error) {
-            console.error("Post AI request failed:", error);
-            await updateDoc(doc(db, "posts", postRef.id), {
-              aiReply: deleteField(),
-            }).catch(() => undefined);
-            Alert.alert("AI Unavailable", getAiErrorMessage(error));
-          }
-        }
-      }
-
-      // Use finalModerationStatus, not moderationDecision.status — the text
-      // decision alone misses the case where only the image/video was
-      // flagged (mediaRequiresReview). That case previously showed "Success"
-      // even though the post was actually saved as pending.
       Alert.alert(
-        finalModerationStatus === "pending" ? "Sent For Review" : "Success",
-        finalModerationStatus === "pending"
-          ? "Your post was flagged for moderator review and is now pending approval."
-          : "Your post has been created!",
+        serverDecision.status === "approved" ? "Success" : "Sent For Review",
+        serverDecision.status === "approved"
+          ? "Your post has been created!"
+          : "Your post was sent for moderator review and will appear after approval.",
       );
       setContent("");
       setFiles([]);
@@ -1134,8 +1117,21 @@ const finalModerationReasons = [
             <View style={styles.iconRow}>
               <TouchableOpacity
                 style={styles.iconButton}
+                onPress={takePhoto}
+                disabled={files.length >= MAX_FILES}
+                accessibilityLabel="Take a photo"
+              >
+                <Ionicons
+                  name="camera"
+                  size={24}
+                  color={files.length >= MAX_FILES ? "#5a6380" : "#a61f1f"}
+                />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.iconButton}
                 onPress={pickFiles}
                 disabled={files.length >= MAX_FILES}
+                accessibilityLabel="Choose photos or files"
               >
                 <Ionicons
                   name="images"

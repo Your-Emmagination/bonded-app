@@ -5,6 +5,7 @@ compatibility_date = "2026-04-30"
 [vars]
 GROQ_MODEL = "openai/gpt-oss-20b"
 ALLOWED_ORIGIN = "*"
+FIREBASE_PROJECT_ID = "bonded-app-c8483"
 
 [observability.logs]
 enabled = true

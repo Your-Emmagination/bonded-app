@@ -1,18 +1,28 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // =========================================================
+    // AUTH / ROLE HELPERS
+    // =========================================================
 
     function signedIn() {
       return request.auth != null;
     }
 
     function isAdmin() {
-      return signedIn() && request.auth.token.role == 'admin';
+      return signedIn() &&
+        request.auth.token.role == 'admin';
     }
 
     function isStaff() {
       return signedIn() &&
-        request.auth.token.role in ['moderator', 'teacher', 'admin'];
+        request.auth.token.role in [
+          'moderator',
+          'teacher',
+          'admin'
+        ];
     }
 
     function isStudentOwner(studentId) {
@@ -31,8 +41,97 @@ service cloud.firestore {
         data.realUserId == request.auth.uid
       );
     }
+    // =========================================================
+    // SAFE LIST TOGGLE / COUNTER HELPERS
+    // =========================================================
+
+    function validOwnListToggle(oldList, newList) {
+      return signedIn() &&
+        oldList is list &&
+        newList is list &&
+        (
+          (
+            !(request.auth.uid in oldList) &&
+            request.auth.uid in newList &&
+            newList.toSet().difference(oldList.toSet()).hasOnly([request.auth.uid]) &&
+            oldList.toSet().difference(newList.toSet()).size() == 0
+          ) ||
+          (
+            request.auth.uid in oldList &&
+            !(request.auth.uid in newList) &&
+            oldList.toSet().difference(newList.toSet()).hasOnly([request.auth.uid]) &&
+            newList.toSet().difference(oldList.toSet()).size() == 0
+          )
+        );
+    }
+
+    function validOwnListToggleWithCount(oldList, newList, oldCount, newCount) {
+      return validOwnListToggle(oldList, newList) &&
+        oldCount is number &&
+        newCount is number &&
+        (
+          (
+            !(request.auth.uid in oldList) &&
+            request.auth.uid in newList &&
+            newCount == oldCount + 1
+          ) ||
+          (
+            request.auth.uid in oldList &&
+            !(request.auth.uid in newList) &&
+            newCount == oldCount - 1 &&
+            newCount >= 0
+          )
+        );
+    }
+
+    
+    function isAiMessageOwner(data) {
+  return signedIn() &&
+    data.aiAssistant == true &&
+    data.aiSourceMessageId is string &&
+    exists(
+      /databases/$(database)/documents/communityThreadMessages/$(data.aiSourceMessageId)
+    ) &&
+    get(
+      /databases/$(database)/documents/communityThreadMessages/$(data.aiSourceMessageId)
+    ).data.userId == request.auth.uid &&
+    get(
+      /databases/$(database)/documents/communityThreadMessages/$(data.aiSourceMessageId)
+    ).data.serverId == data.serverId &&
+    get(
+      /databases/$(database)/documents/communityThreadMessages/$(data.aiSourceMessageId)
+    ).data.channelId == data.channelId;
+}
+    // =========================================================
+    // COMMUNITY MEMBERSHIP
+    // =========================================================
+
+    function isServerMember(serverId) {
+      return signedIn() &&
+        exists(
+          /databases/$(database)/documents/communityServerMemberships/$(serverId + '_' + request.auth.uid)
+        ) &&
+        get(
+          /databases/$(database)/documents/communityServerMemberships/$(serverId + '_' + request.auth.uid)
+        ).data.status == 'joined';
+    }
+
+    // =========================================================
+    // POST MODERATION
+    // =========================================================
+
+    function isApprovedPost(data) {
+      return !('moderationStatus' in data) ||
+        data.moderationStatus == 'approved';
+    }
+
+
+    // =========================================================
+    // COMMUNITY SERVERS
+    // =========================================================
 
     match /communityServers/{serverId} {
+
       allow read, list: if signedIn();
 
       allow create: if signedIn() && isStaff();
@@ -44,7 +143,13 @@ service cloud.firestore {
       );
     }
 
+
+    // =========================================================
+    // SERVER MEMBERSHIPS
+    // =========================================================
+
     match /communityServerMemberships/{membershipId} {
+
       allow read, list: if signedIn();
 
       allow create: if signedIn() && (
@@ -58,7 +163,13 @@ service cloud.firestore {
       );
     }
 
+
+    // =========================================================
+    // SERVER JOIN REQUESTS
+    // =========================================================
+
     match /communityServerJoinRequests/{requestId} {
+
       allow read, list: if signedIn();
 
       allow create: if signedIn() &&
@@ -70,68 +181,192 @@ service cloud.firestore {
       );
     }
 
-    match /communityThreadMessages/{messageId} {
-      allow read, list: if signedIn();
 
-      allow create: if signedIn() &&
-        request.resource.data.userId is string &&
-        request.resource.data.createdAt is timestamp &&
-        request.resource.data.serverId is string &&
-        request.resource.data.channelId is string;
+    // =========================================================
+    // COMMUNITY THREAD MESSAGES
+    // =========================================================
 
-      allow update, delete: if signedIn() && (
-        isContentOwner(resource.data) ||
-        isStaff()
-      );
-    }
+   match /communityThreadMessages/{messageId} {
+
+  allow read, list: if signedIn();
+
+  allow create: if signedIn() &&
+    request.resource.data.createdAt is timestamp &&
+    request.resource.data.serverId is string &&
+    request.resource.data.channelId is string &&
+    (
+      request.resource.data.userId == request.auth.uid ||
+      isAiMessageOwner(request.resource.data)
+    ) &&
+    (
+      isServerMember(request.resource.data.serverId) ||
+      isStaff()
+    );
+
+  allow update: if signedIn() && (
+    isContentOwner(resource.data) ||
+    isAiMessageOwner(resource.data) ||
+    isStaff()
+  );
+
+  allow delete: if signedIn() && (
+    isContentOwner(resource.data) ||
+    isStaff()
+  );
+}
+
+
+    // =========================================================
+    // STUDENTS / USERS
+    // =========================================================
 
     match /students/{studentId} {
-      allow read, list, create: if signedIn();
 
-      allow update: if signedIn() && (
-        isStudentOwner(studentId) ||
-        isAdmin() ||
-        request.resource.data.diff(resource.data)
-          .affectedKeys()
-          .hasOnly(['isOnline', 'lastSeen'])
-      );
+  // Authenticated users can read student profiles.
+  allow read, list: if signedIn();
 
-      allow delete: if signedIn() && (
-        isStudentOwner(studentId) ||
-        isAdmin()
-      );
-    }
+  // Only administrators can create student profiles.
+  allow create: if isAdmin();
+
+  // Student can update their own profile.
+  // Admin can update any student.
+  // Online status fields may also be updated.
+  allow update: if signedIn() && (
+    isStudentOwner(studentId) ||
+    isAdmin() ||
+    request.resource.data.diff(resource.data)
+      .affectedKeys()
+      .hasOnly([
+        'isOnline',
+        'lastSeen'
+      ])
+  );
+
+  // Student can delete their own profile.
+  // Admin can delete any student.
+  allow delete: if signedIn() && (
+    isStudentOwner(studentId) ||
+    isAdmin()
+  );
+}
+
+
+
+    // =========================================================
+    // USER PUSH TOKENS
+    // =========================================================
 
     match /userPushTokens/{userId} {
-      allow read: if signedIn() && request.auth.uid == userId;
+
+      allow read: if signedIn() &&
+        request.auth.uid == userId;
+
       allow list: if signedIn() && isStaff();
 
       allow create, update, delete: if signedIn() &&
         request.auth.uid == userId;
     }
+// =========================================================
+// USER NOTIFICATION SETTINGS
+// =========================================================
+
+match /userNotificationSettings/{userId} {
+
+  // User can read their own notification settings.
+  allow read: if signedIn() &&
+    request.auth.uid == userId;
+
+  // User can create/update their own notification settings.
+  allow create, update: if signedIn() &&
+    request.auth.uid == userId &&
+    request.resource.data.userId == request.auth.uid &&
+    request.resource.data.soundId is string;
+
+  // User can delete their own notification settings.
+  allow delete: if signedIn() &&
+    request.auth.uid == userId;
+}
+
+    // =========================================================
+    // POSTS
+    // =========================================================
 
     match /posts/{postId} {
-      allow read: if signedIn();
 
+      allow read: if signedIn() && (
+        isApprovedPost(resource.data) ||
+        isContentOwner(resource.data) ||
+        isStaff()
+      );
+
+      // Spark-compatible architecture: clients may create/edit only PENDING
+      // posts. The Cloudflare Worker uses a server credential to approve or
+      // reject them. A modified client cannot self-approve a post.
       allow create: if signedIn() &&
-        request.resource.data.userId is string &&
+        request.resource.data.realUserId == request.auth.uid &&
+        (
+          request.resource.data.userId == request.auth.uid ||
+          request.resource.data.userId == 'anonymous'
+        ) &&
         request.resource.data.username is string &&
         request.resource.data.content is string &&
-        request.resource.data.createdAt is timestamp;
+        request.resource.data.createdAt is timestamp &&
+        request.resource.data.moderationStatus == 'pending';
 
       allow update: if signedIn() && (
-        isContentOwner(resource.data) ||
         isStaff() ||
-        request.resource.data.diff(resource.data)
-          .affectedKeys()
-          .hasOnly([
-            'likedBy',
-            'likeCount',
-            'reactions',
-            'commentCount',
-            'viewCount',
-            'viewedBy'
-          ])
+        (
+          isContentOwner(resource.data) &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.realUserId == resource.data.realUserId &&
+          request.resource.data.diff(resource.data)
+            .affectedKeys()
+            .hasOnly([
+              'content',
+              'files',
+              'taggedUsers',
+              'isAnonymous',
+              'link',
+              'updatedAt',
+              'moderationStatus',
+              'moderationReasons',
+              'moderatedAtMs',
+              'aiPrompt'
+            ]) &&
+          request.resource.data.moderationStatus == 'pending'
+        ) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'likedBy', 'likeCount'
+          ]) &&
+          validOwnListToggleWithCount(
+            resource.data.likedBy,
+            request.resource.data.likedBy,
+            resource.data.likeCount,
+            request.resource.data.likeCount
+          )
+        ) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'bookmarkedBy'
+          ]) &&
+          validOwnListToggle(
+            resource.data.bookmarkedBy,
+            request.resource.data.bookmarkedBy
+          )
+        ) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'commentCount'
+          ]) &&
+          resource.data.commentCount is number &&
+          request.resource.data.commentCount is number &&
+          request.resource.data.commentCount >= 0 &&
+          (
+            request.resource.data.commentCount == resource.data.commentCount + 1 ||
+            request.resource.data.commentCount == resource.data.commentCount - 1
+          )
+        )
       );
 
       allow delete: if signedIn() && (
@@ -140,22 +375,53 @@ service cloud.firestore {
       );
     }
 
+    // =========================================================
+    // COMMENTS
+    // =========================================================
+
     match /comments/{commentId} {
+
       allow read: if signedIn();
 
+      // Comments enter the database only as pending. The Cloudflare Worker
+      // re-reads and moderates them before changing the moderation status.
       allow create: if signedIn() &&
         request.resource.data.postId is string &&
         request.resource.data.userId is string &&
+        (request.resource.data.userId == request.auth.uid || request.resource.data.userId == 'anonymous') &&
+        request.resource.data.realUserId == request.auth.uid &&
         request.resource.data.text is string &&
         request.resource.data.createdAt is timestamp &&
-        request.resource.data.likes is list;
+        request.resource.data.likes is list &&
+        request.resource.data.moderationStatus == 'pending';
 
       allow update: if signedIn() && (
-        isContentOwner(resource.data) ||
         isStaff() ||
-        request.resource.data.diff(resource.data)
-          .affectedKeys()
-          .hasOnly(['likes', 'replyCount'])
+        (
+          isContentOwner(resource.data) &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.realUserId == resource.data.realUserId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'text', 'files', 'taggedUsers', 'isAnonymous', 'link',
+            'updatedAt', 'moderationStatus', 'moderationReasons',
+            'moderatedAtMs', 'moderationModel', 'moderationRuleSource', 'aiReply'
+          ]) &&
+          request.resource.data.moderationStatus == 'pending'
+        ) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
+          validOwnListToggle(resource.data.likes, request.resource.data.likes)
+        ) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['replyCount']) &&
+          resource.data.replyCount is number &&
+          request.resource.data.replyCount is number &&
+          request.resource.data.replyCount >= 0 &&
+          (
+            request.resource.data.replyCount == resource.data.replyCount + 1 ||
+            request.resource.data.replyCount == resource.data.replyCount - 1
+          )
+        )
       );
 
       allow delete: if signedIn() && (
@@ -164,21 +430,58 @@ service cloud.firestore {
       );
     }
 
+
+    // =========================================================
+    // REPLIES
+    // =========================================================
+
     match /replies/{replyId} {
+
       allow read: if signedIn();
 
+      // Replies follow the same server-authoritative moderation flow.
       allow create: if signedIn() &&
         request.resource.data.commentId is string &&
         request.resource.data.userId is string &&
+        (request.resource.data.userId == request.auth.uid || request.resource.data.userId == 'anonymous') &&
+        request.resource.data.realUserId == request.auth.uid &&
         request.resource.data.text is string &&
-        request.resource.data.createdAt is timestamp;
+        request.resource.data.createdAt is timestamp &&
+        request.resource.data.moderationStatus == 'pending';
 
       allow update: if signedIn() && (
-        isContentOwner(resource.data) ||
         isStaff() ||
-        request.resource.data.diff(resource.data)
-          .affectedKeys()
-          .hasOnly(['likedBy', 'likeCount', 'seenBy'])
+        (
+          isContentOwner(resource.data) &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.realUserId == resource.data.realUserId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'text', 'files', 'taggedUsers', 'isAnonymous', 'link',
+            'updatedAt', 'moderationStatus', 'moderationReasons',
+            'moderatedAtMs', 'moderationModel', 'moderationRuleSource', 'aiReply'
+          ]) &&
+          request.resource.data.moderationStatus == 'pending'
+        ) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'likedBy', 'likeCount'
+          ]) &&
+          validOwnListToggleWithCount(
+            resource.data.likedBy,
+            request.resource.data.likedBy,
+            resource.data.likeCount,
+            request.resource.data.likeCount
+          )
+        ) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'seenBy'
+          ]) &&
+          validOwnListToggle(
+            resource.data.seenBy,
+            request.resource.data.seenBy
+          )
+        )
       );
 
       allow delete: if signedIn() && (
@@ -187,7 +490,13 @@ service cloud.firestore {
       );
     }
 
+
+    // =========================================================
+    // NOTIFICATIONS
+    // =========================================================
+
     match /notifications/{notificationId} {
+
       allow read: if signedIn() &&
         resource.data.recipientId == request.auth.uid;
 
@@ -206,7 +515,9 @@ service cloud.firestore {
           resource.data.recipientId == request.auth.uid &&
           request.resource.data.diff(resource.data)
             .affectedKeys()
-            .hasOnly(['read'])
+            .hasOnly([
+              'read'
+            ])
         ) ||
         resource.data.actorId == request.auth.uid
       );
@@ -215,21 +526,62 @@ service cloud.firestore {
         resource.data.actorId == request.auth.uid;
     }
 
+
+    // =========================================================
+    // POLLS
+    // =========================================================
+
     match /polls/{pollId} {
+
       allow read: if signedIn();
 
       allow create: if signedIn() &&
         request.resource.data.userId is string &&
+        request.resource.data.userId == request.auth.uid &&
         request.resource.data.question is string &&
         request.resource.data.createdAt is timestamp;
 
       allow update: if signedIn() && (
-        resource.data.userId == request.auth.uid ||
-        request.resource.data.userId == request.auth.uid ||
-        request.auth.token.role in ['teacher', 'admin'] ||
-        request.resource.data.diff(resource.data)
-          .affectedKeys()
-          .hasOnly(['options', 'totalVotes', 'userVotes'])
+        (
+          resource.data.userId == request.auth.uid &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'question',
+            'imageUrl',
+            'allowUsersToAddOption',
+            'allowMultiple',
+            'maxSelections',
+            'durationMs',
+            'expiresAt',
+            'username',
+            'isAnonymous',
+            'updatedAt'
+          ])
+        ) ||
+        (
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'options',
+            'totalVotes',
+            'userVotes'
+          ]) &&
+          request.resource.data.options is list &&
+          request.resource.data.totalVotes is number &&
+          request.resource.data.totalVotes >= 0
+        ) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'commentCount'
+          ]) &&
+          resource.data.commentCount is number &&
+          request.resource.data.commentCount is number &&
+          request.resource.data.commentCount >= 0 &&
+          (
+            request.resource.data.commentCount == resource.data.commentCount + 1 ||
+            request.resource.data.commentCount == resource.data.commentCount - 1
+          )
+        ) ||
+        isStaff()
       );
 
       allow delete: if signedIn() && (
@@ -238,15 +590,30 @@ service cloud.firestore {
       );
     }
 
+
+    // =========================================================
+    // EVENTS
+    // =========================================================
+
     match /events/{eventId} {
+
       allow read, list: if signedIn();
 
       allow create: if signedIn() &&
-        request.auth.token.role in ['moderator', 'teacher', 'admin'] &&
+        request.auth.token.role in [
+          'moderator',
+          'teacher',
+          'admin'
+        ] &&
         request.resource.data.createdBy == request.auth.uid &&
         request.resource.data.title is string &&
         request.resource.data.date is string &&
-        request.resource.data.category in ['morning', 'afternoon', 'evening', 'all-day'];
+        request.resource.data.category in [
+          'morning',
+          'afternoon',
+          'evening',
+          'all-day'
+        ];
 
       allow update: if signedIn() && (
         resource.data.createdBy == request.auth.uid ||
@@ -259,13 +626,83 @@ service cloud.firestore {
       );
     }
 
+
+    // =========================================================
+    // PROGRAMS / COURSES
+    // =========================================================
+
+    match /programs/{programId} {
+
+      // Students, teachers, moderators and admins
+      // can load programs for dropdowns.
+      allow read, list: if signedIn();
+
+      // Only admins can create programs.
+      allow create: if isAdmin() &&
+        request.resource.data.name is string &&
+        request.resource.data.code is string;
+
+      // Only admins can edit programs.
+      allow update: if isAdmin() &&
+        request.resource.data.name is string &&
+        request.resource.data.code is string;
+
+      // Only admins can delete programs.
+      allow delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // REPORTS
+    // =========================================================
+
     match /reports/{reportId} {
+
       allow create: if signedIn() &&
         request.resource.data.reportedBy == request.auth.uid &&
+        request.resource.data.contentType in ['post', 'comment', 'reply'] &&
+        request.resource.data.contentId is string &&
         request.resource.data.reason is string &&
-        request.resource.data.status is string;
+        request.resource.data.status == 'pending' &&
+        request.resource.data.createdAt is timestamp &&
+        (
+          (request.resource.data.contentType == 'post' &&
+            exists(/databases/$(database)/documents/posts/$(request.resource.data.contentId)) &&
+            !isContentOwner(get(/databases/$(database)/documents/posts/$(request.resource.data.contentId)).data)) ||
+          (request.resource.data.contentType == 'comment' &&
+            exists(/databases/$(database)/documents/comments/$(request.resource.data.contentId)) &&
+            !isContentOwner(get(/databases/$(database)/documents/comments/$(request.resource.data.contentId)).data)) ||
+          (request.resource.data.contentType == 'reply' &&
+            exists(/databases/$(database)/documents/replies/$(request.resource.data.contentId)) &&
+            !isContentOwner(get(/databases/$(database)/documents/replies/$(request.resource.data.contentId)).data))
+        );
 
-      allow read, update, delete: if isStaff();
+      allow read, list: if isStaff();
+
+      allow update, delete: if isStaff();
+    }
+
+
+    // =========================================================
+    // MODERATION FEEDBACK
+    // =========================================================
+
+    match /moderationFeedback/{feedbackId} {
+
+      allow read, list: if isStaff();
+
+      allow create: if isStaff() &&
+        request.resource.data.contentType is string &&
+        request.resource.data.contentId is string &&
+        request.resource.data.reportId is string &&
+        request.resource.data.moderatorDecision is string &&
+        request.resource.data.source == 'user_report' &&
+        request.resource.data.reviewedBy == request.auth.uid &&
+        request.resource.data.reviewedAt is timestamp;
+
+      allow update: if isStaff();
+
+      allow delete: if isStaff();
     }
   }
 }

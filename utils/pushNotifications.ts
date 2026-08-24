@@ -10,12 +10,22 @@ import {
 } from "firebase/firestore";
 import { Platform, Vibration } from "react-native";
 import { db } from "../Firebase_configure";
+import { fetchNotificationSoundIdsForUsers } from "./notificationSettings";
+import {
+  DEFAULT_NOTIFICATION_SOUND_ID,
+  NOTIFICATION_SOUND_OPTIONS,
+  getNotificationSoundOption,
+} from "./notificationSounds";
 import { getStudentDocIdFromAuthUser, getUserDataByAuthUser } from "./rbac";
 
 const EXPO_PUSH_API_URL = "https://exp.host/--/api/v2/push/send";
 const ANDROID_CHANNEL_ID = "default";
 const EMERGENCY_ANDROID_CHANNEL_ID = "emergency";
 const EXPO_GO_EXECUTION_ENVIRONMENT = "storeClient";
+
+/** Android res/raw resource name = filename without extension. */
+const toAndroidSoundResourceName = (fileName: string) =>
+  fileName.replace(/\.[^/.]+$/, "");
 
 type NotificationsModule = typeof import("expo-notifications");
 type NotificationResponse = import("expo-notifications").NotificationResponse;
@@ -55,7 +65,7 @@ type ExpoPushMessage = {
   to: string;
   title: string;
   body: string;
-  sound: "default";
+  sound: string | null;
   priority: "high";
   channelId: string;
   data: Record<string, string>;
@@ -159,6 +169,22 @@ const ensureAndroidNotificationChannel = async (
     lightColor: "#e0a53d",
     sound: "default",
   });
+
+  // One channel per sound option — Android locks a channel's sound at
+  // creation time, so a per-user sound choice means a per-sound channel.
+  await Promise.all(
+    NOTIFICATION_SOUND_OPTIONS.map((option) =>
+      notifications.setNotificationChannelAsync(option.androidChannelId, {
+        name: `Notifications - ${option.label}`,
+        importance: notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: "#e0a53d",
+        sound: option.iosFileName
+          ? toAndroidSoundResourceName(option.iosFileName)
+          : undefined,
+      }),
+    ),
+  );
 
   await notifications.setNotificationChannelAsync(EMERGENCY_ANDROID_CHANNEL_ID, {
     name: "Emergency alerts",
@@ -323,13 +349,19 @@ const navigateFromNotificationResponse = (
 
   const eventId = readEventIdFromNotificationData(notificationData);
 
-  if (!eventId) {
-    return false;
+  if (eventId) {
+    router.push({
+      pathname: "/(main)/EventCalendarScreen",
+      params: { eventId },
+    });
+    return true;
   }
 
+  // Likes, comments, replies, mentions, and moderation notifications use the
+  // existing in-app notification resolver, which already knows how to open
+  // posts and show the correct deleted-content message.
   router.push({
-    pathname: "/(main)/EventCalendarScreen",
-    params: { eventId },
+    pathname: "/(main)/(tabs)/NotificationsScreen",
   });
   return true;
 };
@@ -445,43 +477,64 @@ export const sendBroadcastEventPushNotifications = async ({
 }: EventPushNotificationInput) => {
   const pushTokensSnapshot = await getDocs(collection(db, "userPushTokens"));
   const excludedIds = new Set(excludeUserIds.filter(Boolean));
-  const tokens = new Set<string>();
+  const tokensByUserId = new Map<string, Set<string>>();
 
   pushTokensSnapshot.docs.forEach((item) => {
     const data = item.data() as PushTokenRecord;
     const userId = String(data?.userId || item.id || "").trim();
 
-    if (userId && excludedIds.has(userId)) {
+    if (!userId || excludedIds.has(userId)) {
       return;
     }
 
-    extractPushTokens(data?.expoPushTokens).forEach((token) => {
-      tokens.add(token);
-    });
+    const userTokens = extractPushTokens(data?.expoPushTokens);
+    if (userTokens.length === 0) {
+      return;
+    }
+
+    const existing = tokensByUserId.get(userId) || new Set<string>();
+    userTokens.forEach((token) => existing.add(token));
+    tokensByUserId.set(userId, existing);
   });
 
-  if (tokens.size === 0) {
+  if (tokensByUserId.size === 0) {
     return 0;
   }
+
+  const soundIdsByUserId = await fetchNotificationSoundIdsForUsers([
+    ...tokensByUserId.keys(),
+  ]);
 
   const pushBody = normalizeEventBody({ description, eventDate });
   const notificationTitle = title.trim()
     ? `New event: ${title.trim()}`
     : "New calendar event";
 
-  const messages: ExpoPushMessage[] = Array.from(tokens).map((token) => ({
-    to: token,
-    title: notificationTitle,
-    body: pushBody,
-    sound: "default",
-    priority: "high",
-    channelId: ANDROID_CHANNEL_ID,
-    data: {
-      screen: "event-calendar",
-      entityType: "event",
-      entityId,
-    },
-  }));
+  const messages: ExpoPushMessage[] = [];
+  let tokenCount = 0;
+
+  tokensByUserId.forEach((userTokens, userId) => {
+    const soundOption = getNotificationSoundOption(
+      soundIdsByUserId.get(userId) || DEFAULT_NOTIFICATION_SOUND_ID,
+    );
+
+    userTokens.forEach((token) => {
+      tokenCount += 1;
+      messages.push({
+        to: token,
+        title: notificationTitle,
+        body: pushBody,
+        sound: soundOption.iosFileName,
+        priority: "high",
+        channelId: soundOption.androidChannelId,
+        data: {
+          screen: "event-calendar",
+          entityType: "event",
+          entityId,
+        },
+      });
+    });
+  });
 
   for (const batch of chunkArray(messages, 100)) {
     const response = await fetch(EXPO_PUSH_API_URL, {
@@ -500,7 +553,7 @@ export const sendBroadcastEventPushNotifications = async ({
     }
   }
 
-  return tokens.size;
+  return tokenCount;
 };
 
 export const sendEmergencyPushNotifications = async ({

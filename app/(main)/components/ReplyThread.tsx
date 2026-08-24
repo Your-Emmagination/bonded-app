@@ -20,7 +20,10 @@ import {
 import {
   canViewModeratedContent,
   getModerationPreviewText,
+  runLocalModerationRules,
   requestModerationDecision,
+  requestFirestoreModerationDecision,
+  type ModerationDecision,
 } from "@/utils/contentModeration";
 import {
   createMentionNotifications,
@@ -51,6 +54,9 @@ import {
   deleteField,
   doc,
   getDoc,
+  getDocs,
+  limit,
+  startAfter,
   increment,
   onSnapshot,
   orderBy,
@@ -58,11 +64,12 @@ import {
   serverTimestamp,
   updateDoc,
   where,
+  type DocumentData,
+  type QueryDocumentSnapshot,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Animated,
   BackHandler,
   FlatList,
@@ -868,6 +875,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   const [loading, setLoading] =
     useState(true);
 
+  // Reply pagination state
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMoreReplies, setHasMoreReplies] = useState(true);
+  const lastReplyDocRef = useRef<QueryDocumentSnapshot<DocumentData> | null>(null);
+
   const [imageViewerVisible, setImageViewerVisible] =
     useState(false);
 
@@ -1096,17 +1108,14 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
 
     setLoading(true);
 
+    lastReplyDocRef.current = null;
+    setHasMoreReplies(true);
+
     const q = query(
       collection(db, "replies"),
-      where(
-        "commentId",
-        "==",
-        commentId,
-      ),
-      orderBy(
-        "createdAt",
-        "asc",
-      ),
+      where("commentId", "==", commentId),
+      orderBy("createdAt", "desc"),
+      limit(20),
     );
 
     const unsubscribe = onSnapshot(
@@ -1136,7 +1145,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               }),
             );
 
-        setReplies(fetched);
+        lastReplyDocRef.current = snapshot.docs[snapshot.docs.length - 1] || null;
+        setHasMoreReplies(snapshot.size === 20);
+        setReplies(fetched.reverse());
         setLoading(false);
 
         if (currentUser?.uid) {
@@ -1319,6 +1330,38 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       }),
     ).current;
 
+  const loadMoreReplies = useCallback(async () => {
+    if (loadingMore || !hasMoreReplies || !lastReplyDocRef.current || !commentId) return;
+    setLoadingMore(true);
+    try {
+      const nextQuery = query(
+        collection(db, "replies"),
+        where("commentId", "==", commentId),
+        orderBy("createdAt", "desc"),
+        startAfter(lastReplyDocRef.current),
+        limit(20),
+      );
+      const snapshot = await getDocs(nextQuery);
+      if (snapshot.docs.length > 0) {
+        lastReplyDocRef.current = snapshot.docs[snapshot.docs.length - 1];
+      }
+      setHasMoreReplies(snapshot.size === 20);
+      const nextReplies = snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as Reply))
+        .filter((item) => canViewModeratedContent({
+          moderationStatus: item.moderationStatus,
+          realUserId: item.realUserId,
+          userId: item.userId,
+          viewerUserId: currentUser?.uid,
+          viewerRole: currentUser?.role,
+        })).reverse();
+      setReplies((current) => [...nextReplies.filter((next) => !current.some((item) => item.id === next.id)), ...current]);
+    } catch (error) {
+      console.error("Failed to load more replies:", error);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [commentId, currentUser?.role, currentUser?.uid, hasMoreReplies, loadingMore]);
+
   const handleSendReply =
     async (replyData: any) => {
       if (!currentUser) return;
@@ -1338,49 +1381,70 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         }),
       };
 
-      const moderationDecision =
-        await requestModerationDecision({
-          text: getModerationPreviewText({
-            text: replyData.text,
-            linkTitle:
-              replyData.link?.title,
-            fileCount:
-              replyData.files?.length,
-          }),
-          scope: "reply",
-          serverId: commentId,
-          channelId: commentId,
-          authorId:
-            currentUser.uid,
-          authorRole:
-            currentUser.role,
+      // Fast local gate: only clearly prohibited content blocks synchronously.
+      // Safe/ambiguous text is written as pending immediately; server moderation
+      // continues in the background so the reply composer can reset promptly.
+      const localDecision = runLocalModerationRules(
+        getModerationPreviewText({
+          text: replyData.text,
+          linkTitle: replyData.link?.title,
+          fileCount: replyData.files?.length,
+        }),
+      );
+
+      if (localDecision.status === "rejected") {
+        setConfirmDialog({
+          title: "Reply Blocked",
+          description: localDecision.reasons?.[0] || "This reply violates the community guidelines.",
+          confirmText: "OK",
+          singleAction: true,
+          destructive: true,
+          onConfirm: () => setConfirmDialog(null),
         });
+        return;
+      }
 
-      newReply.moderationStatus =
-        moderationDecision.status;
+      newReply.moderationStatus = "pending";
+      newReply.moderationReasons = [];
+      newReply.moderationModel = null;
+      newReply.moderationRuleSource = null;
+      newReply.moderatedAtMs = null;
 
-      newReply.moderationReasons =
-        moderationDecision.reasons;
+      const replyRef = await addDoc(collection(db, "replies"), newReply);
 
-      newReply.moderationModel =
-        moderationDecision.model ??
-        null;
+      void (async () => {
+        let moderationDecision: ModerationDecision;
+        try {
+        moderationDecision = await requestFirestoreModerationDecision({
+          collectionName: "replies",
+          documentId: replyRef.id,
+          scope: "reply",
+        });
+      } catch (error) {
+        console.warn("[Reply] Server moderation unavailable; reply remains pending:", error);
+        setConfirmDialog({
+          title: "Reply Pending Review",
+          description: "Automatic moderation is temporarily unavailable. Your reply is waiting for moderator approval.",
+          confirmText: "OK",
+          singleAction: true,
+          destructive: false,
+          onConfirm: () => setConfirmDialog(null),
+        });
+        return;
+      }
 
-      newReply.moderationRuleSource =
-        moderationDecision.ruleSource ??
-        null;
-
-      newReply.moderatedAtMs =
-        Date.now();
-
-      const replyRef =
-        await addDoc(
-          collection(
-            db,
-            "replies",
-          ),
-          newReply,
-        );
+      if (moderationDecision.status !== "approved") {
+        setConfirmDialog({
+          title: moderationDecision.status === "rejected" ? "Reply Blocked" : "Reply Pending Review",
+          description: moderationDecision.reasons?.[0] || (moderationDecision.status === "rejected" ? "This reply was blocked." : "This reply is waiting for moderator approval."),
+          confirmText: "OK",
+          singleAction: true,
+          destructive: moderationDecision.status === "rejected",
+          onConfirm: () => setConfirmDialog(null),
+        });
+        setReplyingTo(null);
+        return;
+      }
 
       await updateDoc(
         doc(
@@ -1441,8 +1505,8 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       };
 
       if (
-        moderationDecision.status !==
-        "pending"
+        moderationDecision.status ===
+        "approved"
       ) {
         if (
           commentOwnerId &&
@@ -1555,33 +1619,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             ),
         );
 
-      if (
-        !shouldTriggerAi ||
-        moderationDecision.status ===
-          "pending"
-      ) {
-        if (
-          moderationDecision.status ===
-          "pending"
-        ) {
-          setConfirmDialog({
-            title:
-              "Reply Pending Review",
-            description:
-              "This reply was flagged and is waiting for moderator approval.",
-            confirmText:
-              "OK",
-            singleAction:
-              true,
-            destructive:
-              false,
-            onConfirm: () =>
-              setConfirmDialog(
-                null,
-              ),
-          });
-        }
-
+      if (!shouldTriggerAi) {
         setReplyingTo(null);
         scrollToBottom();
         return;
@@ -1722,6 +1760,10 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             ),
         });
       }
+
+        })().catch((error) => {
+          console.error("[Reply] Background approval finalization failed:", error);
+        });
 
       setReplyingTo(null);
       scrollToBottom();
@@ -1911,6 +1953,20 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       if (!currentUser?.uid)
         return;
 
+      const targetReply = replies.find((reply) => reply.id === replyId);
+      const replyOwnerId = targetReply?.realUserId || targetReply?.userId;
+      if (replyOwnerId === currentUser.uid) {
+        setConfirmDialog({
+          title: "Report unavailable",
+          description: "You cannot report your own reply.",
+          confirmText: "Done",
+          singleAction: true,
+          destructive: true,
+          onConfirm: () => setConfirmDialog(null),
+        });
+        return;
+      }
+
       try {
         await addDoc(
           collection(
@@ -1972,40 +2028,13 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     (replyId: string) => {
       closeReplyActions();
 
-      Alert.alert(
-        "Report Reply",
-        "Select a reason:",
-        [
-          {
-            text: "Cancel",
-            style: "cancel",
-          },
-          {
-            text: "Spam",
-            onPress: () =>
-              submitReport(
-                replyId,
-                "spam",
-              ),
-          },
-          {
-            text: "Harassment",
-            onPress: () =>
-              submitReport(
-                replyId,
-                "harassment",
-              ),
-          },
-          {
-            text: "Inappropriate",
-            onPress: () =>
-              submitReport(
-                replyId,
-                "inappropriate",
-              ),
-          },
-        ],
-      );
+      setConfirmDialog({
+        title: "Report reply?",
+        description: "This reply will be sent to the moderation team for review.",
+        confirmText: "Send report",
+        destructive: true,
+        onConfirm: () => submitReport(replyId, "inappropriate"),
+      });
     };
 
   const canManageReply =
@@ -2755,6 +2784,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             <FlatList
               ref={flatListRef}
               data={replies}
+              onStartReached={loadMoreReplies}
+              onStartReachedThreshold={0.5}
+              ListHeaderComponent={loadingMore ? <ActivityIndicator color="#e0a53d" style={{ marginVertical: 16 }} /> : null}
               keyExtractor={(item) =>
                 item.id
               }

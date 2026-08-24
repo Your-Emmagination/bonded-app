@@ -4,7 +4,7 @@ import { getFirestore, type Firestore } from "firebase/firestore";
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY || "AIzaSyCRNcZFWVFW-xOVGL846_CmpFMzPyGVjXg",
   authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN || "bonded-app-c8483.firebaseapp.com",
   projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID || "bonded-app-c8483",
