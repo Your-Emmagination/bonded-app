@@ -69,6 +69,7 @@ function TabItem({
 // Defines visible tabs per role — order here = visual order in tab bar
 const studentRoutes = [
   { name: "HomeScreen", label: "Home", icon: "home" },
+  { name: "AiChatScreen", label: "AI", icon: "chatbubble-ellipses" },
   { name: "NotificationsScreen", label: "Notifications", icon: "notifications" },
   { name: "ProfileScreen", label: "Profile", icon: "person-circle" },
 ];
@@ -76,6 +77,7 @@ const studentRoutes = [
 const privilegedRoutes = [
   { name: "DashboardScreen", label: "Dashboard", icon: "grid" },
   { name: "HomeScreen", label: "Home", icon: "home" },
+  { name: "AiChatScreen", label: "AI", icon: "chatbubble-ellipses" },
   { name: "NotificationsScreen", label: "Notifications", icon: "notifications" },
   { name: "ProfileScreen", label: "Profile", icon: "person-circle" },
 ];
@@ -161,6 +163,7 @@ export default function TabLayout() {
       >
         <Tabs.Screen name="DashboardScreen" options={!isPrivileged ? { href: null } : {}} />
         <Tabs.Screen name="HomeScreen" />
+        <Tabs.Screen name="AiChatScreen" />
         <Tabs.Screen name="NotificationsScreen" />
         <Tabs.Screen name="ProfileScreen" />
       </Tabs>

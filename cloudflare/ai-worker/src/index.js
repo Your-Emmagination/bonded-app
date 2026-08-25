@@ -294,29 +294,11 @@ async function runApprovedSideEffects(env, postId, post) {
     });
   }));
 
-  if (tagged.some(x => String(x?.id || "") === "ai-assistant")) {
-    const prompt = String(post.aiPrompt || post.content || "").trim();
-    if (prompt) {
-      await patchFirestore(env, "posts", postId, { aiReply: { text: "", status: "generating", generatedAtMs: Date.now() } });
-      try {
-        const response = await callGroq(env, {
-          model: env.GROQ_MODEL || DEFAULT_MODEL, temperature: 0.6, max_tokens: 300,
-          messages: [
-            { role: "system", content: "You are Bonded AI, a helpful assistant inside a student community. Reply briefly, warmly, and clearly. Answer only from the user's post. Never encourage violence or harm and never invent private school facts." },
-            { role: "user", content: prompt },
-          ],
-        });
-        const payload = await response.json().catch(() => null);
-        if (!response.ok) throw new Error(payload?.error?.message || "Groq AI reply failed.");
-        const reply = String(payload?.choices?.[0]?.message?.content || "").trim();
-        if (!reply) throw new Error("Groq returned an empty AI reply.");
-        await patchFirestore(env, "posts", postId, { aiReply: { text: reply, model: payload?.model || env.GROQ_MODEL || DEFAULT_MODEL, status: "completed", generatedAtMs: Date.now() } });
-      } catch (error) {
-        console.warn("[Moderation] @AI failed:", error?.message || error);
-        await patchFirestore(env, "posts", postId, { aiReply: { text: "", status: "failed", generatedAtMs: Date.now() } }).catch(() => undefined);
-      }
-    }
-  }
+  // @BondedAI post replies are intentionally NOT generated here.
+  // The React Native client uses the non-generative Naive Bayes + Firestore
+  // retrieval chatbot after this worker approves the post. This prevents the
+  // old Groq/OpenAI generative reply path from being used for CreatePost.
+
 }
 
 async function moderateFirestoreContent(env, request, body) {

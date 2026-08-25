@@ -537,6 +537,8 @@ const HomeScreen = () => {
     useState(false);
   const [pendingNotificationTarget, setPendingNotificationTarget] =
     useState<NotificationTarget | null>(null);
+  const notificationPostFetchesRef = useRef(new Set<string>());
+  const pendingNotificationPostIdRef = useRef<string | undefined>(undefined);
   const [handledNotificationKey, setHandledNotificationKey] = useState<
     string | null
   >(null);
@@ -1563,6 +1565,10 @@ const selectedChannel = useMemo(() => {
     notificationReplyId,
   ]);
 
+  useEffect(() => {
+    pendingNotificationPostIdRef.current = pendingNotificationTarget?.postId;
+  }, [pendingNotificationTarget?.postId]);
+
   // ── Resolve postId from commentId when missing
   useEffect(() => {
     if (
@@ -1598,6 +1604,54 @@ const selectedChannel = useMemo(() => {
       isCancelled = true;
     };
   }, [pendingNotificationTarget]);
+
+  // The live feed initially contains only the newest page. Fetch a notification's
+  // post directly so older likes/comments/replies/mentions can still open it.
+  useEffect(() => {
+    const postId = pendingNotificationTarget?.postId;
+    if (
+      !postId ||
+      loadedPostIdsRef.current.has(postId) ||
+      notificationPostFetchesRef.current.has(postId)
+    ) {
+      return;
+    }
+
+    notificationPostFetchesRef.current.add(postId);
+    let isCancelled = false;
+
+    getDoc(doc(db, "posts", postId))
+      .then((postSnap) => {
+        if (!postSnap.exists() || isCancelled) return;
+        const fetchedPost: PostFeedItem = {
+          type: "post",
+          id: postSnap.id,
+          likeCount: 0,
+          commentCount: 0,
+          likedBy: [],
+          ...(postSnap.data() as Omit<Post, "id">),
+        };
+        loadedPostIdsRef.current.add(fetchedPost.id);
+        setFeedItems((current) =>
+          sortFeedItems(
+            mergeFeedItemsByIdentity(current, [
+              ...current.filter(
+                (item) => !(item.type === "post" && item.id === fetchedPost.id),
+              ),
+              fetchedPost,
+            ]),
+          ),
+        );
+      })
+      .catch((error) => {
+        console.error("Error loading older notification post:", error);
+        notificationPostFetchesRef.current.delete(postId);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [pendingNotificationTarget?.postId]);
 
   const fetchUserRole = useCallback(
     async (userId: string) => {
@@ -1663,9 +1717,21 @@ const selectedChannel = useMemo(() => {
 
         setFeedItems((prev) => {
           const polls = prev.filter((item) => item.type === "poll");
+          const notificationPostId = pendingNotificationPostIdRef.current;
+          const notificationPost = notificationPostId
+            ? prev.find(
+                (item): item is PostFeedItem =>
+                  item.type === "post" && item.id === notificationPostId,
+              )
+            : undefined;
+          const posts =
+            notificationPost &&
+            !fetchedPosts.some((post) => post.id === notificationPost.id)
+              ? [...fetchedPosts, notificationPost]
+              : fetchedPosts;
           return mergeFeedItemsByIdentity(
             prev,
-            sortFeedItems([...fetchedPosts, ...polls]),
+            sortFeedItems([...posts, ...polls]),
           );
         });
         setIsLoading(false);

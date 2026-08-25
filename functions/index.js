@@ -516,35 +516,93 @@ async function requestServerAiReply({ postId, postData }) {
   const prompt = clean(postData.aiPrompt);
   if (!prompt) return null;
 
-  const response = await fetch(AI_WORKER_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      serverId: clean(postData.serverId) || "home",
-      channelId: clean(postData.channelId) || "feed",
-      sourceMessageId: postId,
-      sourceUserId: clean(postData.userId) || "unknown",
-      prompt,
-      memoryBlocks: [],
-      contextMessages: [
-        {
-          role: "user",
-          name: clean(postData.isAnonymous ? "Anonymous" : postData.authorName || postData.username) || "User",
-          content: prompt,
-        },
-      ],
-    }),
-  });
+  // Non-generative server fallback for @AI on approved posts. The main
+  // client chatbot uses the trained Naive Bayes intent classifier. This
+  // server path deliberately uses deterministic retrieval/templates only
+  // and never calls an LLM provider.
+  const text = prompt
+    .toLowerCase()
+    .replace(/@(?:ai|bondedai)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error || `AI worker failed: HTTP ${response.status}`);
+  const mathText = text
+    .replace(/\bplus\b/g, "+")
+    .replace(/\bminus\b/g, "-")
+    .replace(/\b(times|multiplied by|multiply by)\b/g, "*")
+    .replace(/\b(divided by|divide by|over)\b/g, "/");
+  const simpleMath = mathText.match(/(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)/);
+  if (simpleMath) {
+    const left = Number(simpleMath[1]);
+    const op = simpleMath[2];
+    const right = Number(simpleMath[3]);
+    let result = null;
+    if (op === "+") result = left + right;
+    if (op === "-") result = left - right;
+    if (op === "*") result = left * right;
+    if (op === "/" && right !== 0) result = left / right;
+    if (Number.isFinite(result)) {
+      return { reply: `${simpleMath[0]} = ${result}`, model: "bonded-deterministic-server-v1" };
+    }
   }
 
-  const reply = clean(payload?.reply);
-  if (!reply) throw new Error("AI worker returned an empty reply.");
+  if (/\b(hello|hi|hey|good morning|good afternoon|good evening)\b/.test(text)) {
+    return {
+      reply: "Hello! I'm Bonded AI. I can help with campus events, academic programs, school information, date/time, and basic calculations.",
+      model: "bonded-deterministic-server-v1",
+    };
+  }
 
-  return { reply, model: payload?.model || null };
+  if (/\b(date|day today|today's date)\b/.test(text)) {
+    return {
+      reply: `Today is ${new Intl.DateTimeFormat("en-PH", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "Asia/Manila" }).format(new Date())}.`,
+      model: "bonded-deterministic-server-v1",
+    };
+  }
+
+  if (/\b(time|current time|time now)\b/.test(text)) {
+    return {
+      reply: `The current Philippine time is ${new Intl.DateTimeFormat("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }).format(new Date())}.`,
+      model: "bonded-deterministic-server-v1",
+    };
+  }
+
+  if (/\b(event|events|schedule)\b/.test(text)) {
+    const snapshot = await db.collection("events").get();
+    const now = new Date();
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+    const events = snapshot.docs
+      .map((item) => ({ id: item.id, ...(item.data() || {}) }))
+      .filter((event) => typeof event.date === "string" && event.date >= today)
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+      .slice(0, 5);
+    return {
+      reply: events.length
+        ? `Upcoming events: ${events.map((event) => `${clean(event.title) || "Untitled event"} on ${event.date}${event.startTime ? ` at ${event.startTime}` : ""}`).join("; ")}.`
+        : "I couldn't find any upcoming campus events in the BondED database.",
+      model: "bonded-deterministic-server-v1",
+    };
+  }
+
+  if (/\b(program|programs|course|courses)\b/.test(text)) {
+    const snapshot = await db.collection("programs").get();
+    const programs = snapshot.docs
+      .map((item) => item.data() || {})
+      .slice(0, 10)
+      .map((program) => program.code ? `${program.code} — ${program.name || "Program"}` : clean(program.name))
+      .filter(Boolean);
+    return {
+      reply: programs.length
+        ? `Programs currently listed in BondED: ${programs.join("; ")}.`
+        : "I couldn't find any academic programs in the BondED database.",
+      model: "bonded-deterministic-server-v1",
+    };
+  }
+
+  return {
+    reply: "I couldn't match that question to a supported BondED intent. Try asking about campus events, academic programs, date/time, or a basic calculation.",
+    model: "bonded-deterministic-server-v1",
+  };
 }
 
 async function runApprovedPostSideEffects(snapshot) {
@@ -579,7 +637,7 @@ async function runApprovedPostSideEffects(snapshot) {
         await snapshot.ref.update({
           aiReply: {
             text: "",
-            status: "generating",
+            status: "processing",
             generatedAtMs: Date.now(),
           },
         });

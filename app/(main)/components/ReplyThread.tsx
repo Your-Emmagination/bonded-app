@@ -1508,6 +1508,10 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         moderationDecision.status ===
         "approved"
       ) {
+        // Notification failures (e.g. resolving a tagged user) must never
+        // block the AI reply below — wrap them so an error here is just
+        // logged instead of aborting the whole send handler.
+        try {
         if (
           commentOwnerId &&
           commentOwnerId !==
@@ -1603,6 +1607,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             Boolean,
           ) as string[],
         });
+        } catch (error) {
+          console.error("Reply mention notifications failed:", error);
+        }
       }
 
       const shouldTriggerAi =
@@ -1644,8 +1651,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
           {
             aiReply: {
               text: "",
+              model: "bonded-nlp-naive-bayes-v1",
               status:
-                "generating",
+                "processing",
               generatedAtMs:
                 Date.now(),
             },

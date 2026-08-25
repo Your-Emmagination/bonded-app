@@ -58,7 +58,7 @@ import {
   isEveryoneMentionId,
 } from "@/utils/aiAssistant";
 import { summarizeAiVisibleContent } from "@/utils/aiContext";
-import { requestServerPostModeration } from "@/utils/aiWorker";
+import { requestAiReplyFromWorker, requestServerPostModeration } from "@/utils/aiWorker";
 import {
   getModerationPreviewText,
   requestModerationDecision,
@@ -649,6 +649,24 @@ for (const file of files) {
           console.warn("[CreatePost] Server moderation unavailable; post remains pending:", moderationError);
         }
 
+        if (serverDecision.status === "approved" && hasAiAssistantMention(content)) {
+          try {
+            const { reply, model } = await requestAiReplyFromWorker({
+              serverId: selectedServerId || "posts",
+              channelId: selectedChannelId || selectedEditPostId,
+              sourceMessageId: selectedEditPostId,
+              sourceUserId: user.uid,
+              prompt: aiPrompt,
+              contextMessages: [],
+            });
+            await updateDoc(doc(db, "posts", selectedEditPostId), {
+              aiReply: { text: reply, model, status: "completed", generatedAtMs: Date.now() },
+            });
+          } catch (aiError) {
+            console.warn("[CreatePost] Non-generative @BondedAI reply failed:", aiError);
+          }
+        }
+
         Alert.alert(
           serverDecision.status === "approved" ? "Success" : "Sent For Review",
           serverDecision.status === "approved"
@@ -670,6 +688,24 @@ for (const file of files) {
         serverDecision = await requestServerPostModeration(postRef.id);
       } catch (moderationError) {
         console.warn("[CreatePost] Server moderation unavailable; post remains pending:", moderationError);
+      }
+
+      if (serverDecision.status === "approved" && hasAiAssistantMention(content)) {
+        try {
+          const { reply, model } = await requestAiReplyFromWorker({
+            serverId: selectedServerId || "posts",
+            channelId: selectedChannelId || postRef.id,
+            sourceMessageId: postRef.id,
+            sourceUserId: user.uid,
+            prompt: aiPrompt,
+            contextMessages: [],
+          });
+          await updateDoc(postRef, {
+            aiReply: { text: reply, model, status: "completed", generatedAtMs: Date.now() },
+          });
+        } catch (aiError) {
+          console.warn("[CreatePost] Non-generative @BondedAI reply failed:", aiError);
+        }
       }
 
       Alert.alert(

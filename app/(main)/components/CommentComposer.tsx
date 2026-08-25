@@ -382,7 +382,12 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         realUserId: currentUser.uid,
         username: isAnonymous
           ? "Anonymous"
-          : `${currentUser.firstname || ""} ${currentUser.lastname || ""}`.trim() || "Anonymous",
+          : (
+              `${currentUser.firstname || ""} ${currentUser.lastname || ""}`.trim() ||
+              String(currentUser.username || currentUser.displayName || "").trim() ||
+              String(currentUser.email || "").split("@")[0]?.trim() ||
+              "User"
+            ),
         role: currentUser.role || "student",
         likes: [],
         profilePic: isAnonymous ? null : resolveAvatarUri(currentUser),

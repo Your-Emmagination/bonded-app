@@ -55,6 +55,13 @@ export default function MainLayout() {
         }}
       />
       <Stack.Screen
+        name="NotificationTargetScreen"
+        options={{
+          animation: "fade",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
+      />
+      <Stack.Screen
         name="UserProfileScreen"
         options={{
           animation: "fade",

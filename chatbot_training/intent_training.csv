@@ -1,0 +1,514 @@
+text,intent
+hello,greeting
+hi,greeting
+hey,greeting
+hello there,greeting
+hi there,greeting
+good morning,greeting
+good afternoon,greeting
+good evening,greeting
+kumusta,greeting
+hey bonded ai,greeting
+hello bonded ai,greeting
+hi assistant,greeting
+morning,greeting
+good day,greeting
+yo assistant,greeting
+hello can you help me,greeting
+hi can you help,greeting
+hey there assistant,greeting
+how are you,wellbeing
+how are you doing,wellbeing
+how is it going,wellbeing
+are you okay,wellbeing
+you good,wellbeing
+how have you been,wellbeing
+are you doing well,wellbeing
+how do you feel,wellbeing
+how are things,wellbeing
+hope you are well,wellbeing
+how is your day,wellbeing
+are you alright,wellbeing
+how are things going,wellbeing
+you doing okay,wellbeing
+how's everything,wellbeing
+thank you,thanks
+thanks,thanks
+thanks a lot,thanks
+thank you very much,thanks
+salamat,thanks
+salamat po,thanks
+thanks for the help,thanks
+thank you for helping,thanks
+appreciate it,thanks
+much appreciated,thanks
+okay thanks,thanks
+great thank you,thanks
+thanks assistant,thanks
+thank you bonded ai,thanks
+that helped thanks,thanks
+goodbye,goodbye
+bye,goodbye
+see you,goodbye
+see you later,goodbye
+gotta go,goodbye
+talk to you later,goodbye
+bye for now,goodbye
+see you next time,goodbye
+good night,goodbye
+catch you later,goodbye
+i am leaving,goodbye
+thanks bye,goodbye
+okay goodbye,goodbye
+until next time,goodbye
+have a good day bye,goodbye
+what is your name,assistant_identity
+what's your name,assistant_identity
+who are you,assistant_identity
+tell me your name,assistant_identity
+what should i call you,assistant_identity
+are you bonded ai,assistant_identity
+what are you called,assistant_identity
+identify yourself,assistant_identity
+what is the assistant name,assistant_identity
+your name please,assistant_identity
+who is bonded ai,assistant_identity
+are you the school assistant,assistant_identity
+what kind of assistant are you,assistant_identity
+what do i call this bot,assistant_identity
+who am i talking to,assistant_identity
+who am i,user_identity
+what is my name,user_identity
+what's my name,user_identity
+tell me my name,user_identity
+do you know my name,user_identity
+do you know who i am,user_identity
+can you tell me my name,user_identity
+identify me,user_identity
+what name is on my account,user_identity
+what is the name of my account,user_identity
+show my name,user_identity
+say my full name,user_identity
+what is my full name,user_identity
+do you recognize me,user_identity
+which user am i,user_identity
+what is my student id,user_profile
+what is my student number,user_profile
+show my student id,user_profile
+what program am i in,user_profile
+what course am i taking,user_profile
+what is my course,user_profile
+what is my program,user_profile
+what year level am i,user_profile
+show my student information,user_profile
+show my profile information,user_profile
+what is my year level,user_profile
+tell me my student number,user_profile
+which course am i enrolled in,user_profile
+which program am i enrolled in,user_profile
+give me my student details,user_profile
+what are my student details,user_profile
+show my school profile,user_profile
+what can you do,help
+help me,help
+what can i ask,help
+show commands,help
+how can you help me,help
+what questions can i ask,help
+what are your capabilities,help
+show me what you can do,help
+what do you know,help
+help,help
+i need help,help
+what can you help with,help
+give me examples of questions,help
+how do i use the assistant,help
+what services can you provide,help
+what information can you find,help
+what is the date today,date
+what date is it,date
+today date,date
+what day is today,date
+what day is it,date
+tell me today's date,date
+current date,date
+date today please,date
+what is today's date,date
+tell me the date,date
+what day of the week is it,date
+what date do we have today,date
+today's date please,date
+give me the current date,date
+day and date today,date
+what time is it,time
+current time,time
+time now,time
+what is the time today,time
+tell me the time,time
+what time is it now,time
+give me the current time,time
+what's the time,time
+time please,time
+can you tell me the time,time
+show current time,time
+what is the time right now,time
+tell me what time it is,time
+clock time now,time
+current clock,time
+calculate 1 plus 1,calculator
+what is 2 plus 2,calculator
+solve 10 divided by 2,calculator
+compute 5 times 7,calculator
+calculate 12 minus 3,calculator
+what is 25 times 4,calculator
+calculate 100 divided by 5,calculator
+solve 8 plus 9,calculator
+compute 20 minus 7,calculator
+what is 6 multiplied by 8,calculator
+calculate 14 plus 23,calculator
+solve 50 over 10,calculator
+what is 9 times 9,calculator
+calculate 15 percent 4,calculator
+compute 7 plus 11,calculator
+solve 42 divided by 6,calculator
+what is 100 minus 35,calculator
+what are the upcoming events,events
+show campus events,events
+when is the next event,events
+events this week,events
+school event schedule,events
+are there any events,events
+what events are coming,events
+next school activity,events
+upcoming school activities,events
+show upcoming activities,events
+what activities are happening,events
+campus activities coming up,events
+what is happening at school,events
+next campus event,events
+list the upcoming school events,events
+what school activities are scheduled,events
+tell me about upcoming events,events
+when is foundation week,events
+what date is foundation week,events
+where is foundation week,events
+when is the orientation,events
+what time is the next event,events
+what programs are available,programs
+show school programs,programs
+what courses are offered,programs
+list academic programs,programs
+tell me about a program,programs
+do you have bsit,programs
+tell me about bsit,programs
+what degree programs do you have,programs
+what course can i take,programs
+courses available,programs
+what degrees are offered,programs
+list the courses,programs
+show degree programs,programs
+does the school offer information technology,programs
+tell me about the it program,programs
+what is bsit,programs
+what is bscs,programs
+available college courses,programs
+which programs can students take,programs
+what academic courses are there,programs
+describe the bsit program,programs
+what programs does the school have,programs
+tell me about the school,campus_knowledge
+campus information,campus_knowledge
+school information,campus_knowledge
+what is the policy,campus_knowledge
+tell me about bonded,campus_knowledge
+what are the school rules,campus_knowledge
+tell me the campus policy,campus_knowledge
+where can i find school information,campus_knowledge
+what is bonded,campus_knowledge
+information about the campus,campus_knowledge
+tell me about a school policy,campus_knowledge
+what are the campus guidelines,campus_knowledge
+what should i know about bonded,campus_knowledge
+give me school information,campus_knowledge
+what are the student guidelines,campus_knowledge
+what does the school say about this policy,campus_knowledge
+campus rules please,campus_knowledge
+school rules and policies,campus_knowledge
+can you tell who i am,user_identity
+can you identify who i am,user_identity
+tell me who i am,user_identity
+which account is mine,user_identity
+do you know who is signed in,user_identity
+what user am i,user_identity
+can you recognize my account,user_identity
+tell me about foundation week,events
+give me details about foundation week,events
+when does foundation week happen,events
+what day is the orientation,events
+what time does orientation start,events
+where will the orientation happen,events
+when are the school activities,events
+what campus event is next,events
+who is batman,unknown
+tell me about batman,unknown
+write me a story,unknown
+write an essay for me,unknown
+tell me a joke,unknown
+what is the weather today,unknown
+will it rain today,unknown
+what is the temperature,unknown
+who won the basketball game,unknown
+what is the nba score,unknown
+what movie should i watch,unknown
+recommend a song,unknown
+give me a recipe,unknown
+how do i cook chicken,unknown
+who is the president,unknown
+tell me political news,unknown
+what is bitcoin price,unknown
+what is the stock market doing,unknown
+translate this sentence,unknown
+write a poem,unknown
+make an image,unknown
+what is the capital of france,unknown
+who is spider man,unknown
+tell me about naruto,unknown
+how do i fix my car,unknown
+what phone should i buy,unknown
+what laptop is best,unknown
+play music,unknown
+open youtube,unknown
+book me a flight,unknown
+tell me world news,unknown
+what happened in the news today,unknown
+who won the election,unknown
+give medical advice,unknown
+diagnose my symptoms,unknown
+what is the meaning of life,unknown
+solve my programming homework,unknown
+write javascript code,unknown
+what is quantum physics,unknown
+tell me a random fact,unknown
+what are you,assistant_identity
+what is bonded ai,assistant_identity
+tell me about yourself,assistant_identity
+are you an ai,assistant_identity
+are you a chatbot,assistant_identity
+what is your purpose,assistant_identity
+introduce yourself,assistant_identity
+who built you,assistant_identity
+who made you,assistant_identity
+explain what you are,assistant_identity
+are you a real person,assistant_identity
+are you human,assistant_identity
+what type of bot are you,assistant_identity
+what should i know about you,assistant_identity
+give me your name,assistant_identity
+who exactly are you,assistant_identity
+what is this assistant called,assistant_identity
+name of this chatbot,assistant_identity
+are you a real assistant,assistant_identity
+what makes you bonded ai,assistant_identity
+bye bye,goodbye
+see ya,goodbye
+im leaving now,goodbye
+gotta go now,goodbye
+logging off,goodbye
+see you around,goodbye
+farewell,goodbye
+take care bye,goodbye
+im done for now,goodbye
+signing off,goodbye
+paalam,goodbye
+paalam po,goodbye
+okay im out,goodbye
+im heading out,goodbye
+alright bye,goodbye
+that will be all bye,goodbye
+im logging out now,goodbye
+see you tomorrow,goodbye
+have a great day bye,goodbye
+gotta run bye,goodbye
+what programs does bonded offer,programs
+list all courses,programs
+what degree programs are available,programs
+tell me about the bsit program,programs
+show available courses,programs
+what majors do you have,programs
+what can i study here,programs
+give me course options,programs
+what programs can i enroll in,programs
+list college degrees offered,programs
+what it courses are offered,programs
+tell me about your academic programs,programs
+what bachelor degrees are offered,programs
+what course options do i have,programs
+can i see the list of programs,programs
+what program should i take,programs
+show me the course list,programs
+what programs are open for enrollment,programs
+enumerate the academic programs,programs
+what majors does bonded have,programs
+what course tracks are available,programs
+list bonded degree programs,programs
+what is the dress code,campus_knowledge
+where is the registrar office,campus_knowledge
+what are the enrollment requirements,campus_knowledge
+tell me about school guidelines,campus_knowledge
+what is the attendance policy,campus_knowledge
+how do i enroll,campus_knowledge
+what are the tuition fees,campus_knowledge
+what is the grading policy,campus_knowledge
+where is the campus located,campus_knowledge
+what facilities does the campus have,campus_knowledge
+tell me the school mission,campus_knowledge
+what is the school vision,campus_knowledge
+how do i request my documents,campus_knowledge
+what are the admission requirements,campus_knowledge
+tell me about school safety rules,campus_knowledge
+what is the uniform policy,campus_knowledge
+whats the process for dropping a subject,campus_knowledge
+tell me about scholarship programs,campus_knowledge
+yo,greeting
+hiya,greeting
+greetings,greeting
+good day bonded,greeting
+hi bonded assistant,greeting
+sup,greeting
+hey good morning,greeting
+morning bonded,greeting
+hi po,greeting
+hello po,greeting
+whats up bonded,greeting
+kamusta ka,wellbeing
+how you doing today,wellbeing
+you ok,wellbeing
+how is life,wellbeing
+everything good with you,wellbeing
+how are you feeling today,wellbeing
+are you well today,wellbeing
+thanks so much,thanks
+many thanks,thanks
+thank you so much,thanks
+salamat po ha,thanks
+i appreciate your help,thanks
+thanks a bunch,thanks
+thanks for that,thanks
+thank you for the information,thanks
+whats my name again,user_identity
+can you tell my name,user_identity
+who is logged in,user_identity
+who is using this account,user_identity
+show my program,user_profile
+whats my student number,user_profile
+give me my profile details,user_profile
+display my account info,user_profile
+what can this bot do,help
+how does bonded ai work,help
+list your features,help
+what are your functions,help
+give me a list of things you can help with,help
+what is the day today,date
+current day,date
+what day of the week is today,date
+todays date please,date
+current time please,time
+what time do we have,time
+give me the time,time
+what is 3 plus 3,calculator
+compute 9 minus 1,calculator
+10 times 10,calculator
+100 divided by 4,calculator
+any school activities this month,events
+whats happening on campus this week,events
+list upcoming bonded events,events
+any activities scheduled soon,events
+whats the next campus event,events
+upcoming foundation events,events
+sing me a song,unknown
+translate this to spanish,unknown
+recommend a movie,unknown
+fix my laptop,unknown
+whats bitcoin price today,unknown
+write a poem about love,unknown
+what is todays exchange rate,unknown
+how tall is mount everest,unknown
+who invented the telephone,unknown
+give me a workout plan,unknown
+what is the fastest car in the world,unknown
+what is the tallest mountain,unknown
+how many planets are there,unknown
+who wrote romeo and juliet,unknown
+what language is spoken in japan,unknown
+convert 10 miles to kilometers,unknown
+what is the square root of 144,unknown
+tell me about world war 2,unknown
+what is machine learning,unknown
+explain blockchain to me,unknown
+what is the population of the philippines,unknown
+give me a business idea,unknown
+help me write a resume,unknown
+how do i lose weight,unknown
+whats a good diet plan,unknown
+tell me about the solar system,unknown
+who is the ceo of apple,unknown
+what stocks should i buy,unknown
+give me lottery numbers,unknown
+tell me a scary story,unknown
+what should i name my dog,unknown
+recommend a restaurant near me,unknown
+whats a good gift for my mom,unknown
+how do i tie a tie,unknown
+teach me spanish,unknown
+what is the meaning of my dream,unknown
+predict the future,unknown
+what zodiac sign am i,unknown
+tell me my horoscope,unknown
+whats trending on social media,unknown
+help me plan a party,unknown
+give me relationship advice,unknown
+should i break up with my partner,unknown
+write my cover letter,unknown
+proofread my essay,unknown
+summarize this article for me,unknown
+generate a logo for my business,unknown
+what is the best programming language,unknown
+debug this python code,unknown
+explain how neural networks work,unknown
+what is chatgpt,unknown
+are you chatgpt,unknown
+are you gemini,unknown
+are you claude,unknown
+can you access the internet,unknown
+whats the latest iphone,unknown
+compare ps5 and xbox,unknown
+what games should i play,unknown
+tell me about your favorite anime,unknown
+who is stronger goku or superman,unknown
+whats the plot of avengers endgame,unknown
+recommend a netflix series,unknown
+what is 2 plus 2 in binary,unknown
+convert celsius to fahrenheit,unknown
+who is the tallest person alive,unknown
+whats the currency of japan,unknown
+how many countries are in the world,unknown
+what year did world war 1 end,unknown
+tell me about ancient egypt,unknown
+who painted the mona lisa,unknown
+what is photosynthesis,unknown
+explain the theory of relativity,unknown
+tell me about bsis,programs
+what is bsis,programs
+do you have bsis,programs
+tell me about bstm,programs
+what is bstm,programs
+do you have bstm,programs
+what is bachelor of science in information systems,programs
+what is bachelor of science in tourism management,programs
+tell me about the tourism management program,programs
+tell me about the information systems program,programs
+is bsis available,programs
+is bstm available,programs
+what programs does bonded ed offer,programs
+show me bsis details,programs
+show me bstm details,programs

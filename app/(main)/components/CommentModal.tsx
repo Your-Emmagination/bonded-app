@@ -208,10 +208,12 @@ const CommentItem: React.FC<{
   const canShowEyeIcon = (item.isAnonymous ?? true) && canSeeIdentity;
   const isIdentityVisible = !item.isAnonymous || (revealed && canSeeIdentity);
 
+  const authorFullName = authorData
+    ? `${authorData.firstname || ""} ${authorData.lastname || ""}`.trim()
+    : "";
+
   const displayName = isIdentityVisible
-    ? authorData
-      ? `${authorData.firstname} ${authorData.lastname}`
-      : item.username || "User"
+    ? authorFullName || item.username?.trim() || "User"
     : "Anonymous";
 
   const canClickProfile =
@@ -868,33 +870,39 @@ const CommentModal: React.FC<CommentModalProps> = ({
       };
 
     if (moderationDecision.status === "approved") {
-      await createNotification({
-        recipientId: postOwnerId,
-        actor,
-        type: "comment",
-        entityType: "comment",
-        entityId: commentRef.id,
-        parentId: postId,
-        message: "commented on your post",
-        preview: commentData.text || postData?.content,
-      });
+      // Notification failures must never block the AI reply that follows —
+      // wrap them so an error here is logged, not thrown out of the handler.
+      try {
+        await createNotification({
+          recipientId: postOwnerId,
+          actor,
+          type: "comment",
+          entityType: "comment",
+          entityId: commentRef.id,
+          parentId: postId,
+          message: "commented on your post",
+          preview: commentData.text || postData?.content,
+        });
 
-      await createMentionNotifications({
-        recipientIds: await resolveMentionRecipientIds({
-          taggedUserIds: (commentData.taggedUsers || [])
-            .map((tag: any) => tag.id)
-            .filter((tagId: string) => !isAiAssistantId(tagId)),
-          actorId: user.uid,
-          serverId: postData?.serverId || null,
-        }),
-        actor,
-        entityType: "comment",
-        entityId: commentRef.id,
-        parentId: postId,
-        message: "mentioned you in a comment",
-        preview: commentData.text,
-        excludeUserIds: [postOwnerId].filter(Boolean) as string[],
-      });
+        await createMentionNotifications({
+          recipientIds: await resolveMentionRecipientIds({
+            taggedUserIds: (commentData.taggedUsers || [])
+              .map((tag: any) => tag.id)
+              .filter((tagId: string) => !isAiAssistantId(tagId)),
+            actorId: user.uid,
+            serverId: postData?.serverId || null,
+          }),
+          actor,
+          entityType: "comment",
+          entityId: commentRef.id,
+          parentId: postId,
+          message: "mentioned you in a comment",
+          preview: commentData.text,
+          excludeUserIds: [postOwnerId].filter(Boolean) as string[],
+        });
+      } catch (error) {
+        console.error("Comment notifications failed:", error);
+      }
     }
 
     const shouldTriggerAi =
@@ -914,7 +922,8 @@ const CommentModal: React.FC<CommentModalProps> = ({
       await updateDoc(commentRef, {
         aiReply: {
           text: "",
-          status: "generating",
+          model: "bonded-nlp-naive-bayes-v1",
+          status: "processing",
           generatedAtMs: Date.now(),
         },
       });

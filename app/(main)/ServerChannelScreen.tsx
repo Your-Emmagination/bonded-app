@@ -164,8 +164,15 @@ const summarizeThreadMessage = (message: Partial<ThreadMessage>) => {
       `[shared ${message.files.length} attachment${message.files.length === 1 ? "" : "s"}]`,
     );
   }
-  if (message.taggedUsers?.length) {
-    parts.push(`Tagged users: ${message.taggedUsers.map((tag) => tag.name).join(", ")}`);
+  // Don't include the AI assistant itself in "Tagged users" — tagging it is
+  // just how this flow gets triggered, and echoing "Tagged users: Bonded AI"
+  // back into the prompt adds noise that can push short messages (e.g. "bye",
+  // "how are you") below the classifier's confidence threshold.
+  const otherTaggedUsers = (message.taggedUsers || []).filter(
+    (tag) => !isAiAssistantId(tag.id),
+  );
+  if (otherTaggedUsers.length) {
+    parts.push(`Tagged users: ${otherTaggedUsers.map((tag) => tag.name).join(", ")}`);
   }
   return parts.join("\n").trim() || "[empty message]";
 };
@@ -603,27 +610,37 @@ export default function ServerChannelScreen() {
       );
 
       if (moderationDecision.status !== "pending") {
-        await createMentionNotifications({
-          recipientIds: await resolveMentionRecipientIds({
-            taggedUserIds: mentionRecipientIds,
-            actorId: user.uid,
-            serverId: resolvedServerId,
-          }),
-          actor: {
-            id: user.uid,
-            name: messageData.username || currentUserProfile?.firstname || "Someone",
-            profileImage:
-              messageData.isAnonymous === true
-                ? null
-                : resolveAvatarUri(currentUserProfile),
-            isAnonymous: messageData.isAnonymous,
-          },
-          entityType: "comment",
-          entityId: messageRef.id,
-          parentId: resolvedServerId,
-          message: `mentioned you in #${resolvedChannelLabel}`,
-          preview: messageData.text,
-        });
+        // Mention notifications are a "nice to have" side effect of this send,
+        // not something the AI reply should depend on. If notifying a tagged
+        // student fails for any reason, we log it and move on — previously an
+        // error here would throw out of handleSend entirely, silently
+        // skipping the AI-trigger check below it whenever @ai was tagged
+        // alongside a real student.
+        try {
+          await createMentionNotifications({
+            recipientIds: await resolveMentionRecipientIds({
+              taggedUserIds: mentionRecipientIds,
+              actorId: user.uid,
+              serverId: resolvedServerId,
+            }),
+            actor: {
+              id: user.uid,
+              name: messageData.username || currentUserProfile?.firstname || "Someone",
+              profileImage:
+                messageData.isAnonymous === true
+                  ? null
+                  : resolveAvatarUri(currentUserProfile),
+              isAnonymous: messageData.isAnonymous,
+            },
+            entityType: "comment",
+            entityId: messageRef.id,
+            parentId: resolvedServerId,
+            message: `mentioned you in #${resolvedChannelLabel}`,
+            preview: messageData.text,
+          });
+        } catch (error) {
+          console.error("Mention notification failed:", error);
+        }
       }
 
       if (!shouldTriggerAi || moderationDecision.status === "pending") {
@@ -672,7 +689,7 @@ export default function ServerChannelScreen() {
           serverId: resolvedServerId,
           channelId: resolvedChannelId,
           aiAssistant: true,
-          aiStatus: "generating",
+          aiStatus: "processing",
           aiSourceMessageId: messageRef.id,
           createdAt: serverTimestamp(),
         });

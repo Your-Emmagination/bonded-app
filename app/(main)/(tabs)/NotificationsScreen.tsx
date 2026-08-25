@@ -1,11 +1,11 @@
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { getDoc } from "firebase/firestore";
 import {
   collection,
   doc,
+  getDoc,
   onSnapshot,
   query,
   updateDoc,
@@ -95,6 +95,20 @@ const NotificationsScreen = () => {
   const [refreshing, setRefreshing] = useState(false);
   const scaleAnim = useRef(new Animated.Value(0)).current;
   const router = useRouter();
+  const { unavailable } = useLocalSearchParams<{
+    unavailable?: string | string[];
+  }>();
+
+  useEffect(() => {
+    if (!unavailable) return;
+    setConfirmDialog({
+      title: "Content not available",
+      description: "This post, comment, or reply has been deleted or is no longer available.",
+      confirmText: "OK",
+      singleAction: true,
+      onConfirm: () => setConfirmDialog(null),
+    });
+  }, [unavailable]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, setUser);
@@ -278,8 +292,8 @@ const onRefresh = useCallback(() => {
   };
 
  const handleNotificationPress = async (notification: NotificationItem) => {
-  // 1. Mark as read first so notification isn't stuck as "unread"
-  await markAsRead(notification.id);
+  // Mark as read in the background; navigation must never wait on this write.
+  void markAsRead(notification.id);
 
   if (!notification.entityType || !notification.entityId) {
     return;
@@ -293,94 +307,61 @@ const onRefresh = useCallback(() => {
     return;
   }
 
-  // 2. Resolve target post ID
-  const targetPostId =
-    notification.entityType === "post"
-      ? notification.entityId
-      : notification.entityType === "comment" || notification.entityType === "reply"
-        ? notification.parentId || undefined
-        : undefined;
-
-  // 3. Verify target post exists before navigating.
-  // Keep the existing deleted-post message unchanged.
-  if (targetPostId) {
-    try {
-      const postRef = doc(db, "posts", targetPostId);
-      const postSnap = await getDoc(postRef);
-
-      if (!postSnap.exists()) {
-        setConfirmDialog({
-          title: "This Content is Unavailable",
-          description: "This content was deleted or removed due to (homosexual, foul language, or offensive remarks) comments.",
-          confirmText: "OK",
-          singleAction: true,
-          onConfirm: () => setConfirmDialog(null),
-        });
-        return; // Stop navigation
-      }
-    } catch (error) {
-      console.error("Error checking post existence:", error);
-    }
-  }
-
-  // 4. For comment/reply notifications, verify the referenced content still exists.
-  // If the comment/reply was deleted, show a specific unavailable message instead
-  // of navigating to an empty comment thread.
-  if (notification.entityType === "comment") {
-    try {
+  let targetExists = false;
+  try {
+    if (notification.entityType === "post") {
+      targetExists = (await getDoc(doc(db, "posts", notification.entityId))).exists();
+    } else if (notification.entityType === "comment") {
       const commentSnap = await getDoc(doc(db, "comments", notification.entityId));
-
-      if (!commentSnap.exists()) {
-        setConfirmDialog({
-          title: "Content not available",
-          description: "This comment has been deleted or is no longer available.",
-          confirmText: "OK",
-          singleAction: true,
-          onConfirm: () => setConfirmDialog(null),
-        });
-        return;
+      if (commentSnap.exists()) {
+        const postId = String(commentSnap.data()?.postId || notification.parentId || "");
+        targetExists = Boolean(
+          postId && (await getDoc(doc(db, "posts", postId))).exists(),
+        );
+      } else {
+        targetExists = (
+          await getDoc(doc(db, "communityThreadMessages", notification.entityId))
+        ).exists();
       }
-    } catch (error) {
-      console.error("Error checking comment existence:", error);
-    }
-  }
-
-  if (notification.entityType === "reply") {
-    try {
+    } else if (notification.entityType === "reply") {
       const replySnap = await getDoc(doc(db, "replies", notification.entityId));
-
-      if (!replySnap.exists()) {
-        setConfirmDialog({
-          title: "Content not available",
-          description: "This reply has been deleted or is no longer available.",
-          confirmText: "OK",
-          singleAction: true,
-          onConfirm: () => setConfirmDialog(null),
-        });
-        return;
+      if (replySnap.exists()) {
+        const commentId = String(
+          replySnap.data()?.commentId || notification.parentId || "",
+        );
+        const commentSnap = commentId
+          ? await getDoc(doc(db, "comments", commentId))
+          : null;
+        const postId = commentSnap?.exists()
+          ? String(commentSnap.data()?.postId || "")
+          : "";
+        targetExists = Boolean(
+          postId && (await getDoc(doc(db, "posts", postId))).exists(),
+        );
       }
-    } catch (error) {
-      console.error("Error checking reply existence:", error);
     }
+  } catch (error) {
+    console.warn("Unable to validate notification destination:", error);
   }
 
-  const targetCommentId =
-    notification.entityType === "comment"
-      ? notification.entityId
-      : notification.entityType === "reply"
-        ? notification.parentId || undefined
-        : undefined;
-  const targetReplyId =
-    notification.entityType === "reply" ? notification.entityId : undefined;
+  if (!targetExists) {
+    setConfirmDialog({
+      title: "Content not available",
+      description: "This post, comment, or reply has been deleted or is no longer available.",
+      confirmText: "OK",
+      singleAction: true,
+      onConfirm: () => setConfirmDialog(null),
+    });
+    return;
+  }
 
-   router.push({
-    pathname: "/(main)/(tabs)/HomeScreen",
+  router.push({
+    pathname: "/NotificationTargetScreen",
     params: {
-      notificationKey: `${notification.id}-${Date.now()}`,
-      notificationPostId: targetPostId,
-      notificationCommentId: targetCommentId,
-      notificationReplyId: targetReplyId,
-      notificationOpenReply: notification.entityType === "reply" ? "1" : "0",
+      notificationId: notification.id,
+      entityType: notification.entityType,
+      entityId: notification.entityId,
+      parentId: notification.parentId || "",
     },
   });
 };
@@ -500,7 +481,7 @@ const onRefresh = useCallback(() => {
         {!!item.preview && (
           <View style={styles.previewBox}>
             <Text style={styles.previewText} numberOfLines={2}>
-              "{item.preview}"
+              {`“${item.preview}”`}
             </Text>
           </View>
         )}

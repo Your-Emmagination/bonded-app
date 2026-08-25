@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { getAiMemoryContext } from "./aiMemory";
 import { getAiConfigDiagnostics, getAiWorkerUrl } from "./aiConfig";
+import { requestNonGenerativeChatbotReply } from "./nonGenerativeChatbot";
 import { auth } from "../Firebase_configure";
 
 export const AI_REQUEST_COOLDOWN_MS = 0;
@@ -54,27 +54,19 @@ export const requestServerPostModeration = async (postId: string) => {
   }
 };
 
-export const requestAiReplyFromWorker = async ({ serverId, channelId, sourceMessageId, sourceUserId, prompt, contextMessages }: {
-  serverId: string; channelId: string; sourceMessageId: string; sourceUserId: string; prompt: string; contextMessages: AiContextMessage[];
+export const requestAiReplyFromWorker = async ({ prompt }: {
+  serverId: string;
+  channelId: string;
+  sourceMessageId: string;
+  sourceUserId: string;
+  prompt: string;
+  contextMessages: AiContextMessage[];
 }) => {
-  const workerUrl = getAiWorkerUrl();
-  if (!workerUrl) throw new Error("Missing EXPO_PUBLIC_AI_WORKER_URL.");
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
-  try {
-    const { memoryBlocks } = await getAiMemoryContext({ serverId, channelId }).catch(() => ({ memoryBlocks: [] }));
-    const response = await fetch(workerUrl, {
-      method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
-      body: JSON.stringify({ serverId, channelId, sourceMessageId, sourceUserId, prompt, memoryBlocks, contextMessages: contextMessages.slice(-AI_CONTEXT_LIMIT) }),
-    });
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(payload?.error || "AI worker request failed.");
-    const reply = payload?.reply?.trim();
-    if (!reply) throw new Error("AI worker returned an empty reply.");
-    return { reply, model: payload?.model || null };
-  } catch (error) {
-    const diagnostics = getAiConfigDiagnostics();
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`AI request failed (${diagnostics.source}: ${diagnostics.resolvedUrl}): ${reason}`);
-  } finally { clearTimeout(timeoutId); }
+  const result = await requestNonGenerativeChatbotReply(prompt);
+  return {
+    reply: result.reply,
+    model: result.model,
+    intent: result.intent,
+    confidence: result.confidence,
+  };
 };

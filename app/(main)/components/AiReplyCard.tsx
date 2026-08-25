@@ -30,7 +30,6 @@ export default function AiReplyCard({
           <Ionicons name="sparkles" size={13} color="#fff7f0" />
         </View>
         <Text style={styles.title}>Bonded AI</Text>
-        {!!reply.model && <Text style={styles.model}>{reply.model}</Text>}
       </View>
       {isGenerating ? (
         <View style={styles.pendingRow}>
@@ -87,13 +86,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "800",
     letterSpacing: 0.2,
-  },
-  model: {
-    marginLeft: "auto",
-    color: "#b46251",
-    fontSize: 10,
-    fontWeight: "700",
-    textTransform: "uppercase",
   },
   body: {
     color: "#4f1c17",

@@ -366,6 +366,13 @@ match /userNotificationSettings/{userId} {
             request.resource.data.commentCount == resource.data.commentCount + 1 ||
             request.resource.data.commentCount == resource.data.commentCount - 1
           )
+        ) ||
+        (
+          isContentOwner(resource.data) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['aiReply']) &&
+          request.resource.data.aiReply is map &&
+          request.resource.data.aiReply.model == 'bonded-nlp-naive-bayes-v1' &&
+          request.resource.data.aiReply.status in ['processing', 'completed']
         )
       );
 
@@ -407,6 +414,13 @@ match /userNotificationSettings/{userId} {
             'moderatedAtMs', 'moderationModel', 'moderationRuleSource', 'aiReply'
           ]) &&
           request.resource.data.moderationStatus == 'pending'
+        ) ||
+        (
+          isContentOwner(resource.data) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['aiReply']) &&
+          request.resource.data.aiReply is map &&
+          request.resource.data.aiReply.model == 'bonded-nlp-naive-bayes-v1' &&
+          request.resource.data.aiReply.status in ['processing', 'completed']
         ) ||
         (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
@@ -461,6 +475,13 @@ match /userNotificationSettings/{userId} {
             'moderatedAtMs', 'moderationModel', 'moderationRuleSource', 'aiReply'
           ]) &&
           request.resource.data.moderationStatus == 'pending'
+        ) ||
+        (
+          isContentOwner(resource.data) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['aiReply']) &&
+          request.resource.data.aiReply is map &&
+          request.resource.data.aiReply.model == 'bonded-nlp-naive-bayes-v1' &&
+          request.resource.data.aiReply.status in ['processing', 'completed']
         ) ||
         (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -680,6 +701,23 @@ match /userNotificationSettings/{userId} {
       allow read, list: if isStaff();
 
       allow update, delete: if isStaff();
+    }
+
+
+    // =========================================================
+    // AI DIRECT MESSAGES (private 1:1 chat with Bonded AI)
+    // =========================================================
+
+    match /aiDirectMessages/{userId}/messages/{messageId} {
+
+      allow read, list: if signedIn() && request.auth.uid == userId;
+
+      allow create: if signedIn() && request.auth.uid == userId &&
+        request.resource.data.text is string &&
+        request.resource.data.role in ['user', 'assistant'] &&
+        request.resource.data.createdAt is timestamp;
+
+      allow update, delete: if signedIn() && request.auth.uid == userId;
     }
 
 

@@ -64,16 +64,15 @@ export const summarizeAiVisibleContent = ({
     );
   }
 
-  if (taggedUsers?.length) {
-    parts.push(
-      `Tagged users: ${taggedUsers
-        .map((tag) =>
-          isAiAssistantId(tag.id)
-            ? "Bonded AI"
-            : `${tag.name}${tag.studentID ? ` (${tag.studentID})` : ""}`,
-        )
-        .join(", ")}`,
-    );
+  // Tagging the AI is how this flow gets triggered, so it isn't meaningful
+  // "context" — including it just adds noise that can drown out short
+  // prompts like "bye" or "how are you" before they ever reach the intent
+  // classifier. Only mention *other* tagged users, if any, and only by name:
+  // including their raw student ID (which often looks like "012324-004855")
+  // has previously been misread by the calculator as a subtraction problem.
+  const otherTaggedUsers = (taggedUsers || []).filter((tag) => !isAiAssistantId(tag.id));
+  if (otherTaggedUsers.length) {
+    parts.push(`Tagged users: ${otherTaggedUsers.map((tag) => tag.name).join(", ")}`);
   }
 
   return parts.join("\n").trim() || "[empty message]";
