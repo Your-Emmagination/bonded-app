@@ -66,8 +66,12 @@ import {
   requestVideoModeration,
 } from "@/utils/contentModeration";
 import { resolveUserRoleForAuthUser } from "@/utils/rbac";
+import { canUsePostFlair, DEFAULT_POST_FLAIR, POST_FLAIRS, type PostFlairId } from "@/utils/postFlairs";
 
 const MAX_FILES = 10;
+// Keep the Python image-moderation integration available for later, but do not
+// call it while BondED is not running the Python media service.
+const IMAGE_MODERATION_ENABLED = false;
 
 interface Student {
   id: string;
@@ -95,6 +99,8 @@ const getSingleParam = (value?: string | string[]) =>
 
 const CreatePostScreen = () => {
   const [content, setContent] = useState("");
+  const [selectedFlair, setSelectedFlair] = useState<PostFlairId>(DEFAULT_POST_FLAIR);
+  const [authorRole, setAuthorRole] = useState<string>("student");
   const [files, setFiles] = useState<
     { uri: string; mimeType: string; name: string }[]
   >([]);
@@ -143,6 +149,16 @@ const CreatePostScreen = () => {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    const loadAuthorRole = async () => {
+      const resolvedRole = await resolveUserRoleForAuthUser(auth.currentUser);
+      if (active) setAuthorRole(String(resolvedRole || "student").toLowerCase());
+    };
+    loadAuthorRole();
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
     if (!selectedEditPostId || !auth.currentUser) return;
     const loadPostForEdit = async () => {
       try {
@@ -158,6 +174,7 @@ const CreatePostScreen = () => {
           return;
         }
         setContent(data.content || "");
+        setSelectedFlair((data.flair || DEFAULT_POST_FLAIR) as PostFlairId);
         setIsAnonymous(!!data.isAnonymous);
         setAttachedLink(data.link || null);
         setExistingFiles(Array.isArray(data.files) ? data.files : []);
@@ -395,7 +412,7 @@ for (const file of files) {
   // ─────────────────────────────────────────────
   // IMAGE AI MODERATION
   // ─────────────────────────────────────────────
-  if (file.mimeType.startsWith("image/")) {
+  if (IMAGE_MODERATION_ENABLED && file.mimeType.startsWith("image/")) {
     console.log("[Post Moderation] Checking image with Python AI...");
 
     const imageDecision = await requestImageModeration(file.uri);
@@ -550,7 +567,7 @@ for (const file of files) {
         serverId: selectedServerId,
         channelId: selectedChannelId,
         authorId: user?.uid,
-        authorRole: await resolveUserRoleForAuthUser(user),
+        authorRole,
       });
       const localModerationStatus =
         moderationDecision.status === "pending" || mediaRequiresReview
@@ -582,8 +599,14 @@ for (const file of files) {
         return;
       }
 
+      if (!canUsePostFlair(selectedFlair, authorRole)) {
+        Alert.alert("Flair Not Allowed", "Announcement is reserved for authorized staff accounts.");
+        return;
+      }
+
       const postData: any = {
   content: content.trim(),
+  flair: selectedFlair,
   files: uploadedUrls,
 
   // Keep the authenticated UID as the ownership identity even when the
@@ -627,6 +650,7 @@ for (const file of files) {
       if (isEditMode && selectedEditPostId) {
         await updateDoc(doc(db, "posts", selectedEditPostId), {
           content: content.trim(),
+          flair: selectedFlair,
           files: uploadedUrls,
           taggedUsers: uniqueTaggedUsers.map((u) => ({
             id: u.id,
@@ -715,6 +739,7 @@ for (const file of files) {
           : "Your post was sent for moderator review and will appear after approval.",
       );
       setContent("");
+      setSelectedFlair(DEFAULT_POST_FLAIR);
       setFiles([]);
       setTaggedUsers([]);
       setIsAnonymous(false);
@@ -1003,6 +1028,24 @@ for (const file of files) {
               students will see this as anonymous.
             </Text>
           )}
+
+          <View style={styles.flairSection}>
+            <View style={styles.flairSectionHeader}>
+              <Text style={styles.flairSectionTitle}>Post flair</Text>
+              <Text style={styles.flairSectionHint}>Choose a category</Text>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.flairPickerContent}>
+              {POST_FLAIRS.filter((flair) => !flair.staffOnly || canUsePostFlair(flair.id, authorRole)).map((flair) => {
+                const selected = selectedFlair === flair.id;
+                return (
+                  <TouchableOpacity key={flair.id} style={[styles.flairChoice, selected && styles.flairChoiceSelected]} activeOpacity={0.82} onPress={() => setSelectedFlair(flair.id)}>
+                    <Text style={styles.flairChoiceEmoji}>{flair.emoji}</Text>
+                    <Text style={[styles.flairChoiceText, selected && styles.flairChoiceTextSelected]}>{flair.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
 
           <TextInput
             style={styles.input}
@@ -1512,6 +1555,16 @@ const styles = StyleSheet.create({
     padding: 16,
   },
   headerTitle: { color: "#7a3b2e", fontSize: 20, fontWeight: "bold" },
+  flairSection: { marginHorizontal: 16, marginBottom: 14 },
+  flairSectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 9 },
+  flairSectionTitle: { color: "#4d1b17", fontSize: 14, fontWeight: "800" },
+  flairSectionHint: { color: "#9b766c", fontSize: 12, fontWeight: "600" },
+  flairPickerContent: { gap: 8, paddingRight: 16 },
+  flairChoice: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 18, backgroundColor: "#fffaf7", borderWidth: 1, borderColor: "#e5d4cc" },
+  flairChoiceSelected: { backgroundColor: "#5f0909", borderColor: "#5f0909" },
+  flairChoiceEmoji: { fontSize: 14 },
+  flairChoiceText: { color: "#6f4a40", fontSize: 12, fontWeight: "700" },
+  flairChoiceTextSelected: { color: "#ffffff" },
   scopeCard: {
     flexDirection: "row",
     alignItems: "center",

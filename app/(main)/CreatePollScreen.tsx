@@ -13,6 +13,7 @@ import {
   KeyboardAvoidingView,
   ListRenderItem,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -28,6 +29,12 @@ import {
   requestModerationDecision,
 } from "@/utils/contentModeration";
 import { resolveUserRoleForAuthUser } from "@/utils/rbac";
+import {
+  canUsePostFlair,
+  DEFAULT_POST_FLAIR,
+  POST_FLAIRS,
+  type PostFlairId,
+} from "@/utils/postFlairs";
 
 type PollOption = {
   id: string;
@@ -57,6 +64,9 @@ const getSingleParam = (value?: string | string[]) =>
 
 const CreatePollScreen = () => {
   const [question, setQuestion] = useState("");
+  const [selectedFlair, setSelectedFlair] =
+    useState<PostFlairId>(DEFAULT_POST_FLAIR);
+  const [authorRole, setAuthorRole] = useState<string>("student");
   const [options, setOptions] = useState<PollOption[]>([
     { id: "1", text: "" },
     { id: "2", text: "" },
@@ -92,6 +102,23 @@ const CreatePollScreen = () => {
 
     return () => subscription.remove();
   }, [router]);
+
+  React.useEffect(() => {
+    let active = true;
+
+    const loadAuthorRole = async () => {
+      const role = await resolveUserRoleForAuthUser(auth.currentUser);
+      if (active) {
+        setAuthorRole(String(role || "student").toLowerCase());
+      }
+    };
+
+    loadAuthorRole();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Unified dropdown management
   const closeAllDropdowns = useCallback(() => {
@@ -231,11 +258,20 @@ const CreatePollScreen = () => {
         serverId: selectedServerId,
         channelId: selectedChannelId,
         authorId: user.uid,
-        authorRole: await resolveUserRoleForAuthUser(user),
+        authorRole,
       });
+
+      if (!canUsePostFlair(selectedFlair, authorRole)) {
+        Alert.alert(
+          "Flair Not Allowed",
+          "Announcement is reserved for authorized staff accounts.",
+        );
+        return;
+      }
 
       const pollData = {
         question: question.trim(),
+        flair: selectedFlair,
         options: filledOptions.map((opt) => ({
           text: opt.text.trim(),
           votes: 0,
@@ -290,6 +326,7 @@ const CreatePollScreen = () => {
 
   const formSections: FormSection[] = useMemo(
     () => [
+      { id: "flair", type: "flair" },
       { id: "question", type: "question" },
       { id: "image", type: "image" },
       { id: "options-header", type: "optionsHeader" },
@@ -305,6 +342,51 @@ const CreatePollScreen = () => {
 
   const renderItem: ListRenderItem<FormSection> = ({ item }) => {
     switch (item.type) {
+      case "flair":
+        return (
+          <View style={styles.flairSection}>
+            <View style={styles.flairSectionHeader}>
+              <Text style={styles.flairSectionTitle}>Poll flair</Text>
+              <Text style={styles.flairSectionHint}>Choose a category</Text>
+            </View>
+
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.flairPickerContent}
+            >
+              {POST_FLAIRS.filter(
+                (flair) =>
+                  !flair.staffOnly || canUsePostFlair(flair.id, authorRole),
+              ).map((flair) => {
+                const selected = selectedFlair === flair.id;
+
+                return (
+                  <TouchableOpacity
+                    key={flair.id}
+                    style={[
+                      styles.flairChoice,
+                      selected && styles.flairChoiceSelected,
+                    ]}
+                    activeOpacity={0.82}
+                    onPress={() => setSelectedFlair(flair.id)}
+                  >
+                    <Text style={styles.flairChoiceEmoji}>{flair.emoji}</Text>
+                    <Text
+                      style={[
+                        styles.flairChoiceText,
+                        selected && styles.flairChoiceTextSelected,
+                      ]}
+                    >
+                      {flair.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        );
+
       case "question":
         return <QuestionSection question={question} setQuestion={setQuestion} />;
 
@@ -831,6 +913,55 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   scopeCopy: { flex: 1 },
+  flairSection: {
+    marginBottom: 20,
+  },
+  flairSectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 9,
+  },
+  flairSectionTitle: {
+    color: "#4d1b17",
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  flairSectionHint: {
+    color: "#9b766c",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  flairPickerContent: {
+    gap: 8,
+    paddingRight: 16,
+  },
+  flairChoice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 18,
+    backgroundColor: "#fffaf7",
+    borderWidth: 1,
+    borderColor: "#e5d4cc",
+  },
+  flairChoiceSelected: {
+    backgroundColor: "#5f0909",
+    borderColor: "#5f0909",
+  },
+  flairChoiceEmoji: {
+    fontSize: 14,
+  },
+  flairChoiceText: {
+    color: "#6f4a40",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  flairChoiceTextSelected: {
+    color: "#ffffff",
+  },
   scopeLabel: {
     color: "#9b766c",
     fontSize: 12,

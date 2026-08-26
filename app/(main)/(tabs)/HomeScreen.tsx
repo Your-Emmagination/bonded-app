@@ -70,6 +70,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import PollCard from "../components/PollCard";
 import CommentModal from "../components/CommentModal";
 import PostCard from "../components/PostCard";
+import { normalizePostFlair, POST_FLAIRS, type PostFlairId } from "@/utils/postFlairs";
 import ImageZoomViewer from "../components/ImageZoomViewer";
 import ServerDrawer, {
   ServerEditPatch,
@@ -99,6 +100,12 @@ const SELECTED_SERVER_KEY = "bonded.selectedCommunityServer";
 const HOME_SEARCH_HISTORY_KEY = "bonded.homeSearchHistory";
 const DEFAULT_CHANNEL_KEY = "general";
 const HOME_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
+
+const BONDED = {
+  colors: {
+    gold: "#e0a53d",
+  },
+} as const;
 
 
 
@@ -137,6 +144,7 @@ type Post = {
   moderationStatus?: string;
   moderatedAtMs?: number;
   moderationReasons?: string[];
+  flair?: string;
 };
 
 
@@ -168,6 +176,7 @@ type Poll = {
   moderationStatus?: string;
   moderatedAtMs?: number;
   moderationReasons?: string[];
+  flair?: string;
 };
 
 type PostFeedItem = Post & { type: "post" };
@@ -371,6 +380,7 @@ const areFeedItemsEquivalent = (first: FeedItem, second: FeedItem) => {
       first.userId === second.userId &&
       first.realUserId === second.realUserId &&
       first.isAnonymous === second.isAnonymous &&
+      normalizePostFlair(first.flair) === normalizePostFlair(second.flair) &&
       String(first.moderationStatus ?? "approved").toLowerCase() ===
         String(second.moderationStatus ?? "approved").toLowerCase() &&
       areStringArraysEqual(first.moderationReasons || [], second.moderationReasons || []) &&
@@ -458,6 +468,7 @@ const HomeScreen = () => {
   const insets = useSafeAreaInsets();
   const [user, setUser] = useState<User | null>(null);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
+  const [selectedFlairFilter, setSelectedFlairFilter] = useState<"all" | PostFlairId>("all");
   // Mirrors feedItems for callbacks (handleLike, handlePollVote) that need to
   // read the current feed without depending on the array itself — feedItems
   // gets a new reference on every realtime Firestore update, and depending
@@ -733,9 +744,15 @@ const selectedChannel = useMemo(() => {
         // from the Moderation Queue instead. Legacy documents without a
         // moderationStatus are treated as approved for backward compatibility.
         const status = String(item.moderationStatus ?? "approved").toLowerCase();
-        return status === "approved";
+        if (status !== "approved") return false;
+
+        if (selectedFlairFilter === "all") return true;
+
+        // Posts and polls share the same flair taxonomy. Legacy items with
+        // no flair are treated as Discussion by normalizePostFlair().
+        return normalizePostFlair(item.flair) === selectedFlairFilter;
       }),
-    [feedItems],
+    [feedItems, selectedFlairFilter],
   );
 
   const selectedServerJoinRequests = useMemo(
@@ -3059,9 +3076,98 @@ const handleSelectChannel = useCallback(
     [searchableStudents],
   );
 
+  const handleFlairFilterPress = useCallback(
+    (flairId: "all" | PostFlairId) => {
+      // Only change the feed filter. Do not programmatically move the
+      // horizontal flair row; it should stay exactly where the user left it.
+      setSelectedFlairFilter(flairId);
+    },
+    [],
+  );
+
   const renderFeedHeader = useCallback(() => {
-    return null;
-  }, []);
+    const firstName =
+      currentUserProfile?.firstname?.trim() ||
+      user?.displayName?.trim()?.split(" ")[0] ||
+      "there";
+
+    return (
+      <>
+      <View style={styles.feedWelcome}>
+        <View style={styles.feedWelcomeCopy}>
+          <Text style={styles.feedEyebrow}>YOUR CAMPUS COMMUNITY</Text>
+          <Text style={styles.feedWelcomeTitle}>Good day, {firstName} 👋</Text>
+          <Text style={styles.feedWelcomeSubtitle}>
+            See what&apos;s happening around BondED today.
+          </Text>
+        </View>
+
+        <View style={styles.feedWelcomeBadge}>
+          <Ionicons name="people" size={18} color={BONDED.colors.gold} />
+          <Text style={styles.feedWelcomeBadgeText}>
+            {onlineUsersCount} online
+          </Text>
+        </View>
+      </View>
+
+      <View style={styles.flairFilterSection}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.flairFilterContent}
+        >
+          <TouchableOpacity
+            style={[
+              styles.flairFilterChip,
+              selectedFlairFilter === "all" && styles.flairFilterChipActive,
+            ]}
+            onPress={() => handleFlairFilterPress("all")}
+          >
+            <Text
+              style={[
+                styles.flairFilterText,
+                selectedFlairFilter === "all" &&
+                  styles.flairFilterTextActive,
+              ]}
+            >
+              All
+            </Text>
+          </TouchableOpacity>
+
+          {POST_FLAIRS.map((flair) => {
+            const active = selectedFlairFilter === flair.id;
+            return (
+              <TouchableOpacity
+                key={flair.id}
+                style={[
+                  styles.flairFilterChip,
+                  active && styles.flairFilterChipActive,
+                ]}
+                onPress={() => handleFlairFilterPress(flair.id)}
+              >
+                <Text style={styles.flairFilterEmoji}>{flair.emoji}</Text>
+                <Text
+                  style={[
+                    styles.flairFilterText,
+                    active && styles.flairFilterTextActive,
+                  ]}
+                >
+                  {flair.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
+      </>
+    );
+  }, [
+    currentUserProfile?.firstname,
+    handleFlairFilterPress,
+    onlineUsersCount,
+    selectedFlairFilter,
+    user?.displayName,
+  ]);
 
   const renderFeedItem = useCallback(
     ({ item }: { item: FeedItem }) => {
@@ -3559,7 +3665,7 @@ return (
                 </View>
               ) : null
             }
-            ListHeaderComponent={renderFeedHeader}
+            ListHeaderComponent={renderFeedHeader()}
             refreshControl={
               <RefreshControl
                 refreshing={refreshing}
@@ -3902,6 +4008,68 @@ const styles = StyleSheet.create({
     flex: 1, 
     backgroundColor: "#5f0909" 
   },
+
+  /* ====================== FEED WELCOME ====================== */
+  feedWelcome: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginHorizontal: 14,
+    marginTop: 14,
+    marginBottom: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderRadius: 20,
+    backgroundColor: "#fff8f3",
+    borderWidth: 1,
+    borderColor: "#ead8cf",
+  },
+  feedWelcomeCopy: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  feedEyebrow: {
+    color: "#a56d22",
+    fontSize: 10.5,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    marginBottom: 5,
+  },
+  feedWelcomeTitle: {
+    color: "#4d1b17",
+    fontSize: 20,
+    fontWeight: "800",
+    lineHeight: 25,
+  },
+  feedWelcomeSubtitle: {
+    color: "#8b6b62",
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 4,
+  },
+  feedWelcomeBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: "#fff2d6",
+    borderWidth: 1,
+    borderColor: "#efd49b",
+  },
+  feedWelcomeBadgeText: {
+    color: "#6f4d18",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  flairFilterSection: { marginBottom: 10 },
+  flairFilterContent: { paddingHorizontal: 14, gap: 8, paddingRight: 22 },
+  flairFilterChip: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18, backgroundColor: "#fff8f3", borderWidth: 1, borderColor: "#ead8cf" },
+  flairFilterChipActive: { backgroundColor: "#5f0909", borderColor: "#5f0909" },
+  flairFilterEmoji: { fontSize: 13 },
+  flairFilterText: { color: "#70483e", fontSize: 12, fontWeight: "800" },
+  flairFilterTextActive: { color: "#ffffff" },
 
   /* ====================== HEADER ====================== */
   header: {

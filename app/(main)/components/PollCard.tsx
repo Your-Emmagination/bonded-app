@@ -25,6 +25,7 @@ import {
 } from "@/utils/rbac";
 import { resolveAvatarUri } from "@/utils/avatar";
 import CommentModal from "./CommentModal";
+import { getPostFlair } from "@/utils/postFlairs";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const FEED_HORIZONTAL_PADDING = 16;
@@ -60,6 +61,7 @@ type Poll = {
   expiresAt?: any;
   userVotes?: number[];
   commentCount?: number;
+  flair?: string;
 };
 
 interface PollCardProps {
@@ -182,6 +184,7 @@ const PollCard = React.memo<PollCardProps>(({
   const authorRole = parseUserRole(authorData?.role) ?? parseUserRole(poll.userRole);
   const roleColor = getRoleColor(authorRole || "student");
   const roleDisplayName = getRoleDisplayName(authorRole || "student");
+  const pollFlair = getPostFlair(poll.flair);
 
   const canSeeIdentity = canViewAnonymousIdentity(
     parseUserRole(currentUserRole),
@@ -396,6 +399,11 @@ const handleAddOption = async () => {
           </View>
 
           <Text style={styles.timestamp}>{getTimeAgo(poll.createdAt)}</Text>
+
+          <View style={styles.flairBadge}>
+            <Text style={styles.flairBadgeEmoji}>{pollFlair.emoji}</Text>
+            <Text style={styles.flairBadgeText}>{pollFlair.label}</Text>
+          </View>
 
           <Text style={styles.pollQuestion}>{poll.question}</Text>
 
@@ -756,6 +764,28 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
     marginBottom: 4,
     letterSpacing: -0.1,
+  },
+  flairBadge: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginTop: 8,
+    marginBottom: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 12,
+    backgroundColor: "#f8e9df",
+    borderWidth: 1,
+    borderColor: "#ead0c3",
+  },
+  flairBadgeEmoji: {
+    fontSize: 12,
+  },
+  flairBadgeText: {
+    color: "#7a3b2e",
+    fontSize: 11.5,
+    fontWeight: "800",
   },
   pollQuestion: {
     color: "#4f1c17",

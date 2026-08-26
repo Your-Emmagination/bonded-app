@@ -41,6 +41,14 @@ service cloud.firestore {
         data.realUserId == request.auth.uid
       );
     }
+
+    function validPostFlair(data) {
+      return data.flair in [
+        'discussion', 'question', 'academic', 'study', 'help',
+        'event_moments', 'community', 'fun_humor', 'achievement',
+        'lost_found', 'projects', 'sports', 'announcement'
+      ] && (data.flair != 'announcement' || isStaff());
+    }
     // =========================================================
     // SAFE LIST TOGGLE / COUNTER HELPERS
     // =========================================================
@@ -311,6 +319,7 @@ match /userNotificationSettings/{userId} {
         request.resource.data.username is string &&
         request.resource.data.content is string &&
         request.resource.data.createdAt is timestamp &&
+        validPostFlair(request.resource.data) &&
         request.resource.data.moderationStatus == 'pending';
 
       allow update: if signedIn() && (
@@ -331,8 +340,10 @@ match /userNotificationSettings/{userId} {
               'moderationStatus',
               'moderationReasons',
               'moderatedAtMs',
-              'aiPrompt'
+              'aiPrompt',
+              'flair'
             ]) &&
+          validPostFlair(request.resource.data) &&
           request.resource.data.moderationStatus == 'pending'
         ) ||
         (
@@ -560,7 +571,8 @@ match /userNotificationSettings/{userId} {
         request.resource.data.userId is string &&
         request.resource.data.userId == request.auth.uid &&
         request.resource.data.question is string &&
-        request.resource.data.createdAt is timestamp;
+        request.resource.data.createdAt is timestamp &&
+        validPostFlair(request.resource.data);
 
       allow update: if signedIn() && (
         (
@@ -576,8 +588,10 @@ match /userNotificationSettings/{userId} {
             'expiresAt',
             'username',
             'isAnonymous',
+            'flair',
             'updatedAt'
-          ])
+          ]) &&
+          validPostFlair(request.resource.data)
         ) ||
         (
           request.resource.data.userId == resource.data.userId &&
@@ -718,6 +732,24 @@ match /userNotificationSettings/{userId} {
         request.resource.data.createdAt is timestamp;
 
       allow update, delete: if signedIn() && request.auth.uid == userId;
+    }
+
+
+    // =========================================================
+    // CHATBOT UNANSWERED QUESTIONS
+    // =========================================================
+
+    match /chatbotUnansweredQuestions/{questionId} {
+
+      allow read, list: if isStaff();
+
+      allow create: if signedIn() &&
+        request.resource.data.prompt is string &&
+        request.resource.data.intent is string &&
+        request.resource.data.confidence is number &&
+        request.resource.data.createdAt is timestamp;
+
+      allow update, delete: if false;
     }
 
 

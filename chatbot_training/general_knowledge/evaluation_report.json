@@ -1,0 +1,10 @@
+{
+  "knowledge_entries": 15990,
+  "vocabulary_size": 20000,
+  "matrix_rows": 15990,
+  "matrix_columns": 20000,
+  "algorithm": "TF-IDF Retrieval",
+  "similarity": "Cosine Similarity",
+  "generative_ai": false,
+  "typescript_export": "C:\\Users\\lexma\\bonded-app\\utils\\generalKnowledgeIndex.ts"
+}

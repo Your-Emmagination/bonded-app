@@ -14,8 +14,10 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import type { NativeScrollEvent, NativeSyntheticEvent } from "react-native";
 import {
   ActivityIndicator,
+  Animated,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -28,7 +30,10 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
 import { AI_ASSISTANT_NAME } from "@/utils/aiAssistant";
-import { requestNonGenerativeChatbotReply } from "@/utils/nonGenerativeChatbot";
+import {
+  requestNonGenerativeChatbotReply,
+  type ChatbotIntent,
+} from "@/utils/nonGenerativeChatbot";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import ConfirmDialog from "../components/ConfirmDialog";
@@ -76,19 +81,151 @@ const SUGGESTED_QUESTIONS = [
 const FALLBACK_REPLY_TEXT =
   "Sorry, I ran into a problem answering that. Please try again.";
 
-function ChatBubble({
+function FadeSlideIn({
+  children,
+  style,
+}: {
+  children: React.ReactNode;
+  style?: any;
+}) {
+  const progress = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(progress, {
+      toValue: 1,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, [progress]);
+
+  return (
+    <Animated.View
+      style={[
+        style,
+        {
+          opacity: progress,
+          transform: [
+            {
+              translateY: progress.interpolate({
+                inputRange: [0, 1],
+                outputRange: [8, 0],
+              }),
+            },
+          ],
+        },
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+function TypingDots() {
+  const dots = useRef([
+    new Animated.Value(0),
+    new Animated.Value(0),
+    new Animated.Value(0),
+  ]).current;
+
+  useEffect(() => {
+    const loops = dots.map((dot, index) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(index * 140),
+          Animated.timing(dot, { toValue: 1, duration: 320, useNativeDriver: true }),
+          Animated.timing(dot, { toValue: 0, duration: 320, useNativeDriver: true }),
+          Animated.delay((dots.length - 1 - index) * 140),
+        ]),
+      ),
+    );
+    loops.forEach((loop) => loop.start());
+    return () => loops.forEach((loop) => loop.stop());
+  }, [dots]);
+
+  return (
+    <View style={styles.typingDotsRow}>
+      {dots.map((dot, index) => (
+        <Animated.View
+          key={index}
+          style={[
+            styles.typingDot,
+            {
+              opacity: dot.interpolate({ inputRange: [0, 1], outputRange: [0.35, 1] }),
+              transform: [
+                {
+                  translateY: dot.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }),
+                },
+              ],
+            },
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
+/**
+ * Bold-only inline markdown for assistant replies: splits on **fact**
+ * segments so the specific piece of data answering the question can be
+ * highlighted in maroon, matching the "important part is bold" pattern
+ * used by chat assistants. No external markdown library needed.
+ */
+function FormattedMessageText({ text, style }: { text: string; style?: any }) {
+  const segments = React.useMemo(() => {
+    const pattern = /\*\*(.+?)\*\*/g;
+    const parts: { text: string; bold: boolean }[] = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = pattern.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        parts.push({ text: text.slice(lastIndex, match.index), bold: false });
+      }
+      parts.push({ text: match[1], bold: true });
+      lastIndex = match.index + match[0].length;
+    }
+    if (lastIndex < text.length) {
+      parts.push({ text: text.slice(lastIndex), bold: false });
+    }
+    return parts;
+  }, [text]);
+
+  return (
+    <Text style={style}>
+      {segments.map((segment, index) =>
+        segment.bold ? (
+          <Text key={index} style={styles.messageTextBold}>
+            {segment.text}
+          </Text>
+        ) : (
+          <Text key={index}>{segment.text}</Text>
+        ),
+      )}
+    </Text>
+  );
+}
+
+/**
+ * Owns its own 30s tick (via useRelativeTimeNow) so only this small label
+ * re-renders as time passes, instead of the parent AiChatScreen re-rendering
+ * on a timer and forcing every mounted ChatBubble to re-render with it.
+ */
+const TimeAgoText = React.memo(function TimeAgoText({ createdAt }: { createdAt: any }) {
+  const nowMs = useRelativeTimeNow();
+  return <Text style={styles.messageMeta}>{getTimeAgo(createdAt, nowMs)}</Text>;
+});
+
+const ChatBubble = React.memo(function ChatBubble({
   item,
-  nowMs,
   onFeedback,
 }: {
   item: ChatMessage;
-  nowMs: number;
-  onFeedback: (messageId: string, feedback: ChatFeedback) => void;
+  onFeedback: (messageId: string, feedback: ChatFeedback | null) => void;
 }) {
   const isOwnMessage = item.role === "user";
 
   return (
-    <View
+    <FadeSlideIn
       style={[
         styles.messageRow,
         isOwnMessage ? styles.messageRowOwn : styles.messageRowOther,
@@ -109,11 +246,13 @@ function ChatBubble({
           {!isOwnMessage && (
             <Text style={styles.messageAuthor}>{AI_ASSISTANT_NAME}</Text>
           )}
-          <Text
-            style={[styles.messageText, isOwnMessage && styles.messageTextOwn]}
-          >
-            {item.text}
-          </Text>
+          {isOwnMessage ? (
+            <Text style={[styles.messageText, styles.messageTextOwn]}>
+              {item.text}
+            </Text>
+          ) : (
+            <FormattedMessageText text={item.text} style={styles.messageText} />
+          )}
         </View>
 
         <View
@@ -122,13 +261,16 @@ function ChatBubble({
             isOwnMessage && styles.messageFooterOwn,
           ]}
         >
-          <Text style={styles.messageMeta}>{getTimeAgo(item.createdAt, nowMs)}</Text>
+          <TimeAgoText createdAt={item.createdAt} />
 
           {!isOwnMessage && (
             <View style={styles.feedbackRow}>
               <TouchableOpacity
-                onPress={() => onFeedback(item.id, "up")}
-                style={styles.feedbackButton}
+                onPress={() => onFeedback(item.id, item.feedback === "up" ? null : "up")}
+                style={[
+                  styles.feedbackButton,
+                  item.feedback !== "up" && styles.feedbackButtonInactive,
+                ]}
                 hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
               >
                 <Ionicons
@@ -138,8 +280,11 @@ function ChatBubble({
                 />
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() => onFeedback(item.id, "down")}
-                style={styles.feedbackButton}
+                onPress={() => onFeedback(item.id, item.feedback === "down" ? null : "down")}
+                style={[
+                  styles.feedbackButton,
+                  item.feedback !== "down" && styles.feedbackButtonInactive,
+                ]}
                 hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
               >
                 <Ionicons
@@ -152,26 +297,23 @@ function ChatBubble({
           )}
         </View>
       </View>
-    </View>
+    </FadeSlideIn>
   );
-}
+});
 
 function TypingBubble() {
   return (
-    <View style={[styles.messageRow, styles.messageRowOther]}>
+    <FadeSlideIn style={[styles.messageRow, styles.messageRowOther]}>
       <View style={styles.avatar}>
         <Ionicons name="sparkles" size={15} color="#5f0909" />
       </View>
       <View style={styles.messageContentWrap}>
         <View style={styles.messageBubble}>
           <Text style={styles.messageAuthor}>{AI_ASSISTANT_NAME}</Text>
-          <View style={styles.typingRow}>
-            <ActivityIndicator size="small" color="#8f3a2b" />
-            <Text style={styles.typingText}>Thinking...</Text>
-          </View>
+          <TypingDots />
         </View>
       </View>
-    </View>
+    </FadeSlideIn>
   );
 }
 
@@ -226,8 +368,28 @@ export default function AiChatScreen() {
   const [confirmClearVisible, setConfirmClearVisible] = useState(false);
   const hasInitializedSuggestions = useRef(false);
   const listRef = useRef<FlatList<ChatMessage>>(null);
-  const nowMs = useRelativeTimeNow();
   const { isOffline } = useNetworkStatus();
+  // Whether the reader is at (or near) the bottom of the list — used so a
+  // new message only pulls the view down when they haven't scrolled away to
+  // read older history. Defaults true so a first-time load still lands at
+  // the bottom.
+  const isNearBottomRef = useRef(true);
+  // Set once the list has done its one-time instant jump to the latest
+  // message after loading; resets whenever the signed-in user changes.
+  const hasJumpedToLatestRef = useRef(false);
+  // Long histories can take several layout passes before FlatList knows its
+  // true content height. Keep the initial "open at latest" request pending
+  // until the list actually reaches the bottom. A brand-new/first chat does
+  // not use this path.
+  const pendingInitialBottomScrollRef = useRef(false);
+  const previousMessageCountRef = useRef(0);
+  // Reuses the previous ChatMessage object for a doc whose relevant fields
+  // haven't changed, instead of remapping every doc into a brand-new object
+  // on every snapshot. Without this, React.memo on ChatBubble can never
+  // bail out — a new message (or a feedback toggle on any one message)
+  // would otherwise give every row a fresh `item` reference and force the
+  // whole list to re-render.
+  const messagesCacheRef = useRef<Map<string, ChatMessage>>(new Map());
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, setUser);
@@ -235,6 +397,12 @@ export default function AiChatScreen() {
   }, []);
 
   useEffect(() => {
+    hasJumpedToLatestRef.current = false;
+    pendingInitialBottomScrollRef.current = false;
+    previousMessageCountRef.current = 0;
+    isNearBottomRef.current = true;
+    messagesCacheRef.current = new Map();
+
     if (!user?.uid) {
       setMessages([]);
       setLoading(false);
@@ -250,11 +418,43 @@ export default function AiChatScreen() {
     const unsubscribe = onSnapshot(
       messagesQuery,
       (snapshot) => {
-        setMessages(
-          snapshot.docs.map(
-            (item) => ({ id: item.id, ...item.data() }) as ChatMessage,
-          ),
-        );
+        const cache = messagesCacheRef.current;
+        const nextMessages = snapshot.docs.map((docSnapshot) => {
+          const data = docSnapshot.data() as Omit<ChatMessage, "id">;
+          const cached = cache.get(docSnapshot.id);
+          // createdAt is set once at write time and never updated, so it's
+          // safe to skip comparing it here — comparing it would always miss
+          // anyway, since Firestore hands back a new Timestamp instance on
+          // every read even when the underlying value hasn't changed.
+          const feedback = data.feedback ?? null;
+          if (
+            cached &&
+            cached.text === data.text &&
+            cached.role === data.role &&
+            cached.feedback === feedback &&
+            cached.intent === (data.intent ?? null) &&
+            cached.confidence === (data.confidence ?? null)
+          ) {
+            return cached;
+          }
+
+          const message: ChatMessage = { id: docSnapshot.id, ...data };
+          cache.set(docSnapshot.id, message);
+          return message;
+        });
+
+        const currentIds = new Set(nextMessages.map((message) => message.id));
+        for (const id of cache.keys()) {
+          if (!currentIds.has(id)) cache.delete(id);
+        }
+
+        // Only existing conversations need an initial bottom jump.
+        // Empty and one-message first-chat states keep their current behavior.
+        if (!hasJumpedToLatestRef.current && nextMessages.length > 1) {
+          pendingInitialBottomScrollRef.current = true;
+        }
+
+        setMessages(nextMessages);
         setLoading(false);
       },
       (error) => {
@@ -267,11 +467,89 @@ export default function AiChatScreen() {
   }, [user?.uid]);
 
   useEffect(() => {
+    const previousCount = previousMessageCountRef.current;
+    previousMessageCountRef.current = messages.length;
     if (!messages.length) return;
+
+    // Existing chat history: request an instant jump to the latest message.
+    // For long histories this first call may happen before FlatList finishes
+    // measuring, so pendingInitialBottomScrollRef stays true and layout/content
+    // callbacks below repeat the instant jump until the real bottom is reached.
+    // A first/brand-new chat (0 or 1 message) is left unchanged.
+    if (!hasJumpedToLatestRef.current) {
+      hasJumpedToLatestRef.current = true;
+
+      if (messages.length > 1) {
+        pendingInitialBottomScrollRef.current = true;
+        requestAnimationFrame(() => {
+          listRef.current?.scrollToEnd({ animated: false });
+        });
+      }
+      return;
+    }
+
+    // Only auto-scroll for an actual new message, and only when the reader
+    // was already near the bottom (or it's their own message) — otherwise
+    // this would yank someone back down while they're scrolled up reading
+    // older history, which is what happened when this ran on every render.
+    const gotNewMessage = messages.length > previousCount;
+    const lastMessage = messages[messages.length - 1];
+    const shouldAutoScroll =
+      gotNewMessage && (isNearBottomRef.current || lastMessage?.role === "user");
+
+    if (shouldAutoScroll) {
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToEnd({ animated: true });
+      });
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    if (!sending) return;
     requestAnimationFrame(() => {
       listRef.current?.scrollToEnd({ animated: true });
     });
-  }, [messages.length, sending]);
+  }, [sending]);
+
+  const handleListScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+      const distanceFromBottom =
+        contentSize.height - contentOffset.y - layoutMeasurement.height;
+      isNearBottomRef.current = distanceFromBottom < 120;
+
+      if (
+        pendingInitialBottomScrollRef.current &&
+        distanceFromBottom <= 8
+      ) {
+        pendingInitialBottomScrollRef.current = false;
+      }
+    },
+    [],
+  );
+
+  // FlatList measures long/wrapping messages progressively, so the content
+  // height right after the initial scrollToEnd can still grow afterward —
+  // without this, the list can settle partway up instead of at the true
+  // bottom on a first load with long AI replies. Gating on isNearBottomRef
+  // keeps this from re-snapping someone who has deliberately scrolled up.
+  const handleContentSizeChange = useCallback(() => {
+    if (pendingInitialBottomScrollRef.current) {
+      listRef.current?.scrollToEnd({ animated: false });
+      return;
+    }
+
+    if (!isNearBottomRef.current) return;
+    listRef.current?.scrollToEnd({ animated: false });
+  }, []);
+
+  const handleListLayout = useCallback(() => {
+    if (!pendingInitialBottomScrollRef.current) return;
+
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToEnd({ animated: false });
+    });
+  }, []);
 
   useEffect(() => {
     if (loading || hasInitializedSuggestions.current) return;
@@ -287,6 +565,18 @@ export default function AiChatScreen() {
       const userId = user?.uid;
       if (!text || !userId || sending) return;
 
+      // Conversation memory: if the most recent assistant reply in THIS
+      // chat answered a filterable intent (programs/events/staff), a short
+      // follow-up like "what about BSTM?" can reuse that same intent's
+      // answer function instead of getting reclassified from scratch. Only
+      // looks at already-loaded local state — nothing extra is persisted.
+      const previousAssistantMessage = [...messages]
+        .reverse()
+        .find((message) => message.role === "assistant" && message.intent);
+      const previousIntent = (previousAssistantMessage?.intent || undefined) as
+        | ChatbotIntent
+        | undefined;
+
       setInputText("");
       setSuggestionsOpen(false);
       setSending(true);
@@ -299,7 +589,7 @@ export default function AiChatScreen() {
           confidence: null,
         });
 
-        const result = await requestNonGenerativeChatbotReply(text);
+        const result = await requestNonGenerativeChatbotReply(text, { previousIntent });
 
         await addDoc(collection(db, "aiDirectMessages", userId, "messages"), {
           text: result.reply,
@@ -321,22 +611,20 @@ export default function AiChatScreen() {
         setSending(false);
       }
     },
-    [sending, user?.uid],
+    [sending, user?.uid, messages],
   );
 
   const handleFeedback = useCallback(
-    (messageId: string, feedback: ChatFeedback) => {
+    (messageId: string, nextFeedback: ChatFeedback | null) => {
       const userId = user?.uid;
       if (!userId) return;
-      const message = messages.find((item) => item.id === messageId);
-      const nextFeedback = message?.feedback === feedback ? null : feedback;
       updateDoc(doc(db, "aiDirectMessages", userId, "messages", messageId), {
         feedback: nextFeedback,
       }).catch((error) => {
         console.error("Error saving Bonded AI feedback:", error);
       });
     },
-    [messages, user?.uid],
+    [user?.uid],
   );
 
   const clearConversation = useCallback(async () => {
@@ -362,6 +650,13 @@ export default function AiChatScreen() {
 
   const canSend = !!inputText.trim() && !sending && !!user?.uid;
 
+  const renderItem = useCallback(
+    ({ item }: { item: ChatMessage }) => (
+      <ChatBubble item={item} onFeedback={handleFeedback} />
+    ),
+    [handleFeedback],
+  );
+
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
       <View style={styles.header}>
@@ -370,7 +665,7 @@ export default function AiChatScreen() {
         </View>
         <View style={styles.headerCopy}>
           <Text style={styles.headerTitle}>{AI_ASSISTANT_NAME}</Text>
-          <Text style={styles.headerSubtitle}>Your private BondED assistant</Text>
+          <Text style={styles.headerSubtitle}>Your BondED assistant</Text>
         </View>
         {messages.length > 0 && (
           <TouchableOpacity
@@ -405,17 +700,16 @@ export default function AiChatScreen() {
             ref={listRef}
             data={messages}
             keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <ChatBubble item={item} nowMs={nowMs} onFeedback={handleFeedback} />
-            )}
+            renderItem={renderItem}
             contentContainerStyle={
               messages.length ? styles.listContent : styles.emptyListContent
             }
             ListEmptyComponent={<EmptyState />}
             ListFooterComponent={sending ? <TypingBubble /> : null}
-            onContentSizeChange={() =>
-              listRef.current?.scrollToEnd({ animated: true })
-            }
+            onScroll={handleListScroll}
+            scrollEventThrottle={100}
+            onLayout={handleListLayout}
+            onContentSizeChange={handleContentSizeChange}
           />
         )}
 
@@ -589,8 +883,8 @@ const styles = StyleSheet.create({
   messageBubble: {
     backgroundColor: "#fffaf7",
     borderRadius: 20,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingHorizontal: 15,
+    paddingVertical: 13,
     borderWidth: 1,
     borderColor: "#ead7cf",
   },
@@ -603,46 +897,55 @@ const styles = StyleSheet.create({
     color: "#8f3a2b",
     fontSize: 12,
     fontWeight: "700",
-    marginBottom: 4,
+    marginBottom: 5,
   },
   messageText: {
     color: "#4d1b17",
     fontSize: 15,
-    lineHeight: 21,
+    lineHeight: 22.5,
   },
   messageTextOwn: {
     color: "#fffaf7",
+  },
+  messageTextBold: {
+    fontWeight: "700",
+    color: "#5f0909",
   },
   messageFooter: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginTop: 4,
+    marginTop: 6,
     paddingHorizontal: 4,
   },
   messageFooterOwn: {
     justifyContent: "flex-end",
   },
   messageMeta: {
-    color: "#9b766c",
+    color: "#b09188",
     fontSize: 11,
   },
   feedbackRow: {
     flexDirection: "row",
-    gap: 10,
+    gap: 12,
   },
   feedbackButton: {
-    padding: 2,
+    padding: 3,
   },
-  typingRow: {
+  feedbackButtonInactive: {
+    opacity: 0.6,
+  },
+  typingDotsRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 5,
+    paddingVertical: 3,
   },
-  typingText: {
-    color: "#7d3b30",
-    fontSize: 13,
-    fontWeight: "600",
+  typingDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: "#8f3a2b",
   },
   suggestionsBar: {
     paddingHorizontal: 16,
@@ -667,9 +970,11 @@ const styles = StyleSheet.create({
   },
   suggestionChip: {
     backgroundColor: "#fff8f4",
-    borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    minHeight: 38,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: "#e0a53d",
   },

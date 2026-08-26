@@ -52,6 +52,8 @@ type TaggedUser = {
   studentID: string;
 };
 
+import { getPostFlair } from "@/utils/postFlairs";
+
 type FileAttachment = {
   url: string;
   mimeType: string;
@@ -84,6 +86,7 @@ type Post = {
     status?: string | null;
   };
   pinnedAt?: any;
+  flair?: string;
 };
 interface VideoPlayerProps {
   videoUrl: string;
@@ -270,6 +273,7 @@ const PostCard = React.memo<PostCardProps>(({
   };
 
   const taggedUsers = post.taggedUsers ?? [];
+  const postFlair = getPostFlair(post.flair);
 
   return (
     <View style={[styles.postCard, isHighlighted && styles.highlightedPostCard]}>
@@ -297,6 +301,13 @@ const PostCard = React.memo<PostCardProps>(({
             onDelete={onDelete}
             onEdit={onEdit}
           />
+
+          <View style={[styles.postFlairBadge, postFlair.staffOnly && styles.postFlairBadgeOfficial]}>
+            <Text style={styles.postFlairEmoji}>{postFlair.emoji}</Text>
+            <Text style={[styles.postFlairText, postFlair.staffOnly && styles.postFlairTextOfficial]}>
+              {postFlair.label}
+            </Text>
+          </View>
 
           {post.content && (
             <View style={styles.postContentContainer}>
@@ -1244,6 +1255,11 @@ const styles = StyleSheet.create({
   avatarColumn: { width: AVATAR_COLUMN_WIDTH, marginRight: AVATAR_COLUMN_GAP },
   contentColumn: { flex: 1, overflow: "visible" },
 
+  postFlairBadge: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 5, marginTop: 5, marginBottom: 5, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, backgroundColor: "#f3ece8", borderWidth: 1, borderColor: "#e5d5cd" },
+  postFlairBadgeOfficial: { backgroundColor: "#fff1cf", borderColor: "#e6c36f" },
+  postFlairEmoji: { fontSize: 12 },
+  postFlairText: { color: "#6d463c", fontSize: 11, fontWeight: "800" },
+  postFlairTextOfficial: { color: "#7a5411" },
   postContentContainer: { marginTop: 4, marginBottom: 8 },
   postContent: { color: "#4f1c17", fontSize: 15, lineHeight: 21 },
   toggleContainer: { alignSelf: "flex-start", marginTop: 4 },

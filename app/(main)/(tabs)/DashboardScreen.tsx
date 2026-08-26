@@ -697,6 +697,14 @@ const handleYearLevelChange = useCallback(
                   onPress={() => router.push("/AiMemoryScreen")}
                 />
               )}
+              {canManageModeration && (
+                <ActionButton
+                  icon="help-circle-outline"
+                  label="Unanswered Questions"
+                  color="#a86fff"
+                  onPress={() => router.push("/UnansweredQuestionsScreen" as any)}
+                />
+              )}
             </>
           )}
         </View>

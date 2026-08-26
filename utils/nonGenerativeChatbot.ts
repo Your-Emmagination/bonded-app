@@ -1,8 +1,9 @@
-import { collection, getDocs } from "firebase/firestore";
+import { addDoc, collection, getDocs, query, serverTimestamp, where } from "firebase/firestore";
 import { auth, db } from "../Firebase_configure";
-import { getUserDataByAuthUser } from "./rbac";
+import { getUserDataByAuthUser, type UserRole } from "./rbac";
 import { readAiMemoryEntries } from "./aiMemory";
 import { CHATBOT_INTENT_MODEL } from "./chatbotIntentModel";
+import { retrieveGeneralKnowledge } from "./chatbotKnowledge";
 
 export type ChatbotIntent =
   | "greeting"
@@ -18,10 +19,12 @@ export type ChatbotIntent =
   | "calculator"
   | "events"
   | "programs"
+  | "staff_directory"
   | "campus_knowledge"
+  | "general_knowledge"
   | "unknown";
 
-type TrainedIntent = Exclude<ChatbotIntent, "unknown">;
+type TrainedIntent = Exclude<ChatbotIntent, "unknown" | "general_knowledge">;
 type IntentScore = { intent: TrainedIntent; probability: number };
 
 type BondedEvent = {
@@ -40,9 +43,42 @@ type BondedProgram = {
   description?: string;
 };
 
+type StaffDirectoryRole = Extract<UserRole, "teacher" | "moderator" | "admin">;
+
+type BondedStaffMember = {
+  firstname?: string;
+  lastname?: string;
+  role?: string;
+};
+
 const MODEL_NAME = CHATBOT_INTENT_MODEL.modelName;
 const MIN_CONFIDENCE = 0.34;
 const MIN_MARGIN = 0.06;
+
+/**
+ * Below this confidence, a BondED intent match gets double-checked against
+ * general knowledge before being trusted. The BondED classifier is a small
+ * bag-of-words model trained on a narrow, school-specific vocabulary, so an
+ * open-domain trivia question can share just enough surface phrasing (e.g.
+ * "how are glacier caves formed" vs. "how are you") to weakly win a BondED
+ * intent it has nothing to do with. This check is safe in both directions:
+ * general knowledge only ever wins here if it *independently* clears its
+ * own confidence bar (see chatbotKnowledge.ts), so it can't steal a
+ * genuinely strong BondED match — only rescue a weak, likely-wrong one.
+ * Verified empirically against the full 1,473-question general-knowledge
+ * dataset and this project's BondED regression suite: at this threshold,
+ * 1471/1473 general-knowledge questions resolve correctly and zero BondED
+ * test cases get hijacked.
+ */
+const GENERAL_KNOWLEDGE_CROSSCHECK_THRESHOLD = 0.9;
+
+/**
+ * Picks a pre-written variant so static/conversational replies don't feel
+ * identical every time. Nothing is composed at request time — every option
+ * is written ahead of time, so this stays fully non-generative.
+ */
+const pickVariant = (variants: string[]): string =>
+  variants[Math.floor(Math.random() * variants.length)];
 
 const normalizeText = (value: string) =>
   value
@@ -67,11 +103,40 @@ const SYNONYMS: Record<string, string> = {
   fullname: "name",
   programme: "program",
   programmes: "programs",
+  // Tagalog/Taglish question words mapped to the same English canonical
+  // words the training data already uses heavily. This isn't a literal
+  // translation layer — it just lets a Taglish question land on the same
+  // well-represented vocabulary an equivalent English question would.
+  kailan: "when",
+  ano: "what",
+  sino: "who",
+  saan: "where",
+  // "paano" is deliberately NOT mapped to "how" here. "how" is heavily
+  // weighted toward the wellbeing intent in the English training data
+  // ("how are you", "how is it going", ...), and routing "paano" through it
+  // would throw away the direct signal from the Taglish "paano ..." rows
+  // trained below in intent_training.csv (help) — a synonym substitution
+  // happens before vectorization, so the model's own learned weight for
+  // the literal token "paano" would never get used. Leaving it as its own
+  // token lets those training rows teach its meaning directly instead.
+  tulong: "help",
+  tumulong: "help",
+  matulungan: "help",
+  makakatulong: "help",
 };
+
+// Pure Tagalog grammatical particles with no content signal of their own
+// (plural marker, articles, politeness/question particles). Dropping them
+// keeps adjacent content words next to each other for bigram matching,
+// e.g. "ano ang mga event" -> "what event" instead of "what ang mga event".
+// Pronouns like "ka"/"mo" are deliberately NOT stripped here — "kamusta ka"
+// needs to stay distinct from bare "kamusta" (wellbeing vs. greeting).
+const FILLER_WORDS = new Set(["mga", "ang", "yung", "po", "na", "ba"]);
 
 const applySynonyms = (value: string) =>
   normalizeText(value)
     .split(/\s+/)
+    .filter((token) => !FILLER_WORDS.has(token))
     .map((token) => SYNONYMS[token] || token)
     .join(" ");
 
@@ -123,6 +188,16 @@ const KNOWN_TYPO_OVERRIDES: Record<string, string> = {
   byee: "goodbye",
   wat: "what",
   wut: "what",
+  // Common Taglish shortenings/typos. "d2" ("dito"/"here") was considered
+  // but skipped — there's no canonical training vocabulary it would
+  // usefully resolve to for any current intent. "pano" corrects to the
+  // Filipino spelling "paano" (not "how") for the same reason "paano"
+  // isn't synonym-mapped above — see the comment there.
+  pano: "paano",
+  kmusta: "kamusta",
+  kamsta: "kamusta",
+  slmt: "salamat",
+  salamt: "salamat",
 };
 
 const correctToken = (token: string) => {
@@ -324,6 +399,11 @@ const extractArithmeticExpression = (input: string): string | null => {
   // code/ID that leaked in from message metadata, not a real calculation.
   if (/\b0\d+\b/.test(candidate)) return null;
 
+  // Guard against "9/11" being read as division — it's overwhelmingly a
+  // reference to September 11, not a fraction, and answering "= 0.82" to a
+  // question about it is both wrong and in poor taste.
+  if (/\b9\s*\/\s*11\b/.test(candidate)) return null;
+
   return /\d/.test(candidate) && /[+\-*/%]/.test(candidate) ? candidate : null;
 };
 
@@ -509,7 +589,7 @@ const answerFromMemory = async (input: string): Promise<string | null> => {
   if (!bestMatch || bestMatch.score < 2) return null;
 
   const best = bestMatch.entry;
-  return `${best.title}: ${best.content}`.trim();
+  return `Regarding **${best.title}**: ${best.content}`.trim();
 };
 
 const answerEvents = async (): Promise<string> => {
@@ -534,11 +614,11 @@ const answerEvents = async (): Promise<string> => {
       const title = String(event.title || "Untitled event");
       const date = String(event.date || "");
       const startTime = event.startTime ? ` at ${String(event.startTime)}` : "";
-      return `${title} on ${date}${startTime}`;
+      return `**${title}** on ${date}${startTime}`;
     })
     .join("; ");
 
-  return `Upcoming events: ${summary}.`;
+  return `Here are the upcoming events at BondED: ${summary}.`;
 };
 
 const escapeForRegex = (value: string) =>
@@ -566,10 +646,11 @@ const answerPrograms = async (input: string): Promise<string> => {
   });
 
   if (exact) {
-    const code = exact.code ? `${String(exact.code)} — ` : "";
+    const code = exact.code ? String(exact.code) : "";
     const name = String(exact.name || "Program");
-    const description = exact.description ? `: ${String(exact.description)}` : "";
-    return `${code}${name}${description}`;
+    const label = code ? `${code} — ${name}` : name;
+    const description = exact.description ? ` ${String(exact.description)}` : "";
+    return `**${label}** is offered at BondED.${description}`;
   }
 
   const listed = programs
@@ -577,16 +658,106 @@ const answerPrograms = async (input: string): Promise<string> => {
     .map((program) => {
       const code = String(program.code || "");
       const name = String(program.name || "");
-      return code ? `${code} — ${name}` : name;
+      return code ? `**${code}** — ${name}` : name;
     })
     .filter(Boolean)
     .join("; ");
 
-  return `Programs currently listed in BondED: ${listed}.`;
+  return `BondED currently offers these programs: ${listed}.`;
+};
+
+const STAFF_DIRECTORY_ROLES: StaffDirectoryRole[] = ["teacher", "moderator", "admin"];
+
+const STAFF_ROLE_NOUNS: Record<StaffDirectoryRole, { singular: string; plural: string }> = {
+  teacher: { singular: "teacher", plural: "teachers" },
+  moderator: { singular: "moderator", plural: "moderators" },
+  admin: { singular: "admin", plural: "admins" },
+};
+
+const humanizeNameList = (names: string[]) => {
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+};
+
+const STAFF_ROLE_KEYWORDS: Record<StaffDirectoryRole, string[]> = {
+  teacher: ["teacher", "teachers"],
+  moderator: ["moderator", "moderators"],
+  admin: ["admin", "admins"],
+};
+
+const STAFF_DIRECTORY_CACHE_TTL_MS = 60 * 1000;
+let cachedStaffDirectory: Record<StaffDirectoryRole, string[]> | null = null;
+let cachedStaffDirectoryAtMs = 0;
+
+const fetchStaffDirectory = async (): Promise<Record<StaffDirectoryRole, string[]>> => {
+  const now = Date.now();
+  if (cachedStaffDirectory && now - cachedStaffDirectoryAtMs < STAFF_DIRECTORY_CACHE_TTL_MS) {
+    return cachedStaffDirectory;
+  }
+
+  const staffQuery = query(
+    collection(db, "students"),
+    where("role", "in", STAFF_DIRECTORY_ROLES),
+  );
+  const snapshot = await getDocs(staffQuery);
+
+  const grouped: Record<StaffDirectoryRole, string[]> = {
+    teacher: [],
+    moderator: [],
+    admin: [],
+  };
+
+  snapshot.docs.forEach((item) => {
+    const data = item.data() as BondedStaffMember;
+    const role = String(data.role || "").toLowerCase();
+    if (role !== "teacher" && role !== "moderator" && role !== "admin") return;
+    const name = `${data.firstname || ""} ${data.lastname || ""}`.trim();
+    if (name) grouped[role].push(name);
+  });
+
+  cachedStaffDirectory = grouped;
+  cachedStaffDirectoryAtMs = now;
+  return grouped;
+};
+
+/**
+ * Only ever exposes firstname + lastname (never email/studentID/etc), same
+ * privacy boundary answerPrograms keeps for program names over document IDs.
+ */
+const answerStaffDirectory = async (input: string): Promise<string | null> => {
+  const tokens = tokenizeForRetrieval(input);
+  const requestedRoles = STAFF_DIRECTORY_ROLES.filter((role) =>
+    containsAnyKeyword(tokens, STAFF_ROLE_KEYWORDS[role]),
+  );
+  const rolesToShow = requestedRoles.length ? requestedRoles : STAFF_DIRECTORY_ROLES;
+
+  const directory = await fetchStaffDirectory();
+
+  const clauses = rolesToShow
+    .map((role) => {
+      const names = directory[role];
+      if (!names.length) return null;
+      const noun = names.length === 1 ? STAFF_ROLE_NOUNS[role].singular : STAFF_ROLE_NOUNS[role].plural;
+      const verb = names.length === 1 ? "is" : "are";
+      const boldedNames = names.map((name) => `**${name}**`);
+      return `the ${noun} ${verb} ${humanizeNameList(boldedNames)}`;
+    })
+    .filter((clause): clause is string => Boolean(clause));
+
+  if (!clauses.length) return null;
+
+  const sentence =
+    clauses.length === 1
+      ? clauses[0]
+      : `${clauses.slice(0, -1).join(", ")}, and ${clauses[clauses.length - 1]}`;
+
+  return `At BondED, ${sentence}.`;
 };
 
 const PROGRAM_KEYWORDS = ["program", "programs", "course", "courses", "degree", "degrees", "major", "majors", "bsit", "bscs"];
 const EVENT_KEYWORDS = ["event", "events", "activity", "activities", "schedule", "happening", "upcoming"];
+const STAFF_DIRECTORY_KEYWORDS = Object.values(STAFF_ROLE_KEYWORDS).flat();
 
 const containsAnyKeyword = (tokens: Set<string>, keywords: string[]) =>
   keywords.some((keyword) => tokens.has(keyword));
@@ -611,8 +782,125 @@ const answerFromAnySource = async (prompt: string): Promise<string | null> => {
     const answer = await answerEvents().catch(() => null);
     if (answer) return answer;
   }
+  if (containsAnyKeyword(tokens, STAFF_DIRECTORY_KEYWORDS)) {
+    const answer = await answerStaffDirectory(prompt).catch(() => null);
+    if (answer) return answer;
+  }
 
   return null;
+};
+
+/**
+ * Fire-and-forget: never awaited by the caller so it can't delay or break the
+ * chatbot reply. Human-reviewed training-data feed only — nothing reads this
+ * collection automatically.
+ */
+const logUnansweredQuestion = (
+  prompt: string,
+  classification: { intent: ChatbotIntent; confidence: number },
+) => {
+  addDoc(collection(db, "chatbotUnansweredQuestions"), {
+    prompt,
+    intent: classification.intent,
+    confidence: classification.confidence,
+    createdAt: serverTimestamp(),
+  }).catch((error) => {
+    console.error("Failed to log unanswered chatbot question:", error);
+  });
+};
+
+const GREETING_VARIANTS = [
+  "Hello! I'm Bonded AI. I can help with BondED campus information, upcoming events, academic programs, general knowledge, date/time, and basic calculations.",
+  "Hi there! I'm Bonded AI — ask me about campus info, upcoming events, academic programs, general knowledge, the date or time, or a quick calculation.",
+  "Hey! Bonded AI here. I can look up campus events, academic programs, school information, general knowledge, the date/time, or run a calculation for you.",
+  "Hello! I'm Bonded AI, ready to help with BondED events, programs, campus info, general knowledge, date/time, and calculations.",
+];
+
+const WELLBEING_VARIANTS = [
+  "I'm doing well and ready to help. What would you like to know about BondED?",
+  "Doing great, thanks for asking! What can I help you find in BondED?",
+  "All good on my end and ready to help — what do you need from BondED?",
+  "I'm running smoothly and ready to help with anything BondED-related.",
+];
+
+const THANKS_VARIANTS = [
+  "You're welcome! I'm ready if you need anything else in BondED.",
+  "Anytime! Let me know if there's anything else you need from BondED.",
+  "Happy to help! I'm here if you have more BondED questions.",
+  "No problem at all — I'm around if you need anything else in BondED.",
+];
+
+const GOODBYE_VARIANTS = [
+  "Goodbye! You can mention me again whenever you need help.",
+  "See you later! I'm here whenever you need BondED help again.",
+  "Take care! Just mention me anytime you need help with BondED.",
+  "Goodbye for now — I'll be here whenever you need me again.",
+];
+
+const ASSISTANT_IDENTITY_VARIANTS = [
+  "I'm **Bonded AI**, the non-generative educational assistant built into BondED.",
+  "I'm **Bonded AI** — a rule-based assistant built right into BondED, not a generative AI.",
+  "I'm **Bonded AI**, BondED's built-in assistant for campus info, events, programs, and more.",
+  "I'm **Bonded AI**, a non-generative assistant designed to help with BondED questions.",
+];
+
+const HELP_VARIANTS = [
+  "You can ask me about upcoming campus events, available academic programs, BondED information stored by the school, the current date or time, and basic calculations.",
+  "I can help with campus events, academic programs, school information, the date or time, and basic calculations — just ask.",
+  "Try asking me about your student profile, upcoming events, academic programs, school info, the date/time, or a calculation.",
+  "I'm best at answering questions about BondED events, programs, campus info, date/time, and calculations.",
+];
+
+const UNKNOWN_FALLBACK_VARIANTS = [
+  "I couldn't quite find an answer to that. I'm best with questions about your BondED profile, programs, events, and campus info — try one of those, or rephrase your question and I'll give it another shot.",
+  "Hmm, I don't have a confident answer for that one. I can help with your profile, programs, events, and campus info — try rephrasing or ask about one of those.",
+  "I'm not sure about that one. I'm most useful for BondED profile, program, event, and campus questions — feel free to rephrase and I'll try again.",
+  "That one's outside what I can confidently answer. I can help with your profile, programs, events, and campus info — try rewording your question.",
+];
+
+// Conversation-memory follow-up support — scoped to callers that opt in via
+// `previousIntent` (only the private AiChatScreen 1:1 chat does this). A
+// public surface like a channel/comment/reply never passes this, so it
+// can't misfire there, where "the previous message" could be from someone
+// else entirely.
+const FOLLOWUP_ELIGIBLE_INTENTS = new Set<ChatbotIntent>(["programs", "events", "staff_directory"]);
+const REFERENTIAL_FOLLOWUP_PREFIXES = ["what about", "how about", "and", "also", "same for"];
+
+/**
+ * Cheap pattern check (no model) for whether a message is likely continuing
+ * the previous exchange rather than standing on its own — e.g. "what about
+ * BSTM?" right after a programs question. A false positive here is
+ * low-risk: it only leads to reusing the previous intent's answer function,
+ * which falls back to normal classification below if it finds nothing.
+ */
+const looksLikeReferentialFollowUp = (message: string): boolean => {
+  const trimmed = message.trim().toLowerCase();
+  if (!trimmed) return false;
+  if (
+    REFERENTIAL_FOLLOWUP_PREFIXES.some(
+      (prefix) => trimmed === prefix || trimmed.startsWith(`${prefix} `),
+    )
+  ) {
+    return true;
+  }
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  return wordCount <= 4;
+};
+
+const answerAsFollowUp = async (
+  previousIntent: ChatbotIntent,
+  prompt: string,
+): Promise<string | null> => {
+  switch (previousIntent) {
+    case "programs":
+      return (await answerPrograms(prompt)) || null;
+    case "events":
+      return (await answerEvents()) || null;
+    case "staff_directory":
+      return answerStaffDirectory(prompt);
+    default:
+      return null;
+  }
 };
 
 export type NonGenerativeReply = {
@@ -622,15 +910,26 @@ export type NonGenerativeReply = {
   confidence: number;
 };
 
+export type NonGenerativeReplyOptions = {
+  /**
+   * The previous assistant reply's intent in this same conversation, if
+   * any. Only meant for a private, single-user chat history — pass this
+   * only when "the previous message" can unambiguously be attributed to
+   * one ongoing conversation with one person.
+   */
+  previousIntent?: ChatbotIntent;
+};
+
 export const requestNonGenerativeChatbotReply = async (
   prompt: string,
+  options?: NonGenerativeReplyOptions,
 ): Promise<NonGenerativeReply> => {
   const expression = extractArithmeticExpression(prompt);
   if (expression) {
     const result = evaluateExpression(expression);
     if (result != null) {
       return {
-        reply: `${expression.trim()} = ${formatNumber(result)}`,
+        reply: `${expression.trim()} equals **${formatNumber(result)}**.`,
         model: MODEL_NAME,
         intent: "calculator",
         confidence: 1,
@@ -641,11 +940,52 @@ export const requestNonGenerativeChatbotReply = async (
   const classification = classifyIntent(prompt);
   const now = new Date();
 
+  // Conversation-memory follow-up rescue: only kicks in when the message
+  // did NOT confidently classify on its own. A message with a clear
+  // standalone meaning (e.g. "who are the teachers") must never be
+  // hijacked by whatever the previous exchange happened to be about —
+  // that was a real bug when this ran before classification: a short
+  // 4-word question landed here purely on word count, and since
+  // answerPrograms() never returns null (it falls back to the full program
+  // list instead), the "fall back to normal classification" safety net
+  // never actually got a chance to fire.
+  if (
+    classification.intent === "unknown" &&
+    options?.previousIntent &&
+    FOLLOWUP_ELIGIBLE_INTENTS.has(options.previousIntent) &&
+    looksLikeReferentialFollowUp(prompt)
+  ) {
+    const followUpAnswer = await answerAsFollowUp(options.previousIntent, prompt).catch(() => null);
+    if (followUpAnswer) {
+      return {
+        reply: followUpAnswer,
+        model: MODEL_NAME,
+        intent: options.previousIntent,
+        confidence: 1,
+      };
+    }
+  }
+
+  // See GENERAL_KNOWLEDGE_CROSSCHECK_THRESHOLD above for why this is safe.
+  if (
+    classification.intent !== "unknown" &&
+    classification.confidence < GENERAL_KNOWLEDGE_CROSSCHECK_THRESHOLD
+  ) {
+    const generalMatch = retrieveGeneralKnowledge(prompt);
+    if (generalMatch) {
+      return {
+        reply: generalMatch.answer,
+        model: MODEL_NAME,
+        intent: "general_knowledge",
+        confidence: generalMatch.similarity,
+      };
+    }
+  }
+
   switch (classification.intent) {
     case "greeting":
       return {
-        reply:
-          "Hello! I'm Bonded AI. I can help with BondED campus information, upcoming events, academic programs, date/time, and basic calculations.",
+        reply: pickVariant(GREETING_VARIANTS),
         model: MODEL_NAME,
         intent: classification.intent,
         confidence: classification.confidence,
@@ -653,7 +993,7 @@ export const requestNonGenerativeChatbotReply = async (
 
     case "wellbeing":
       return {
-        reply: "I'm doing well and ready to help. What would you like to know about BondED?",
+        reply: pickVariant(WELLBEING_VARIANTS),
         model: MODEL_NAME,
         intent: classification.intent,
         confidence: classification.confidence,
@@ -661,7 +1001,7 @@ export const requestNonGenerativeChatbotReply = async (
 
     case "thanks":
       return {
-        reply: "You're welcome! I'm ready if you need anything else in BondED.",
+        reply: pickVariant(THANKS_VARIANTS),
         model: MODEL_NAME,
         intent: classification.intent,
         confidence: classification.confidence,
@@ -669,7 +1009,7 @@ export const requestNonGenerativeChatbotReply = async (
 
     case "goodbye":
       return {
-        reply: "Goodbye! You can mention me again whenever you need help.",
+        reply: pickVariant(GOODBYE_VARIANTS),
         model: MODEL_NAME,
         intent: classification.intent,
         confidence: classification.confidence,
@@ -677,7 +1017,7 @@ export const requestNonGenerativeChatbotReply = async (
 
     case "assistant_identity":
       return {
-        reply: "I'm Bonded AI, the non-generative educational assistant built into BondED.",
+        reply: pickVariant(ASSISTANT_IDENTITY_VARIANTS),
         model: MODEL_NAME,
         intent: classification.intent,
         confidence: classification.confidence,
@@ -696,7 +1036,7 @@ export const requestNonGenerativeChatbotReply = async (
 
       return {
         reply: currentUser
-          ? `Your name is ${fullName || authName || fallbackName || "the currently signed-in BondED user"}.`
+          ? `Your name is **${fullName || authName || fallbackName || "the currently signed-in BondED user"}**.`
           : "I can't identify you because there is no signed-in BondED user.",
         model: MODEL_NAME,
         intent: classification.intent,
@@ -720,29 +1060,27 @@ export const requestNonGenerativeChatbotReply = async (
       }
 
       const normalized = normalizeForUnderstanding(prompt);
+      const fullName = `${profile.firstname || ""} ${profile.lastname || ""}`.trim();
+      const profileClauses = [
+        fullName ? `You're **${fullName}**` : null,
+        profile.studentID ? `student ID **${profile.studentID}**` : null,
+        profile.course ? `enrolled in **${profile.course}**` : null,
+        profile.yearlvl ? `year level **${profile.yearlvl}**` : null,
+      ].filter((part): part is string => Boolean(part));
 
-      let reply = [
-        `${profile.firstname || ""} ${profile.lastname || ""}`.trim()
-          ? `Name: ${`${profile.firstname || ""} ${profile.lastname || ""}`.trim()}`
-          : null,
-        profile.studentID ? `Student ID: ${profile.studentID}` : null,
-        profile.course ? `Program/Course: ${profile.course}` : null,
-        profile.yearlvl ? `Year level: ${profile.yearlvl}` : null,
-      ]
-        .filter(Boolean)
-        .join("; ");
+      let reply = profileClauses.length ? `${profileClauses.join(", ")}.` : "";
 
       if (/\b(student id|student number)\b/.test(normalized)) {
         reply = profile.studentID
-          ? `Your student ID is ${profile.studentID}.`
+          ? `Your student ID is **${profile.studentID}**.`
           : "Your student ID is not listed in your BondED profile.";
       } else if (/\b(program|course)\b/.test(normalized)) {
         reply = profile.course
-          ? `Your program/course is ${profile.course}.`
+          ? `Your program/course is **${profile.course}**.`
           : "Your program/course is not listed in your BondED profile.";
       } else if (/\byear\b/.test(normalized)) {
         reply = profile.yearlvl
-          ? `Your year level is ${profile.yearlvl}.`
+          ? `Your year level is **${profile.yearlvl}**.`
           : "Your year level is not listed in your BondED profile.";
       }
 
@@ -756,8 +1094,7 @@ export const requestNonGenerativeChatbotReply = async (
 
     case "help":
       return {
-        reply:
-          "You can ask me about upcoming campus events, available academic programs, BondED information stored by the school, the current date or time, and basic calculations.",
+        reply: pickVariant(HELP_VARIANTS),
         model: MODEL_NAME,
         intent: classification.intent,
         confidence: classification.confidence,
@@ -765,7 +1102,7 @@ export const requestNonGenerativeChatbotReply = async (
 
     case "date":
       return {
-        reply: `Today is ${formatDate(now)}.`,
+        reply: `Today is **${formatDate(now)}**.`,
         model: MODEL_NAME,
         intent: classification.intent,
         confidence: classification.confidence,
@@ -773,7 +1110,7 @@ export const requestNonGenerativeChatbotReply = async (
 
     case "time":
       return {
-        reply: `The current time on your device is ${formatTime(now)}.`,
+        reply: `The current time on your device is **${formatTime(now)}**.`,
         model: MODEL_NAME,
         intent: classification.intent,
         confidence: classification.confidence,
@@ -795,6 +1132,18 @@ export const requestNonGenerativeChatbotReply = async (
         confidence: classification.confidence,
       };
 
+    case "staff_directory": {
+      const answer = await answerStaffDirectory(prompt);
+      return {
+        reply:
+          answer ||
+          "I don't have that information yet — no matching teachers, moderators, or admins are on file.",
+        model: MODEL_NAME,
+        intent: classification.intent,
+        confidence: classification.confidence,
+      };
+    }
+
     case "campus_knowledge": {
       const answer = await answerFromAnySource(prompt);
       return {
@@ -808,13 +1157,35 @@ export const requestNonGenerativeChatbotReply = async (
     }
 
     default: {
-      const answer = await answerFromAnySource(prompt);
+      // Priority 1: try BondED/Firestore knowledge first so school and user
+      // information always wins over the bundled public knowledge dataset.
+      const bondedAnswer = await answerFromAnySource(prompt);
+      if (bondedAnswer) {
+        return {
+          reply: bondedAnswer,
+          model: MODEL_NAME,
+          intent: "campus_knowledge",
+          confidence: classification.confidence,
+        };
+      }
+
+      // Priority 2: retrieve a stored, non-generative answer from the bundled
+      // WikiQA general-knowledge index. No text is generated here.
+      const generalMatch = retrieveGeneralKnowledge(prompt);
+      if (generalMatch) {
+        return {
+          reply: generalMatch.answer,
+          model: MODEL_NAME,
+          intent: "general_knowledge",
+          confidence: generalMatch.similarity,
+        };
+      }
+
+      logUnansweredQuestion(prompt, classification);
       return {
-        reply:
-          answer ||
-          "I’m not confident enough to answer that correctly. Try rephrasing your question or ask about your student profile, campus events, academic programs, school information, date/time, or a basic calculation.",
+        reply: pickVariant(UNKNOWN_FALLBACK_VARIANTS),
         model: MODEL_NAME,
-        intent: answer ? "campus_knowledge" : "unknown",
+        intent: "unknown",
         confidence: classification.confidence,
       };
     }
