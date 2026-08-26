@@ -1,4 +1,5 @@
 // EventCalendarScreen.tsx
+import { getUserData, UserRole } from "@/utils/rbac";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
@@ -11,6 +12,7 @@ import {
 } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
 import {
+  Alert,
   FlatList,
   Modal,
   ScrollView,
@@ -19,10 +21,8 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import ConfirmDialog from "./components/ConfirmDialog";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
-import { getUserData, UserRole } from "@/utils/rbac";
 
 type CalendarEvent = {
   id: string;
@@ -36,6 +36,7 @@ type CalendarEvent = {
   createdByName: string;
   createdAt: any;
   notifyUsers?: boolean;
+  status?: "published" | "draft" | "archived";
 };
 
 type GroupedEvents = {
@@ -49,15 +50,6 @@ const EventCalendarScreen = () => {
   const { eventId } = useLocalSearchParams<{ eventId?: string | string[] }>();
   const resolvedEventId = Array.isArray(eventId) ? eventId[0] : eventId;
   const [events, setEvents] = useState<CalendarEvent[]>([]);
-  const [confirmDialog, setConfirmDialog] = useState<{
-    title: string;
-    description?: string;
-    confirmText?: string;
-    cancelText?: string;
-    destructive?: boolean;
-    singleAction?: boolean;
-    onConfirm: () => void;
-  } | null>(null);
   const [groupedEvents, setGroupedEvents] = useState<GroupedEvents>({});
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<CalendarEvent[]>([]);
@@ -154,36 +146,22 @@ const EventCalendarScreen = () => {
   };
 
   const handleDeleteEvent = async (eventId: string) => {
-    setConfirmDialog({
-      title: "Delete Event",
-      description: "Are you sure you want to delete this event?",
-      confirmText: "Delete",
-      cancelText: "Cancel",
-      destructive: true,
-      onConfirm: async () => {
-        try {
-          await deleteDoc(doc(db, "events", eventId));
-          setConfirmDialog({
-            title: "Success",
-            description: "Event deleted successfully",
-            confirmText: "OK",
-            singleAction: true,
-            destructive: false,
-            onConfirm: () => setConfirmDialog(null),
-          });
-        } catch (error) {
-          console.error("Error deleting event:", error);
-          setConfirmDialog({
-            title: "Error",
-            description: "Failed to delete event",
-            confirmText: "OK",
-            singleAction: true,
-            destructive: true,
-            onConfirm: () => setConfirmDialog(null),
-          });
-        }
+    Alert.alert("Delete Event", "Are you sure you want to delete this event?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await deleteDoc(doc(db, "events", eventId));
+            Alert.alert("Success", "Event deleted successfully");
+          } catch (error) {
+            console.error("Error deleting event:", error);
+            Alert.alert("Error", "Failed to delete event");
+          }
+        },
       },
-    });
+    ]);
   };
 
   const canManageEvents = () => {
@@ -208,6 +186,22 @@ const EventCalendarScreen = () => {
       "all-day": "#e0a53d",
     };
     return colors[category as keyof typeof colors] || "#4f9cff";
+  };
+
+  const getStatusDetails = (status?: CalendarEvent["status"]) => {
+    if (status === "draft") {
+      return { label: "DRAFT", icon: "create-outline" as const, color: "#9b766c" };
+    }
+    if (status === "archived") {
+      return { label: "ARCHIVED", icon: "archive-outline" as const, color: "#7a3b2e" };
+    }
+    return { label: "PUBLISHED", icon: "checkmark-circle-outline" as const, color: "#5f0909" };
+  };
+
+  const handleEditEvent = (event: CalendarEvent) => {
+    if (event.status !== "draft" || !canManageEvents()) return;
+    setModalVisible(false);
+    router.push({ pathname: "/CreateEventScreen", params: { eventId: event.id } });
   };
 
   const renderMonthSection = ({ item }: { item: string }) => {
@@ -240,6 +234,16 @@ const EventCalendarScreen = () => {
                 <Text style={styles.eventTitle} numberOfLines={1}>
                   {eventsForDate[0].title}
                 </Text>
+                <View style={styles.previewStatus}>
+                  <Ionicons
+                    name={getStatusDetails(eventsForDate[0].status).icon}
+                    size={13}
+                    color={getStatusDetails(eventsForDate[0].status).color}
+                  />
+                  <Text style={[styles.previewStatusText, { color: getStatusDetails(eventsForDate[0].status).color }]}>
+                    {getStatusDetails(eventsForDate[0].status).label}
+                  </Text>
+                </View>
                 {eventsForDate.length > 1 && (
                   <Text style={styles.moreEvents}>
                     +{eventsForDate.length - 1} more scheduled
@@ -337,21 +341,27 @@ const EventCalendarScreen = () => {
                 >
                   <View style={styles.eventHeader}>
                     <Text style={styles.eventCardTitle}>{event.title}</Text>
-                    {canManageEvents() && (
-                      <View style={{ flexDirection: "row", gap: 12 }}>
-                        <TouchableOpacity
-                          onPress={() => {
-                            setModalVisible(false);
-                            router.push({ pathname: "/CreateEventScreen", params: { eventId: event.id } });
-                          }}
-                        >
-                          <Ionicons name="create-outline" size={20} color="#7a3b2e" />
-                        </TouchableOpacity>
-                        <TouchableOpacity onPress={() => handleDeleteEvent(event.id)}>
-                          <Ionicons name="trash-outline" size={20} color="#e0a53d" />
-                        </TouchableOpacity>
-                      </View>
+                    {event.status === "draft" && canManageEvents() && (
+                      <TouchableOpacity onPress={() => handleEditEvent(event)} accessibilityLabel="Edit draft event">
+                        <Ionicons name="create-outline" size={21} color="#e0a53d" />
+                      </TouchableOpacity>
                     )}
+                    {canManageEvents() && (
+                      <TouchableOpacity
+                        onPress={() => handleDeleteEvent(event.id)}
+                      >
+                        <Ionicons
+                          name="trash-outline"
+                          size={20}
+                          color="#e0a53d"
+                        />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  <View style={[styles.statusBadge, { backgroundColor: getStatusDetails(event.status).color }]}>
+                    <Ionicons name={getStatusDetails(event.status).icon} size={13} color="#fffaf7" />
+                    <Text style={styles.statusText}>{getStatusDetails(event.status).label}</Text>
                   </View>
 
                   {event.description && (
@@ -402,17 +412,6 @@ const EventCalendarScreen = () => {
         </View>
       </Modal>
       </View>
-      <ConfirmDialog
-        visible={!!confirmDialog}
-        title={confirmDialog?.title ?? ""}
-        description={confirmDialog?.description}
-        confirmText={confirmDialog?.confirmText}
-        cancelText={confirmDialog?.cancelText}
-        destructive={confirmDialog?.destructive ?? false}
-        singleAction={confirmDialog?.singleAction ?? false}
-        onConfirm={() => confirmDialog?.onConfirm()}
-        onCancel={() => setConfirmDialog(null)}
-      />
     </SafeAreaView>
   );
 };
@@ -511,6 +510,16 @@ const styles = StyleSheet.create({
     color: "#4d1b17",
     marginBottom: 4,
   },
+  previewStatus: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  previewStatusText: {
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
   moreEvents: {
     fontSize: 12,
     color: "#7a3b2e",
@@ -580,6 +589,22 @@ const styles = StyleSheet.create({
     fontWeight: "bold",
     color: "#4d1b17",
     flex: 1,
+  },
+  statusBadge: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  statusText: {
+    color: "#fffaf7",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.5,
   },
   eventDescription: {
     fontSize: 14,

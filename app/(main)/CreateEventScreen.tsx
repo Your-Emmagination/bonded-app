@@ -6,8 +6,6 @@ import { addDoc, collection, doc, getDoc, serverTimestamp, updateDoc } from "fir
 import React, { useCallback, useEffect, useState } from "react";
 import {
   Alert,
-  KeyboardAvoidingView,
-  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -28,13 +26,20 @@ type CalendarEvent = {
   endTime?: string;
   category: "morning" | "afternoon" | "evening" | "all-day";
   notifyUsers?: boolean;
+  status?: "published" | "draft" | "archived";
 };
+
+const categoryIcons = {
+  morning: "sunny-outline",
+  afternoon: "partly-sunny-outline",
+  evening: "moon-outline",
+  "all-day": "infinite-outline",
+} as const;
 
 const CreateEventScreen = () => {
   const router = useRouter();
   const { eventId } = useLocalSearchParams<{ eventId?: string | string[] }>();
-  const resolvedEventId = Array.isArray(eventId) ? eventId[0] : eventId;
-  const isEditMode = !!resolvedEventId;
+  const editingEventId = Array.isArray(eventId) ? eventId[0] : eventId;
   const [currentUserRole, setCurrentUserRole] = useState<
     UserRole | undefined
   >();
@@ -51,6 +56,34 @@ const CreateEventScreen = () => {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    if (!editingEventId) return;
+
+    const loadEvent = async () => {
+      try {
+        const eventSnapshot = await getDoc(doc(db, "events", editingEventId));
+        if (eventSnapshot.exists()) {
+          const event = eventSnapshot.data() as CalendarEvent;
+          setForm({
+            title: event.title || "",
+            description: event.description || "",
+            date: event.date || new Date().toISOString().split("T")[0],
+            startTime: event.startTime,
+            endTime: event.endTime,
+            category: event.category || "morning",
+            notifyUsers: event.notifyUsers || false,
+            status: event.status,
+          });
+        }
+      } catch (error) {
+        console.error("Error loading event:", error);
+        Alert.alert("Error", "Could not load this event for editing.");
+      }
+    };
+
+    loadEvent();
+  }, [editingEventId]);
+
+  useEffect(() => {
     const fetchUserRole = async () => {
       if (auth.currentUser) {
         const userData = await getUserData(auth.currentUser.uid);
@@ -59,33 +92,6 @@ const CreateEventScreen = () => {
     };
     fetchUserRole();
   }, []);
-
-  useEffect(() => {
-    if (!resolvedEventId) return;
-    const loadEvent = async () => {
-      try {
-        const snap = await getDoc(doc(db, "events", resolvedEventId));
-        if (!snap.exists()) {
-          Alert.alert("Event Not Found", "The event no longer exists.", [{ text: "OK", onPress: () => router.back() }]);
-          return;
-        }
-        const data = snap.data() as CalendarEvent;
-        setForm({
-          title: data.title || "",
-          description: data.description || "",
-          date: data.date || new Date().toISOString().split("T")[0],
-          startTime: data.startTime,
-          endTime: data.endTime,
-          category: data.category || "morning",
-          notifyUsers: false,
-        });
-      } catch (error) {
-        console.error("Error loading event:", error);
-        Alert.alert("Error", "Failed to load event.", [{ text: "OK", onPress: () => router.back() }]);
-      }
-    };
-    loadEvent();
-  }, [resolvedEventId, router]);
 
   // Check if user can manage events
   const canManageEvents = useCallback(() => {
@@ -134,7 +140,7 @@ const CreateEventScreen = () => {
     }
   };
 
-  const handleSubmit = async () => {
+  const handleSave = async (status: "published" | "draft") => {
     if (!form.title.trim()) {
       Alert.alert("Error", "Title is required.");
       return;
@@ -152,30 +158,36 @@ const CreateEventScreen = () => {
         currentUserData
           ? `${currentUserData.firstname} ${currentUserData.lastname}`.trim()
           : auth.currentUser.displayName || auth.currentUser.email || "Unknown";
-      const eventPayload = {
+      const eventData = {
         ...form,
-        updatedAt: serverTimestamp(),
+        status,
+        createdBy: auth.currentUser.uid,
+        createdByName:
+          currentUserData
+            ? `${currentUserData.firstname} ${currentUserData.lastname}`.trim() ||
+              auth.currentUser.displayName ||
+              auth.currentUser.email ||
+              "Unknown"
+            : auth.currentUser.displayName || auth.currentUser.email || "Unknown",
       };
-      let createdEventRef: any = null;
-      if (isEditMode && resolvedEventId) {
-        await updateDoc(doc(db, "events", resolvedEventId), eventPayload);
-      } else {
-        createdEventRef = await addDoc(collection(db, "events"), {
-          ...form,
-          createdBy: auth.currentUser.uid,
-          createdByName:
-            currentUserData
-              ? `${currentUserData.firstname} ${currentUserData.lastname}`.trim() ||
-                auth.currentUser.displayName || auth.currentUser.email || "Unknown"
-              : auth.currentUser.displayName || auth.currentUser.email || "Unknown",
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
+      let createdEventRef = editingEventId
+        ? { id: editingEventId }
+        : await addDoc(collection(db, "events"), {
+            ...eventData,
+            createdAt: serverTimestamp(),
+          });
+
+      if (editingEventId) {
+        await updateDoc(doc(db, "events", editingEventId), eventData);
       }
 
-      let successMessage = isEditMode ? "Event updated successfully!" : "Event created successfully!";
+      let successMessage = status === "draft"
+        ? "Event saved as a draft."
+        : editingEventId
+          ? "Event updated successfully!"
+          : "Event created successfully!";
 
-      if (form.notifyUsers && !isEditMode && createdEventRef) {
+      if (status === "published" && form.notifyUsers) {
         const notificationResults = await Promise.allSettled([
           createBroadcastEventNotifications({
             actor: {
@@ -229,24 +241,44 @@ const CreateEventScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView
-        style={styles.contentShell}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
-      {/* Header */}
+      <View style={styles.contentShell}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => router.back()}
+          accessibilityLabel="Go back"
+        >
           <Ionicons name="arrow-back" size={24} color="#7a3b2e" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>{isEditMode ? "Edit Event" : "Create Event"}</Text>
-        <View style={{ width: 24 }} />
+        <View style={styles.headerCopy}>
+          <Text style={styles.headerEyebrow}>CALENDAR</Text>
+          <Text style={styles.headerTitle}>Create Event</Text>
+        </View>
+        <View style={styles.draftBadge}>
+          <Ionicons name="create-outline" size={14} color="#9b766c" />
+          <Text style={styles.draftBadgeText}>{editingEventId ? "EDIT EVENT" : "NEW EVENT"}</Text>
+        </View>
       </View>
 
       <ScrollView
         style={styles.formContainer}
         contentContainerStyle={styles.formContent}
+        showsVerticalScrollIndicator={false}
       >
-        {/* Title */}
+        <View style={styles.introCard}>
+          <View style={styles.dateBadge}>
+            <Text style={styles.dateBadgeMonth}>{form.date.slice(5, 7)}</Text>
+            <Text style={styles.dateBadgeDay}>{form.date.slice(8, 10)}</Text>
+          </View>
+          <View style={styles.introCopy}>
+            <Text style={styles.introEyebrow}>EVENT WORKSPACE</Text>
+            <Text style={styles.introTitle}>Plan something meaningful</Text>
+            <Text style={styles.introText}>
+              Add the details below and choose who should be notified.
+            </Text>
+          </View>
+        </View>
+
         <View style={styles.inputGroup}>
           <Text style={styles.label}>Title *</Text>
           <TextInput
@@ -258,7 +290,6 @@ const CreateEventScreen = () => {
           />
         </View>
 
-        {/* Description */}
         <View style={styles.inputGroup}>
           <Text style={styles.label}>Description</Text>
           <TextInput
@@ -273,7 +304,6 @@ const CreateEventScreen = () => {
           />
         </View>
 
-        {/* Date */}
         <View style={styles.inputGroup}>
           <Text style={styles.label}>Date *</Text>
           <TouchableOpacity
@@ -293,63 +323,49 @@ const CreateEventScreen = () => {
           )}
         </View>
 
-        {/* Start Time */}
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Start Time (Optional)</Text>
-          <TouchableOpacity
-            style={styles.dateTimeButton}
-            onPress={() => setShowStartTimePicker(true)}
-          >
-            <Text style={styles.dateTimeText}>
-              {form.startTime || "Select start time"}
-            </Text>
-            <Ionicons name="time-outline" size={20} color="#7a3b2e" />
-          </TouchableOpacity>
-          {showStartTimePicker && (
-            <DateTimePicker
-              value={
-                form.startTime
-                  ? new Date(`2000-01-01T${form.startTime}`)
-                  : new Date()
-              }
-              mode="time"
-              display="default"
-              onChange={(event, selected) =>
-                handleTimeChange(event, selected, "startTime")
-              }
-            />
-          )}
+        <View style={styles.timeRow}>
+          <View style={styles.timeField}>
+            <Text style={styles.label}>Start time</Text>
+            <TouchableOpacity
+              style={styles.dateTimeButton}
+              onPress={() => setShowStartTimePicker(true)}
+            >
+              <Text style={styles.dateTimeText} numberOfLines={1}>
+                {form.startTime || "Select time"}
+              </Text>
+              <Ionicons name="time-outline" size={19} color="#7a3b2e" />
+            </TouchableOpacity>
+            {showStartTimePicker && (
+              <DateTimePicker
+                value={form.startTime ? new Date(`2000-01-01T${form.startTime}`) : new Date()}
+                mode="time"
+                display="default"
+                onChange={(event, selected) => handleTimeChange(event, selected, "startTime")}
+              />
+            )}
+          </View>
+          <View style={styles.timeField}>
+            <Text style={styles.label}>End time</Text>
+            <TouchableOpacity
+              style={styles.dateTimeButton}
+              onPress={() => setShowEndTimePicker(true)}
+            >
+              <Text style={styles.dateTimeText} numberOfLines={1}>
+                {form.endTime || "Select time"}
+              </Text>
+              <Ionicons name="time-outline" size={19} color="#7a3b2e" />
+            </TouchableOpacity>
+            {showEndTimePicker && (
+              <DateTimePicker
+                value={form.endTime ? new Date(`2000-01-01T${form.endTime}`) : new Date()}
+                mode="time"
+                display="default"
+                onChange={(event, selected) => handleTimeChange(event, selected, "endTime")}
+              />
+            )}
+          </View>
         </View>
 
-        {/* End Time */}
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>End Time (Optional)</Text>
-          <TouchableOpacity
-            style={styles.dateTimeButton}
-            onPress={() => setShowEndTimePicker(true)}
-          >
-            <Text style={styles.dateTimeText}>
-              {form.endTime || "Select end time"}
-            </Text>
-            <Ionicons name="time-outline" size={20} color="#7a3b2e" />
-          </TouchableOpacity>
-          {showEndTimePicker && (
-            <DateTimePicker
-              value={
-                form.endTime
-                  ? new Date(`2000-01-01T${form.endTime}`)
-                  : new Date()
-              }
-              mode="time"
-              display="default"
-              onChange={(event, selected) =>
-                handleTimeChange(event, selected, "endTime")
-              }
-            />
-          )}
-        </View>
-
-        {/* Category */}
         <View style={styles.inputGroup}>
           <Text style={styles.label}>Category</Text>
           <View style={styles.categoryContainer}>
@@ -363,6 +379,11 @@ const CreateEventScreen = () => {
                   ]}
                   onPress={() => handleInputChange("category", cat)}
                 >
+                  <Ionicons
+                    name={categoryIcons[cat]}
+                    size={16}
+                    color={form.category === cat ? "#fff" : "#7a3b2e"}
+                  />
                   <Text
                     style={[
                       styles.categoryButtonText,
@@ -378,10 +399,12 @@ const CreateEventScreen = () => {
           </View>
         </View>
 
-        {/* Notify Users */}
-        <View style={styles.inputGroup}>
+        <View style={[styles.inputGroup, styles.notifyCard]}>
           <View style={styles.switchContainer}>
-            <Text style={styles.label}>Notify All Users</Text>
+            <View style={styles.notifyCopy}>
+              <Text style={[styles.label, styles.notifyTitle]}>Notify all users</Text>
+              <Text style={styles.notifyText}>Send an update when this event is published.</Text>
+            </View>
             <TouchableOpacity
               style={[
                 styles.toggleButton,
@@ -401,17 +424,25 @@ const CreateEventScreen = () => {
         </View>
       </ScrollView>
 
-      {/* Submit Button */}
-      <TouchableOpacity
-        style={[styles.submitButton, loading && styles.submitButtonDisabled]}
-        onPress={handleSubmit}
-        disabled={loading}
-      >
-        <Text style={styles.submitButtonText}>
-          {loading ? (isEditMode ? "Saving..." : "Creating...") : (isEditMode ? "Save Changes" : "Create Event")}
-        </Text>
-      </TouchableOpacity>
-      </KeyboardAvoidingView>
+      <View style={styles.actionBar}>
+        <TouchableOpacity
+          style={[styles.secondaryAction, loading && styles.submitButtonDisabled]}
+          onPress={() => handleSave("draft")}
+          disabled={loading}
+        >
+          <Ionicons name="bookmark-outline" size={19} color="#7a3b2e" />
+          <Text style={styles.secondaryActionText}>Save draft</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.submitButton, loading && styles.submitButtonDisabled]}
+          onPress={() => handleSave("published")}
+          disabled={loading}
+        >
+          <Ionicons name={loading ? "hourglass-outline" : "paper-plane-outline"} size={19} color="#fff" />
+          <Text style={styles.submitButtonText}>{loading ? "Saving..." : "Publish"}</Text>
+        </TouchableOpacity>
+      </View>
+      </View>
     </SafeAreaView>
   );
 };
@@ -428,30 +459,120 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderBottomWidth: 1,
-    borderBottomColor: "#fffaf7",
+    borderBottomColor: "#dfc5bc",
+    backgroundColor: "#fff8f4",
+  },
+  backButton: {
+    width: 42,
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 21,
+    backgroundColor: "#f6f1ed",
+    borderWidth: 1,
+    borderColor: "#dfc5bc",
+  },
+  headerCopy: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  headerEyebrow: {
+    color: "#9b766c",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 1.4,
   },
   headerTitle: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: "bold",
     color: "#7a3b2e",
-    letterSpacing: 1,
+    marginTop: 2,
+  },
+  draftBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: "#f6f1ed",
+    borderWidth: 1,
+    borderColor: "#dfc5bc",
+  },
+  draftBadgeText: {
+    color: "#9b766c",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.8,
   },
   formContainer: {
     flex: 1,
     paddingHorizontal: 16,
   },
   formContent: {
-    paddingVertical: 16,
+    paddingTop: 18,
+    paddingBottom: 28,
+  },
+  introCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#5f0909",
+    borderWidth: 1,
+    borderColor: "#7a3b2e",
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 22,
+  },
+  dateBadge: {
+    width: 50,
+    minHeight: 54,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#e0a53d",
+  },
+  dateBadgeMonth: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  dateBadgeDay: {
+    color: "#fff",
+    fontSize: 21,
+    fontWeight: "800",
+    lineHeight: 23,
+  },
+  introCopy: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  introTitle: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  introEyebrow: {
+    color: "#e0a53d",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    marginBottom: 3,
+  },
+  introText: {
+    color: "#fff8f4",
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 2,
   },
   inputGroup: {
-    marginBottom: 20,
+    marginBottom: 18,
   },
   label: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "600",
     color: "#4d1b17",
     marginBottom: 8,
@@ -459,15 +580,15 @@ const styles = StyleSheet.create({
   textInput: {
     backgroundColor: "#fff8f4",
     color: "#4d1b17",
-    borderRadius: 10,
-    paddingVertical: 12,
+    borderRadius: 12,
+    paddingVertical: 13,
     paddingHorizontal: 16,
     fontSize: 16,
     borderWidth: 1,
     borderColor: "#dfc5bc",
   },
   multilineInput: {
-    height: 80,
+    height: 96,
     textAlignVertical: "top",
   },
   dateTimeButton: {
@@ -475,15 +596,23 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     backgroundColor: "#fff8f4",
-    borderRadius: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
+    borderRadius: 12,
+    paddingVertical: 13,
+    paddingHorizontal: 14,
     borderWidth: 1,
     borderColor: "#dfc5bc",
   },
   dateTimeText: {
     color: "#4d1b17",
     fontSize: 16,
+  },
+  timeRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 18,
+  },
+  timeField: {
+    flex: 1,
   },
   categoryContainer: {
     flexDirection: "row",
@@ -492,8 +621,11 @@ const styles = StyleSheet.create({
   },
   categoryButton: {
     backgroundColor: "#fff8f4",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderRadius: 20,
     borderWidth: 1,
     borderColor: "#dfc5bc",
@@ -506,6 +638,7 @@ const styles = StyleSheet.create({
     color: "#7a3b2e",
     fontSize: 14,
     fontWeight: "600",
+    letterSpacing: 0.2,
   },
   selectedCategoryButtonText: {
     color: "#fff",
@@ -514,6 +647,25 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+  },
+  notifyCard: {
+    backgroundColor: "#fff8f4",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#dfc5bc",
+    padding: 14,
+  },
+  notifyCopy: {
+    flex: 1,
+    marginRight: 12,
+  },
+  notifyTitle: {
+    marginBottom: 3,
+  },
+  notifyText: {
+    color: "#9b766c",
+    fontSize: 12,
+    lineHeight: 17,
   },
   toggleButton: {
     backgroundColor: "#fff8f4",
@@ -527,9 +679,13 @@ const styles = StyleSheet.create({
     borderColor: "#e0a53d",
   },
   submitButton: {
+    flex: 1,
     backgroundColor: "#e0a53d",
     paddingVertical: 16,
     alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
     marginHorizontal: 16,
     marginBottom: 20,
     borderRadius: 12,
@@ -545,6 +701,29 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 18,
     fontWeight: "bold",
+  },
+  actionBar: {
+    flexDirection: "row",
+    gap: 8,
+    marginHorizontal: 16,
+    marginBottom: 20,
+  },
+  secondaryAction: {
+    flex: 1,
+    minHeight: 54,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#dfc5bc",
+    backgroundColor: "#fff8f4",
+  },
+  secondaryActionText: {
+    color: "#7a3b2e",
+    fontSize: 14,
+    fontWeight: "700",
   },
 });
 
