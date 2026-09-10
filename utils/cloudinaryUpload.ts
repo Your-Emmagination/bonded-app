@@ -1,16 +1,18 @@
 // utils/cloudinaryUpload.ts
 // Centralized Cloudinary upload utility with folder organization
 
+import * as FileSystem from "expo-file-system/legacy";
+import { Platform } from "react-native";
 import {
-  AVATAR_SIZE_LARGE,
-  AVATAR_SIZE_SMALL,
-  FEED_IMAGE_WIDTH,
-  FULLSCREEN_IMAGE_WIDTH,
-  getCloudinaryUrl,
+    AVATAR_SIZE_LARGE,
+    AVATAR_SIZE_SMALL,
+    FEED_IMAGE_WIDTH,
+    FULLSCREEN_IMAGE_WIDTH,
+    getCloudinaryUrl,
 } from "./cloudinaryImages";
 
 const CLOUDINARY_CLOUD_NAME = "dutkd2ih4";
-const CLOUDINARY_UPLOAD_PRESET = "bonded_app_preset"; 
+const CLOUDINARY_UPLOAD_PRESET = "bonded_app_preset";
 
 export type UploadFolder = "profile_images" | "post_images" | "post_files" | "post_gifs" | "post_videos" | "server_images";
 
@@ -45,42 +47,76 @@ if (!CLOUDINARY_UPLOAD_PRESET) {
 }
 
 
-    const formData = new FormData();
-    
     // Determine file type and name based on folder
-    const fileName = generateFileName(folder);
+    const fileName = generateFileName(folder, uri);
     const mimeType = getMimeType(uri, folder);
-    
-    formData.append("file", {
-      uri: uri,
-      type: mimeType,
-      name: fileName,
-    } as any);
-    
-    formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
-    formData.append("folder", folder); // 📁 Sets the Cloudinary folder
     
     // Determine the correct endpoint based on resource type
     const endpoint = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/${resourceType}/upload`;
 
-    console.log(`📤 Uploading to Cloudinary: ${folder}/${fileName}`);
+    if (__DEV__) console.log(`📤 Uploading to Cloudinary: ${folder}/${fileName}`);
 
-    const response = await fetch(endpoint, {
-      method: "POST",
-      body: formData,
-      headers: {
-        "Accept": "application/json",
-      },
-    });
+    let data: any;
 
-    const data = await response.json();
+    if (Platform.OS !== "web" && (uri.startsWith("file://") || uri.startsWith("content://"))) {
+      const uploadResult = await FileSystem.uploadAsync(endpoint, uri, {
+        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        fieldName: "file",
+        mimeType: mimeType,
+        parameters: {
+          upload_preset: CLOUDINARY_UPLOAD_PRESET,
+          folder: folder,
+        },
+        headers: {
+          Accept: "application/json",
+        },
+      });
 
-    if (!response.ok || data.error) {
-      const errorMessage = data.error?.message || response.statusText || "Unknown error";
-      throw new Error(`Upload failed: ${errorMessage}`);
+      try {
+        data = JSON.parse(uploadResult.body);
+      } catch {
+        throw new Error(`Upload failed: received invalid response (HTTP ${uploadResult.status})`);
+      }
+
+      if (uploadResult.status >= 400 || data?.error) {
+        const errorMessage = data?.error?.message || `Upload failed with status ${uploadResult.status}`;
+        throw new Error(`Upload failed: ${errorMessage}`);
+      }
+    } else {
+      const formData = new FormData();
+      
+      try {
+        const fileResponse = await fetch(uri);
+        const blob = await fileResponse.blob();
+        formData.append("file", blob, fileName);
+      } catch {
+        formData.append("file", {
+          uri: uri,
+          type: mimeType,
+          name: fileName,
+        } as any);
+      }
+      
+      formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+      formData.append("folder", folder);
+      
+      const response = await fetch(endpoint, {
+        method: "POST",
+        body: formData,
+        headers: {
+          Accept: "application/json",
+        },
+      });
+
+      data = await response.json();
+
+      if (!response.ok || data?.error) {
+        const errorMessage = data?.error?.message || response.statusText || "Unknown error";
+        throw new Error(`Upload failed: ${errorMessage}`);
+      }
     }
 
-    console.log(`✅ Upload successful: ${data.secure_url}`);
+    if (__DEV__) console.log(`✅ Upload successful: ${data.secure_url}`);
 
     // Eagerly warm the CDN cache for the sizes this image will actually be
     // requested at (avatar/feed/fullscreen), so the first viewer never eats
@@ -188,9 +224,10 @@ const warmCloudinaryCache = (secureUrl: string, folder: UploadFolder): void => {
 /**
  * Generate appropriate filename based on folder type
  */
-const generateFileName = (folder: UploadFolder): string => {
+const generateFileName = (folder: UploadFolder, uri?: string): string => {
   const timestamp = Date.now();
   const random = Math.floor(Math.random() * 1000);
+  const extension = uri ? uri.split("?")[0].split("#")[0].split(".").pop()?.toLowerCase() : undefined;
   
   switch (folder) {
     case "profile_images":
@@ -202,11 +239,11 @@ const generateFileName = (folder: UploadFolder): string => {
     case "post_gifs":
       return `post_gif_${timestamp}_${random}.gif`;
     case "post_videos":
-      return `post_video_${timestamp}_${random}.mp4`;
+      return `post_video_${timestamp}_${random}.${extension === "mov" ? "mov" : "mp4"}`;
     case "post_files":
-      return `post_file_${timestamp}_${random}`;
+      return extension ? `post_file_${timestamp}_${random}.${extension}` : `post_file_${timestamp}_${random}`;
     default:
-      return `file_${timestamp}_${random}`;
+      return extension ? `file_${timestamp}_${random}.${extension}` : `file_${timestamp}_${random}`;
   }
 };
 
@@ -220,7 +257,8 @@ const getMimeType = (uri: string, folder: UploadFolder): string => {
   }
   
   // For posts, detect from URI extension
-  const extension = uri.split(".").pop()?.toLowerCase();
+  const cleanUri = uri.split("?")[0].split("#")[0];
+  const extension = cleanUri.split(".").pop()?.toLowerCase();
   
   const mimeTypes: Record<string, string> = {
     // Images
@@ -241,6 +279,16 @@ const getMimeType = (uri: string, folder: UploadFolder): string => {
     ppt: "application/vnd.ms-powerpoint",
     pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     txt: "text/plain",
+    csv: "text/csv",
+    rtf: "application/rtf",
+    odt: "application/vnd.oasis.opendocument.text",
+    ods: "application/vnd.oasis.opendocument.spreadsheet",
+    odp: "application/vnd.oasis.opendocument.presentation",
+    zip: "application/zip",
+    rar: "application/x-rar-compressed",
+    "7z": "application/x-7z-compressed",
+    tar: "application/x-tar",
+    gz: "application/gzip",
     
     // Video
     mp4: "video/mp4",

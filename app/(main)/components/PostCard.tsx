@@ -1,49 +1,66 @@
 // components/PostCard.tsx
 
+import { auth, db } from "@/Firebase_configure";
 import { resolveAvatarUri } from "@/utils/avatar";
-import ConfirmDialog from "./ConfirmDialog";
-import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
+import { AVATAR_SIZE_SMALL, avatarThumb, FEED_IMAGE_WIDTH, feedImage } from "@/utils/cloudinaryImages";
+import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import {
-  canDeleteContent,
-  canViewAnonymousIdentity,
-  getRoleColor,
-  getRoleDisplayName,
-  getStudentDocIdFromAuthUser,
-  getUserData,
-  parseUserRole,
-  UserData,
-  UserRole,
+    canDeleteContent,
+    canReportContent,
+    canViewAnonymousIdentity,
+    getRoleColor,
+    getRoleDisplayName,
+    getStudentDocIdFromAuthUser,
+    getUserData,
+    isStaff,
+    parseUserRole,
+    subscribeToUserDataUpdates,
+    UserData,
+    UserRole,
 } from "@/utils/rbac";
-import { Ionicons, MaterialIcons } from "@expo/vector-icons";
-import React, { useEffect, useRef, useState } from "react";
-import { useIsFocused } from "@react-navigation/native";
 import {
-  ActivityIndicator,
-  Dimensions,
-  Image,
-  Linking,
-  Modal,
-  NativeScrollEvent,
-  NativeSyntheticEvent,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+    normalizeCaptions,
+    type CaptionSegment,
+    type CaptionStatus,
+} from "@/utils/videoCaptions";
+import { Ionicons, MaterialIcons } from "@expo/vector-icons";
+import * as Haptics from "expo-haptics";
+import { Image } from "expo-image";
+import { useIsFocused } from "expo-router";
+import { addDoc, arrayRemove, arrayUnion, collection, doc, serverTimestamp, updateDoc } from "firebase/firestore";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+    ActivityIndicator,
+    Dimensions,
+    Linking,
+    Modal,
+    NativeScrollEvent,
+    NativeSyntheticEvent,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from "react-native";
+import ReanimatedAnimated, {
+    useAnimatedStyle,
+    useSharedValue,
+    withSequence,
+    withSpring,
+    withTiming,
+} from "react-native-reanimated";
 import AiReplyCard from "../components/AiReplyCard";
 import CommentModal from "../components/CommentModal";
 import ExpandableText from "../components/ExpandableText";
 import VideoPostMedia from "../components/VideoPostMedia";
-import { addDoc, collection, doc, serverTimestamp, updateDoc, arrayUnion, arrayRemove } from "firebase/firestore";
-import { db, auth } from "@/Firebase_configure";
+import ConfirmDialog from "./ConfirmDialog";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const AVATAR_COLUMN_WIDTH = 40;
 const AVATAR_COLUMN_GAP = 12;
 const FEED_HORIZONTAL_PADDING = 16;
-const IMAGE_WIDTH =
+const DEFAULT_MEDIA_WIDTH =
   SCREEN_WIDTH - FEED_HORIZONTAL_PADDING * 2 - AVATAR_COLUMN_WIDTH - AVATAR_COLUMN_GAP;
 
 type TaggedUser = {
@@ -86,7 +103,14 @@ type Post = {
     status?: string | null;
   };
   pinnedAt?: any;
+  pinnedBy?: string | null;
+  pinExpiresAt?: any;
+  targetDate?: any;
+  targetDateLabel?: string | null;
   flair?: string;
+  // Auto-generated video captions (written server-side after upload).
+  captionStatus?: CaptionStatus;
+  captions?: CaptionSegment[];
 };
 interface VideoPlayerProps {
   videoUrl: string;
@@ -110,20 +134,139 @@ interface PostCardProps {
   onTogglePin?: (postId: string, shouldPin: boolean) => void;
   onDelete?: (postId: string) => void | Promise<void>;
   onEdit?: (postId: string) => void;
+  // "Trending this week" renders this same card inside a narrow horizontal
+  // scroller. `compact` only trims height (tighter text clamp, shorter media,
+  // no AI-reply block, no bottom divider) — every real behaviour
+  // (like / comment / bookmark / profile / menu / modals) is untouched, so
+  // this is not a second card implementation.
+  compact?: boolean;
+  // Main-feed scroll visibility for X-style muted autoplay. `undefined` (the
+  // default, and what every non-feed screen passes) keeps the old
+  // tap-to-play behavior; a boolean opts this card's video into
+  // autoplay-when-(focused && scrolled-into-view).
+  videoCardVisible?: boolean;
 }
 
-/* Helper Component for Video Playback Focus Handling */
-const VideoMediaItem = ({ url, width }: { url: string; width: number }) => {
+/* Feed video: autoplays muted only when the Home screen has focus AND this
+   specific card is scrolled into view — both, so leaving Home still pauses
+   everything. Without `cardVisible` it falls back to the old manual player. */
+const VideoMediaItem = ({
+  url,
+  width,
+  cardVisible,
+  captionStatus,
+  captions,
+}: {
+  url: string;
+  width: number;
+  cardVisible?: boolean;
+  captionStatus?: CaptionStatus;
+  captions?: unknown;
+}) => {
   const isFocused = useIsFocused();
+  const feedAutoplay = cardVisible !== undefined;
+  // Firestore data is untrusted: coerce to clean, start-sorted segments once
+  // per doc update rather than on every render.
+  const safeCaptions = useMemo(() => normalizeCaptions(captions), [captions]);
 
   return (
     <VideoPostMedia
       uri={url}
       width={width}
-      isPlaying={isFocused}
+      feedAutoplay={feedAutoplay}
+      isPlaying={feedAutoplay ? isFocused && !!cardVisible : isFocused}
+      captionStatus={captionStatus}
+      captions={safeCaptions}
     />
   );
 };
+
+/**
+ * Animated like / bookmark toggle. The tap runs a spring-overshoot scale
+ * "burst" and cross-fades an outline icon into a solid one, instead of the
+ * old instant glyph swap. The underlying toggle fires immediately from the
+ * press handler — the animation never gates it. `withHaptic` adds one light
+ * pulse, and only on the positive (activating) tap.
+ */
+type ActionToggleIconProps = {
+  active: boolean;
+  onToggle: () => void;
+  family: "ionicons" | "material";
+  activeName: string;
+  inactiveName: string;
+  size: number;
+  activeColor: string;
+  inactiveColor: string;
+  withHaptic?: boolean;
+};
+
+const ActionToggleIcon = React.memo(function ActionToggleIcon({
+  active,
+  onToggle,
+  family,
+  activeName,
+  inactiveName,
+  size,
+  activeColor,
+  inactiveColor,
+  withHaptic = false,
+}: ActionToggleIconProps) {
+  const scale = useSharedValue(1);
+  const fill = useSharedValue(active ? 1 : 0);
+  const IconSet = family === "ionicons" ? Ionicons : MaterialIcons;
+
+  // Cross-fade the solid glyph in/out whenever the toggle state changes
+  // (driven by the parent's data, so it also covers changes made elsewhere).
+  useEffect(() => {
+    fill.value = withTiming(active ? 1 : 0, { duration: 180 });
+  }, [active, fill]);
+
+  const handlePress = () => {
+    // Fire the real action first — never wait on the animation.
+    onToggle();
+    if (withHaptic && !active) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    }
+    scale.value = withSequence(
+      withTiming(1.25, { duration: 120 }),
+      withSpring(1, { damping: 6, stiffness: 220, mass: 0.6 }),
+    );
+  };
+
+  const scaleStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+  const fillStyle = useAnimatedStyle(() => ({
+    opacity: fill.value,
+    transform: [{ scale: 0.6 + fill.value * 0.4 }],
+  }));
+
+  return (
+    <TouchableOpacity
+      style={styles.actionButton}
+      onPress={handlePress}
+      activeOpacity={0.7}
+    >
+      <ReanimatedAnimated.View
+        style={[
+          { width: size, height: size, alignItems: "center", justifyContent: "center" },
+          scaleStyle,
+        ]}
+      >
+        <IconSet name={inactiveName as any} size={size} color={inactiveColor} />
+        <ReanimatedAnimated.View
+          style={[
+            StyleSheet.absoluteFill,
+            { alignItems: "center", justifyContent: "center" },
+            fillStyle,
+          ]}
+        >
+          <IconSet name={activeName as any} size={size} color={activeColor} />
+        </ReanimatedAnimated.View>
+      </ReanimatedAnimated.View>
+    </TouchableOpacity>
+  );
+});
 
 const PostCard = React.memo<PostCardProps>(({
   post,
@@ -142,12 +285,18 @@ const PostCard = React.memo<PostCardProps>(({
   onTogglePin,
   onDelete,
   onEdit,
+  compact = false,
+  videoCardVisible,
 }) => {
   const [showCommentsModal, setShowCommentsModal] = useState(false);
   const [showLikesModal, setShowLikesModal] = useState(false);
   const [authorData, setAuthorData] = useState<UserData | null>(null);
   const [authorLoading, setAuthorLoading] = useState(true);
   const [activeImageIndex, setActiveImageIndex] = useState(0);
+  // PostCard can be rendered full-width in Home or inside a narrower parent
+  // (for example Profile -> My Posts). Measure the real content column so
+  // media never assumes the full device width and spills past its card.
+  const [mediaWidth, setMediaWidth] = useState(DEFAULT_MEDIA_WIDTH);
 
   // Bookmark State
   const activeUserId = currentUserId || auth.currentUser?.uid;
@@ -169,9 +318,9 @@ const PostCard = React.memo<PostCardProps>(({
 
   useEffect(() => {
     let isActive = true;
+    const userIdToFetch = post.realUserId || post.userId;
 
     const fetchAuthor = async () => {
-      const userIdToFetch = post.realUserId || post.userId;
       if (!userIdToFetch || userIdToFetch === "anonymous") {
         if (isActive) {
           setAuthorData(null);
@@ -193,10 +342,21 @@ const PostCard = React.memo<PostCardProps>(({
     setAuthorLoading(true);
     fetchAuthor();
 
+    const unsubscribe = subscribeToUserDataUpdates((updatedId, updatedData) => {
+      if (
+        isActive &&
+        userIdToFetch &&
+        (updatedId === userIdToFetch || updatedId === authorData?.studentID)
+      ) {
+        setAuthorData((prev) => (prev ? { ...prev, ...updatedData } : null));
+      }
+    });
+
     return () => {
       isActive = false;
+      unsubscribe();
     };
-  }, [post.realUserId, post.userId]);
+  }, [authorData?.studentID, post.realUserId, post.userId]);
 
   const imageFiles = (post.files || []).filter(
     (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif"),
@@ -219,7 +379,7 @@ const PostCard = React.memo<PostCardProps>(({
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const slide = Math.round(
-      event.nativeEvent.contentOffset.x / IMAGE_WIDTH
+      event.nativeEvent.contentOffset.x / mediaWidth
     );
     if (slide !== activeImageIndex && slide >= 0 && slide < imageFiles.length) {
       setActiveImageIndex(slide);
@@ -276,7 +436,13 @@ const PostCard = React.memo<PostCardProps>(({
   const postFlair = getPostFlair(post.flair);
 
   return (
-    <View style={[styles.postCard, isHighlighted && styles.highlightedPostCard]}>
+    <View
+      style={[
+        styles.postCard,
+        isHighlighted && styles.highlightedPostCard,
+        compact && styles.postCardCompact,
+      ]}
+    >
       <View style={styles.hangingLayout}>
         <View style={styles.avatarColumn}>
           <PostAvatar
@@ -288,7 +454,15 @@ const PostCard = React.memo<PostCardProps>(({
           />
         </View>
 
-        <View style={styles.contentColumn}>
+        <View
+          style={styles.contentColumn}
+          onLayout={(event) => {
+            const measuredWidth = Math.round(event.nativeEvent.layout.width);
+            if (measuredWidth > 0 && measuredWidth !== mediaWidth) {
+              setMediaWidth(measuredWidth);
+            }
+          }}
+        >
           <PostHeader
             post={post}
             authorData={authorData}
@@ -314,8 +488,10 @@ const PostCard = React.memo<PostCardProps>(({
               <ExpandableText
                 text={post.content}
                 textStyle={styles.postContent}
-                collapsedLines={5}
-                minLengthToToggle={180}
+                collapsedLines={compact ? 3 : 5}
+                // In the trending scroller the card can't grow, so never offer
+                // an inline "show more" — the tap target is the card itself.
+                minLengthToToggle={compact ? Number.MAX_SAFE_INTEGER : 180}
                 buttonStyle={styles.toggleContainer}
                 buttonTextStyle={styles.toggleText}
               />
@@ -333,8 +509,12 @@ const PostCard = React.memo<PostCardProps>(({
             <View style={styles.mediaContainer}>
               <Image
                 source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }}
-                style={styles.gif}
-                resizeMode="cover"
+                style={[
+                  styles.gif,
+                  { width: mediaWidth },
+                  compact && styles.compactMedia,
+                ]}
+                contentFit="cover"
               />
             </View>
           )}
@@ -345,7 +525,10 @@ const PostCard = React.memo<PostCardProps>(({
                 <VideoMediaItem
                   key={`${video.url}-${index}`}
                   url={video.url}
-                  width={IMAGE_WIDTH}
+                  width={mediaWidth}
+                  cardVisible={videoCardVisible}
+                  captionStatus={post.captionStatus}
+                  captions={post.captions}
                 />
               ))}
             </View>
@@ -378,8 +561,14 @@ const PostCard = React.memo<PostCardProps>(({
                   >
                     <Image
                       source={{ uri: feedImage(item.url, FEED_IMAGE_WIDTH) }}
-                      style={styles.carouselImage}
-                      resizeMode="cover"
+                      style={[
+                        styles.carouselImage,
+                        {
+                          width: mediaWidth,
+                          height: compact ? mediaWidth * 0.62 : mediaWidth * 1.25,
+                        },
+                      ]}
+                      contentFit="cover"
                     />
                   </TouchableOpacity>
                 ))}
@@ -407,19 +596,21 @@ const PostCard = React.memo<PostCardProps>(({
           )}
           {post.link && <LinkPreview link={post.link} />}
 
-          <AiReplyCard reply={post.aiReply} />
+          {/* AI-reply block can be tall; omit it from the compact trending card. */}
+          {!compact && <AiReplyCard reply={post.aiReply} />}
 
           <View style={styles.actions}>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => onLike(post.id, post.likedBy || [])}
-            >
-              <Ionicons
-                name={isLiked ? "heart" : "heart-outline"}
-                size={20}
-                color={isLiked ? "#a61f1f" : "#956a5f"}
-              />
-            </TouchableOpacity>
+            <ActionToggleIcon
+              active={isLiked}
+              onToggle={() => onLike(post.id, post.likedBy || [])}
+              family="ionicons"
+              activeName="heart"
+              inactiveName="heart-outline"
+              size={20}
+              activeColor="#a61f1f"
+              inactiveColor="#956a5f"
+              withHaptic
+            />
 
             <TouchableOpacity
               style={styles.actionButton}
@@ -428,16 +619,16 @@ const PostCard = React.memo<PostCardProps>(({
               <Ionicons name="chatbubble-outline" size={19} color="#956a5f" />
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={handleToggleBookmark}
-            >
-              <MaterialIcons
-                name={isBookmarked ? "bookmark" : "bookmark-outline"}
-                size={21}
-                color={isBookmarked ? "#a61f1f" : "#956a5f"}
-              />
-            </TouchableOpacity>
+            <ActionToggleIcon
+              active={isBookmarked}
+              onToggle={handleToggleBookmark}
+              family="material"
+              activeName="bookmark"
+              inactiveName="bookmark-outline"
+              size={21}
+              activeColor="#a61f1f"
+              inactiveColor="#956a5f"
+            />
           </View>
 
           <View style={styles.statsRow}>
@@ -656,7 +847,7 @@ const PostAvatar: React.FC<{
         {authorLoading ? (
           <ActivityIndicator size="small" color="#956a5f" />
         ) : isIdentityVisible && resolveAvatarUri(authorData) ? (
-          <Image source={{ uri: avatarThumb(resolveAvatarUri(authorData), AVATAR_SIZE_SMALL) }} style={styles.avatarImage} />
+           <Image source={{ uri: avatarThumb(resolveAvatarUri(authorData), AVATAR_SIZE_SMALL) }} style={styles.avatarImage} />
         ) : isIdentityVisible ? (
           <Text style={[styles.avatarText, { color: roleColor }]}>
             {(
@@ -737,8 +928,13 @@ const PostHeader: React.FC<{
     authorRole,
   });
 
+  const isStaffViewer = isStaff(currentUserRole);
+
   const getAuthorDisplayName = () => {
     if (!isIdentityVisible) {
+      if (post.isAnonymous && isOwnPost && isStaffViewer) {
+        return "Anonymous (You)";
+      }
       return "Anonymous";
     }
 
@@ -747,12 +943,14 @@ const PostHeader: React.FC<{
 
     const fullName = `${firstName} ${lastName}`.trim();
 
-    return (
-      fullName ||
-      post.authorName?.trim() ||
-      post.username?.trim() ||
-      "User"
-    );
+    if (fullName) return fullName;
+
+    const fallback = post.authorName?.trim() || post.username?.trim() || "User";
+    if (post.isAnonymous && /^Anonymous\d*$/i.test(fallback)) {
+      return isOwnPost && isStaffViewer ? "Anonymous (You)" : "Anonymous";
+    }
+
+    return fallback;
   };
 
   const displayName = getAuthorDisplayName();
@@ -762,10 +960,28 @@ const PostHeader: React.FC<{
     !!authorData?.userId &&
     authorData.userId !== "anonymous";
 
-  const isPinned = !!post.pinnedAt;
+  const isPinned = useMemo(() => {
+    if (!post.pinnedAt) return false;
+    if (!post.pinExpiresAt) return true;
+    const expiresVal = post.pinExpiresAt;
+    const expiresMs =
+      typeof expiresVal?.toMillis === "function"
+        ? expiresVal.toMillis()
+        : typeof expiresVal?.seconds === "number"
+          ? expiresVal.seconds * 1000
+          : new Date(expiresVal).getTime();
+    return expiresMs > 0 ? Date.now() < expiresMs : true;
+  }, [post.pinnedAt, post.pinExpiresAt]);
 
   const canEdit = authorUserId === currentUserId && !!onEdit;
-  const canOpenOptions = canPin || canDelete || canEdit || !!currentUserId;
+  const canReport =
+    canReportContent(currentUserRole, authorRole, post.isAnonymous === true) &&
+    !isOwnPost;
+  const canOpenOptions =
+    (canPin && !!onTogglePin) ||
+    (canDelete && !!onDelete) ||
+    canEdit ||
+    canReport;
 
   const handleProfileClick = () => {
     if (!canClickProfile) return;
@@ -818,11 +1034,11 @@ const PostHeader: React.FC<{
       return;
     }
 
-    if (isOwnPost) {
+    if (!canReport) {
       setPendingReportReason(null);
       setReportFeedback({
         title: "Report unavailable",
-        description: "You cannot report your own post.",
+        description: "This post cannot be reported.",
         destructive: true,
       });
       return;
@@ -1026,7 +1242,7 @@ const PostHeader: React.FC<{
               </TouchableOpacity>
             )}
 
-            {currentUserRole !== "admin" && !isOwnPost && (
+            {canReport && (
               <TouchableOpacity
                 style={styles.actionMenuItem}
                 activeOpacity={0.75}
@@ -1166,33 +1382,30 @@ const FilesList: React.FC<{
     }
   };
 
-  const getFileIcon = (mimeType: string) => {
-    if (mimeType.includes("pdf")) return "document-text";
-    if (mimeType.includes("word") || mimeType.includes("document"))
-      return "document";
-    return "document-attach";
-  };
-
   return (
     <View style={styles.filesContainer}>
-      {files.map((file, idx) => (
-        <TouchableOpacity
-          key={idx}
-          style={styles.fileCard}
-          onPress={() => onFilePress(file.url, file.mimeType)}
-          activeOpacity={0.7}
-        >
-          <Ionicons
-            name={getFileIcon(file.mimeType)}
-            size={18}
-            color="#c28724"
-          />
-          <Text style={styles.fileName} numberOfLines={1}>
-            {file.name || getFileNameFromUrl(file.url)}
-          </Text>
-          <Ionicons name="download-outline" size={14} color="#956a5f" />
-        </TouchableOpacity>
-      ))}
+      {files.map((file, idx) => {
+        const displayName = file.name || getFileNameFromUrl(file.url);
+        const details = getFileIconDetails(file.mimeType, displayName);
+        return (
+          <TouchableOpacity
+            key={idx}
+            style={styles.fileCard}
+            onPress={() => onFilePress(file.url, file.mimeType)}
+            activeOpacity={0.7}
+          >
+            <Ionicons
+              name={details.icon}
+              size={18}
+              color={details.color}
+            />
+            <Text style={styles.fileName} numberOfLines={1}>
+              {displayName}
+            </Text>
+            <Ionicons name="download-outline" size={14} color="#956a5f" />
+          </TouchableOpacity>
+        );
+      })}
     </View>
   );
 };
@@ -1250,6 +1463,15 @@ const styles = StyleSheet.create({
     borderLeftWidth: 4,
     borderLeftColor: "#a61f1f",
     backgroundColor: "#fff4ee",
+  },
+  // Trailing divider only makes sense in the vertical feed; the trending
+  // scroller wraps each card in its own bordered container.
+  postCardCompact: {
+    borderBottomWidth: 0,
+    paddingVertical: 12,
+  },
+  compactMedia: {
+    height: 150,
   },
   hangingLayout: { flexDirection: "row", overflow: "visible" },
   avatarColumn: { width: AVATAR_COLUMN_WIDTH, marginRight: AVATAR_COLUMN_GAP },
@@ -1612,8 +1834,8 @@ const styles = StyleSheet.create({
     position: "relative",
   },
   carouselImage: {
-    width: IMAGE_WIDTH,
-    height: IMAGE_WIDTH * 1.25,
+    width: DEFAULT_MEDIA_WIDTH,
+    height: DEFAULT_MEDIA_WIDTH * 1.25,
     backgroundColor: "#efe1d6",
     borderRadius: 18,
   },
@@ -1646,7 +1868,7 @@ const styles = StyleSheet.create({
     marginVertical: 10,
   },
   gif: {
-    width: IMAGE_WIDTH,
+    width: DEFAULT_MEDIA_WIDTH,
     height: 220,
     borderRadius: 12,
     backgroundColor: "#efe1d6",

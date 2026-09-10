@@ -1,69 +1,89 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import { uploadProfileImage } from "@/utils/cloudinaryUpload";
-import ImageZoomViewer from "../components/ImageZoomViewer";
-import PostCard from "../components/PostCard";
-import CommentModal from "../components/CommentModal";
+import { endPresenceSession } from "@/utils/presence";
 import { Ionicons } from "@expo/vector-icons";
-import * as ImagePicker from "expo-image-picker";
 import DateTimePicker from "@react-native-community/datetimepicker";
+import * as ImagePicker from "expo-image-picker";
 import {
-  EmailAuthProvider,
-  User as FirebaseUser,
-  reauthenticateWithCredential,
-  signOut,
-  updatePassword,
+    EmailAuthProvider,
+    User as FirebaseUser,
+    reauthenticateWithCredential,
+    signOut,
+    updatePassword,
+    updateProfile,
 } from "firebase/auth";
 import {
-  collection,
-  deleteDoc,
-  doc,
-  getDocs,
-  increment,
-  onSnapshot,
-  query,
-  setDoc,
-  updateDoc,
-  where,
+    collection,
+    deleteDoc,
+    doc,
+    getDocs,
+    increment,
+    limit,
+    onSnapshot,
+    orderBy,
+    query,
+    updateDoc,
+    where,
 } from "firebase/firestore";
 import DropDownPicker from "react-native-dropdown-picker";
+import CommentModal from "../components/CommentModal";
+import ImageZoomViewer from "../components/ImageZoomViewer";
+import PostCard from "../components/PostCard";
+import { FeedSkeleton } from "../components/Skeleton";
 
-import { getProfileIdLabel } from "@/utils/profileLabels";
-import { buildUserProfileHref } from "@/utils/profileNavigation";
-import {
-  removeLikeNotification,
-  upsertLikeNotification,
-} from "@/utils/notifications";
-import { resolveUserRoleForAuthUser, UserRole } from "@/utils/rbac";
-import { useRelativeTimeNow } from "@/utils/relativeTime";
-import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { AVATAR_SIZE_LARGE, avatarThumb } from "@/utils/cloudinaryImages";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useNetworkStatus } from "@/utils/networkUtils";
+import {
+    removeLikeNotification,
+    upsertLikeNotification,
+} from "@/utils/notifications";
+import {
+    getCachedMyPosts,
+    getCachedMyProfile,
+    saveCachedMyPosts,
+    saveCachedMyProfile,
+} from "@/utils/offlineStorage";
+import { validateNewPassword } from "@/utils/passwordPolicy";
+import {
+    confirmRecoveryEmailVerification,
+    startRecoveryEmailVerification,
+} from "@/utils/passwordReset";
+import { getProfileIdLabel } from "@/utils/profileLabels";
+import {
+    isPushNotificationsSupported,
+    unregisterDeviceForPushNotifications,
+} from "@/utils/pushNotifications";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
+import { resolveUserRoleForAuthUser, updateUserDataCache, UserRole } from "@/utils/rbac";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { Image } from "expo-image";
+import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
 } from "react";
 import {
-  ActivityIndicator,
-  Alert,
-  Animated,
-  AppState,
-  BackHandler,
-  Image,
-  Linking,
-  Modal,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Animated,
+    BackHandler,
+    Linking,
+    Modal,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
+import ConfirmDialog, {
+    type ConfirmDialogVariant,
+} from "../components/ConfirmDialog";
 
 type Student = {
   firstname?: string;
@@ -74,7 +94,10 @@ type Student = {
   email?: string;
   profileImage?: string;
   isOnline?: boolean;
+  activeStatusEnabled?: boolean;
   role?: string;
+  recoveryEmail?: string;
+  recoveryEmailVerified?: boolean;
 };
 
 type TabKey = "info" | "password" | "photo";
@@ -122,6 +145,13 @@ const POST_SORT_OPTIONS: { key: PostSortOption; label: string }[] = [
 
 const PROFILE_RETURN_ROUTE = "/(main)/(tabs)/ProfileScreen";
 
+// How many of the user's own posts to load per page. Matches UserProfileScreen's
+// PAGE_SIZE so both profile screens paginate post history the same way. The
+// query keeps its live onSnapshot but is now bounded and grown by "Load more"
+// (same limit-grow pattern as ManageModerationScreen), instead of streaming a
+// year's worth of posts on every visit.
+const MY_POSTS_PAGE_SIZE = 20;
+
 const isSameCalendarDay = (timestamp: any, target: Date): boolean => {
   if (!timestamp || typeof timestamp.toDate !== "function") return false;
   const date = timestamp.toDate();
@@ -153,6 +183,7 @@ const TABS: {
 
 const ProfileScreen = () => {
   const { returnTo } = useLocalSearchParams<{ returnTo?: string | string[] }>();
+  const { isOffline } = useNetworkStatus();
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [student, setStudent] = useState<Student | null>(null);
   const [editedData, setEditedData] = useState<EditData>({
@@ -163,6 +194,58 @@ const ProfileScreen = () => {
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [viewImageVisible, setViewImageVisible] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  // Single dialog state used to render every alert on this screen through
+  // the app's branded ConfirmDialog instead of the bare native Alert.alert.
+  const [dialog, setDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    variant?: ConfirmDialogVariant;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
+  const showInfo = (title: string, description?: string, onConfirm?: () => void) => {
+    const t = title.toLowerCase();
+    const variant: ConfirmDialogVariant = /success|updated|verified|changed|saved/.test(t)
+      ? "success"
+      : /error|failed|unable/.test(t)
+        ? "destructive"
+        : /validation|required|invalid|weak|same/.test(t)
+          ? "warning"
+          : "info";
+    setDialog({
+      title,
+      description,
+      variant,
+      destructive: false,
+      confirmText: "OK",
+      singleAction: true,
+      onConfirm: () => {
+        setDialog(null);
+        onConfirm?.();
+      },
+    });
+  };
+  const showConfirm = (options: {
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    onConfirm: () => void;
+  }) => {
+    setDialog({
+      ...options,
+      onConfirm: () => {
+        setDialog(null);
+        options.onConfirm();
+      },
+    });
+  };
+
   const scaleAnim = useRef(new Animated.Value(0)).current;
   const router = useRouter();
   const navigation = useNavigation();
@@ -173,6 +256,10 @@ const ProfileScreen = () => {
   const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>();
   const [myPosts, setMyPosts] = useState<Post[]>([]);
   const [myPostsLoading, setMyPostsLoading] = useState(true);
+  // Fix 4: bounded, "Load more"-grown page size for the own-posts query.
+  const [myPostsLimit, setMyPostsLimit] = useState(MY_POSTS_PAGE_SIZE);
+  const [hasMoreMyPosts, setHasMoreMyPosts] = useState(true);
+  const [loadingMoreMyPosts, setLoadingMoreMyPosts] = useState(false);
   const [postSearchQuery, setPostSearchQuery] = useState("");
   const [postSortOption, setPostSortOption] = useState<PostSortOption>("newest");
   const [showSortMenu, setShowSortMenu] = useState(false);
@@ -208,7 +295,10 @@ const ProfileScreen = () => {
 
   // Live listener on the signed-in user's own posts. realUserId is always
   // set to the true auth uid on creation (even for anonymous posts), so a
-  // single query covers both anonymous and regular posts.
+  // single query covers both anonymous and regular posts. Bounded to
+  // myPostsLimit (grown by "Load more") so an active user's whole post
+  // history isn't streamed on every visit — needs the existing
+  // posts(realUserId ASC, createdAt DESC) composite index.
   useEffect(() => {
     if (!user?.uid) {
       setMyPosts([]);
@@ -216,21 +306,44 @@ const ProfileScreen = () => {
       return;
     }
 
+    getCachedMyPosts<Post>(user.uid).then((cached) => {
+      if (cached && cached.length > 0) {
+        setMyPosts(cached);
+        setMyPostsLoading(false);
+      }
+    });
+
     setMyPostsLoading(true);
-    const q = query(collection(db, "posts"), where("realUserId", "==", user.uid));
+    const q = query(
+      collection(db, "posts"),
+      where("realUserId", "==", user.uid),
+      orderBy("createdAt", "desc"),
+      limit(myPostsLimit),
+    );
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        setMyPosts(snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as Post)));
+        const nextPosts = snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as Post));
+        setMyPosts(nextPosts);
+        saveCachedMyPosts(user.uid, nextPosts);
+        setHasMoreMyPosts(snapshot.size === myPostsLimit);
         setMyPostsLoading(false);
+        setLoadingMoreMyPosts(false);
       },
       (error) => {
         console.error("Error loading your posts:", error);
         setMyPostsLoading(false);
+        setLoadingMoreMyPosts(false);
       },
     );
     return unsubscribe;
-  }, [user?.uid]);
+  }, [user?.uid, myPostsLimit]);
+
+  const loadMoreMyPosts = useCallback(() => {
+    if (loadingMoreMyPosts || !hasMoreMyPosts) return;
+    setLoadingMoreMyPosts(true);
+    setMyPostsLimit((current) => current + MY_POSTS_PAGE_SIZE);
+  }, [hasMoreMyPosts, loadingMoreMyPosts]);
 
   useEffect(() => {
     if (!user) {
@@ -331,9 +444,17 @@ const ProfileScreen = () => {
         const email = currentUser.email ?? "";
         const studentID = email.split("@")[0] || currentUser.uid;
 
-        setDoc(doc(db, "students", studentID), { isOnline: true }, { merge: true }).catch(
-          (error) => console.error("Error setting online status:", error),
-        );
+        getCachedMyProfile<Student>(currentUser.uid).then((cached) => {
+          if (cached) {
+            setStudent(cached);
+            setProfileImage(cached.profileImage);
+            setEditedData((prev) => ({
+              ...prev,
+              yearlvl: cached.yearlvl,
+              email: cached.email || "",
+            }));
+          }
+        });
 
         unsubscribeProfile = onSnapshot(
           doc(db, "students", studentID),
@@ -341,6 +462,7 @@ const ProfileScreen = () => {
             if (docSnapshot.exists()) {
               const data = docSnapshot.data() as Student;
               setStudent(data);
+              saveCachedMyProfile(currentUser.uid, data);
               setProfileImage(data.profileImage);
               setEditedData((prev) => ({
                 ...prev,
@@ -367,29 +489,6 @@ const ProfileScreen = () => {
     };
   }, []);
 
-  useEffect(() => {
-    const subscription = AppState.addEventListener(
-      "change",
-      async (nextAppState) => {
-        if (!user || !auth.currentUser) return;
-
-        const email = user.email ?? "";
-        const studentID = email.split("@")[0] || user.uid;
-
-        try {
-          const isOnline = nextAppState === "active";
-          await setDoc(doc(db, "students", studentID), { isOnline }, { merge: true });
-        } catch (error) {
-          console.error("Error updating online status:", error);
-        }
-      },
-    );
-
-    return () => {
-      subscription.remove();
-    };
-  }, [user]);
-
   // ─── My Posts: handlers ─────────────────────────────────────────────
   const deleteCommentTree = useCallback(async (parentId: string) => {
     const commentsSnapshot = await getDocs(
@@ -409,6 +508,10 @@ const ProfileScreen = () => {
   const handleLike = useCallback(
     async (postId: string, currentLikedBy: string[] = []) => {
       if (!user) return;
+      if (isOffline) {
+        showInfo("Offline", "You are currently offline. Liking posts is unavailable.");
+        return;
+      }
       if (likeInFlightRef.current.has(postId)) return;
       likeInFlightRef.current.add(postId);
 
@@ -448,38 +551,42 @@ const ProfileScreen = () => {
         likeInFlightRef.current.delete(postId);
       }
     },
-    [myPosts, user],
+    [isOffline, myPosts, user],
   );
 
   const handleEditPost = useCallback(
     (postId: string) => {
+      if (isOffline) {
+        showInfo("Offline", "You are currently offline. Editing posts is unavailable.");
+        return;
+      }
       router.push({ pathname: "/CreatePostScreen", params: { editPostId: postId } });
     },
-    [router],
+    [isOffline, router],
   );
 
   const handleDeletePost = useCallback(
     (postId: string) => {
-      Alert.alert(
-        "Delete Post",
-        "This will permanently remove the post, comments, and replies.",
-        [
-          { text: "Cancel", style: "cancel" },
-          {
-            text: "Delete",
-            style: "destructive",
-            onPress: async () => {
-              try {
-                await deleteCommentTree(postId);
-                await deleteDoc(doc(db, "posts", postId));
-              } catch (error) {
-                console.error("Error deleting post:", error);
-                Alert.alert("Error", "Failed to delete post.");
-              }
-            },
-          },
-        ],
-      );
+      if (isOffline) {
+        showInfo("Offline", "You are currently offline. Deleting posts is unavailable.");
+        return;
+      }
+      showConfirm({
+        title: "Delete Post",
+        description: "This will permanently remove the post, comments, and replies.",
+        confirmText: "Delete",
+        cancelText: "Cancel",
+        destructive: true,
+        onConfirm: async () => {
+          try {
+            await deleteCommentTree(postId);
+            await deleteDoc(doc(db, "posts", postId));
+          } catch (error) {
+            console.error("Error deleting post:", error);
+            showInfo("Error", "Failed to delete post.");
+          }
+        },
+      });
     },
     [deleteCommentTree],
   );
@@ -545,9 +652,13 @@ const ProfileScreen = () => {
   const updateStudent = useCallback(
     async (data: Partial<Student>) => {
       if (!student?.studentID || !auth.currentUser) return;
+      if (isOffline) {
+        showInfo("Offline", "You are currently offline. Changes cannot be saved until you reconnect.");
+        return;
+      }
 
       try {
-        const payload = { ...data };
+        const payload: Record<string, any> = { ...data };
         if (
           payload.email?.endsWith("@student.csap") ||
           payload.email?.endsWith("@teacher.csap") ||
@@ -556,18 +667,39 @@ const ProfileScreen = () => {
           delete payload.email;
         }
 
+        // App-wide search: keep the lowercased name fields in step with any
+        // first/last name edit so the profile stays findable.
+        if (typeof payload.firstname === "string") {
+          payload.firstnameLower = payload.firstname.trim().toLowerCase();
+        }
+        if (typeof payload.lastname === "string") {
+          payload.lastnameLower = payload.lastname.trim().toLowerCase();
+        }
+
+        if (auth.currentUser?.uid) {
+          payload.userId = auth.currentUser.uid;
+          payload.uid = auth.currentUser.uid;
+        }
+
         await updateDoc(doc(db, "students", student.studentID), payload);
+        if (auth.currentUser?.uid && auth.currentUser.uid !== student.studentID) {
+          updateDoc(doc(db, "students", auth.currentUser.uid), payload).catch(() => {});
+        }
         setStudent((prev) => (prev ? { ...prev, ...payload } : prev));
       } catch (error) {
         console.error("Error updating student:", error);
         throw error;
       }
     },
-    [student?.studentID],
+    [isOffline, student?.studentID],
   );
 
   const handleImagePick = useCallback(
     async (useCamera = false) => {
+      if (isOffline) {
+        showInfo("Offline", "You are currently offline. Updating profile photo is unavailable.");
+        return;
+      }
       setLoading(true);
       try {
         const permission = useCamera
@@ -575,7 +707,7 @@ const ProfileScreen = () => {
           : await ImagePicker.requestMediaLibraryPermissionsAsync();
 
         if (permission.status !== "granted") {
-          Alert.alert(
+          showInfo(
             "Permission required",
             `Allow ${useCamera ? "camera" : "photo"} access.`,
           );
@@ -597,16 +729,20 @@ const ProfileScreen = () => {
           setEditModalVisible(true);
         }
       } catch (error: any) {
-        Alert.alert("Error", `Failed to update photo: ${error.message}`);
+        showInfo("Error", `Failed to update photo: ${error.message}`);
       } finally {
         setLoading(false);
       }
     },
-    [updateStudent],
+    [isOffline, updateStudent],
   );
 
   const commitPendingProfileImage = useCallback(async () => {
     if (!pendingProfileImage) return;
+    if (isOffline) {
+      showInfo("Offline", "You are currently offline. Uploading profile photo is unavailable.");
+      return;
+    }
     setLoading(true);
     try {
       const cloudinaryUrl = await uploadProfileImage(pendingProfileImage);
@@ -614,52 +750,64 @@ const ProfileScreen = () => {
       setProfileImage(cloudinaryUrl);
       setPendingProfileImage(null);
       setEditModalVisible(false);
-      Alert.alert("Success", "Profile photo updated!");
+
+      if (auth.currentUser) {
+        updateProfile(auth.currentUser, { photoURL: cloudinaryUrl }).catch((err) =>
+          console.warn("Error updating auth photoURL:", err),
+        );
+      }
+
+      const keysToUpdate = [
+        user?.uid,
+        student?.studentID,
+        user?.email?.split("@")[0]?.trim(),
+      ].filter(Boolean);
+      updateUserDataCache(keysToUpdate, { profileImage: cloudinaryUrl });
+      if (user?.uid && student) {
+        saveCachedMyProfile(user.uid, { ...student, profileImage: cloudinaryUrl });
+      }
+      showInfo("Success", "Profile photo updated!");
     } catch (error: any) {
-      Alert.alert("Error", `Failed to update photo: ${error?.message || "Please try again."}`);
+      showInfo("Error", `Failed to update photo: ${error?.message || "Please try again."}`);
     } finally {
       setLoading(false);
     }
-  }, [pendingProfileImage, updateStudent]);
+  }, [isOffline, pendingProfileImage, student, updateStudent, user]);
 
   const toggleOnlineStatus = useCallback(async () => {
     if (!student || !auth.currentUser) return;
-    const newStatus = !student.isOnline;
+    if (isOffline) {
+      showInfo("Offline", "You are currently offline. Status cannot be changed.");
+      return;
+    }
+    const newStatus = student.activeStatusEnabled === false;
 
     try {
-      await updateStudent({ isOnline: newStatus });
+      await updateStudent({ activeStatusEnabled: newStatus, isOnline: newStatus });
     } catch {
-      Alert.alert("Error", "Failed to update status");
+      showInfo("Error", "Failed to update status");
     }
-  }, [student, updateStudent]);
-
-  const handleSave = useCallback(async () => {
-    if (!student?.studentID) {
-      return Alert.alert("Error", "Missing student ID");
-    }
-
-    if (!editedData.yearlvl) {
-      return Alert.alert("Validation", "Please select a Year Level.");
-    }
-
-    try {
-      await updateStudent({
-        yearlvl: editedData.yearlvl,
-        email: editedData.email || "",
-      });
-      Alert.alert("Success", "Profile updated successfully");
-      setEditModalVisible(false);
-    } catch {
-      Alert.alert("Error", "Failed to update profile");
-    }
-  }, [student?.studentID, editedData.yearlvl, editedData.email, updateStudent]);
+  }, [isOffline, student, updateStudent]);
 
   const handleChangePassword = useCallback(async () => {
     if (!user) return;
+    if (isOffline) {
+      return showInfo("Offline", "You are currently offline. Changing password is unavailable.");
+    }
 
     const { currentPassword, newPassword } = editedData;
     if (!currentPassword || !newPassword) {
-      return Alert.alert("Error", "Enter both current and new password.");
+      return showInfo("Error", "Enter both current and new password.");
+    }
+    if (currentPassword === newPassword) {
+      return showInfo(
+        "Same Password",
+        "Your new password must be different from your current one.",
+      );
+    }
+    const policyError = validateNewPassword(newPassword);
+    if (policyError) {
+      return showInfo("Weak Password", policyError);
     }
 
     try {
@@ -669,57 +817,33 @@ const ProfileScreen = () => {
       );
       await reauthenticateWithCredential(user, credential);
       await updatePassword(user, newPassword);
-      Alert.alert("Success", "Password changed successfully!");
+      showInfo("Success", "Password changed successfully!");
       setEditedData((prev) => ({
         ...prev,
         currentPassword: "",
         newPassword: "",
       }));
     } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to change password");
+      showInfo("Error", error.message || "Failed to change password");
     }
   }, [user, editedData.currentPassword, editedData.newPassword]);
 
-  const handleLogout = useCallback(async () => {
-    let confirmed: boolean;
-
-    if (Platform.OS === "web") {
-      confirmed = window.confirm("Are you sure you want to log out?");
-    } else {
-      confirmed = await new Promise<boolean>((resolve) => {
-        Alert.alert(
-          "Log Out",
-          "Are you sure you want to log out?",
-          [
-            { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
-            {
-              text: "Log Out",
-              style: "destructive",
-              onPress: () => resolve(true),
-            },
-          ],
-          { cancelable: true, onDismiss: () => resolve(false) },
-        );
-      });
-    }
-
-    if (!confirmed) return;
-
+  const performLogout = useCallback(async () => {
     try {
-      if (user) {
-        const email = user.email ?? "";
-        const studentID = email.split("@")[0] || user.uid;
-        if (studentID) {
-          try {
-            await setDoc(
-              doc(db, "students", studentID),
-              { isOnline: false },
-              { merge: true },
-            );
-          } catch (err) {
-            console.warn("Offline status failed:", err);
-          }
-        }
+      await endPresenceSession();
+
+      // While request.auth.uid still matches the userPushTokens doc id — the
+      // only window the rule allows the write. Detaching the device here is
+      // what stops this account's notifications from ringing on the phone
+      // once someone else signs in. A failure must never strand the user in a
+      // half-logged-out state, so it is caught rather than awaited to throw.
+      const signedInUser = auth.currentUser;
+      if (signedInUser && isPushNotificationsSupported()) {
+        await unregisterDeviceForPushNotifications(signedInUser).catch(
+          (error) => {
+            console.error("Push unregister on logout failed:", error);
+          },
+        );
       }
 
       await signOut(auth);
@@ -732,12 +856,33 @@ const ProfileScreen = () => {
     } catch (e: any) {
       console.error("Logout failed:", e);
       if (Platform.OS !== "web") {
-        Alert.alert("Error", "Failed to log out. Please try again.");
+        showInfo("Error", "Failed to log out. Please try again.");
       } else {
         alert("Failed to log out: " + (e.message || "Unknown error"));
       }
     }
   }, [user, router]);
+
+  const handleLogout = useCallback(() => {
+    if (Platform.OS === "web") {
+      // window.confirm is a browser-native dialog, distinct from React
+      // Native's Alert.alert — left as-is; ConfirmDialog is an RN component
+      // and this branch only runs on web.
+      if (window.confirm("Are you sure you want to log out?")) {
+        performLogout();
+      }
+      return;
+    }
+
+    showConfirm({
+      title: "Log Out",
+      description: "Are you sure you want to log out?",
+      confirmText: "Log Out",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: performLogout,
+    });
+  }, [performLogout]);
 
   const openModal = useCallback(() => {
     Animated.spring(scaleAnim, {
@@ -819,12 +964,13 @@ const ProfileScreen = () => {
   );
 
   const displayEmail =
-    student?.email &&
+    student?.recoveryEmail?.trim() ||
+    (student?.email &&
     !student.email.endsWith("@student.csap") &&
     !student.email.endsWith("@teacher.csap") &&
     !student.email.endsWith("@admin.csap")
       ? student.email
-      : "No email added";
+      : "No email added");
 
   return (
     <SafeAreaView style={styles.container}>
@@ -856,6 +1002,15 @@ const ProfileScreen = () => {
             <View style={styles.headerBackSpacer} />
           </View>
         </View>
+
+        {isOffline && (
+          <View style={styles.offlineStatusBar}>
+            <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+            <Text style={styles.offlineStatusText}>
+              Offline mode • Viewing saved profile and posts
+            </Text>
+          </View>
+        )}
 
         <ScrollView
           contentContainerStyle={styles.scroll}
@@ -1069,9 +1224,7 @@ const ProfileScreen = () => {
 
             {/* Post list */}
             {myPostsLoading ? (
-              <View style={styles.postsEmptyState}>
-                <ActivityIndicator size="small" color="#a61f1f" />
-              </View>
+              <FeedSkeleton count={3} />
             ) : myPosts.length === 0 ? (
               <View style={styles.postsEmptyState}>
                 <Ionicons name="albums-outline" size={32} color="#c9a89c" />
@@ -1116,6 +1269,25 @@ const ProfileScreen = () => {
                   onDelete={handleDeletePost}
                 />
               ))
+            )}
+
+            {/* Fix 4: page through post history instead of streaming all of it. */}
+            {!myPostsLoading && myPosts.length > 0 && hasMoreMyPosts && (
+              <TouchableOpacity
+                style={styles.loadMoreButton}
+                onPress={loadMoreMyPosts}
+                disabled={loadingMoreMyPosts}
+                activeOpacity={0.85}
+              >
+                {loadingMoreMyPosts ? (
+                  <ActivityIndicator size="small" color="#5f0909" />
+                ) : (
+                  <>
+                    <Ionicons name="chevron-down-circle-outline" size={17} color="#5f0909" />
+                    <Text style={styles.loadMoreButtonText}>Load more</Text>
+                  </>
+                )}
+              </TouchableOpacity>
             )}
           </View>
         </ScrollView>
@@ -1203,7 +1375,9 @@ const ProfileScreen = () => {
         editedData={editedData}
         onTabChange={handleTabChange}
         onDataChange={updateEditedData}
-        onSave={handleSave}
+        infoStudentID={student?.studentID ?? user?.email?.split("@")[0] ?? ""}
+        infoEmail={student?.recoveryEmail}
+        infoVerified={student?.recoveryEmailVerified}
         onChangePassword={handleChangePassword}
         onImagePick={handleImagePick}
         pendingProfileImage={pendingProfileImage}
@@ -1219,6 +1393,19 @@ const ProfileScreen = () => {
         visible={viewImageVisible}
         onClose={() => setViewImageVisible(false)}
         showActions={false}
+      />
+
+      <ConfirmDialog
+        visible={!!dialog}
+        title={dialog?.title ?? ""}
+        description={dialog?.description}
+        confirmText={dialog?.confirmText ?? "Confirm"}
+        cancelText={dialog?.cancelText}
+        destructive={dialog?.destructive ?? true}
+        variant={dialog?.variant}
+        singleAction={dialog?.singleAction ?? false}
+        onConfirm={() => dialog?.onConfirm()}
+        onCancel={() => setDialog(null)}
       />
     </SafeAreaView>
   );
@@ -1291,9 +1478,11 @@ const EditModal = ({
   onShow,
   onClose,
   editedData,
+  infoStudentID,
+  infoEmail,
+  infoVerified,
   onTabChange,
   onDataChange,
-  onSave,
   onChangePassword,
   onImagePick,
   loading,
@@ -1306,9 +1495,11 @@ const EditModal = ({
   onShow: () => void;
   onClose: () => void;
   editedData: EditData;
+  infoStudentID: string;
+  infoEmail?: string;
+  infoVerified?: boolean;
   onTabChange: (key: TabKey) => void;
   onDataChange: (field: keyof EditData, value: string) => void;
-  onSave: () => void;
   onChangePassword: () => void;
   onImagePick: (useCamera: boolean) => void;
   loading: boolean;
@@ -1369,9 +1560,9 @@ const EditModal = ({
             <>
               {editedData.selectedTab === "info" && (
                 <InfoTab
-                  editedData={editedData}
-                  onDataChange={onDataChange}
-                  onSave={onSave}
+                  studentID={infoStudentID}
+                  initialEmail={infoEmail}
+                  initialVerified={infoVerified}
                 />
               )}
 
@@ -1404,33 +1595,214 @@ const EditModal = ({
   </Modal>
 );
 
-// Cleaned-up InfoTab for Edit Modal (Email only)
+// Personal email address = the account's recovery email. Saving a new one
+// verifies it with a 6-digit code (utils/passwordReset -> the Worker) so
+// "Forgot password?" has a real inbox to send the reset code to.
 const InfoTab = ({
-  editedData,
-  onDataChange,
-  onSave,
+  studentID,
+  initialEmail,
+  initialVerified,
 }: {
-  editedData: EditData;
-  onDataChange: (field: keyof EditData, value: string) => void;
-  onSave: () => void;
-}) => (
-  <>
-    <Text style={styles.inputLabel}>Personal Email Address</Text>
-    <TextInput
-      style={styles.input}
-      placeholder="Enter email address"
-      placeholderTextColor="rgba(155,118,108,0.6)"
-      value={editedData.email ?? ""}
-      onChangeText={(text: string) => onDataChange("email", text)}
-      keyboardType="email-address"
-      autoCapitalize="none"
-    />
+  studentID: string;
+  initialEmail?: string;
+  initialVerified?: boolean;
+}) => {
+  const [savedEmail, setSavedEmail] = useState(initialEmail ?? "");
+  const [savedVerified, setSavedVerified] = useState(initialVerified === true);
+  const [draft, setDraft] = useState(initialEmail ?? "");
+  const [stage, setStage] = useState<"email" | "code">("email");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [cooldown, setCooldown] = useState(0);
+  const cooldownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    <TouchableOpacity style={styles.primaryBtn} onPress={onSave}>
-      <Text style={styles.primaryText}>Save Changes</Text>
-    </TouchableOpacity>
-  </>
-);
+  useEffect(() => {
+    setSavedEmail(initialEmail ?? "");
+    setSavedVerified(initialVerified === true);
+    setDraft(initialEmail ?? "");
+  }, [initialEmail, initialVerified]);
+
+  useEffect(
+    () => () => {
+      if (cooldownRef.current) clearInterval(cooldownRef.current);
+    },
+    [],
+  );
+
+  const startCooldown = useCallback(() => {
+    setCooldown(60);
+    if (cooldownRef.current) clearInterval(cooldownRef.current);
+    cooldownRef.current = setInterval(() => {
+      setCooldown((v) => {
+        if (v <= 1 && cooldownRef.current) {
+          clearInterval(cooldownRef.current);
+          cooldownRef.current = null;
+        }
+        return v - 1;
+      });
+    }, 1000);
+  }, []);
+
+  const trimmed = draft.trim().toLowerCase();
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+  const emailChanged = trimmed !== savedEmail.trim().toLowerCase();
+  const nothingToDo = !emailChanged && savedVerified;
+
+  const editEmail = (text: string) => {
+    setDraft(text);
+    setError(null);
+    if (stage === "code") {
+      setStage("email");
+      setCode("");
+      setNotice(null);
+    }
+  };
+
+  const sendCode = useCallback(async () => {
+    if (busy || cooldown > 0) return;
+    setError(null);
+    setNotice(null);
+    if (!emailValid) {
+      setError("Enter a valid email address.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await startRecoveryEmailVerification(studentID, trimmed);
+      setStage("code");
+      setNotice(`Code sent to ${trimmed}.`);
+      startCooldown();
+    } catch (e: any) {
+      setError(e?.message || "Couldn't send the code. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, cooldown, emailValid, studentID, trimmed, startCooldown]);
+
+  const onSave = useCallback(async () => {
+    if (busy || nothingToDo) return;
+    if (stage === "email") {
+      await sendCode();
+      return;
+    }
+    setError(null);
+    if (!/^\d{6}$/.test(code.trim())) {
+      setError("Enter the 6-digit code.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = (await confirmRecoveryEmailVerification(
+        studentID,
+        code.trim(),
+      )) as { recoveryEmail?: string };
+      setSavedEmail(res.recoveryEmail || trimmed);
+      setSavedVerified(true);
+      setStage("email");
+      setCode("");
+      setNotice("Email verified.");
+    } catch (e: any) {
+      setError(e?.message || "Couldn't verify the code. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, nothingToDo, stage, code, studentID, trimmed, sendCode]);
+
+  return (
+    <View style={styles.infoTab}>
+      <View style={styles.fieldLabelRow}>
+        <Text style={styles.inputLabel}>Personal Email Address</Text>
+        {savedEmail ? (
+          <View
+            style={[
+              styles.verifyChip,
+              savedVerified ? styles.verifyChipOk : styles.verifyChipWarn,
+            ]}
+          >
+            <Ionicons
+              name={savedVerified ? "checkmark-circle" : "alert-circle"}
+              size={14}
+              color={savedVerified ? "#17845c" : "#b7791f"}
+            />
+          </View>
+        ) : null}
+      </View>
+
+      <View style={styles.inputWrap}>
+        <Ionicons
+          name="mail-outline"
+          size={17}
+          color="#9b766c"
+          style={styles.inputIcon}
+        />
+        <TextInput
+          style={styles.inputWithIcon}
+          placeholder="Enter email address"
+          placeholderTextColor="rgba(155,118,108,0.6)"
+          value={draft}
+          onChangeText={editEmail}
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoCorrect={false}
+          editable={!busy}
+        />
+      </View>
+
+      {stage === "code" ? (
+        <View style={styles.inputWrap}>
+          <Ionicons
+            name="keypad-outline"
+            size={17}
+            color="#9b766c"
+            style={styles.inputIcon}
+          />
+          <TextInput
+            style={[styles.inputWithIcon, styles.codeField]}
+            placeholder="6-digit code"
+            placeholderTextColor="rgba(155,118,108,0.6)"
+            value={code}
+            onChangeText={(t) => setCode(t.replace(/\D/g, "").slice(0, 6))}
+            keyboardType="number-pad"
+            maxLength={6}
+            editable={!busy}
+          />
+          <TouchableOpacity
+            onPress={sendCode}
+            disabled={busy || cooldown > 0}
+            style={styles.resendInline}
+          >
+            <Text
+              style={[
+                styles.resendInlineText,
+                (busy || cooldown > 0) && styles.mutedText,
+              ]}
+            >
+              {cooldown > 0 ? `${cooldown}s` : "Resend"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {notice ? <Text style={styles.infoNotice}>{notice}</Text> : null}
+      {error ? <Text style={styles.infoError}>{error}</Text> : null}
+
+      <TouchableOpacity
+        style={[styles.primaryBtn, (busy || nothingToDo) && styles.btnMuted]}
+        onPress={onSave}
+        disabled={busy || nothingToDo}
+        activeOpacity={0.85}
+      >
+        {busy ? (
+          <ActivityIndicator color="#fff" />
+        ) : (
+          <Text style={styles.primaryText}>Save Changes</Text>
+        )}
+      </TouchableOpacity>
+    </View>
+  );
+};
 
 const PasswordTab = ({
   editedData,
@@ -1448,6 +1820,12 @@ const PasswordTab = ({
     <>
       <Text style={styles.inputLabel}>Current Password</Text>
       <View style={styles.passwordInputWrapper}>
+        <Ionicons
+          name="lock-closed-outline"
+          size={17}
+          color="#9b766c"
+          style={styles.pwLeadIcon}
+        />
         <TextInput
           style={styles.passwordInput}
           placeholder="Current Password"
@@ -1470,6 +1848,12 @@ const PasswordTab = ({
 
       <Text style={styles.inputLabel}>New Password</Text>
       <View style={styles.passwordInputWrapper}>
+        <Ionicons
+          name="lock-closed-outline"
+          size={17}
+          color="#9b766c"
+          style={styles.pwLeadIcon}
+        />
         <TextInput
           style={styles.passwordInput}
           placeholder="New Password"
@@ -1807,7 +2191,10 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "bold",
     textAlign: "center",
-    marginBottom: 16,
+    marginBottom: 14,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(95,9,9,0.08)",
   },
   tabRow: {
     flexDirection: "row",
@@ -1831,7 +2218,7 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   tabTextActive: { color: "#fff" },
-  tabContent: { marginVertical: 12 },
+  tabContent: { marginVertical: 16 },
   inputLabel: {
     color: "#9b766c",
     fontSize: 12,
@@ -1859,7 +2246,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.32)",
   },
-  passwordInput: { flex: 1, color: "#4d1b17", padding: 12, fontSize: 14 },
+  passwordInput: { flex: 1, color: "#4d1b17", paddingVertical: 12, paddingRight: 12, fontSize: 14 },
+  pwLeadIcon: { marginLeft: 10, marginRight: 6 },
   eyeIconPassword: { padding: 8 },
   primaryBtn: {
     backgroundColor: "#5f0909",
@@ -1875,6 +2263,41 @@ const styles = StyleSheet.create({
     borderColor: "#8f3a2b",
   },
   primaryText: { color: "#fff", fontWeight: "700", fontSize: 14 },
+  infoTab: { paddingTop: 2 },
+  fieldLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 6,
+  },
+  verifyChip: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  verifyChipOk: { backgroundColor: "rgba(31,158,110,0.14)" },
+  verifyChipWarn: { backgroundColor: "rgba(214,158,46,0.16)" },
+  inputWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#f0e7e2",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(224,165,61,0.32)",
+    paddingHorizontal: 10,
+    marginBottom: 10,
+  },
+  inputIcon: { marginRight: 8 },
+  inputWithIcon: { flex: 1, color: "#4d1b17", paddingVertical: 12, fontSize: 14 },
+  codeField: { letterSpacing: 4, fontSize: 16 },
+  resendInline: { paddingHorizontal: 8, paddingVertical: 6 },
+  resendInlineText: { color: "#a8791f", fontWeight: "700", fontSize: 12 },
+  mutedText: { color: "#b7a29c" },
+  infoNotice: { color: "#17845c", fontSize: 12, marginBottom: 8, marginTop: 2 },
+  infoError: { color: "#b3261e", fontSize: 12, marginBottom: 8, marginTop: 2 },
+  btnMuted: { opacity: 0.55 },
   closeBtn: {
     backgroundColor: "#f5efeb",
     borderRadius: 10,
@@ -1966,6 +2389,23 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     marginTop: 2,
   },
+  loadMoreButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    backgroundColor: "#fffaf6",
+    borderWidth: 1,
+    borderColor: "#e7d5cc",
+    borderRadius: 14,
+    paddingVertical: 13,
+    marginTop: 12,
+  },
+  loadMoreButtonText: {
+    color: "#5f0909",
+    fontSize: 13,
+    fontWeight: "800",
+  },
   sortMenuBackdrop: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.4)",
@@ -1991,6 +2431,21 @@ const styles = StyleSheet.create({
   },
   sortMenuOptionText: { color: "#4d1b17", fontSize: 14.5 },
   sortMenuOptionTextActive: { color: "#a61f1f", fontWeight: "700" },
+  offlineStatusBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#ffedd5",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#fed7aa",
+  },
+  offlineStatusText: {
+    fontSize: 12,
+    color: "#9a3412",
+    fontWeight: "600",
+  },
 });
 
 export default ProfileScreen;

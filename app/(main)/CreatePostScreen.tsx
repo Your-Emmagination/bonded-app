@@ -1,77 +1,142 @@
 //createpostscreen.tsx
 import { Ionicons } from "@expo/vector-icons";
-import ConfirmDialog from "./components/ConfirmDialog";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import * as DocumentPicker from "expo-document-picker";
+import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { router, useLocalSearchParams } from "expo-router";
 import {
-  addDoc,
-  collection,
-  deleteField,
-  doc,
-  getDoc,
-  getDocs,
-  serverTimestamp,
-  updateDoc,
+    addDoc,
+    collection,
+    deleteField,
+    doc,
+    getDoc,
+    getDocs,
+    serverTimestamp,
+    Timestamp,
+    updateDoc,
 } from "firebase/firestore";
-import React, { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  Alert,
-  BackHandler,
-  FlatList,
-  Image,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Alert,
+    Animated,
+    BackHandler,
+    FlatList,
+    KeyboardAvoidingView,
+    LayoutAnimation,
+    Modal,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    UIManager,
+    View,
 } from "react-native";
 import {
-  SafeAreaView,
-  useSafeAreaInsets,
+    SafeAreaView,
+    useSafeAreaInsets,
 } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
+import ConfirmDialog, { type ConfirmDialogVariant } from "./components/ConfirmDialog";
 
+import { notifyAnnouncement } from "@/services/notificationService";
 import {
-  uploadPostFile,
-  uploadPostGif,
-  uploadPostImage,
-  uploadPostVideo,
-} from "@/utils/cloudinaryUpload";
-import {
-  AI_ASSISTANT_NAME,
-  AI_ASSISTANT_STUDENT,
-  AI_MENTION_TOKEN,
-  EVERYONE_MENTION_NAME,
-  EVERYONE_MENTION_STUDENT,
-  EVERYONE_MENTION_TAG,
-  EVERYONE_MENTION_TOKEN,
-  getMentionTokenForStudent,
-  hasAiAssistantMention,
-  hasEveryoneMention,
-  isAiAssistantId,
-  isEveryoneMentionId,
+    AI_ASSISTANT_NAME,
+    AI_ASSISTANT_STUDENT,
+    AI_MENTION_TOKEN,
+    EVERYONE_MENTION_NAME,
+    EVERYONE_MENTION_STUDENT,
+    EVERYONE_MENTION_TAG,
+    EVERYONE_MENTION_TOKEN,
+    getMentionTokenForStudent,
+    hasAiAssistantMention,
+    hasEveryoneMention,
+    isAiAssistantId,
+    isEveryoneMentionId,
 } from "@/utils/aiAssistant";
 import { summarizeAiVisibleContent } from "@/utils/aiContext";
-import { requestAiReplyFromWorker, requestServerPostModeration } from "@/utils/aiWorker";
 import {
-  getModerationPreviewText,
-  requestModerationDecision,
-  requestImageModeration,
-  requestVideoModeration,
+    requestAiReplyFromWorker,
+    requestServerPostModeration,
+    requestVideoTranscription,
+} from "@/utils/aiWorker";
+import {
+    uploadPostFile,
+    uploadPostGif,
+    uploadPostImage,
+    uploadPostVideo,
+} from "@/utils/cloudinaryUpload";
+import {
+    SELF_HARM_SAFETY_MESSAGE,
 } from "@/utils/contentModeration";
-import { resolveUserRoleForAuthUser } from "@/utils/rbac";
-import { canUsePostFlair, DEFAULT_POST_FLAIR, POST_FLAIRS, type PostFlairId } from "@/utils/postFlairs";
+import {
+    detectAnnouncementTargetDate,
+    formatTargetDateLabel,
+    type DetectedTargetDate,
+} from "@/utils/dateDetection";
+import { getFileIconDetails } from "@/utils/fileTypeHelper";
+import { looksLikeHelpRequest } from "@/utils/helpRequestDetection";
+import { emitHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
+import { looksLikeLostItemDescription } from "@/utils/lostAndFoundDetection";
+import {
+    canUsePostFlair,
+    DEFAULT_POST_FLAIR,
+    POST_FLAIRS,
+    STAFF_POST_FLAIR_ROLES,
+    type PostFlairId,
+} from "@/utils/postFlairs";
+import { buildPostSearchTerms } from "@/utils/postSearchTerms";
+import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
 
 const MAX_FILES = 10;
-// Keep the Python image-moderation integration available for later, but do not
-// call it while BondED is not running the Python media service.
-const IMAGE_MODERATION_ENABLED = false;
+
+if (
+  Platform.OS === "android" &&
+  UIManager.setLayoutAnimationEnabledExperimental
+) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+// Gentle collapse/expand for previews, chips and inline banners as they
+// appear and disappear. Purely visual — no behaviour or copy changes.
+const easeLayout = () =>
+  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+
+// Shared banner for the flair suggestions (Lost & Found, Help / Advice). Both
+// suggestions render this so the card / "Switch flair" / "Not now" styling
+// lives in one place instead of being copy-pasted per suggestion type.
+const FlairSuggestionBanner = ({
+  message,
+  onSwitch,
+  onDismiss,
+}: {
+  message: string;
+  onSwitch: () => void;
+  onDismiss: () => void;
+}) => (
+  <View style={styles.flairSuggestionBanner}>
+    <Text style={styles.flairSuggestionText}>{message}</Text>
+    <View style={styles.flairSuggestionActions}>
+      <TouchableOpacity
+        style={styles.flairSuggestionSwitchButton}
+        activeOpacity={0.82}
+        onPress={onSwitch}
+      >
+        <Text style={styles.flairSuggestionSwitchText}>Switch flair</Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.flairSuggestionDismissButton}
+        activeOpacity={0.82}
+        onPress={onDismiss}
+      >
+        <Text style={styles.flairSuggestionDismissText}>Not now</Text>
+      </TouchableOpacity>
+    </View>
+  </View>
+);
 
 interface Student {
   id: string;
@@ -101,6 +166,7 @@ const CreatePostScreen = () => {
   const [content, setContent] = useState("");
   const [selectedFlair, setSelectedFlair] = useState<PostFlairId>(DEFAULT_POST_FLAIR);
   const [authorRole, setAuthorRole] = useState<string>("student");
+  const [authorProfileName, setAuthorProfileName] = useState("");
   const [files, setFiles] = useState<
     { uri: string; mimeType: string; name: string }[]
   >([]);
@@ -111,13 +177,62 @@ const CreatePostScreen = () => {
   const [blockedDialog, setBlockedDialog] = useState<{
     title: string;
     description: string;
+    variant: ConfirmDialogVariant;
+    onConfirm?: () => void;
   } | null>(null);
+  // Small helper so the many single-button "OK" Alert.alert() info messages
+  // throughout this screen render as the app's branded ConfirmDialog instead
+  // of the bare OS alert. Multi-branch / safety-critical alerts (the
+  // self-harm safety notice) intentionally do NOT use this and are left as
+  // native Alert.alert calls, untouched.
+  const getDialogVariant = (title: string): ConfirmDialogVariant => {
+    const normalizedTitle = title.trim().toLowerCase();
+    if (normalizedTitle.includes("success")) return "success";
+    if (
+      normalizedTitle.includes("info") ||
+      normalizedTitle.includes("review") ||
+      normalizedTitle.includes("pending") ||
+      normalizedTitle.includes("sent")
+    ) {
+      return "info";
+    }
+    if (
+      normalizedTitle.includes("error") ||
+      normalizedTitle.includes("failed") ||
+      normalizedTitle.includes("blocked")
+    ) {
+      return "destructive";
+    }
+    return "warning";
+  };
+
+  const showInfo = (title: string, description: string, onConfirm?: () => void) => {
+    setBlockedDialog({ title, description, variant: getDialogVariant(title), onConfirm });
+  };
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [taggedUsers, setTaggedUsers] = useState<Student[]>([]);
   const [showTagModal, setShowTagModal] = useState(false);
   const [students, setStudents] = useState<Student[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [contentSelection, setContentSelection] = useState({ start: 0, end: 0 });
+  // Suggests switching to the Lost & Found flair when the post text reads
+  // like someone describing their own lost item (same detection pattern the
+  // @ai chat nudge uses). Purely a suggestion — never changes the flair on
+  // its own, and dismissing it for this draft stops it from reappearing
+  // even if the text keeps matching.
+  const [lostFoundSuggestionDismissed, setLostFoundSuggestionDismissed] = useState(false);
+  // Mirror of lostFoundSuggestionDismissed for the Help / Advice flair
+  // suggestion. Both re-arm together when the compose box is fully cleared.
+  const [helpSuggestionDismissed, setHelpSuggestionDismissed] = useState(false);
+
+  // Target date detection and pin-until-date expiration for staff announcements
+  const isStaff = STAFF_POST_FLAIR_ROLES.has(String(authorRole || "").toLowerCase());
+  const [shouldPin, setShouldPin] = useState(false);
+  const [targetDate, setTargetDate] = useState<Date | null>(null);
+  const [targetDateLabel, setTargetDateLabel] = useState<string | null>(null);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
+  const [dismissedDetectedDate, setDismissedDetectedDate] = useState(false);
 
   const [showLinkModal, setShowLinkModal] = useState(false);
   const [linkUrl, setLinkUrl] = useState("");
@@ -126,6 +241,16 @@ const CreatePostScreen = () => {
     url: string;
     title: string;
   } | null>(null);
+  const contentScrollRef = useRef<ScrollView>(null);
+  // Horizontal flair picker: its ref plus enough layout bookkeeping to scroll
+  // a specific chip into view (used by the suggestion banners' "Switch flair").
+  const flairPickerRef = useRef<ScrollView>(null);
+  const flairChipLayoutsRef = useRef<Record<string, { x: number; width: number }>>({});
+  const flairPickerScrollXRef = useRef(0);
+  const flairPickerWidthRef = useRef(0);
+  const [isContentFocused, setIsContentFocused] = useState(false);
+  const anonymousProgress = useRef(new Animated.Value(0)).current;
+  const postButtonScale = useRef(new Animated.Value(1)).current;
 
   const [showGifModal, setShowGifModal] = useState(false);
   const [gifSearchQuery, setGifSearchQuery] = useState("");
@@ -151,8 +276,16 @@ const CreatePostScreen = () => {
   useEffect(() => {
     let active = true;
     const loadAuthorRole = async () => {
-      const resolvedRole = await resolveUserRoleForAuthUser(auth.currentUser);
-      if (active) setAuthorRole(String(resolvedRole || "student").toLowerCase());
+      const [resolvedRole, profile] = await Promise.all([
+        resolveUserRoleForAuthUser(auth.currentUser),
+        getUserDataByAuthUser(auth.currentUser),
+      ]);
+      if (active) {
+        setAuthorRole(String(resolvedRole || "student").toLowerCase());
+        setAuthorProfileName(
+          `${profile?.firstname || ""} ${profile?.lastname || ""}`.trim(),
+        );
+      }
     };
     loadAuthorRole();
     return () => { active = false; };
@@ -164,13 +297,13 @@ const CreatePostScreen = () => {
       try {
         const snap = await getDoc(doc(db, "posts", selectedEditPostId));
         if (!snap.exists()) {
-          Alert.alert("Post Not Found", "This post no longer exists.", [{ text: "OK", onPress: () => router.back() }]);
+          showInfo("Post Not Found", "This post no longer exists.", () => router.back());
           return;
         }
         const data: any = snap.data();
         const ownerId = data.realUserId || data.userId;
         if (ownerId !== auth.currentUser?.uid) {
-          Alert.alert("Access Denied", "You can only edit your own posts.", [{ text: "OK", onPress: () => router.back() }]);
+          showInfo("Access Denied", "You can only edit your own posts.", () => router.back());
           return;
         }
         setContent(data.content || "");
@@ -185,9 +318,26 @@ const CreatePostScreen = () => {
           email: "",
           studentID: tag.studentID || "",
         })) : []);
+        if (data.pinnedAt) {
+          setShouldPin(true);
+          const rawDate = data.pinExpiresAt || data.targetDate;
+          if (rawDate) {
+            const parsed = rawDate?.toDate
+              ? rawDate.toDate()
+              : rawDate?.seconds
+                ? new Date(rawDate.seconds * 1000)
+                : new Date(rawDate);
+            if (!isNaN(parsed.getTime())) {
+              setTargetDate(parsed);
+            }
+          }
+          if (data.targetDateLabel) {
+            setTargetDateLabel(data.targetDateLabel);
+          }
+        }
       } catch (error) {
         console.error("Error loading post for edit:", error);
-        Alert.alert("Error", "Failed to load the post.", [{ text: "OK", onPress: () => router.back() }]);
+        showInfo("Error", "Failed to load the post.", () => router.back());
       }
     };
     loadPostForEdit();
@@ -208,6 +358,14 @@ const CreatePostScreen = () => {
       setGifResults([]);
     }
   }, [gifSearchQuery]);
+
+  useEffect(() => {
+    Animated.timing(anonymousProgress, {
+      toValue: isAnonymous ? 1 : 0,
+      duration: 180,
+      useNativeDriver: false,
+    }).start();
+  }, [isAnonymous, anonymousProgress]);
 
   const fetchStudents = async () => {
     try {
@@ -244,14 +402,14 @@ const CreatePostScreen = () => {
       setStudents(studentsList);
     } catch (error) {
       console.error("Error fetching students:", error);
-      Alert.alert("Error", "Failed to load students list");
+      showInfo("Error", "Failed to load students list");
     }
   };
 
   const takePhoto = async () => {
     try {
       if (files.length >= MAX_FILES) {
-        Alert.alert(
+        showInfo(
           "Maximum Files Reached",
           `You can only attach up to ${MAX_FILES} files per post.`,
         );
@@ -260,7 +418,7 @@ const CreatePostScreen = () => {
 
       const permission = await ImagePicker.requestCameraPermissionsAsync();
       if (!permission.granted) {
-        Alert.alert(
+        showInfo(
           "Camera Permission Required",
           "Please allow BondEd to use your camera so you can take a photo for your post.",
         );
@@ -276,6 +434,7 @@ const CreatePostScreen = () => {
       if (result.canceled || !result.assets?.length) return;
 
       const photo = result.assets[0];
+      easeLayout();
       setFiles((current) => [
         ...current,
         {
@@ -286,14 +445,14 @@ const CreatePostScreen = () => {
       ]);
     } catch (error) {
       console.error("Error taking photo:", error);
-      Alert.alert("Camera Error", "Failed to take a photo. Please try again.");
+      showInfo("Camera Error", "Failed to take a photo. Please try again.");
     }
   };
 
-  const pickFiles = async () => {
+  const pickPhotos = async () => {
     try {
       if (files.length >= MAX_FILES) {
-        Alert.alert(
+        showInfo(
           "Maximum Files Reached",
           `You can only attach up to ${MAX_FILES} files per post.`,
         );
@@ -301,12 +460,7 @@ const CreatePostScreen = () => {
       }
 
       const result = await DocumentPicker.getDocumentAsync({
-        type: [
-          "image/*",
-          "application/pdf",
-          "application/msword",
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ],
+        type: "image/*",
         multiple: true,
         copyToCacheDirectory: true,
       });
@@ -316,7 +470,49 @@ const CreatePostScreen = () => {
         const filesToAdd = result.assets.slice(0, remainingSlots);
 
         if (result.assets.length > remainingSlots) {
-          Alert.alert(
+          showInfo(
+            "File Limit",
+            `Only ${remainingSlots} more file(s) can be added. Maximum is ${MAX_FILES} files per post.`,
+          );
+        }
+
+        const newFiles = filesToAdd.map((picked) => ({
+          uri: picked.uri || "",
+          mimeType: picked.mimeType ?? "image/jpeg",
+          name: picked.name ?? `photo_${Date.now()}.jpg`,
+        }));
+
+        easeLayout();
+        setFiles([...files, ...newFiles]);
+      }
+    } catch (error) {
+      console.error("Error picking photos:", error);
+      showInfo("Error", "Failed to pick photos");
+    }
+  };
+
+  const pickDocuments = async () => {
+    try {
+      if (files.length >= MAX_FILES) {
+        showInfo(
+          "Maximum Files Reached",
+          `You can only attach up to ${MAX_FILES} files per post.`,
+        );
+        return;
+      }
+
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "*/*",
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+
+      if (!result.canceled && result.assets?.length > 0) {
+        const remainingSlots = MAX_FILES - files.length;
+        const filesToAdd = result.assets.slice(0, remainingSlots);
+
+        if (result.assets.length > remainingSlots) {
+          showInfo(
             "File Limit",
             `Only ${remainingSlots} more file(s) can be added. Maximum is ${MAX_FILES} files per post.`,
           );
@@ -328,18 +524,21 @@ const CreatePostScreen = () => {
           name: picked.name ?? `file_${Date.now()}`,
         }));
 
+        easeLayout();
         setFiles([...files, ...newFiles]);
       }
     } catch (error) {
-      console.error("Error picking files:", error);
-      Alert.alert("Error", "Failed to pick files");
+      console.error("Error picking documents:", error);
+      showInfo("Error", "Failed to pick documents");
     }
   };
+
+  const pickFiles = pickDocuments;
 
   const pickVideos = async () => {
     try {
       if (files.length >= MAX_FILES) {
-        Alert.alert(
+        showInfo(
           "Maximum Files Reached",
           `You can only attach up to ${MAX_FILES} files per post.`,
         );
@@ -357,7 +556,7 @@ const CreatePostScreen = () => {
         const filesToAdd = result.assets.slice(0, remainingSlots);
 
         if (result.assets.length > remainingSlots) {
-          Alert.alert(
+          showInfo(
             "File Limit",
             `Only ${remainingSlots} more video(s) can be added. Maximum is ${MAX_FILES} files per post.`,
           );
@@ -371,17 +570,18 @@ const CreatePostScreen = () => {
           name: picked.name ?? `video_${Date.now()}.mp4`,
         }));
 
+        easeLayout();
         setFiles((current) => [...current, ...newVideos]);
       }
     } catch (error) {
       console.error("Error picking videos:", error);
-      Alert.alert("Error", "Failed to pick video(s)");
+      showInfo("Error", "Failed to pick video(s)");
     }
   };
 
   const handlePost = async () => {
     if (!auth.currentUser) {
-      Alert.alert("Login required", "You must be signed in to create a post.");
+      showInfo("Login required", "You must be signed in to create a post.");
       return;
     }
 
@@ -392,98 +592,52 @@ const CreatePostScreen = () => {
       !selectedGif &&
       !attachedLink
     ) {
-      Alert.alert("Empty Post", "Please add content, a file, GIF, or link.");
+      showInfo("Empty Post", "Please add content, a file, GIF, or link.");
       return;
     }
 setUploading(true);
 
 try {
-  // ─────────────────────────────────────────────────────────────
-  // STEP 1: AI MODERATE MEDIA BEFORE UPLOADING
-  // approved = continue, review = pending queue, blocked = stop.
-  let mediaRequiresReview = false;
+  // Media (images/video) is moderated server-side by the trusted Worker on
+  // the same pass as text — a post with attachments is saved pending, the
+  // Worker checks every attachment via OpenModeration, and it is approved
+  // only when text AND media are clean. No client-side pre-check: like text,
+  // the client is not the moderation authority.
 
-  // STEP 2: UPLOAD MEDIA ONLY AFTER AI CHECK
-  // ─────────────────────────────────────────────────────────────
 
-  const uploadedUrls = [];
+      // Upload independent attachments together after every student file has
+      // passed the existing moderation checks. Promise.all preserves order.
+      const [uploadedFiles, uploadedGifUrl] = await Promise.all([
+        Promise.all(
+          files.map(async (file) => {
+            let uploadedUrl: string;
 
-for (const file of files) {
-  // ─────────────────────────────────────────────
-  // IMAGE AI MODERATION
-  // ─────────────────────────────────────────────
-  if (IMAGE_MODERATION_ENABLED && file.mimeType.startsWith("image/")) {
-    console.log("[Post Moderation] Checking image with Python AI...");
+            if (file.mimeType.startsWith("image/")) {
+              uploadedUrl = await uploadPostImage(file.uri);
+            } else if (file.mimeType.startsWith("video/")) {
+              uploadedUrl = await uploadPostVideo(file.uri);
+            } else {
+              uploadedUrl = await uploadPostFile(file.uri);
+            }
 
-    const imageDecision = await requestImageModeration(file.uri);
+            return { url: uploadedUrl, mimeType: file.mimeType };
+          }),
+        ),
+        selectedGif ? uploadPostGif(selectedGif) : Promise.resolve(null),
+      ]);
+      const uploadedUrls = [...uploadedFiles];
 
-    console.log(
-      "[Post Moderation] Image AI result:",
-      JSON.stringify(imageDecision),
-    );
-
-    if (imageDecision.decision === "blocked") {
-      setBlockedDialog({
-        title: "Post Blocked",
-        description: "This image cannot be posted because it was detected as inappropriate.",
-      });
-      return;
-    }
-
-    if (imageDecision.decision === "review") {
-      mediaRequiresReview = true;
-    }
-  }
-
-  // ─────────────────────────────────────────────
-  // VIDEO AI MODERATION
-  // ─────────────────────────────────────────────
-  if (file.mimeType.startsWith("video/")) {
-    console.log("[Post Moderation] Checking video with Python AI...");
-
-    const videoDecision = await requestVideoModeration(file.uri);
-
-    console.log(
-      "[Post Moderation] Video AI result:",
-      JSON.stringify(videoDecision),
-    );
-
-    if (videoDecision.decision === "blocked") {
-      setBlockedDialog({
-        title: "Post Blocked",
-        description: "This video cannot be posted because it was detected as inappropriate.",
-      });
-      return;
-    }
-
-    if (videoDecision.decision === "review") {
-      mediaRequiresReview = true;
-    }
-  }
-
-  // ─────────────────────────────────────────────
-  // ONLY UPLOAD AFTER MEDIA MODERATION
-  // ─────────────────────────────────────────────
-  let uploadedUrl: string;
-
-  if (file.mimeType.startsWith("image/")) {
-    uploadedUrl = await uploadPostImage(file.uri);
-  } else if (file.mimeType.startsWith("video/")) {
-    uploadedUrl = await uploadPostVideo(file.uri);
-  } else {
-    uploadedUrl = await uploadPostFile(file.uri);
-  }
-
-  uploadedUrls.push({
-    url: uploadedUrl,
-    mimeType: file.mimeType,
-  });
-}
-
-      if (selectedGif) {
-        const uploadedGifUrl = await uploadPostGif(selectedGif);
+      if (uploadedGifUrl) {
         uploadedUrls.push({ url: uploadedGifUrl, mimeType: "image/gif" });
       }
+
+      // Auto-captioning: a video post starts life as caption "pending"; the
+      // Worker transcribes it in the background (see requestVideoTranscription
+      // below) and flips this to "ready"/"unavailable". Non-video posts don't
+      // carry the field at all.
+      const hasVideoAttachment = uploadedUrls.some((file) =>
+        file.mimeType.startsWith("video/"),
+      );
 
       const user = auth.currentUser;
 
@@ -502,45 +656,20 @@ for (const file of files) {
         (user, index, self) =>
           index === self.findIndex((u) => u.id === user.id),
       );
-      let firstName = "";
-      let lastName = "";
-
-      if (!isAnonymous) {
+      let resolvedProfileName = authorProfileName;
+      if (!isAnonymous && !resolvedProfileName) {
         try {
-          const studentsSnapshot = await getDocs(collection(db, "students"));
-          const currentUid = user?.uid || "";
-          const currentEmail = user?.email?.trim().toLowerCase() || "";
-          const currentStudentID = currentEmail.split("@")[0];
-
-          const currentStudent = studentsSnapshot.docs.find((studentDoc) => {
-            const data = studentDoc.data();
-            const docId = studentDoc.id.trim().toLowerCase();
-            const dataUid = String(data.uid ?? data.userId ?? "").trim();
-            const dataEmail = String(data.email ?? "").trim().toLowerCase();
-            const dataStudentID = String(data.studentID ?? "").trim().toLowerCase();
-
-            return (
-              docId === currentUid.toLowerCase() ||
-              dataUid === currentUid ||
-              (currentEmail && dataEmail === currentEmail) ||
-              (currentStudentID && dataStudentID === currentStudentID)
-            );
-          });
-
-          if (currentStudent) {
-            const data = currentStudent.data();
-            firstName = String(data.firstname ?? data.firstName ?? "").trim();
-            lastName = String(data.lastname ?? data.lastName ?? "").trim();
-          }
+          const profile = await getUserDataByAuthUser(user);
+          resolvedProfileName =
+            `${profile?.firstname || ""} ${profile?.lastname || ""}`.trim();
         } catch (profileError) {
-          console.warn("[CreatePost] Could not resolve student name:", profileError);
+          console.warn("[CreatePost] Could not resolve author name:", profileError);
         }
       }
 
-      const resolvedStudentName = `${firstName} ${lastName}`.trim();
       const displayName = isAnonymous
-        ? `Anonymous${Math.floor(Math.random() * 10000)}`
-        : resolvedStudentName || user?.displayName?.trim() || user?.email?.split("@")[0] || "User";
+        ? "Anonymous"
+        : resolvedProfileName || user?.displayName?.trim() || user?.email?.split("@")[0] || "User";
       const aiPrompt = summarizeAiVisibleContent({
         text: content,
         username: displayName,
@@ -558,56 +687,24 @@ for (const file of files) {
         })),
       });
       
-      const moderationDecision = await requestModerationDecision({
-        // Text moderation must inspect only the actual user text.
-        // A media-only post should not be turned into an artificial
-        // "Empty Post" text by the AI context summarizer.
-        text: content.trim(),
-        scope: "post",
-        serverId: selectedServerId,
-        channelId: selectedChannelId,
-        authorId: user?.uid,
-        authorRole,
-      });
-      const localModerationStatus =
-        moderationDecision.status === "pending" || mediaRequiresReview
-          ? "pending"
-          : moderationDecision.status;
-
-      const finalModerationReasons = [
-        ...moderationDecision.reasons,
-        ...(mediaRequiresReview
-          ? ["Media flagged for AI moderator review."]
-          : []),
-      ];
-
-      // Local moderation can block obvious violations before any write.
-      // Every non-rejected post is still written as PENDING. The trusted
-      // Cloud Function is responsible for changing it to approved/rejected.
-      const finalModerationStatus: "pending" | "rejected" =
-        localModerationStatus === "rejected" ? "rejected" : "pending";
-
-      // Rejected content must never be written to Firestore.
-      // Pending content is intentionally written so it can appear in the
-      // moderation queue, but it must remain hidden from user feeds.
-      if (finalModerationStatus === "rejected") {
-        setBlockedDialog({
-          title: "Post Blocked",
-          description:
-            "This post was blocked because it contains restricted content. If you think this is a mistake, contact a moderator.",
-        });
-        return;
-      }
+      // MODERATION IS SERVER-AUTHORITATIVE. Every post is saved pending
+      // first; the trusted Worker re-reads it and runs both text and media
+      // (image/video) through OpenModeration before approving.
+      const finalModerationReasons: string[] = [];
 
       if (!canUsePostFlair(selectedFlair, authorRole)) {
-        Alert.alert("Flair Not Allowed", "Announcement is reserved for authorized staff accounts.");
+        showInfo("Flair Not Allowed", "Announcement is reserved for authorized staff accounts.");
         return;
       }
 
       const postData: any = {
   content: content.trim(),
+  // App-wide search: word-array of the content, matched with array-contains.
+  // Rebuilt on every edit below too.
+  searchTerms: buildPostSearchTerms(content, [attachedLink?.title, attachedLink?.url]),
   flair: selectedFlair,
   files: uploadedUrls,
+  ...(hasVideoAttachment ? { captionStatus: "pending" } : {}),
 
   // Keep the authenticated UID as the ownership identity even when the
   // public display is anonymous. Firestore rules depend on this invariant.
@@ -617,6 +714,10 @@ for (const file of files) {
   username: displayName,
   authorName: displayName,
   aiPrompt,
+
+  // Persist the student marker used by report authorization. Staff content
+  // intentionally keeps its existing schema and remains non-reportable.
+  ...(authorRole === "student" ? { userRole: "student" } : {}),
 
   isAnonymous,
 
@@ -634,6 +735,8 @@ for (const file of files) {
 
   likeCount: 0,
   commentCount: 0,
+  likedBy: [],
+  bookmarkedBy: [],
 
   serverId: selectedServerId,
   channelId: selectedChannelId,
@@ -645,11 +748,21 @@ for (const file of files) {
       if (attachedLink) {
         postData.link = attachedLink;
       }
+      if (isStaff && shouldPin) {
+        postData.pinnedAt = serverTimestamp();
+        postData.pinnedBy = user?.uid;
+        if (targetDate) {
+          postData.pinExpiresAt = Timestamp.fromDate(targetDate);
+          postData.targetDate = Timestamp.fromDate(targetDate);
+          postData.targetDateLabel = targetDateLabel || formatTargetDateLabel(targetDate);
+        }
+      }
 
       let postRef: any;
       if (isEditMode && selectedEditPostId) {
-        await updateDoc(doc(db, "posts", selectedEditPostId), {
+        const editPayload: any = {
           content: content.trim(),
+          searchTerms: buildPostSearchTerms(content, [attachedLink?.title, attachedLink?.url]),
           flair: selectedFlair,
           files: uploadedUrls,
           taggedUsers: uniqueTaggedUsers.map((u) => ({
@@ -664,13 +777,44 @@ for (const file of files) {
           moderationReasons: finalModerationReasons,
           moderatedAtMs: null,
           updatedAt: serverTimestamp(),
-        });
+        };
 
-        let serverDecision: any = { status: "pending" };
+        if (isStaff) {
+          if (shouldPin) {
+            editPayload.pinnedAt = serverTimestamp();
+            editPayload.pinnedBy = user?.uid;
+            if (targetDate) {
+              editPayload.pinExpiresAt = Timestamp.fromDate(targetDate);
+              editPayload.targetDate = Timestamp.fromDate(targetDate);
+              editPayload.targetDateLabel = targetDateLabel || formatTargetDateLabel(targetDate);
+            } else {
+              editPayload.pinExpiresAt = deleteField();
+              editPayload.targetDate = deleteField();
+              editPayload.targetDateLabel = deleteField();
+            }
+          } else {
+            editPayload.pinnedAt = deleteField();
+            editPayload.pinnedBy = deleteField();
+            editPayload.pinExpiresAt = deleteField();
+            editPayload.targetDate = deleteField();
+            editPayload.targetDateLabel = deleteField();
+          }
+        }
+
+        await updateDoc(doc(db, "posts", selectedEditPostId), editPayload);
+
+        let serverDecision: any = { status: "pending", selfHarm: false };
         try {
           serverDecision = await requestServerPostModeration(selectedEditPostId);
         } catch (moderationError) {
           console.warn("[CreatePost] Server moderation unavailable; post remains pending:", moderationError);
+        }
+
+        if (serverDecision.selfHarm === true) {
+          Alert.alert("We’re concerned about your safety", SELF_HARM_SAFETY_MESSAGE, [
+            { text: "OK", onPress: () => router.back() },
+          ]);
+          return;
         }
 
         if (serverDecision.status === "approved" && hasAiAssistantMention(content)) {
@@ -691,13 +835,13 @@ for (const file of files) {
           }
         }
 
-        Alert.alert(
+        showInfo(
           serverDecision.status === "approved" ? "Success" : "Sent For Review",
           serverDecision.status === "approved"
             ? "Your edited post has been updated and approved."
             : "Your edited post was sent for moderator review.",
+          () => router.back(),
         );
-        router.back();
         return;
       }
 
@@ -707,11 +851,32 @@ for (const file of files) {
       // created as PENDING, then the trusted Cloudflare Worker re-reads the
       // document and is the only non-staff path that can approve it. If the
       // Worker is unavailable, the post safely stays pending.
-      let serverDecision: any = { status: "pending" };
+      let serverDecision: any = { status: "pending", selfHarm: false };
       try {
         serverDecision = await requestServerPostModeration(postRef.id);
       } catch (moderationError) {
         console.warn("[CreatePost] Server moderation unavailable; post remains pending:", moderationError);
+      }
+
+      if (serverDecision.selfHarm === true) {
+        Alert.alert("We’re concerned about your safety", SELF_HARM_SAFETY_MESSAGE, [
+          { text: "OK", onPress: () => router.back() },
+        ]);
+        return;
+      }
+
+      // Kick off caption generation once, only for an approved video post
+      // (no point transcribing something that's about to be rejected). Fully
+      // fire-and-forget — the post is already published and the video plays
+      // regardless of whether/when captions arrive.
+      if (serverDecision.status === "approved" && hasVideoAttachment) {
+        void requestVideoTranscription(postRef.id);
+      }
+
+      // Staff announcement -> push to every device via the free Worker + Expo
+      // path. Fire-and-forget; the Worker re-checks staff role + post owner.
+      if (serverDecision.status === "approved" && selectedFlair === "announcement") {
+        void notifyAnnouncement(postRef.id);
       }
 
       if (serverDecision.status === "approved" && hasAiAssistantMention(content)) {
@@ -732,24 +897,35 @@ for (const file of files) {
         }
       }
 
-      Alert.alert(
+      showInfo(
         serverDecision.status === "approved" ? "Success" : "Sent For Review",
         serverDecision.status === "approved"
           ? "Your post has been created!"
           : "Your post was sent for moderator review and will appear after approval.",
+        () => {
+          setContent("");
+          setSelectedFlair(DEFAULT_POST_FLAIR);
+          setLostFoundSuggestionDismissed(false);
+          setHelpSuggestionDismissed(false);
+          setDismissedDetectedDate(false);
+          setShouldPin(false);
+          setTargetDate(null);
+          setTargetDateLabel(null);
+          setFiles([]);
+          setTaggedUsers([]);
+          setIsAnonymous(false);
+          setAttachedLink(null);
+          setSelectedGif(null);
+          setContentSelection({ start: 0, end: 0 });
+          router.back();
+          if (serverDecision.status === "approved") {
+            requestAnimationFrame(emitHomeFeedScrollToTop);
+          }
+        },
       );
-      setContent("");
-      setSelectedFlair(DEFAULT_POST_FLAIR);
-      setFiles([]);
-      setTaggedUsers([]);
-      setIsAnonymous(false);
-      setAttachedLink(null);
-      setSelectedGif(null);
-      setContentSelection({ start: 0, end: 0 });
-      router.back();
     } catch (error: any) {
       console.error("Upload error:", error);
-      Alert.alert("Error", error.message || "Failed to create post");
+      showInfo("Error", error.message || "Failed to create post");
     } finally {
       setUploading(false);
     }
@@ -827,9 +1003,42 @@ for (const file of files) {
     );
   };
 
+  // Scrolls the horizontal flair picker so the given flair's chip is fully
+  // visible. No-op if the chip is already comfortably in view, so tapping
+  // "Switch flair" on a chip that's already on screen doesn't jump the picker.
+  const scrollFlairIntoView = (flairId: string) => {
+    const layout = flairChipLayoutsRef.current[flairId];
+    const picker = flairPickerRef.current;
+    const viewportWidth = flairPickerWidthRef.current;
+    if (!layout || !picker || viewportWidth <= 0) return;
+
+    const scrollX = flairPickerScrollXRef.current;
+    const margin = 16; // breathing room from the picker edges
+    const chipStart = layout.x;
+    const chipEnd = layout.x + layout.width;
+
+    let nextX = scrollX;
+    if (chipStart < scrollX + margin) {
+      nextX = Math.max(0, chipStart - margin);
+    } else if (chipEnd > scrollX + viewportWidth - margin) {
+      nextX = chipEnd - viewportWidth + margin;
+    } else {
+      return; // already visible
+    }
+    picker.scrollTo({ x: nextX, animated: true });
+  };
+
   const handleContentChange = (nextText: string) => {
     setContent(nextText);
     syncTaggedUsersFromText(nextText);
+    // Re-arm both flair suggestions the moment the box is fully cleared, so
+    // deleting everything and retyping matching text can surface a banner
+    // again this session. A partial edit leaves a dismissed banner dismissed.
+    if (nextText.trim().length === 0) {
+      setLostFoundSuggestionDismissed(false);
+      setHelpSuggestionDismissed(false);
+      setDismissedDetectedDate(false);
+    }
   };
 
   const handleSelectMention = (person: MentionDraft) => {
@@ -849,14 +1058,14 @@ for (const file of files) {
 
   const handleAddLink = () => {
     if (!linkUrl.trim()) {
-      Alert.alert("Error", "Please enter a valid URL");
+      showInfo("Error", "Please enter a valid URL");
       return;
     }
 
     const urlPattern =
       /^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$/;
     if (!urlPattern.test(linkUrl)) {
-      Alert.alert("Invalid URL", "Please enter a valid website URL");
+      showInfo("Invalid URL", "Please enter a valid website URL");
       return;
     }
 
@@ -868,10 +1077,24 @@ for (const file of files) {
       formattedUrl = "https://" + formattedUrl;
     }
 
+    easeLayout();
     setAttachedLink({
       url: formattedUrl,
       title: linkTitle.trim() || formattedUrl,
     });
+    setShowLinkModal(false);
+    setLinkUrl("");
+    setLinkTitle("");
+  };
+
+  const handleRemoveLink = () => {
+    easeLayout();
+    setAttachedLink(null);
+    setLinkUrl("");
+    setLinkTitle("");
+  };
+
+  const handleCloseLinkModal = () => {
     setShowLinkModal(false);
     setLinkUrl("");
     setLinkTitle("");
@@ -924,6 +1147,7 @@ for (const file of files) {
   };
 
   const handleSelectGif = (gifUrl: string) => {
+    easeLayout();
     setSelectedGif(gifUrl);
     setShowGifModal(false);
     setGifSearchQuery("");
@@ -962,16 +1186,54 @@ for (const file of files) {
     ...filteredStudents.filter((student) => !isEveryoneMentionId(student.id)),
   ];
 
+  // Require a bit of real content before suggesting anything — avoids
+  // firing on a half-typed word every keystroke.
+  const hasEnoughContentForSuggestion = content.trim().length >= 12;
+
+  const showLostFoundSuggestion =
+    !lostFoundSuggestionDismissed &&
+    selectedFlair !== "lost_found" &&
+    hasEnoughContentForSuggestion &&
+    looksLikeLostItemDescription(content);
+
+  // Same shape as the Lost & Found suggestion. Only one banner shows at a
+  // time: when a post matches both patterns, Lost & Found (the established
+  // feature) wins, so this is suppressed whenever the text reads as a lost
+  // item — not just when the Lost & Found banner happens to be visible.
+  const showHelpSuggestion =
+    !helpSuggestionDismissed &&
+    selectedFlair !== "help" &&
+    hasEnoughContentForSuggestion &&
+    looksLikeHelpRequest(content) &&
+    !looksLikeLostItemDescription(content);
+
+  const detectedTargetDate = useMemo<DetectedTargetDate | null>(() => {
+    if (
+      dismissedDetectedDate ||
+      !isStaff ||
+      shouldPin ||
+      !hasEnoughContentForSuggestion
+    ) {
+      return null;
+    }
+    return detectAnnouncementTargetDate(content);
+  }, [content, dismissedDetectedDate, hasEnoughContentForSuggestion, isStaff, shouldPin]);
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.contentShell}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
       >
         <View style={styles.header}>
           <Text style={styles.headerTitle}>{isEditMode ? "Edit Post" : "Create Post"}</Text>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity
+            activeOpacity={0.7}
+            style={styles.headerCloseButton}
+            onPress={() => router.back()}
+            accessibilityRole="button"
+          >
             <Ionicons name="close" size={28} color="#7a3b2e" />
           </TouchableOpacity>
         </View>
@@ -995,9 +1257,13 @@ for (const file of files) {
         </View>
 
         <ScrollView
-          style={styles.scrollContent}
-          contentContainerStyle={{ paddingBottom: 120 }}
+          ref={contentScrollRef}
+          style={styles.scroll}
+          contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="always"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+          automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
         >
           {files.length > 0 && (
             <View style={styles.fileLimitInfo}>
@@ -1010,15 +1276,41 @@ for (const file of files) {
           <View style={styles.anonymousContainer}>
             <Text style={styles.anonymousLabel}>Post Anonymously</Text>
             <TouchableOpacity
-              style={[styles.toggle, isAnonymous && styles.toggleActive]}
-              onPress={() => setIsAnonymous(!isAnonymous)}
+              activeOpacity={0.9}
+              onPress={() => {
+                easeLayout();
+                setIsAnonymous(!isAnonymous);
+              }}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: isAnonymous }}
             >
-              <View
+              <Animated.View
                 style={[
-                  styles.toggleThumb,
-                  isAnonymous && styles.toggleThumbActive,
+                  styles.toggle,
+                  {
+                    backgroundColor: anonymousProgress.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: ["#d6c9c2", "#e0a53d"],
+                    }),
+                  },
                 ]}
-              />
+              >
+                <Animated.View
+                  style={[
+                    styles.toggleThumb,
+                    {
+                      transform: [
+                        {
+                          translateX: anonymousProgress.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [0, 20],
+                          }),
+                        },
+                      ],
+                    },
+                  ]}
+                />
+              </Animated.View>
             </TouchableOpacity>
           </View>
 
@@ -1034,33 +1326,286 @@ for (const file of files) {
               <Text style={styles.flairSectionTitle}>Post flair</Text>
               <Text style={styles.flairSectionHint}>Choose a category</Text>
             </View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.flairPickerContent}>
+            {showLostFoundSuggestion && (
+              <FlairSuggestionBanner
+                message="🔎 This sounds like a Lost & Found post — want to switch the flair?"
+                onSwitch={() => {
+                  easeLayout();
+                  setSelectedFlair("lost_found");
+                  setLostFoundSuggestionDismissed(true);
+                  requestAnimationFrame(() => scrollFlairIntoView("lost_found"));
+                }}
+                onDismiss={() => {
+                  easeLayout();
+                  setLostFoundSuggestionDismissed(true);
+                }}
+              />
+            )}
+            {showHelpSuggestion && (
+              <FlairSuggestionBanner
+                message="🆘 This sounds like a Help / Advice post — want to switch the flair?"
+                onSwitch={() => {
+                  easeLayout();
+                  setSelectedFlair("help");
+                  setHelpSuggestionDismissed(true);
+                  requestAnimationFrame(() => scrollFlairIntoView("help"));
+                }}
+                onDismiss={() => {
+                  easeLayout();
+                  setHelpSuggestionDismissed(true);
+                }}
+              />
+            )}
+            <ScrollView
+              ref={flairPickerRef}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.flairPickerContent}
+              scrollEventThrottle={16}
+              onLayout={(event) => {
+                flairPickerWidthRef.current = event.nativeEvent.layout.width;
+              }}
+              onScroll={(event) => {
+                flairPickerScrollXRef.current = event.nativeEvent.contentOffset.x;
+              }}
+            >
               {POST_FLAIRS.filter((flair) => !flair.staffOnly || canUsePostFlair(flair.id, authorRole)).map((flair) => {
                 const selected = selectedFlair === flair.id;
                 return (
-                  <TouchableOpacity key={flair.id} style={[styles.flairChoice, selected && styles.flairChoiceSelected]} activeOpacity={0.82} onPress={() => setSelectedFlair(flair.id)}>
+                  <TouchableOpacity
+                    key={flair.id}
+                    style={[styles.flairChoice, selected && styles.flairChoiceSelected]}
+                    activeOpacity={0.82}
+                    onLayout={(event) => {
+                      const { x, width } = event.nativeEvent.layout;
+                      flairChipLayoutsRef.current[flair.id] = { x, width };
+                    }}
+                    onPress={() => {
+                      easeLayout();
+                      setSelectedFlair(flair.id);
+                    }}
+                  >
                     <Text style={styles.flairChoiceEmoji}>{flair.emoji}</Text>
                     <Text style={[styles.flairChoiceText, selected && styles.flairChoiceTextSelected]}>{flair.label}</Text>
+                    {selected && (
+                      <Ionicons
+                        name="checkmark-circle"
+                        size={14}
+                        color="#ffffff"
+                        style={styles.flairChoiceCheck}
+                      />
+                    )}
                   </TouchableOpacity>
                 );
               })}
             </ScrollView>
           </View>
 
-          <TextInput
-            style={styles.input}
-            placeholder="Share something with BondED..."
-            placeholderTextColor="#a0a8c0"
-            multiline
-            value={content}
-            onChangeText={handleContentChange}
-            onSelectionChange={(event) =>
-              setContentSelection(event.nativeEvent.selection)
-            }
-          />
+          {isStaff && (
+            <View style={styles.pinSection}>
+              <View style={styles.pinRow}>
+                <View style={styles.pinLabelContainer}>
+                  <Ionicons name="pin" size={18} color="#7a0020" style={{ marginRight: 8 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.pinTitle}>Pin to Top of Feed</Text>
+                    <Text style={styles.pinSubtitle}>
+                      {selectedFlair === "announcement"
+                        ? "Feature in active announcements carousel at top of feed"
+                        : "Keep at the top of the campus feed"}
+                    </Text>
+                  </View>
+                </View>
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    easeLayout();
+                    const next = !shouldPin;
+                    setShouldPin(next);
+                    if (next && !targetDate) {
+                      const d = new Date();
+                      d.setDate(d.getDate() + 3);
+                      d.setHours(23, 59, 0, 0);
+                      setTargetDate(d);
+                      setTargetDateLabel(formatTargetDateLabel(d));
+                    }
+                  }}
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: shouldPin }}
+                >
+                  <View style={[styles.miniToggle, shouldPin && styles.miniToggleActive]}>
+                    <View style={[styles.miniToggleThumb, shouldPin && styles.miniToggleThumbActive]} />
+                  </View>
+                </TouchableOpacity>
+              </View>
+
+              {shouldPin && (
+                <View style={styles.pinDetailsCard}>
+                  <Text style={styles.pinDetailsInfo}>
+                    📅 Auto-unpin & expiration schedule:
+                  </Text>
+                  <View style={styles.pinDateControls}>
+                    <TouchableOpacity
+                      style={styles.pinDateButton}
+                      onPress={() => setShowDatePicker(true)}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="calendar-outline" size={16} color="#7a0020" />
+                      <Text style={styles.pinDateButtonText}>
+                        {targetDate
+                          ? targetDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+                          : "Pick Date"}
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.pinDateButton}
+                      onPress={() => setShowTimePicker(true)}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="time-outline" size={16} color="#7a0020" />
+                      <Text style={styles.pinDateButtonText}>
+                        {targetDate
+                          ? targetDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+                          : "Pick Time"}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {targetDate ? (
+                    <View style={styles.pinExpiryRow}>
+                      <Text style={styles.pinExpiryBadge}>
+                        ⏳ Ends: {formatTargetDateLabel(targetDate)}
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() => {
+                          easeLayout();
+                          setTargetDate(null);
+                          setTargetDateLabel(null);
+                        }}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <Text style={styles.pinRemoveDateText}>Pin indefinitely</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <Text style={styles.pinIndefiniteNote}>
+                      Pinned indefinitely until manually unpinned.
+                    </Text>
+                  )}
+                </View>
+              )}
+            </View>
+          )}
+
+          {showDatePicker && (
+            <DateTimePicker
+              value={targetDate || new Date()}
+              mode="date"
+              display={Platform.OS === "ios" ? "spinner" : "default"}
+              minimumDate={new Date()}
+              onChange={(_, selected) => {
+                setShowDatePicker(false);
+                if (selected) {
+                  const next = targetDate ? new Date(targetDate) : new Date();
+                  next.setFullYear(selected.getFullYear(), selected.getMonth(), selected.getDate());
+                  setTargetDate(next);
+                  setTargetDateLabel(formatTargetDateLabel(next));
+                }
+              }}
+            />
+          )}
+
+          {showTimePicker && (
+            <DateTimePicker
+              value={targetDate || new Date()}
+              mode="time"
+              display={Platform.OS === "ios" ? "spinner" : "default"}
+              onChange={(_, selected) => {
+                setShowTimePicker(false);
+                if (selected) {
+                  const next = targetDate ? new Date(targetDate) : new Date();
+                  next.setHours(selected.getHours(), selected.getMinutes(), 0, 0);
+                  setTargetDate(next);
+                  setTargetDateLabel(formatTargetDateLabel(next));
+                }
+              }}
+            />
+          )}
+
+          {detectedTargetDate && (
+            <View style={styles.dateSuggestionBanner}>
+              <View style={styles.dateSuggestionHeader}>
+                <Ionicons name="sparkles" size={16} color="#c28724" />
+                <Text style={styles.dateSuggestionTitle}>Upcoming Target Date Detected</Text>
+              </View>
+              <Text style={styles.dateSuggestionText}>
+                We detected <Text style={styles.dateSuggestionBold}>"{detectedTargetDate.matchedText}"</Text> ({detectedTargetDate.label}). Would you like to pin this announcement until then?
+              </Text>
+              <View style={styles.flairSuggestionActions}>
+                <TouchableOpacity
+                  style={styles.flairSuggestionSwitchButton}
+                  activeOpacity={0.82}
+                  onPress={() => {
+                    easeLayout();
+                    setShouldPin(true);
+                    setTargetDate(detectedTargetDate.targetDate);
+                    setTargetDateLabel(detectedTargetDate.label);
+                    if (selectedFlair !== "announcement" && canUsePostFlair("announcement", authorRole)) {
+                      setSelectedFlair("announcement");
+                    }
+                    setDismissedDetectedDate(true);
+                  }}
+                >
+                  <Text style={styles.flairSuggestionSwitchText}>Pin until date</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.flairSuggestionDismissButton}
+                  activeOpacity={0.82}
+                  onPress={() => {
+                    easeLayout();
+                    setDismissedDetectedDate(true);
+                  }}
+                >
+                  <Text style={styles.flairSuggestionDismissText}>Not now</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          <View
+            style={[
+              styles.composerCard,
+              isContentFocused && styles.composerCardFocused,
+            ]}
+          >
+            <TextInput
+              style={styles.input}
+              placeholder="Share something with BondED..."
+              placeholderTextColor="#a0a8c0"
+              multiline
+              value={content}
+              onChangeText={handleContentChange}
+              onFocus={() => setIsContentFocused(true)}
+              onBlur={() => setIsContentFocused(false)}
+              onSelectionChange={(event) =>
+                setContentSelection(event.nativeEvent.selection)
+              }
+            />
+          </View>
 
           {mentionSuggestions.length > 0 && (
-            <View style={styles.mentionSheet}>
+            <View
+              style={styles.mentionSheet}
+              onLayout={(event) => {
+                const mentionSheetY = event.nativeEvent.layout.y;
+                requestAnimationFrame(() => {
+                  contentScrollRef.current?.scrollTo({
+                    y: Math.max(0, mentionSheetY - 12),
+                    animated: true,
+                  });
+                });
+              }}
+            >
               <Text style={styles.mentionLabel}>Mention someone</Text>
               {mentionSuggestions.slice(0, 5).map((person) => (
                 <TouchableOpacity
@@ -1095,8 +1640,12 @@ for (const file of files) {
             <View style={styles.gifPreview}>
               <Image source={{ uri: selectedGif }} style={styles.gifImage} />
               <TouchableOpacity
+                activeOpacity={0.7}
                 style={styles.removeFile}
-                onPress={() => setSelectedGif(null)}
+                onPress={() => {
+                  easeLayout();
+                  setSelectedGif(null);
+                }}
               >
                 <Ionicons name="close-circle" size={22} color="#e0a53d" />
               </TouchableOpacity>
@@ -1114,7 +1663,13 @@ for (const file of files) {
                   {attachedLink.url}
                 </Text>
               </View>
-              <TouchableOpacity onPress={() => setAttachedLink(null)}>
+              <TouchableOpacity
+                style={styles.linkRemoveButton}
+                onPress={handleRemoveLink}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Remove link"
+              >
                 <Ionicons name="close-circle" size={22} color="#e0a53d" />
               </TouchableOpacity>
             </View>
@@ -1128,11 +1683,15 @@ for (const file of files) {
                     <Image source={{ uri: f.url }} style={styles.imagePreview} />
                   ) : (
                     <View style={styles.documentPreview}>
-                      <Ionicons name={f.mimeType?.startsWith("video/") ? "videocam" : "document-text"} size={40} color="#4f9cff" />
+                      <Ionicons
+                        name={f.mimeType?.startsWith("video/") ? "videocam" : getFileIconDetails(f.mimeType, f.name).icon}
+                        size={40}
+                        color={f.mimeType?.startsWith("video/") ? "#4f9cff" : getFileIconDetails(f.mimeType, f.name).color}
+                      />
                       <Text style={styles.documentName} numberOfLines={1}>{f.name || "Attached file"}</Text>
                     </View>
                   )}
-                  <TouchableOpacity style={styles.removeFile} onPress={() => setExistingFiles((current) => current.filter((_, idx) => idx !== i))}>
+                  <TouchableOpacity activeOpacity={0.7} style={styles.removeFile} onPress={() => { easeLayout(); setExistingFiles((current) => current.filter((_, idx) => idx !== i)); }}>
                     <Ionicons name="close-circle" size={22} color="#e0a53d" />
                   </TouchableOpacity>
                 </View>
@@ -1159,9 +1718,9 @@ for (const file of files) {
                   ) : (
                     <View style={styles.documentPreview}>
                       <Ionicons
-                        name="document-text"
+                        name={getFileIconDetails(f.mimeType, f.name).icon}
                         size={40}
-                        color="#4f9cff"
+                        color={getFileIconDetails(f.mimeType, f.name).color}
                       />
                       <Text style={styles.documentName} numberOfLines={1}>
                         {f.name}
@@ -1169,10 +1728,12 @@ for (const file of files) {
                     </View>
                   )}
                   <TouchableOpacity
+                    activeOpacity={0.7}
                     style={styles.removeFile}
-                    onPress={() =>
-                      setFiles(files.filter((_, idx) => idx !== i))
-                    }
+                    onPress={() => {
+                      easeLayout();
+                      setFiles(files.filter((_, idx) => idx !== i));
+                    }}
                   >
                     <Ionicons name="close-circle" size={22} color="#e0a53d" />
                   </TouchableOpacity>
@@ -1195,7 +1756,11 @@ for (const file of files) {
             <Text style={styles.addToPostLabel}>Add to your post</Text>
             <View style={styles.iconRow}>
               <TouchableOpacity
-                style={styles.iconButton}
+                activeOpacity={0.7}
+                style={[
+                  styles.iconButton,
+                  files.length >= MAX_FILES && styles.iconButtonDisabled,
+                ]}
                 onPress={takePhoto}
                 disabled={files.length >= MAX_FILES}
                 accessibilityLabel="Take a photo"
@@ -1207,10 +1772,14 @@ for (const file of files) {
                 />
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.iconButton}
-                onPress={pickFiles}
+                activeOpacity={0.7}
+                style={[
+                  styles.iconButton,
+                  files.length >= MAX_FILES && styles.iconButtonDisabled,
+                ]}
+                onPress={pickPhotos}
                 disabled={files.length >= MAX_FILES}
-                accessibilityLabel="Choose photos or files"
+                accessibilityLabel="Choose photos"
               >
                 <Ionicons
                   name="images"
@@ -1219,7 +1788,27 @@ for (const file of files) {
                 />
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.iconButton}
+                activeOpacity={0.7}
+                style={[
+                  styles.iconButton,
+                  files.length >= MAX_FILES && styles.iconButtonDisabled,
+                ]}
+                onPress={pickDocuments}
+                disabled={files.length >= MAX_FILES}
+                accessibilityLabel="Attach files"
+              >
+                <Ionicons
+                  name="attach"
+                  size={24}
+                  color={files.length >= MAX_FILES ? "#5a6380" : "#e0a53d"}
+                />
+              </TouchableOpacity>
+              <TouchableOpacity
+                activeOpacity={0.7}
+                style={[
+                  styles.iconButton,
+                  files.length >= MAX_FILES && styles.iconButtonDisabled,
+                ]}
                 onPress={pickVideos}
                 disabled={files.length >= MAX_FILES}
               >
@@ -1230,12 +1819,14 @@ for (const file of files) {
                 />
               </TouchableOpacity>
               <TouchableOpacity
+                activeOpacity={0.7}
                 style={styles.iconButton}
                 onPress={() => setShowLinkModal(true)}
               >
                 <Ionicons name="link" size={24} color="#4f9cff" />
               </TouchableOpacity>
               <TouchableOpacity
+                activeOpacity={0.7}
                 style={styles.iconButton}
                 onPress={() => setShowGifModal(true)}
               >
@@ -1251,30 +1842,45 @@ for (const file of files) {
             { paddingBottom: Math.max(insets.bottom, 16) },
           ]}
         >
-          <TouchableOpacity
-            style={[
-              styles.postButton,
-              !content.trim() &&
-                files.length === 0 &&
-                !selectedGif &&
-                !attachedLink &&
-                styles.disabledButton,
-            ]}
-            onPress={handlePost}
-            disabled={
-              (!content.trim() &&
-                files.length === 0 &&
-                !selectedGif &&
-                !attachedLink) ||
-              uploading
-            }
-          >
-            {uploading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.postButtonText}>{isEditMode ? "Save Changes" : "Post"}</Text>
-            )}
-          </TouchableOpacity>
+          <Animated.View style={{ transform: [{ scale: postButtonScale }] }}>
+            <TouchableOpacity
+              activeOpacity={0.9}
+              style={[
+                styles.postButton,
+                !content.trim() &&
+                  files.length === 0 &&
+                  !selectedGif &&
+                  !attachedLink &&
+                  styles.disabledButton,
+              ]}
+              onPress={handlePost}
+              onPressIn={() =>
+                Animated.spring(postButtonScale, {
+                  toValue: 0.97,
+                  useNativeDriver: true,
+                }).start()
+              }
+              onPressOut={() =>
+                Animated.spring(postButtonScale, {
+                  toValue: 1,
+                  useNativeDriver: true,
+                }).start()
+              }
+              disabled={
+                (!content.trim() &&
+                  files.length === 0 &&
+                  !selectedGif &&
+                  !attachedLink) ||
+                uploading
+              }
+            >
+              {uploading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.postButtonText}>{isEditMode ? "Save Changes" : "Post"}</Text>
+              )}
+            </TouchableOpacity>
+          </Animated.View>
         </View>
 
         <Modal
@@ -1285,6 +1891,7 @@ for (const file of files) {
         >
           <View style={styles.modalOverlay}>
             <View style={styles.modalContainer}>
+              <View style={styles.sheetHandle} />
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>
                   Tag People{" "}
@@ -1304,7 +1911,7 @@ for (const file of files) {
                       (s) => !taggedUsers.find((u) => u.id === s.id),
                     );
                     if (allTagged.length === 0) {
-                      Alert.alert("Info", "Everyone is already tagged!");
+                      showInfo("Info", "Everyone is already tagged!");
                       return;
                     }
                     setTaggedUsers([...taggedUsers, ...allTagged]);
@@ -1376,14 +1983,25 @@ for (const file of files) {
           visible={showLinkModal}
           animationType="fade"
           transparent
-          onRequestClose={() => setShowLinkModal(false)}
+          onRequestClose={handleCloseLinkModal}
         >
           <KeyboardAvoidingView
             behavior={Platform.OS === "ios" ? "padding" : "height"}
             style={styles.linkModalOverlay}
           >
             <View style={styles.linkModalContent}>
-              <Text style={styles.linkModalTitle}>Add Link</Text>
+              <View style={styles.linkModalHeader}>
+                <Text style={styles.linkModalTitle}>Add Link</Text>
+                <TouchableOpacity
+                  style={styles.linkModalCloseButton}
+                  onPress={handleCloseLinkModal}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close Add Link"
+                >
+                  <Ionicons name="close" size={22} color="#7a3b2e" />
+                </TouchableOpacity>
+              </View>
 
               <TextInput
                 placeholder="Enter URL (e.g., https://example.com)"
@@ -1409,13 +2027,9 @@ for (const file of files) {
                     styles.linkModalButton,
                     { backgroundColor: "#fffaf7" },
                   ]}
-                  onPress={() => {
-                    setShowLinkModal(false);
-                    setLinkUrl("");
-                    setLinkTitle("");
-                  }}
+                  onPress={handleCloseLinkModal}
                 >
-                  <Text style={styles.linkModalButtonText}>Cancel</Text>
+                  <Text style={styles.linkModalCancelText}>Cancel</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
@@ -1441,6 +2055,7 @@ for (const file of files) {
         >
           <View style={styles.modalOverlay}>
             <View style={styles.modalContainer}>
+              <View style={styles.sheetHandle} />
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Choose a GIF</Text>
                 <TouchableOpacity onPress={() => setShowGifModal(false)}>
@@ -1507,7 +2122,7 @@ for (const file of files) {
         <Image
           source={{ uri: thumbnailUrl }}
           style={styles.gifThumbnail}
-          resizeMode="cover"
+          contentFit="cover"
         />
       </TouchableOpacity>
     );
@@ -1535,8 +2150,12 @@ for (const file of files) {
         description={blockedDialog?.description}
         singleAction
         confirmText="OK"
-        destructive
-        onConfirm={() => setBlockedDialog(null)}
+        variant={blockedDialog?.variant ?? "warning"}
+        onConfirm={() => {
+          const onConfirmCallback = blockedDialog?.onConfirm;
+          setBlockedDialog(null);
+          onConfirmCallback?.();
+        }}
         onCancel={() => setBlockedDialog(null)}
       />
     </SafeAreaView>
@@ -1552,19 +2171,207 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    minHeight: 60,
+    borderBottomWidth: 1,
+    borderBottomColor: "#eadbd4",
+    backgroundColor: "#fffaf7",
   },
   headerTitle: { color: "#7a3b2e", fontSize: 20, fontWeight: "bold" },
-  flairSection: { marginHorizontal: 16, marginBottom: 14 },
+  headerCloseButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f5e9e3",
+  },
+  flairSection: { marginTop: 16, marginBottom: 16 },
   flairSectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 9 },
   flairSectionTitle: { color: "#4d1b17", fontSize: 14, fontWeight: "800" },
   flairSectionHint: { color: "#9b766c", fontSize: 12, fontWeight: "600" },
   flairPickerContent: { gap: 8, paddingRight: 16 },
+  // Shared by both flair-suggestion banners (Lost & Found, Help / Advice) —
+  // see the FlairSuggestionBanner component near the top of this file.
+  flairSuggestionBanner: {
+    backgroundColor: "#fff4ee",
+    borderWidth: 1,
+    borderColor: "#e0a53d",
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 10,
+  },
+  flairSuggestionText: { color: "#4d1b17", fontSize: 13, fontWeight: "700", marginBottom: 8 },
+  flairSuggestionActions: { flexDirection: "row", gap: 8 },
+  flairSuggestionSwitchButton: { backgroundColor: "#5f0909", borderRadius: 14, paddingHorizontal: 14, paddingVertical: 7 },
+  flairSuggestionSwitchText: { color: "#ffffff", fontSize: 12, fontWeight: "800" },
+  flairSuggestionDismissButton: { backgroundColor: "transparent", borderWidth: 1, borderColor: "#e5d4cc", borderRadius: 14, paddingHorizontal: 14, paddingVertical: 7 },
+  flairSuggestionDismissText: { color: "#9b766c", fontSize: 12, fontWeight: "700" },
+  pinSection: {
+    backgroundColor: "#fffaf7",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+    padding: 14,
+    marginBottom: 16,
+    shadowColor: "#4d1b17",
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  pinRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  pinLabelContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    flex: 1,
+    marginRight: 12,
+  },
+  pinTitle: {
+    color: "#4d1b17",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  pinSubtitle: {
+    color: "#9b766c",
+    fontSize: 11,
+    marginTop: 2,
+    lineHeight: 15,
+  },
+  miniToggle: {
+    width: 44,
+    height: 26,
+    backgroundColor: "#d6c9c2",
+    borderRadius: 13,
+    justifyContent: "center",
+    padding: 2,
+  },
+  miniToggleActive: {
+    backgroundColor: "#7a0020",
+  },
+  miniToggleThumb: {
+    width: 22,
+    height: 22,
+    backgroundColor: "#fff",
+    borderRadius: 11,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 2,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
+  },
+  miniToggleThumbActive: {
+    transform: [{ translateX: 18 }],
+  },
+  pinDetailsCard: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: "#f0e2da",
+  },
+  pinDetailsInfo: {
+    color: "#6f4a40",
+    fontSize: 12,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
+  pinDateControls: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  pinDateButton: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: "#f5ece7",
+    borderWidth: 1,
+    borderColor: "#e2d0c7",
+    borderRadius: 10,
+    paddingVertical: 9,
+    paddingHorizontal: 8,
+  },
+  pinDateButtonText: {
+    color: "#4d1b17",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  pinExpiryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 10,
+  },
+  pinExpiryBadge: {
+    color: "#7a0020",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  pinRemoveDateText: {
+    color: "#9b766c",
+    fontSize: 11,
+    fontWeight: "600",
+    textDecorationLine: "underline",
+  },
+  pinIndefiniteNote: {
+    marginTop: 8,
+    color: "#9b766c",
+    fontSize: 11,
+    fontStyle: "italic",
+  },
+  dateSuggestionBanner: {
+    backgroundColor: "#fff8eb",
+    borderWidth: 1,
+    borderColor: "#e0a53d",
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 14,
+  },
+  dateSuggestionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 6,
+  },
+  dateSuggestionTitle: {
+    color: "#7a4e00",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  dateSuggestionText: {
+    color: "#4d1b17",
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 10,
+  },
+  dateSuggestionBold: {
+    fontWeight: "800",
+    color: "#7a0020",
+  },
   flairChoice: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 18, backgroundColor: "#fffaf7", borderWidth: 1, borderColor: "#e5d4cc" },
   flairChoiceSelected: { backgroundColor: "#5f0909", borderColor: "#5f0909" },
   flairChoiceEmoji: { fontSize: 14 },
   flairChoiceText: { color: "#6f4a40", fontSize: 12, fontWeight: "700" },
   flairChoiceTextSelected: { color: "#ffffff" },
+  flairChoiceCheck: { marginLeft: 1 },
+  composerCardFocused: {
+    borderColor: "#e0a53d",
+    shadowOpacity: 0.1,
+  },
+  sheetHandle: {
+    alignSelf: "center",
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#d8c7bf",
+    marginTop: 8,
+  },
   scopeCard: {
     flexDirection: "row",
     alignItems: "center",
@@ -1592,7 +2399,8 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     marginTop: 3,
   },
-  scrollContent: { flex: 1, padding: 16 },
+  scroll: { flex: 1 },
+  scrollContent: { padding: 16, paddingBottom: 120 },
   fileLimitInfo: {
     backgroundColor: "#f0e7e2",
     padding: 10,
@@ -1612,6 +2420,13 @@ const styles = StyleSheet.create({
     backgroundColor: "#fffaf7",
     padding: 14,
     borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+    shadowColor: "#4d1b17",
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
   },
   anonymousLabel: { color: "#4d1b17", fontSize: 15, fontWeight: "600" },
   anonymousNote: {
@@ -1629,20 +2444,37 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     padding: 2,
   },
-  toggleActive: { backgroundColor: "#e0a53d" },
   toggleThumb: {
     width: 24,
     height: 24,
     backgroundColor: "#fff",
     borderRadius: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 2,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
   },
-  toggleThumbActive: { alignSelf: "flex-end" },
   input: {
     color: "#4d1b17",
     fontSize: 16,
-    minHeight: 120,
+    minHeight: 132,
     textAlignVertical: "top",
-    marginBottom: 12,
+    lineHeight: 23,
+  },
+  composerCard: {
+    backgroundColor: "#fffaf7",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 14,
+    shadowColor: "#4d1b17",
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   mentionSheet: {
     marginBottom: 14,
@@ -1729,21 +2561,30 @@ const styles = StyleSheet.create({
   },
 
   gifPreview: {
-    marginBottom: 12,
+    marginBottom: 14,
     position: "relative",
+    padding: 6,
+    borderRadius: 16,
+    backgroundColor: "#fffaf7",
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+    overflow: "hidden",
   },
   gifImage: {
     width: "100%",
     height: 250,
-    borderRadius: 12,
+    borderRadius: 11,
   },
   linkPreview: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "#f0e7e2",
-    padding: 12,
-    borderRadius: 10,
-    marginBottom: 12,
+    minHeight: 72,
+    paddingLeft: 14,
+    paddingVertical: 12,
+    paddingRight: 8,
+    borderRadius: 14,
+    marginBottom: 14,
     borderWidth: 1,
     borderColor: "#dfc9c1",
   },
@@ -1757,10 +2598,26 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
   },
-  filePreviewContainer: { gap: 10 },
+  linkRemoveButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: 8,
+    flexShrink: 0,
+    backgroundColor: "#fff7f0",
+  },
+  filePreviewContainer: { gap: 12, marginBottom: 2 },
   filePreview: {
-    marginBottom: 10,
+    marginBottom: 2,
     position: "relative",
+    padding: 6,
+    borderRadius: 16,
+    backgroundColor: "#fffaf7",
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+    overflow: "hidden",
   },
   videoPreview: {
     width: 110,
@@ -1771,7 +2628,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 8,
   },
-  imagePreview: { width: "100%", height: 250, borderRadius: 12 },
+  imagePreview: { width: "100%", height: 250, borderRadius: 11 },
   documentPreview: {
     backgroundColor: "#f0e7e2",
     padding: 20,
@@ -1785,18 +2642,45 @@ const styles = StyleSheet.create({
     marginTop: 8,
     textAlign: "center",
   },
-  removeFile: { position: "absolute", top: 8, right: 8 },
+  removeFile: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,250,247,0.92)",
+  },
   addToPostContainer: {
     backgroundColor: "#fffaf7",
     padding: 14,
-    borderRadius: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+    gap: 12,
+  },
+  addToPostLabel: { color: "#7a3b2e", fontSize: 15, fontWeight: "600" },
+  iconRow: {
+    width: "100%",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    gap: 6,
   },
-  addToPostLabel: { color: "#7a3b2e", fontSize: 15, fontWeight: "600" },
-  iconRow: { flexDirection: "row", gap: 14 },
-  iconButton: { padding: 6, position: "relative" },
+  iconButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+    backgroundColor: "#f7ede8",
+  },
+  iconButtonDisabled: {
+    opacity: 0.4,
+  },
   tagBadge: {
     position: "absolute",
     top: 0,
@@ -1815,16 +2699,24 @@ const styles = StyleSheet.create({
     fontWeight: "bold",
   },
   footer: {
-    backgroundColor: "#f6f1ed",
-    padding: 16,
-    borderTopColor: "#fffaf7",
+    backgroundColor: "#fffaf7",
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    borderTopColor: "#eadbd4",
     borderTopWidth: 1,
   },
   postButton: {
     backgroundColor: "#e0a53d",
-    borderRadius: 12,
-    paddingVertical: 14,
+    minHeight: 50,
+    borderRadius: 15,
+    paddingVertical: 13,
     alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#7a3b2e",
+    shadowOpacity: 0.14,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
   disabledButton: { opacity: 0.5 },
   postButtonText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
@@ -1854,7 +2746,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     padding: 14,
-    borderBottomColor: "#1e2840",
+    borderBottomColor: "#ece0d9",
     borderBottomWidth: 1,
   },
   studentAvatar: {
@@ -1893,12 +2785,28 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 20,
   },
+  linkModalHeader: {
+    minHeight: 40,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 12,
+  },
   linkModalTitle: {
     color: "#7a3b2e",
     fontSize: 18,
     fontWeight: "bold",
-    marginBottom: 16,
     textAlign: "center",
+  },
+  linkModalCloseButton: {
+    position: "absolute",
+    right: -6,
+    width: 40,
+    height: 40,
+    borderRadius: 13,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f5e9e3",
   },
   linkInput: {
     backgroundColor: "#f0e7e2",
@@ -1922,6 +2830,11 @@ const styles = StyleSheet.create({
   },
   linkModalButtonText: {
     color: "#fff",
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  linkModalCancelText: {
+    color: "#7a3b2e",
     fontSize: 15,
     fontWeight: "600",
   },

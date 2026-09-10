@@ -1,0 +1,249 @@
+{
+  "model": "TF-IDF + one-hidden-layer MLP",
+  "generative_ai": false,
+  "epochs_trained": 16,
+  "max_epochs": 50,
+  "early_stopping_patience": 6,
+  "validation_accuracy": 0.8615819209039548,
+  "best_validation_loss": 0.3397015631198883,
+  "training_rows": 1416,
+  "validation_rows": 354,
+  "vocabulary_size": 1600,
+  "classification_report": {
+    "bonded": {
+      "precision": 0.777027027027027,
+      "recall": 0.9745762711864406,
+      "f1-score": 0.8646616541353384,
+      "support": 118.0
+    },
+    "general": {
+      "precision": 0.9058823529411765,
+      "recall": 0.652542372881356,
+      "f1-score": 0.7586206896551724,
+      "support": 118.0
+    },
+    "utility": {
+      "precision": 0.9338842975206612,
+      "recall": 0.9576271186440678,
+      "f1-score": 0.9456066945606695,
+      "support": 118.0
+    },
+    "accuracy": 0.8615819209039548,
+    "macro avg": {
+      "precision": 0.8722645591629549,
+      "recall": 0.8615819209039549,
+      "f1-score": 0.8562963461170602,
+      "support": 354.0
+    },
+    "weighted avg": {
+      "precision": 0.8722645591629549,
+      "recall": 0.8615819209039548,
+      "f1-score": 0.8562963461170601,
+      "support": 354.0
+    }
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "validation_loss": 1.0703566074371338,
+      "validation_accuracy": 0.4265536723163842
+    },
+    {
+      "epoch": 2,
+      "validation_loss": 1.0097993612289429,
+      "validation_accuracy": 0.5423728813559322
+    },
+    {
+      "epoch": 3,
+      "validation_loss": 0.9348570108413696,
+      "validation_accuracy": 0.7401129943502824
+    },
+    {
+      "epoch": 4,
+      "validation_loss": 0.8549196124076843,
+      "validation_accuracy": 0.8050847457627118
+    },
+    {
+      "epoch": 5,
+      "validation_loss": 0.7732015252113342,
+      "validation_accuracy": 0.8248587570621468
+    },
+    {
+      "epoch": 6,
+      "validation_loss": 0.6947723031044006,
+      "validation_accuracy": 0.8333333333333334
+    },
+    {
+      "epoch": 7,
+      "validation_loss": 0.6226206421852112,
+      "validation_accuracy": 0.8418079096045198
+    },
+    {
+      "epoch": 8,
+      "validation_loss": 0.5580556988716125,
+      "validation_accuracy": 0.847457627118644
+    },
+    {
+      "epoch": 9,
+      "validation_loss": 0.5018991827964783,
+      "validation_accuracy": 0.8700564971751412
+    },
+    {
+      "epoch": 10,
+      "validation_loss": 0.4552161991596222,
+      "validation_accuracy": 0.8728813559322034
+    },
+    {
+      "epoch": 11,
+      "validation_loss": 0.41752222180366516,
+      "validation_accuracy": 0.8728813559322034
+    },
+    {
+      "epoch": 12,
+      "validation_loss": 0.38807058334350586,
+      "validation_accuracy": 0.8728813559322034
+    },
+    {
+      "epoch": 13,
+      "validation_loss": 0.36667972803115845,
+      "validation_accuracy": 0.8757062146892656
+    },
+    {
+      "epoch": 14,
+      "validation_loss": 0.35185810923576355,
+      "validation_accuracy": 0.8757062146892656
+    },
+    {
+      "epoch": 15,
+      "validation_loss": 0.3433433473110199,
+      "validation_accuracy": 0.8615819209039548
+    },
+    {
+      "epoch": 16,
+      "validation_loss": 0.3397015631198883,
+      "validation_accuracy": 0.8615819209039548
+    },
+    {
+      "epoch": 17,
+      "validation_loss": 0.33987724781036377,
+      "validation_accuracy": 0.8615819209039548
+    },
+    {
+      "epoch": 18,
+      "validation_loss": 0.34437108039855957,
+      "validation_accuracy": 0.8615819209039548
+    },
+    {
+      "epoch": 19,
+      "validation_loss": 0.3516070544719696,
+      "validation_accuracy": 0.8531073446327684
+    },
+    {
+      "epoch": 20,
+      "validation_loss": 0.36128565669059753,
+      "validation_accuracy": 0.8531073446327684
+    },
+    {
+      "epoch": 21,
+      "validation_loss": 0.37231871485710144,
+      "validation_accuracy": 0.8531073446327684
+    },
+    {
+      "epoch": 22,
+      "validation_loss": 0.38502463698387146,
+      "validation_accuracy": 0.8531073446327684
+    }
+  ],
+  "regression_checks": [
+    {
+      "question": "what are the upcoming events",
+      "expected": "bonded",
+      "predicted": "bonded",
+      "passed": true
+    },
+    {
+      "question": "when is the next campus event",
+      "expected": "bonded",
+      "predicted": "bonded",
+      "passed": true
+    },
+    {
+      "question": "what is my name",
+      "expected": "bonded",
+      "predicted": "bonded",
+      "passed": true
+    },
+    {
+      "question": "what programs are available",
+      "expected": "bonded",
+      "predicted": "bonded",
+      "passed": true
+    },
+    {
+      "question": "what is photosynthesis",
+      "expected": "general",
+      "predicted": "general",
+      "passed": true
+    },
+    {
+      "question": "what is orogeny",
+      "expected": "general",
+      "predicted": "general",
+      "passed": true
+    },
+    {
+      "question": "what is snowboard cross",
+      "expected": "general",
+      "predicted": "general",
+      "passed": true
+    },
+    {
+      "question": "what is an event in programming",
+      "expected": "general",
+      "predicted": "general",
+      "passed": true
+    },
+    {
+      "question": "what time is it",
+      "expected": "utility",
+      "predicted": "utility",
+      "passed": true
+    },
+    {
+      "question": "what is 25 plus 4",
+      "expected": "utility",
+      "predicted": "utility",
+      "passed": true
+    },
+    {
+      "question": "how many students are enrolled",
+      "expected": "bonded",
+      "predicted": "bonded",
+      "passed": true
+    },
+    {
+      "question": "list everyone in the system",
+      "expected": "bonded",
+      "predicted": "bonded",
+      "passed": true
+    },
+    {
+      "question": "who is registered",
+      "expected": "bonded",
+      "predicted": "bonded",
+      "passed": true
+    },
+    {
+      "question": "who is ana lopez",
+      "expected": "bonded",
+      "predicted": "bonded",
+      "passed": true
+    },
+    {
+      "question": "list every staff member in the system",
+      "expected": "bonded",
+      "predicted": "bonded",
+      "passed": true
+    }
+  ]
+}

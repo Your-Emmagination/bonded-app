@@ -1,5 +1,15 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+} from "firebase/firestore";
 import { db } from "../Firebase_configure";
 import {
   DEFAULT_NOTIFICATION_SOUND_ID,
@@ -8,6 +18,91 @@ import {
 
 const STORAGE_KEY = "bonded:notificationSoundId";
 const COLLECTION = "userNotificationSettings";
+
+// Task 4B: per-user, per-channel notification mute.
+//
+// This lives in its own `channelMutes/{channelId}_{userId}` collection rather
+// than as a field on the owner-only `userNotificationSettings` doc, because a
+// message sender has to see *other* members' mutes at mention fan-out time to
+// know whom to skip — the same per-user-per-channel doc shape already used for
+// channelReads / typingIndicators. Presence of the doc means "muted".
+const CHANNEL_MUTES_COLLECTION = "channelMutes";
+const channelMuteDocId = (channelId: string, userId: string) =>
+  `${channelId}_${userId}`;
+
+/** Is this channel muted for this user? Reads that user's own mute doc. */
+export const isChannelMuted = async (
+  userId: string,
+  channelId: string,
+): Promise<boolean> => {
+  try {
+    const snapshot = await getDoc(
+      doc(db, CHANNEL_MUTES_COLLECTION, channelMuteDocId(channelId, userId)),
+    );
+    return snapshot.exists();
+  } catch (error) {
+    console.error("Error reading channel mute:", error);
+    return false;
+  }
+};
+
+/** Mute (create the doc) or unmute (delete it) a channel for a user. */
+export const setChannelMuted = async ({
+  userId,
+  serverId,
+  channelId,
+  muted,
+}: {
+  userId: string;
+  serverId: string;
+  channelId: string;
+  muted: boolean;
+}): Promise<void> => {
+  const ref = doc(
+    db,
+    CHANNEL_MUTES_COLLECTION,
+    channelMuteDocId(channelId, userId),
+  );
+  if (muted) {
+    await setDoc(ref, {
+      userId,
+      serverId,
+      channelId,
+      updatedAt: serverTimestamp(),
+    });
+  } else {
+    await deleteDoc(ref);
+  }
+};
+
+/**
+ * The subset of `userIds` who have muted this channel — used at mention
+ * fan-out time to skip creating notifications they've opted out of. One
+ * channel-scoped query instead of a read per recipient.
+ */
+export const fetchChannelMuterIds = async (
+  channelId: string,
+  userIds: string[],
+): Promise<Set<string>> => {
+  const wanted = new Set(userIds.filter(Boolean));
+  const muted = new Set<string>();
+  if (!channelId || wanted.size === 0) return muted;
+  try {
+    const snapshot = await getDocs(
+      query(
+        collection(db, CHANNEL_MUTES_COLLECTION),
+        where("channelId", "==", channelId),
+      ),
+    );
+    snapshot.docs.forEach((entry) => {
+      const uid = String(entry.data()?.userId || "");
+      if (uid && wanted.has(uid)) muted.add(uid);
+    });
+  } catch (error) {
+    console.error("Error fetching channel muters:", error);
+  }
+  return muted;
+};
 
 const isValidSoundId = (value: unknown): value is NotificationSoundId =>
   typeof value === "string" &&

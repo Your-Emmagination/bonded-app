@@ -253,7 +253,6 @@ who is batman,unknown
 tell me about batman,unknown
 write me a story,unknown
 write an essay for me,unknown
-tell me a joke,unknown
 what is the weather today,unknown
 will it rain today,unknown
 what is the temperature,unknown
@@ -601,3 +600,168 @@ ano ang mga services mo,help
 pwede mo ba akong tulungan,help
 anong tulong pwede mo ibigay,help
 paano gamitin ang bonded ai,help
+list all students,directory
+list all students in bonded,directory
+how many students are enrolled,directory
+show all students,directory
+how many students do we have,directory
+give me the full list of students,directory
+list all users,directory
+show all users,directory
+list everyone in the system,directory
+who is registered,directory
+list all registered users,directory
+how many users are in the system,directory
+show me everyone in bonded,directory
+list every staff member in the system,directory
+show the full staff directory,directory
+give me the member directory,directory
+show the member list,directory
+what program is juan cruz in,directory
+what course is maria santos taking,directory
+what year level is pedro reyes,directory
+who is ana lopez,directory
+what year is carlo mendoza in,directory
+what program is she in,directory
+how are you today,wellbeing
+how do you do,wellbeing
+are you having a good day,wellbeing
+how is everything going,wellbeing
+hows it going,wellbeing
+how are you holding up,wellbeing
+you doing well,wellbeing
+are you good today,wellbeing
+how are you this morning,wellbeing
+how are you this afternoon,wellbeing
+hope you are doing well,wellbeing
+hope all is well with you,wellbeing
+how is your day going,wellbeing
+how has your day been,wellbeing
+are things going well for you,wellbeing
+whats up with you,wellbeing
+how are you feeling,wellbeing
+are you doing okay today,wellbeing
+is everything okay with you,wellbeing
+hey how are you,wellbeing
+hi how are you doing,wellbeing
+how are you bonded ai,wellbeing
+how are you doing bonded assistant,wellbeing
+are you okay bonded ai,wellbeing
+kumusta ka,wellbeing
+kumusta ka na,wellbeing
+kamusta ka na,wellbeing
+musta ka,wellbeing
+musta ka na,wellbeing
+kumusta ka ngayon,wellbeing
+ok ka lang,wellbeing
+ayos ka lang,wellbeing
+kamusta ang araw mo,wellbeing
+can you do my homework,unknown
+do my assignment for me,unknown
+give me the answers to the quiz,unknown
+what will be on the exam,unknown
+what is the answer to number 5,unknown
+write my thesis for me,unknown
+what is your favorite color,unknown
+do you have feelings,unknown
+lets play a game,unknown
+tell me a bedtime story,unknown
+what do you think about politics,unknown
+is the earth flat,unknown
+where can i watch movies for free,unknown
+what is on the jollibee menu,unknown
+how do i get free mobile load,unknown
+what are you for,help
+what is this assistant for,help
+how can you assist me,help
+what kind of help do you offer,help
+what can i use you for,help
+can you help me with something,help
+what do you help students with,help
+what are you able to do for me,help
+ano ba ang magagawa mo,help
+paano mo ako matutulungan,help
+saan ka pwede gamitin,help
+whats your name again,assistant_identity
+remind me your name,assistant_identity
+do you have a name,assistant_identity
+so what are you exactly,assistant_identity
+are you a virtual assistant,assistant_identity
+what are you supposed to be,assistant_identity
+how many people are registered,directory
+give me the list of all users,directory
+count the enrolled students,directory
+how many are enrolled in total,directory
+what program is he in,directory
+which year level is juan cruz in,directory
+hello there bonded ai,greeting
+hi there bonded,greeting
+good to see you,greeting
+hey assistant good morning,greeting
+whats todays date,date
+give me todays date,date
+what is the current date,date
+what is the date right now,date
+so what is the date today,date
+whats the time now,time
+tell me the current time please,time
+do you have the time,time
+what is the clock right now,time
+so what time is it,time
+what is my year,user_profile
+tell me my course,user_profile
+tell me my program,user_profile
+what program am i enrolled in,user_profile
+what is my student info,user_profile
+show me my student id number,user_profile
+what are my course and year level,user_profile
+display my student profile,user_profile
+tell me a joke,joke
+tell me another joke,joke
+say something funny,joke
+make me laugh,joke
+do you know any jokes,joke
+got any jokes,joke
+can you tell a joke,joke
+i want to hear a joke,joke
+give me a joke,joke
+joke please,joke
+tell me a funny joke,joke
+know any good jokes,joke
+hit me with a joke,joke
+tell me a dad joke,joke
+say a joke,joke
+tell me something funny,joke
+do you have any jokes,joke
+crack a joke,joke
+tell me a joke please,joke
+make me smile with a joke,joke
+tell me a good joke,joke
+another joke please,joke
+may joke ka ba,joke
+patawa naman,joke
+pa joke naman,joke
+gusto ko marinig ng joke,joke
+how do i report a post,campus_knowledge
+how do i report a comment or reply,campus_knowledge
+how can i report someone's post,campus_knowledge
+what is a post flair,campus_knowledge
+what does a post flair mean,campus_knowledge
+can i post anonymously,campus_knowledge
+who can see my anonymous post,campus_knowledge
+how do i use the ai assistant in a post,campus_knowledge
+what is the lost and found feature,campus_knowledge
+how do i mark a lost item as found,campus_knowledge
+why is my post pending,campus_knowledge
+why was my post removed,campus_knowledge
+how do i save or bookmark a post,campus_knowledge
+how do i find my saved posts,campus_knowledge
+how do i create a poll in bonded,campus_knowledge
+what is a server or channel,campus_knowledge
+how do i join a server,campus_knowledge
+how do i edit or delete my post,campus_knowledge
+how do i tag someone in a post,campus_knowledge
+when do i get a notification in bonded,campus_knowledge
+how do i contact a moderator,campus_knowledge
+who reviews reported content,campus_knowledge
+how does bonded handle my data privacy,campus_knowledge

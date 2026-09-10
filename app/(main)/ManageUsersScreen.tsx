@@ -1,0 +1,1822 @@
+// app/(main)/ManageUsersScreen.tsx
+import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
+import { onAuthStateChanged } from "firebase/auth";
+import {
+  collection,
+  doc,
+  getCountFromServer,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where,
+} from "firebase/firestore";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ActivityIndicator,
+  FlatList,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { Image } from "expo-image";
+import { SafeAreaView } from "react-native-safe-area-context";
+import ConfirmDialog from "./components/ConfirmDialog";
+import { ListSkeleton } from "./components/Skeleton";
+import { auth, db } from "../../Firebase_configure";
+import { avatarThumb } from "@/utils/cloudinaryImages";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
+import {
+  canManageUsers,
+  getPermissionsForRole,
+  getRoleDisplayName,
+  getRoleHierarchyLevel,
+  parseUserRole,
+  resolveUserRoleForAuthUser,
+  type UserRole,
+} from "@/utils/rbac";
+
+const YEAR_LEVEL_OPTIONS = [
+  "1st Year",
+  "2nd Year",
+  "3rd Year",
+  "4th Year",
+  "Graduated",
+];
+
+// Fix 2: the students listener is bounded to this many rows and grown by
+// "Load more" (same single-tier limit pattern as ManageModerationScreen's
+// PAGE_SIZE), instead of streaming the whole collection into an unvirtualized
+// list.
+const PAGE_SIZE = 40;
+
+type ManagedUserFilter =
+  | "all"
+  | "online"
+  | "admin"
+  | "teacher"
+  | "moderator"
+  | "student";
+
+type ManagedUserRecord = {
+  id: string;
+  userId?: string | null;
+  firstname?: string;
+  lastname?: string;
+  email?: string;
+  studentID?: string;
+  course?: string;
+  yearlvl?: string;
+  role?: string;
+  isOnline?: boolean;
+  profileImage?: string | null;
+};
+
+// Mirrors the `programs` collection shape used by the registration program
+// picker (AdminRegisterUserScreen / AdminManageProgramsScreen). A student's
+// `course` field stores the program *name*, so that is what we validate against.
+type Program = {
+  id: string;
+  name: string;
+  code: string;
+  description?: string;
+};
+
+// Roles for which a program is mandatory (matches AdminRegisterUserScreen's
+// registration rules). Teachers/admins may have a blank program.
+const PROGRAM_REQUIRED_ROLES: UserRole[] = ["student", "moderator"];
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const FILTERS: {
+  value: ManagedUserFilter;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+}[] = [
+  { value: "all", label: "All", icon: "apps-outline" },
+  { value: "online", label: "Online", icon: "ellipse-outline" },
+  { value: "admin", label: "Admins", icon: "shield-checkmark-outline" },
+  { value: "teacher", label: "Teachers", icon: "school-outline" },
+  { value: "moderator", label: "Moderators", icon: "shield-outline" },
+  { value: "student", label: "Students", icon: "people-outline" },
+];
+
+const ROLE_OPTIONS: {
+  value: UserRole;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+}[] = [
+  { value: "student", label: "Student", icon: "people-outline" },
+  { value: "moderator", label: "Moderator", icon: "shield-outline" },
+  { value: "teacher", label: "Teacher", icon: "school-outline" },
+  { value: "admin", label: "Admin", icon: "shield-checkmark-outline" },
+];
+
+function getName(user: ManagedUserRecord) {
+  return (
+    `${user.firstname || ""} ${user.lastname || ""}`.trim() ||
+    user.email ||
+    "Unknown user"
+  );
+}
+
+function getInitials(user: ManagedUserRecord) {
+  const seed = `${user.firstname?.[0] || ""}${user.lastname?.[0] || ""}`.trim();
+  if (seed) return seed.toUpperCase();
+  return (user.email?.[0] || user.studentID?.[0] || "U").toUpperCase();
+}
+
+function getMeta(user: ManagedUserRecord) {
+  return (
+    [user.studentID, user.course, user.yearlvl].filter(Boolean).join(" • ") ||
+    "No profile details yet"
+  );
+}
+
+function getRoleColor(role: string | null) {
+  const colors: Record<string, string> = {
+    admin: "#8f1d2c",
+    teacher: "#b86b1d",
+    moderator: "#6e4aa3",
+    student: "#356a59",
+  };
+  return colors[role || ""] || "#356a59";
+}
+
+// Fix 2: extracted from the inline .map() and memoized so a students-collection
+// change (or an unrelated screen re-render) only re-renders the rows whose
+// props actually changed, not every visible card. Callbacks come in as stable
+// references from the screen; per-row flags (expanded / busy / isSelf) are
+// primitives so React.memo's shallow compare does the right thing.
+type UserRowProps = {
+  user: ManagedUserRecord;
+  expanded: boolean;
+  busy: boolean;
+  isSelf: boolean;
+  onToggleExpand: (id: string) => void;
+  onOpenProfile: (user: ManagedUserRecord) => void;
+  onOpenEdit: (user: ManagedUserRecord) => void;
+  onChangeYear: (user: ManagedUserRecord, year: string) => void;
+  onChangeRole: (user: ManagedUserRecord, role: UserRole) => void;
+};
+
+function UserRowComponent({
+  user,
+  expanded,
+  busy,
+  isSelf,
+  onToggleExpand,
+  onOpenProfile,
+  onOpenEdit,
+  onChangeYear,
+  onChangeRole,
+}: UserRowProps) {
+  const normalizedRole = parseUserRole(user.role) || "student";
+
+  return (
+    <View style={[styles.userCard, expanded && styles.userCardExpanded]}>
+      <TouchableOpacity
+        style={styles.userHeader}
+        onPress={() => onToggleExpand(user.id)}
+        activeOpacity={0.86}
+      >
+        <View style={styles.identityRow}>
+          <View style={styles.avatar}>
+            {user.profileImage ? (
+              <Image
+                source={{ uri: avatarThumb(user.profileImage, 52) }}
+                style={styles.avatarImage}
+              />
+            ) : (
+              <Text style={styles.avatarText}>{getInitials(user)}</Text>
+            )}
+            <View
+              style={[
+                styles.presenceDot,
+                { backgroundColor: user.isOnline ? "#2e8b68" : "#c7aaa0" },
+              ]}
+            />
+          </View>
+
+          <View style={styles.identityCopy}>
+            <View style={styles.nameRow}>
+              <Text style={styles.userName} numberOfLines={1}>
+                {getName(user)}
+              </Text>
+              {isSelf && (
+                <View style={styles.youBadge}>
+                  <Text style={styles.youBadgeText}>You</Text>
+                </View>
+              )}
+            </View>
+            <Text style={styles.userMeta} numberOfLines={2}>
+              {getMeta(user)}
+            </Text>
+            <View style={styles.badgeRow}>
+              <View
+                style={[
+                  styles.roleBadge,
+                  { backgroundColor: getRoleColor(normalizedRole) + "14" },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.roleBadgeText,
+                    { color: getRoleColor(normalizedRole) },
+                  ]}
+                >
+                  {getRoleDisplayName(normalizedRole)}
+                </Text>
+              </View>
+              <Text style={styles.statusText}>
+                {user.isOnline ? "Online now" : "Offline"}
+              </Text>
+            </View>
+          </View>
+        </View>
+        <Ionicons
+          name={expanded ? "chevron-up" : "chevron-down"}
+          size={18}
+          color="#7a3b2e"
+        />
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={styles.openProfileButton}
+        onPress={() => onOpenProfile(user)}
+        activeOpacity={0.82}
+      >
+        <Ionicons name="person-circle-outline" size={17} color="#8a5a10" />
+        <Text style={styles.openProfileText}>Open profile</Text>
+        <Ionicons name="arrow-forward" size={15} color="#8a5a10" />
+      </TouchableOpacity>
+
+      {expanded && (
+        <View style={styles.expandedPanel}>
+          <Text style={styles.controlTitle}>Profile details</Text>
+          <Text style={styles.controlHelp}>
+            Correct this account&apos;s name, email, or program.
+          </Text>
+          <TouchableOpacity
+            style={styles.editDetailsButton}
+            onPress={() => onOpenEdit(user)}
+            disabled={busy}
+            activeOpacity={0.82}
+          >
+            <Ionicons name="create-outline" size={15} color="#8a5a10" />
+            <Text style={styles.editDetailsText}>Edit name, email &amp; program</Text>
+          </TouchableOpacity>
+
+          <View style={styles.divider} />
+
+          <Text style={styles.controlTitle}>Year level</Text>
+          <Text style={styles.controlHelp}>
+            Keep the student&apos;s academic level current.
+          </Text>
+          <View style={styles.optionGrid}>
+            {YEAR_LEVEL_OPTIONS.map((yearOption) => {
+              const selected = user.yearlvl === yearOption;
+              return (
+                <TouchableOpacity
+                  key={`${user.id}-${yearOption}`}
+                  style={[
+                    styles.optionButton,
+                    selected && styles.optionButtonSelected,
+                  ]}
+                  onPress={() => onChangeYear(user, yearOption)}
+                  disabled={busy}
+                  activeOpacity={0.82}
+                >
+                  <Ionicons
+                    name="school-outline"
+                    size={15}
+                    color={selected ? "#fffaf6" : "#5f0909"}
+                  />
+                  <Text
+                    style={[
+                      styles.optionText,
+                      selected && styles.optionTextSelected,
+                    ]}
+                  >
+                    {yearOption}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <View style={styles.divider} />
+
+          <Text style={styles.controlTitle}>Role access</Text>
+          <Text style={styles.controlHelp}>
+            Choose the access level that matches this account.
+          </Text>
+          <View style={styles.optionGrid}>
+            {ROLE_OPTIONS.map((roleOption) => {
+              const selected = normalizedRole === roleOption.value;
+              return (
+                <TouchableOpacity
+                  key={`${user.id}-${roleOption.value}`}
+                  style={[
+                    styles.optionButton,
+                    selected && styles.optionButtonSelected,
+                  ]}
+                  onPress={() => onChangeRole(user, roleOption.value)}
+                  disabled={busy || isSelf || selected}
+                  activeOpacity={0.82}
+                >
+                  <Ionicons
+                    name={roleOption.icon}
+                    size={15}
+                    color={selected ? "#fffaf6" : getRoleColor(roleOption.value)}
+                  />
+                  <Text
+                    style={[
+                      styles.optionText,
+                      selected && styles.optionTextSelected,
+                    ]}
+                  >
+                    {roleOption.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {busy ? (
+            <View style={styles.busyRow}>
+              <ActivityIndicator size="small" color="#8f3a2b" />
+              <Text style={styles.busyText}>Updating account…</Text>
+            </View>
+          ) : (
+            <Text style={styles.hintText}>
+              Role changes update the student record immediately. The user may
+              need to refresh their session to receive the new access
+              everywhere.
+            </Text>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+const UserRow = React.memo(UserRowComponent);
+
+export default function ManageUsersScreen() {
+  const router = useRouter();
+  const [loading, setLoading] = useState(true);
+  const [role, setRole] = useState<UserRole | undefined>(undefined);
+  const [users, setUsers] = useState<ManagedUserRecord[]>([]);
+  const [usersLoading, setUsersLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<ManagedUserFilter>("all");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  // Fix 2: bounded page that "Load more" grows.
+  const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Fix 2: chip / metric counts come from server-side aggregation so they stay
+  // accurate no matter how many pages are loaded (no docs downloaded).
+  const [roleCounts, setRoleCounts] = useState({
+    all: 0,
+    online: 0,
+    admin: 0,
+    teacher: 0,
+    moderator: 0,
+    student: 0,
+  });
+
+  // Managed program catalog — the same `programs` collection the registration
+  // screen reads. Used to validate the program field in the profile editor so
+  // an admin can't set a `course` value that isn't a real program.
+  const [programs, setPrograms] = useState<Program[]>([]);
+  const [programsLoading, setProgramsLoading] = useState(true);
+
+  // Profile editor (name / email / program). Student ID is deliberately NOT
+  // editable here — see the comment on `openEditProfile` below.
+  const [editUser, setEditUser] = useState<ManagedUserRecord | null>(null);
+  const [editFirstname, setEditFirstname] = useState("");
+  const [editLastname, setEditLastname] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [editCourse, setEditCourse] = useState("");
+  const [editProgramPickerOpen, setEditProgramPickerOpen] = useState(false);
+  const [editError, setEditError] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  // Single dialog state used to render every alert on this screen through
+  // the app's branded ConfirmDialog instead of the bare native Alert.alert.
+  const [dialog, setDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
+  const showInfo = (title: string, description?: string, onConfirm?: () => void) => {
+    setDialog({
+      title,
+      description,
+      confirmText: "OK",
+      singleAction: true,
+      onConfirm: () => {
+        setDialog(null);
+        onConfirm?.();
+      },
+    });
+  };
+  const showConfirm = (options: {
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    onConfirm: () => void;
+  }) => {
+    setDialog({
+      ...options,
+      onConfirm: () => {
+        setDialog(null);
+        options.onConfirm();
+      },
+    });
+  };
+
+  const canManage = canManageUsers(role);
+  const currentStudentDocId = auth.currentUser?.email?.split("@")[0] || null;
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        setLoading(false);
+        router.replace("/(main)/(tabs)/HomeScreen");
+        return;
+      }
+
+      try {
+        const nextRole = await resolveUserRoleForAuthUser(user);
+        setRole(nextRole);
+        if (!canManageUsers(nextRole)) {
+          router.replace("/(main)/(tabs)/DashboardScreen");
+        }
+      } catch (error) {
+        console.error("Error loading manage-users role:", error);
+        router.replace("/(main)/(tabs)/DashboardScreen");
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    return unsubscribe;
+  }, [router]);
+
+  useEffect(() => {
+    if (!canManage || !auth.currentUser) {
+      setUsers([]);
+      setUsersLoading(false);
+      return;
+    }
+
+    setUsersLoading(true);
+    // Bounded live listener: at most `pageLimit` student docs, grown by
+    // "Load more". Ordered implicitly by document id, which every doc has, so
+    // no user is ever excluded for missing a sort field. Display order is
+    // still the client-side online/role/name sort in filteredUsers below.
+    return onSnapshot(
+      query(collection(db, "students"), limit(pageLimit)),
+      (snapshot) => {
+        setUsers(
+          snapshot.docs.map((item) => {
+            const data = item.data() as ManagedUserRecord;
+            return {
+              id: item.id,
+              userId: data.userId ?? null,
+              firstname: data.firstname || "",
+              lastname: data.lastname || "",
+              email: data.email || "",
+              studentID: data.studentID || item.id,
+              course: data.course || "",
+              yearlvl: data.yearlvl || "",
+              role: data.role || "student",
+              isOnline: data.isOnline === true,
+              profileImage: data.profileImage || null,
+            };
+          }),
+        );
+        setHasMore(snapshot.size === pageLimit);
+        setUsersLoading(false);
+        setLoadingMore(false);
+      },
+      (error) => {
+        console.error("Error loading managed users:", error);
+        showInfo("Unable to load users", "Please try again in a moment.");
+        setUsersLoading(false);
+        setLoadingMore(false);
+      },
+    );
+  }, [canManage, pageLimit]);
+
+  // Live program catalog for the profile editor's program picker/validation.
+  useEffect(() => {
+    if (!canManage || !auth.currentUser) {
+      setPrograms([]);
+      setProgramsLoading(false);
+      return;
+    }
+    return onSnapshot(
+      query(collection(db, "programs"), orderBy("name", "asc")),
+      (snapshot) => {
+        setPrograms(
+          snapshot.docs.map((item) => ({
+            id: item.id,
+            ...(item.data() as Omit<Program, "id">),
+          })),
+        );
+        setProgramsLoading(false);
+      },
+      (error) => {
+        console.error("Error loading programs:", error);
+        setProgramsLoading(false);
+      },
+    );
+  }, [canManage]);
+
+  const refreshCounts = useCallback(async () => {
+    if (!canManage || !auth.currentUser) return;
+    try {
+      const students = collection(db, "students");
+      const [all, online, admin, teacher, moderator] = await Promise.all([
+        getCountFromServer(students),
+        getCountFromServer(query(students, where("isOnline", "==", true))),
+        getCountFromServer(query(students, where("role", "==", "admin"))),
+        getCountFromServer(query(students, where("role", "==", "teacher"))),
+        getCountFromServer(query(students, where("role", "==", "moderator"))),
+      ]);
+      const allCount = all.data().count;
+      const staffCount =
+        admin.data().count + teacher.data().count + moderator.data().count;
+      setRoleCounts({
+        all: allCount,
+        online: online.data().count,
+        admin: admin.data().count,
+        teacher: teacher.data().count,
+        moderator: moderator.data().count,
+        // Anyone who isn't admin/teacher/moderator (covers "student" plus any
+        // legacy role value), matching the old client-side derivation.
+        student: Math.max(0, allCount - staffCount),
+      });
+    } catch (error) {
+      console.error("Error loading user counts:", error);
+    }
+  }, [canManage]);
+
+  useEffect(() => {
+    void refreshCounts();
+  }, [refreshCounts]);
+
+  const loadMore = useCallback(() => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    setPageLimit((current) => current + PAGE_SIZE);
+  }, [hasMore, loadingMore]);
+
+  const toggleExpand = useCallback((id: string) => {
+    setExpandedId((current) => (current === id ? null : id));
+  }, []);
+
+  const counts = roleCounts;
+
+  const filteredUsers = useMemo(() => {
+    const queryValue = search.trim().toLowerCase();
+
+    return [...users]
+      .filter((item) => {
+        const normalizedRole = parseUserRole(item.role) || "student";
+        const matchesFilter =
+          filter === "all" ||
+          (filter === "online" && item.isOnline === true) ||
+          normalizedRole === filter;
+
+        if (!matchesFilter) return false;
+        if (!queryValue) return true;
+
+        return [
+          getName(item),
+          item.email,
+          item.studentID,
+          item.course,
+          item.yearlvl,
+          normalizedRole,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(queryValue);
+      })
+      .sort((first, second) => {
+        if ((first.isOnline === true) !== (second.isOnline === true)) {
+          return first.isOnline ? -1 : 1;
+        }
+
+        const roleDiff =
+          getRoleHierarchyLevel(parseUserRole(second.role)) -
+          getRoleHierarchyLevel(parseUserRole(first.role));
+        if (roleDiff !== 0) return roleDiff;
+        return getName(first).localeCompare(getName(second));
+      });
+  }, [filter, search, users]);
+
+  const openProfile = useCallback(
+    (managedUser: ManagedUserRecord) => {
+      const targetUserId =
+        managedUser.userId || managedUser.studentID || managedUser.id;
+
+      if (!targetUserId) {
+        showInfo("Unavailable", "This user does not have a linked profile yet.");
+        return;
+      }
+
+      if (auth.currentUser?.uid === targetUserId) {
+        router.push({
+          pathname: "/(main)/(tabs)/ProfileScreen",
+          params: { returnTo: "/ManageUsersScreen" },
+        });
+        return;
+      }
+
+      router.push(
+        buildUserProfileHref({
+          userId: targetUserId,
+          profileDocId: managedUser.id,
+          returnTo: "/ManageUsersScreen",
+        }) as any,
+      );
+    },
+    [router],
+  );
+
+  const changeYearLevel = useCallback(
+    (managedUser: ManagedUserRecord, nextYearLvl: string) => {
+      if (!canManage || managedUser.yearlvl === nextYearLvl) return;
+
+      showConfirm({
+        title: "Update Year Level",
+        description: `Change ${getName(managedUser)}'s year level to ${nextYearLvl}?`,
+        confirmText: "Update",
+        cancelText: "Cancel",
+        destructive: false,
+        onConfirm: async () => {
+          try {
+            setBusyId(managedUser.id);
+            await updateDoc(doc(db, "students", managedUser.id), {
+              yearlvl: nextYearLvl,
+              updatedAt: serverTimestamp(),
+            });
+          } catch (error) {
+            console.error("Error updating year level:", error);
+            showInfo("Error", "Failed to update year level.");
+          } finally {
+            setBusyId(null);
+          }
+        },
+      });
+    },
+    [canManage],
+  );
+
+  const changeRole = useCallback(
+    (managedUser: ManagedUserRecord, nextRole: UserRole) => {
+      if (!canManage) return;
+
+      const currentRole = parseUserRole(managedUser.role) || "student";
+      if (currentRole === nextRole) return;
+
+      const isSelf =
+        (!!managedUser.userId &&
+          managedUser.userId === auth.currentUser?.uid) ||
+        managedUser.id === currentStudentDocId;
+
+      if (isSelf) {
+        showInfo(
+          "Action Blocked",
+          "For safety, you cannot change your own role from the dashboard.",
+        );
+        return;
+      }
+
+      showConfirm({
+        title: "Update Role",
+        description: `Change ${getName(managedUser)} to ${getRoleDisplayName(nextRole)}?`,
+        confirmText: "Update",
+        cancelText: "Cancel",
+        destructive: false,
+        onConfirm: async () => {
+          try {
+            setBusyId(managedUser.id);
+            await updateDoc(doc(db, "students", managedUser.id), {
+              role: nextRole,
+              permissions: getPermissionsForRole(nextRole),
+              updatedAt: serverTimestamp(),
+              roleUpdatedAt: serverTimestamp(),
+              roleUpdatedBy: auth.currentUser?.uid || null,
+            });
+          } catch (error) {
+            console.error("Error updating user role:", error);
+            showInfo("Error", "Failed to update user role.");
+          } finally {
+            setBusyId(null);
+          }
+        },
+      });
+    },
+    [canManage, currentStudentDocId],
+  );
+
+  // Open the name / email / program editor for a user.
+  //
+  // Student ID is intentionally NOT editable here. It is the Firestore
+  // document ID of the `students/{studentID}` record and the value the user
+  // types on the login screen, so "changing" it is not a field update — it
+  // would require migrating the document to a new ID, re-pointing every
+  // reference to it, and keeping the login credential in sync. That belongs
+  // in a deliberate re-registration/support flow, not an inline edit next to
+  // name and email. See the task notes / docs/registration-and-programs.md.
+  const openEditProfile = useCallback(
+    (managedUser: ManagedUserRecord) => {
+      if (!canManage) return;
+      setEditUser(managedUser);
+      setEditFirstname(managedUser.firstname || "");
+      setEditLastname(managedUser.lastname || "");
+      setEditEmail(managedUser.email || "");
+      setEditCourse(managedUser.course || "");
+      setEditProgramPickerOpen(false);
+      setEditError("");
+    },
+    [canManage],
+  );
+
+  const closeEditProfile = useCallback(() => {
+    if (savingEdit) return;
+    setEditUser(null);
+    setEditProgramPickerOpen(false);
+    setEditError("");
+  }, [savingEdit]);
+
+  const filteredEditPrograms = useMemo(() => {
+    const value = editCourse.trim().toLowerCase();
+    if (!value) return programs;
+    return programs.filter((program) =>
+      `${program.name} ${program.code}`.toLowerCase().includes(value),
+    );
+  }, [editCourse, programs]);
+
+  const selectEditProgram = useCallback((program: Program) => {
+    setEditCourse(program.name);
+    setEditProgramPickerOpen(false);
+    setEditError("");
+  }, []);
+
+  const submitEditProfile = useCallback(() => {
+    if (!editUser) return;
+
+    if (programsLoading) {
+      setEditError("Programs are still loading — try again in a moment.");
+      return;
+    }
+
+    const target = editUser;
+    const firstname = editFirstname.trim();
+    const lastname = editLastname.trim();
+    const email = editEmail.trim();
+    const courseText = editCourse.trim();
+
+    if (!firstname || !lastname) {
+      setEditError("First and last name are both required.");
+      return;
+    }
+    if (!email) {
+      setEditError("Email is required.");
+      return;
+    }
+    if (!EMAIL_PATTERN.test(email)) {
+      setEditError("Enter a valid email address.");
+      return;
+    }
+
+    // Program must resolve to a real entry in the `programs` collection.
+    const roleNeedsProgram = PROGRAM_REQUIRED_ROLES.includes(
+      parseUserRole(target.role) || "student",
+    );
+    let normalizedCourse = "";
+    if (courseText) {
+      const matched = programs.find(
+        (program) => program.name.trim().toLowerCase() === courseText.toLowerCase(),
+      );
+      if (!matched) {
+        setEditError(
+          "Pick a program from the list — that value isn't a managed program.",
+        );
+        return;
+      }
+      normalizedCourse = matched.name;
+    } else if (roleNeedsProgram) {
+      setEditError("Students and moderators must have a program.");
+      return;
+    }
+
+    setEditError("");
+
+    showConfirm({
+      title: "Save profile changes",
+      description: `Update ${getName(target)}'s details?`,
+      confirmText: "Save",
+      cancelText: "Cancel",
+      destructive: false,
+      onConfirm: async () => {
+        try {
+          setSavingEdit(true);
+          setBusyId(target.id);
+          await updateDoc(doc(db, "students", target.id), {
+            firstname,
+            lastname,
+            // App-wide search keys the lowercased name fields — keep them in
+            // step with the edit (same as ProfileScreen / registration).
+            firstnameLower: firstname.toLowerCase(),
+            lastnameLower: lastname.toLowerCase(),
+            // NOTE: this updates the profile/display email on the student
+            // document only. It does not change the Firebase Auth email the
+            // user signs in with — a full email-change flow is out of scope
+            // for this screen.
+            email,
+            course: normalizedCourse,
+            updatedAt: serverTimestamp(),
+          });
+          setEditUser(null);
+          setEditProgramPickerOpen(false);
+        } catch (error) {
+          console.error("Error updating user profile:", error);
+          showInfo("Error", "Failed to update the profile. Please try again.");
+        } finally {
+          setSavingEdit(false);
+          setBusyId(null);
+        }
+      },
+    });
+  }, [
+    editUser,
+    editFirstname,
+    editLastname,
+    editEmail,
+    editCourse,
+    programs,
+    programsLoading,
+  ]);
+
+  const renderUserItem = useCallback(
+    ({ item }: { item: ManagedUserRecord }) => {
+      const isSelf =
+        (!!item.userId && item.userId === auth.currentUser?.uid) ||
+        item.id === currentStudentDocId;
+      return (
+        <UserRow
+          user={item}
+          expanded={expandedId === item.id}
+          busy={busyId === item.id}
+          isSelf={isSelf}
+          onToggleExpand={toggleExpand}
+          onOpenProfile={openProfile}
+          onOpenEdit={openEditProfile}
+          onChangeYear={changeYearLevel}
+          onChangeRole={changeRole}
+        />
+      );
+    },
+    [
+      busyId,
+      changeRole,
+      changeYearLevel,
+      currentStudentDocId,
+      expandedId,
+      openEditProfile,
+      openProfile,
+      toggleExpand,
+    ],
+  );
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <ListSkeleton count={6} contentStyle={styles.skeletonContent} rowStyle={styles.skeletonCard} />
+      </SafeAreaView>
+    );
+  }
+
+  if (!canManage) return null;
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.topBar}>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => router.back()}
+          activeOpacity={0.8}
+        >
+          <Ionicons name="arrow-back" size={21} color="#fffaf6" />
+        </TouchableOpacity>
+        <View style={styles.topBarCopy}>
+          <Text style={styles.topBarEyebrow}>ADMIN WORKSPACE</Text>
+          <Text style={styles.topBarTitle}>Manage Users</Text>
+        </View>
+        <TouchableOpacity
+          style={styles.addButton}
+          onPress={() => router.push("/AdminRegisterUserScreen")}
+          activeOpacity={0.82}
+        >
+          <Ionicons name="person-add" size={20} color="#5f0909" />
+        </TouchableOpacity>
+      </View>
+
+      <FlatList
+        style={styles.body}
+        contentContainerStyle={styles.content}
+        data={filteredUsers}
+        keyExtractor={(item) => item.id}
+        renderItem={renderUserItem}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+        initialNumToRender={10}
+        maxToRenderPerBatch={10}
+        windowSize={9}
+        removeClippedSubviews={Platform.OS === "android"}
+        ListHeaderComponent={
+          <ManageUsersListHeader
+            counts={counts}
+            search={search}
+            onSearchChange={setSearch}
+            filter={filter}
+            onFilterChange={setFilter}
+            shownCount={filteredUsers.length}
+            loadedCount={users.length}
+            onRegister={() => router.push("/AdminRegisterUserScreen")}
+          />
+        }
+        ListEmptyComponent={
+          usersLoading ? (
+            <ListSkeleton count={5} rowStyle={styles.skeletonCard} />
+          ) : (
+            <View style={styles.emptyCard}>
+              <View style={styles.emptyIcon}>
+                <Ionicons name="search-outline" size={28} color="#8f6a60" />
+              </View>
+              <Text style={styles.emptyTitle}>No users matched</Text>
+              <Text style={styles.emptyText}>
+                Try a different search term or choose another filter.
+              </Text>
+            </View>
+          )
+        }
+        ListFooterComponent={
+          hasMore && filteredUsers.length > 0 ? (
+            <TouchableOpacity
+              style={styles.loadMoreButton}
+              onPress={loadMore}
+              disabled={loadingMore}
+              activeOpacity={0.85}
+            >
+              {loadingMore ? (
+                <ActivityIndicator size="small" color="#5f0909" />
+              ) : (
+                <>
+                  <Ionicons
+                    name="chevron-down-circle-outline"
+                    size={17}
+                    color="#5f0909"
+                  />
+                  <Text style={styles.loadMoreButtonText}>Load more</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          ) : (
+            <View style={{ height: 24 }} />
+          )
+        }
+      />
+
+      <Modal
+        visible={!!editUser}
+        transparent
+        animationType="slide"
+        onRequestClose={closeEditProfile}
+      >
+        <KeyboardAvoidingView
+          style={styles.editModalBackdrop}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <View style={styles.editModalCard}>
+            <View style={styles.editModalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.editModalTitle}>Edit profile details</Text>
+                <Text style={styles.editModalSubtitle} numberOfLines={1}>
+                  {editUser ? getName(editUser) : ""}
+                  {editUser?.studentID ? ` • ${editUser.studentID}` : ""}
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={closeEditProfile}
+                disabled={savingEdit}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Ionicons name="close" size={24} color="#7a3b2e" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <View style={styles.editFieldRow}>
+                <View style={styles.editFieldHalf}>
+                  <Text style={styles.editLabel}>First name</Text>
+                  <TextInput
+                    value={editFirstname}
+                    onChangeText={(value) => {
+                      setEditFirstname(value);
+                      setEditError("");
+                    }}
+                    placeholder="Juan"
+                    placeholderTextColor="#b88f87"
+                    style={styles.editInput}
+                  />
+                </View>
+                <View style={styles.editFieldHalf}>
+                  <Text style={styles.editLabel}>Last name</Text>
+                  <TextInput
+                    value={editLastname}
+                    onChangeText={(value) => {
+                      setEditLastname(value);
+                      setEditError("");
+                    }}
+                    placeholder="Dela Cruz"
+                    placeholderTextColor="#b88f87"
+                    style={styles.editInput}
+                  />
+                </View>
+              </View>
+
+              <Text style={styles.editLabel}>Email</Text>
+              <TextInput
+                value={editEmail}
+                onChangeText={(value) => {
+                  setEditEmail(value);
+                  setEditError("");
+                }}
+                placeholder="name@student.csap"
+                placeholderTextColor="#b88f87"
+                style={styles.editInput}
+                autoCapitalize="none"
+                keyboardType="email-address"
+              />
+              <Text style={styles.editHelp}>
+                Updates the profile email shown in the app. It does not change
+                the account&apos;s login credential.
+              </Text>
+
+              <Text style={styles.editLabel}>Program</Text>
+              <View style={styles.editSearchShell}>
+                <Ionicons name="search-outline" size={17} color="#9b766c" />
+                <TextInput
+                  value={editCourse}
+                  onChangeText={(value) => {
+                    setEditCourse(value);
+                    setEditProgramPickerOpen(true);
+                    setEditError("");
+                  }}
+                  placeholder={
+                    programsLoading ? "Loading programs…" : "Search program or code"
+                  }
+                  placeholderTextColor="#b88f87"
+                  style={styles.editSearchInput}
+                  editable={!programsLoading}
+                />
+                {!!editCourse && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      setEditCourse("");
+                      setEditError("");
+                    }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Ionicons name="close-circle" size={17} color="#b89a91" />
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity
+                  onPress={() => setEditProgramPickerOpen((value) => !value)}
+                >
+                  <Ionicons
+                    name={editProgramPickerOpen ? "chevron-up" : "chevron-down"}
+                    size={19}
+                    color="#7a3b2e"
+                  />
+                </TouchableOpacity>
+              </View>
+              {editProgramPickerOpen && (
+                <View style={styles.editDropdown}>
+                  {filteredEditPrograms.length === 0 ? (
+                    <Text style={styles.editDropdownEmpty}>
+                      No matching programs. Add one in Manage Programs.
+                    </Text>
+                  ) : (
+                    filteredEditPrograms.map((program) => (
+                      <TouchableOpacity
+                        key={program.id}
+                        style={styles.editDropdownItem}
+                        onPress={() => selectEditProgram(program)}
+                      >
+                        <View style={styles.editProgramBadge}>
+                          <Text style={styles.editProgramBadgeText}>
+                            {program.code.slice(0, 5)}
+                          </Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.editDropdownName}>{program.name}</Text>
+                          <Text style={styles.editDropdownCode}>{program.code}</Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))
+                  )}
+                </View>
+              )}
+
+              {!!editError && <Text style={styles.editErrorText}>{editError}</Text>}
+
+              <View style={styles.editButtonRow}>
+                <TouchableOpacity
+                  style={[styles.editButton, styles.editCancelButton]}
+                  onPress={closeEditProfile}
+                  disabled={savingEdit}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.editCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.editButton, styles.editSaveButton, savingEdit && { opacity: 0.6 }]}
+                  onPress={submitEditProfile}
+                  disabled={savingEdit}
+                  activeOpacity={0.85}
+                >
+                  {savingEdit ? (
+                    <ActivityIndicator size="small" color="#fffaf6" />
+                  ) : (
+                    <Text style={styles.editSaveText}>Review &amp; save</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <ConfirmDialog
+        visible={!!dialog}
+        title={dialog?.title ?? ""}
+        description={dialog?.description}
+        confirmText={dialog?.confirmText ?? "Confirm"}
+        cancelText={dialog?.cancelText}
+        destructive={dialog?.destructive ?? true}
+        singleAction={dialog?.singleAction ?? false}
+        onConfirm={() => dialog?.onConfirm()}
+        onCancel={() => setDialog(null)}
+      />
+    </SafeAreaView>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  icon,
+  color,
+}: {
+  label: string;
+  value: number;
+  icon: keyof typeof Ionicons.glyphMap;
+  color: string;
+}) {
+  return (
+    <View style={styles.metricCard}>
+      <View style={[styles.metricIcon, { backgroundColor: color + "12" }]}>
+        <Ionicons name={icon} size={18} color={color} />
+      </View>
+      <Text style={styles.metricValue}>{value}</Text>
+      <Text style={styles.metricLabel}>{label}</Text>
+    </View>
+  );
+}
+
+// Fix 2: the scroll chrome (hero / metrics / register / search / filters /
+// section heading) as the FlatList's ListHeaderComponent. Kept as a stable
+// component and passed as an element so the search TextInput isn't remounted
+// (and doesn't lose focus) every time the list data changes.
+type ManageUsersListHeaderProps = {
+  counts: Record<ManagedUserFilter, number>;
+  search: string;
+  onSearchChange: (value: string) => void;
+  filter: ManagedUserFilter;
+  onFilterChange: (value: ManagedUserFilter) => void;
+  shownCount: number;
+  loadedCount: number;
+  onRegister: () => void;
+};
+
+function ManageUsersListHeader({
+  counts,
+  search,
+  onSearchChange,
+  filter,
+  onFilterChange,
+  shownCount,
+  loadedCount,
+  onRegister,
+}: ManageUsersListHeaderProps) {
+  return (
+    <View>
+      <View style={styles.heroCard}>
+        <View style={styles.heroIcon}>
+          <Ionicons name="people-circle-outline" size={30} color="#d39a32" />
+        </View>
+        <View style={styles.heroCopy}>
+          <Text style={styles.heroTitle}>Campus user control</Text>
+          <Text style={styles.heroText}>
+            Search accounts, check availability, open profiles, and manage
+            academic year or role access from one focused workspace.
+          </Text>
+        </View>
+      </View>
+
+      <View style={styles.metricGrid}>
+        <MetricCard label="Total" value={counts.all} icon="people" color="#5f0909" />
+        <MetricCard label="Online" value={counts.online} icon="ellipse" color="#2e8b68" />
+        <MetricCard
+          label="Staff"
+          value={counts.admin + counts.teacher + counts.moderator}
+          icon="shield-checkmark"
+          color="#b86b1d"
+        />
+        <MetricCard label="Students" value={counts.student} icon="school" color="#6e4aa3" />
+      </View>
+
+      <TouchableOpacity
+        style={styles.registerCard}
+        onPress={onRegister}
+        activeOpacity={0.84}
+      >
+        <View style={styles.registerIcon}>
+          <Ionicons name="person-add-outline" size={19} color="#8a5a10" />
+        </View>
+        <View style={styles.registerCopy}>
+          <Text style={styles.registerTitle}>Register users</Text>
+          <Text style={styles.registerText}>
+            Add one account or import your campus CSV.
+          </Text>
+        </View>
+        <Ionicons name="chevron-forward" size={19} color="#9b776d" />
+      </TouchableOpacity>
+
+      <View style={styles.controlsCard}>
+        <View style={styles.searchShell}>
+          <Ionicons name="search" size={18} color="#8c6d65" />
+          <TextInput
+            value={search}
+            onChangeText={onSearchChange}
+            placeholder="Search name, ID, email, course, or role"
+            placeholderTextColor="#b89a91"
+            style={styles.searchInput}
+            autoCapitalize="none"
+          />
+          {!!search.trim() && (
+            <TouchableOpacity
+              onPress={() => onSearchChange("")}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons name="close-circle" size={19} color="#b89a91" />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterRow}
+        >
+          {FILTERS.map((item) => {
+            const selected = filter === item.value;
+            const count = counts[item.value];
+            return (
+              <TouchableOpacity
+                key={item.value}
+                style={[styles.filterChip, selected && styles.filterChipSelected]}
+                onPress={() => onFilterChange(item.value)}
+                activeOpacity={0.82}
+              >
+                <Ionicons
+                  name={item.icon}
+                  size={14}
+                  color={selected ? "#fffaf6" : "#7a3b2e"}
+                />
+                <Text
+                  style={[styles.filterText, selected && styles.filterTextSelected]}
+                >
+                  {item.label}
+                </Text>
+                <View
+                  style={[
+                    styles.filterCount,
+                    selected && styles.filterCountSelected,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.filterCountText,
+                      selected && styles.filterCountTextSelected,
+                    ]}
+                  >
+                    {count}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
+
+      <View style={styles.sectionHeading}>
+        <View>
+          <Text style={styles.sectionTitle}>Campus accounts</Text>
+          <Text style={styles.sectionSubtitle}>
+            Showing {shownCount} of {loadedCount}
+          </Text>
+        </View>
+        <Ionicons name="options-outline" size={20} color="#8f6a60" />
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: "#5f0909" },
+  topBar: {
+    minHeight: 66,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: "#5f0909",
+    borderBottomWidth: 1,
+    borderBottomColor: "#7e2724",
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  topBarCopy: { flex: 1 },
+  topBarEyebrow: {
+    color: "#d9b27a",
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 1.1,
+  },
+  topBarTitle: {
+    color: "#fffaf6",
+    fontSize: 22,
+    fontWeight: "900",
+    marginTop: 2,
+  },
+  addButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#e2aa45",
+  },
+  body: { flex: 1, backgroundColor: "#f8f3ef" },
+  content: { padding: 16, paddingBottom: 80 },
+  heroCard: {
+    flexDirection: "row",
+    gap: 14,
+    padding: 18,
+    borderRadius: 22,
+    backgroundColor: "#fffaf6",
+    borderWidth: 1,
+    borderColor: "#ead8ce",
+    marginBottom: 14,
+  },
+  heroIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 18,
+    backgroundColor: "#f7ead4",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  heroCopy: { flex: 1 },
+  heroTitle: { color: "#4c1b14", fontSize: 18, fontWeight: "900" },
+  heroText: {
+    color: "#87685f",
+    fontSize: 12.5,
+    lineHeight: 19,
+    marginTop: 5,
+  },
+  metricGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginBottom: 14,
+  },
+  metricCard: {
+    width: "48%",
+    flexGrow: 1,
+    backgroundColor: "#fffaf6",
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: "#eee1da",
+    padding: 14,
+  },
+  metricIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+  },
+  metricValue: { color: "#4c1b14", fontSize: 22, fontWeight: "900" },
+  metricLabel: {
+    color: "#92736a",
+    fontSize: 11.5,
+    fontWeight: "700",
+    marginTop: 2,
+  },
+  registerCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: "#fffaf6",
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: "#e6d3c8",
+    padding: 14,
+    marginBottom: 14,
+  },
+  registerIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: "#f8efdf",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  registerCopy: { flex: 1 },
+  registerTitle: { color: "#5f0909", fontSize: 14, fontWeight: "900" },
+  registerText: { color: "#96766d", fontSize: 11.5, marginTop: 3 },
+  controlsCard: {
+    backgroundColor: "#fffaf6",
+    borderRadius: 19,
+    borderWidth: 1,
+    borderColor: "#eadbd4",
+    padding: 13,
+    marginBottom: 18,
+  },
+  searchShell: {
+    minHeight: 46,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    backgroundColor: "#f8f1ed",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#ead8ce",
+    paddingHorizontal: 12,
+  },
+  searchInput: {
+    flex: 1,
+    color: "#4c1b14",
+    fontSize: 13.5,
+    paddingVertical: 10,
+  },
+  filterRow: { gap: 8, paddingTop: 12, paddingRight: 4 },
+  filterChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#e7d5cc",
+    backgroundColor: "#fff8f4",
+    paddingLeft: 11,
+    paddingRight: 8,
+    paddingVertical: 8,
+  },
+  filterChipSelected: { backgroundColor: "#6e1717", borderColor: "#6e1717" },
+  filterText: { color: "#70483e", fontSize: 11.5, fontWeight: "800" },
+  filterTextSelected: { color: "#fffaf6" },
+  filterCount: {
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    paddingHorizontal: 5,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f0e3dc",
+  },
+  filterCountSelected: { backgroundColor: "rgba(255,255,255,0.18)" },
+  filterCountText: { color: "#7a3b2e", fontSize: 10.5, fontWeight: "900" },
+  filterCountTextSelected: { color: "#fffaf6" },
+  sectionHeading: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  sectionTitle: { color: "#4c1b14", fontSize: 17, fontWeight: "900" },
+  sectionSubtitle: { color: "#98766d", fontSize: 11.5, marginTop: 3 },
+  userCard: {
+    backgroundColor: "#fffaf6",
+    borderRadius: 19,
+    borderWidth: 1,
+    borderColor: "#eadfd9",
+    padding: 14,
+    marginBottom: 11,
+  },
+  skeletonContent: { flex: 1, backgroundColor: "#f8f3ef", padding: 16 },
+  skeletonCard: {
+    backgroundColor: "#fffaf6",
+    borderRadius: 19,
+    borderWidth: 1,
+    borderColor: "#eadfd9",
+    padding: 16,
+    marginBottom: 11,
+  },
+  userCardExpanded: {
+    borderColor: "#d7b56d",
+    shadowColor: "#5f0909",
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  userHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  identityRow: { flex: 1, flexDirection: "row", alignItems: "center", gap: 12 },
+  avatar: {
+    width: 52,
+    height: 52,
+    borderRadius: 17,
+    backgroundColor: "#6e1717",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarImage: { width: "100%", height: "100%", borderRadius: 17 },
+  avatarText: { color: "#fffaf6", fontSize: 17, fontWeight: "900" },
+  presenceDot: {
+    position: "absolute",
+    right: -2,
+    bottom: -2,
+    width: 13,
+    height: 13,
+    borderRadius: 7,
+    borderWidth: 2,
+    borderColor: "#fffaf6",
+  },
+  identityCopy: { flex: 1 },
+  nameRow: { flexDirection: "row", alignItems: "center", gap: 7 },
+  userName: { flexShrink: 1, color: "#4c1b14", fontSize: 14.5, fontWeight: "900" },
+  youBadge: {
+    backgroundColor: "#fff1d6",
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  youBadgeText: { color: "#8a5a10", fontSize: 9.5, fontWeight: "900" },
+  userMeta: { color: "#97766d", fontSize: 11.5, lineHeight: 17, marginTop: 3 },
+  badgeRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 7 },
+  roleBadge: { borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4 },
+  roleBadgeText: { fontSize: 10.5, fontWeight: "900" },
+  statusText: { color: "#92736a", fontSize: 10.5, fontWeight: "700" },
+  openProfileButton: {
+    marginTop: 12,
+    flexDirection: "row",
+    alignSelf: "flex-start",
+    alignItems: "center",
+    gap: 7,
+    backgroundColor: "#faf0de",
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: "#e0bf80",
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+  },
+  openProfileText: { color: "#8a5a10", fontSize: 11.5, fontWeight: "800" },
+  expandedPanel: {
+    marginTop: 14,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#efe1da",
+  },
+  controlTitle: { color: "#5f0909", fontSize: 13, fontWeight: "900" },
+  controlHelp: { color: "#98766d", fontSize: 11.5, lineHeight: 17, marginTop: 3, marginBottom: 10 },
+  optionGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  optionButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: "#e5d4cc",
+    backgroundColor: "#fff8f4",
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  optionButtonSelected: { backgroundColor: "#5f0909", borderColor: "#5f0909" },
+  optionText: { color: "#5f0909", fontSize: 11.5, fontWeight: "800" },
+  optionTextSelected: { color: "#fffaf6" },
+  divider: { height: 1, backgroundColor: "#efe1da", marginVertical: 15 },
+  busyRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12 },
+  busyText: { color: "#8f3a2b", fontSize: 11.5, fontWeight: "800" },
+  hintText: { color: "#9a7970", fontSize: 10.75, lineHeight: 16, marginTop: 12 },
+  loadMoreButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    backgroundColor: "#fffaf6",
+    borderWidth: 1,
+    borderColor: "#e7d5cc",
+    borderRadius: 14,
+    paddingVertical: 13,
+    marginTop: 12,
+  },
+  loadMoreButtonText: { color: "#5f0909", fontSize: 13, fontWeight: "800" },
+  emptyCard: {
+    alignItems: "center",
+    padding: 28,
+    borderRadius: 19,
+    backgroundColor: "#fffaf6",
+    borderWidth: 1,
+    borderColor: "#eadfd9",
+  },
+  emptyIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f5e9e3",
+  },
+  emptyTitle: { color: "#5f0909", fontSize: 15, fontWeight: "900", marginTop: 12 },
+  emptyText: { color: "#98766d", fontSize: 11.5, lineHeight: 17, textAlign: "center", marginTop: 5 },
+  loadingState: { flex: 1, alignItems: "center", justifyContent: "center" },
+  loadingText: { color: "#f2d7c8", fontSize: 12.5, fontWeight: "700", marginTop: 12 },
+
+  // Profile-details editor (expanded-panel trigger + bottom-sheet form).
+  editDetailsButton: {
+    flexDirection: "row",
+    alignSelf: "flex-start",
+    alignItems: "center",
+    gap: 7,
+    backgroundColor: "#faf0de",
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: "#e0bf80",
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+  },
+  editDetailsText: { color: "#8a5a10", fontSize: 11.5, fontWeight: "800" },
+  editModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    justifyContent: "flex-end",
+  },
+  editModalCard: {
+    backgroundColor: "#fffaf6",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 26,
+    maxHeight: "88%",
+  },
+  editModalHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    marginBottom: 14,
+  },
+  editModalTitle: { color: "#4c1b14", fontSize: 19, fontWeight: "900" },
+  editModalSubtitle: { color: "#9b766c", fontSize: 12, marginTop: 3 },
+  editFieldRow: { flexDirection: "row", gap: 12 },
+  editFieldHalf: { flex: 1 },
+  editLabel: {
+    color: "#7a3b2e",
+    fontSize: 12.5,
+    fontWeight: "800",
+    marginBottom: 6,
+    marginTop: 12,
+  },
+  editInput: {
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#e5d4cc",
+    borderRadius: 12,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+    color: "#4c1b14",
+    fontSize: 14,
+  },
+  editHelp: { color: "#9a7970", fontSize: 10.75, lineHeight: 16, marginTop: 6 },
+  editSearchShell: {
+    minHeight: 46,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#e5d4cc",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+  },
+  editSearchInput: {
+    flex: 1,
+    color: "#4c1b14",
+    fontSize: 14,
+    paddingVertical: 10,
+  },
+  editDropdown: {
+    borderWidth: 1,
+    borderColor: "#ead9d2",
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    overflow: "hidden",
+    marginTop: 8,
+  },
+  editDropdownItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f1e5e0",
+  },
+  editDropdownEmpty: { padding: 14, color: "#8f6c63", fontSize: 12 },
+  editDropdownName: { fontWeight: "800", color: "#4c1b14", fontSize: 13 },
+  editDropdownCode: { marginTop: 2, color: "#9b766c", fontSize: 11.5 },
+  editProgramBadge: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: "#f1dfd7",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  editProgramBadgeText: { color: "#7a3b2e", fontWeight: "900", fontSize: 10.5 },
+  editErrorText: {
+    color: "#b3261e",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 14,
+  },
+  editButtonRow: { flexDirection: "row", gap: 10, marginTop: 18 },
+  editButton: {
+    flex: 1,
+    height: 46,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  editCancelButton: {
+    backgroundColor: "#f5efeb",
+    borderWidth: 1,
+    borderColor: "#e5d4cc",
+  },
+  editCancelText: { color: "#5f0909", fontSize: 14, fontWeight: "700" },
+  editSaveButton: { backgroundColor: "#5f0909" },
+  editSaveText: { color: "#fffaf6", fontSize: 14, fontWeight: "800" },
+});

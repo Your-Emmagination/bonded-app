@@ -1,25 +1,29 @@
-// EventCalendarScreen.tsx
+import { useNetworkStatus } from "@/utils/networkUtils";
+import {
+    getCachedCalendarEvents,
+    saveCachedCalendarEvents,
+} from "@/utils/offlineStorage";
 import { getUserData, UserRole } from "@/utils/rbac";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
-  collection,
-  deleteDoc,
-  doc,
-  onSnapshot,
-  orderBy,
-  query,
+    collection,
+    deleteDoc,
+    doc,
+    onSnapshot,
+    orderBy,
+    query,
 } from "firebase/firestore";
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  Alert,
-  FlatList,
-  Modal,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+    Alert,
+    FlatList,
+    Modal,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
@@ -47,6 +51,7 @@ type GroupedEvents = {
 
 const EventCalendarScreen = () => {
   const router = useRouter();
+  const { isOffline } = useNetworkStatus();
   const { eventId } = useLocalSearchParams<{ eventId?: string | string[] }>();
   const resolvedEventId = Array.isArray(eventId) ? eventId[0] : eventId;
   const [events, setEvents] = useState<CalendarEvent[]>([]);
@@ -70,6 +75,14 @@ const EventCalendarScreen = () => {
   }, []);
 
   useEffect(() => {
+    getCachedCalendarEvents<CalendarEvent>().then((cached) => {
+      if (cached && cached.length > 0) {
+        setEvents(cached);
+        groupEventsByMonth(cached);
+        setLoading(false);
+      }
+    });
+
     const q = query(collection(db, "events"), orderBy("date", "asc"));
 
     const unsubscribe = onSnapshot(
@@ -82,6 +95,7 @@ const EventCalendarScreen = () => {
 
         setEvents(fetchedEvents);
         groupEventsByMonth(fetchedEvents);
+        saveCachedCalendarEvents(fetchedEvents);
         setLoading(false);
       },
       (error) => {
@@ -146,6 +160,10 @@ const EventCalendarScreen = () => {
   };
 
   const handleDeleteEvent = async (eventId: string) => {
+    if (isOffline) {
+      Alert.alert("Offline", "Deleting events is unavailable while offline.");
+      return;
+    }
     Alert.alert("Delete Event", "Are you sure you want to delete this event?", [
       { text: "Cancel", style: "cancel" },
       {
@@ -200,6 +218,10 @@ const EventCalendarScreen = () => {
 
   const handleEditEvent = (event: CalendarEvent) => {
     if (event.status !== "draft" || !canManageEvents()) return;
+    if (isOffline) {
+      Alert.alert("Offline", "Editing events is unavailable while offline.");
+      return;
+    }
     setModalVisible(false);
     router.push({ pathname: "/CreateEventScreen", params: { eventId: event.id } });
   };
@@ -275,12 +297,29 @@ const EventCalendarScreen = () => {
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Event Calendar</Text>
         {canManageEvents() && (
-          <TouchableOpacity onPress={() => router.push("/CreateEventScreen")}>
+          <TouchableOpacity
+            onPress={() => {
+              if (isOffline) {
+                Alert.alert("Offline", "Creating events is unavailable while offline.");
+                return;
+              }
+              router.push("/CreateEventScreen");
+            }}
+          >
             <Ionicons name="add-circle" size={28} color="#e0a53d" />
           </TouchableOpacity>
         )}
         {!canManageEvents() && <View style={{ width: 28 }} />}
       </View>
+
+      {isOffline && (
+        <View style={styles.offlineStatusBar}>
+          <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+          <Text style={styles.offlineStatusText}>
+            Offline mode • Viewing saved calendar events
+          </Text>
+        </View>
+      )}
 
       {/* Events List */}
       {loading ? (
@@ -294,7 +333,13 @@ const EventCalendarScreen = () => {
           {canManageEvents() && (
             <TouchableOpacity
               style={styles.createButton}
-              onPress={() => router.push("/CreateEventScreen")}
+              onPress={() => {
+                if (isOffline) {
+                  Alert.alert("Offline", "Creating events is unavailable while offline.");
+                  return;
+                }
+                router.push("/CreateEventScreen");
+              }}
             >
               <Text style={styles.createButtonText}>Create Event</Text>
             </TouchableOpacity>
@@ -668,6 +713,21 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "600",
     color: "#fff",
+  },
+  offlineStatusBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#ffedd5",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#fed7aa",
+  },
+  offlineStatusText: {
+    fontSize: 12,
+    color: "#9a3412",
+    fontWeight: "600",
   },
 });
 

@@ -1,46 +1,47 @@
 // components/CommentComposer.tsx
-import React, { useEffect, useState, useRef } from "react";
 import {
-  View,
-  Text,
-  Modal,
-  TouchableOpacity,
-  StyleSheet,
-  TextInput,
-  FlatList,
-  Image,
-  ActivityIndicator,
-  Alert,
-} from "react-native";
-import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
-import { Ionicons } from "@expo/vector-icons";
-import * as DocumentPicker from "expo-document-picker";
-import {
-  collection,
-  getDocs,
-} from "firebase/firestore";
-import { db, auth } from "../../../Firebase_configure";
-import {
-  uploadPostImage,
-  uploadPostFile,
-  uploadPostGif,
-} from "@/utils/cloudinaryUpload";
-import {
-  AI_ASSISTANT_NAME,
-  AI_ASSISTANT_TAG,
-  AI_ASSISTANT_STUDENT,
-  AI_MENTION_TOKEN,
-  EVERYONE_MENTION_NAME,
-  EVERYONE_MENTION_STUDENT,
-  EVERYONE_MENTION_TAG,
-  EVERYONE_MENTION_TOKEN,
-  getMentionTokenForStudent,
-  hasAiAssistantMention,
-  hasEveryoneMention,
-  isAiAssistantId,
-  isEveryoneMentionId,
+    AI_ASSISTANT_NAME,
+    AI_ASSISTANT_STUDENT,
+    AI_ASSISTANT_TAG,
+    AI_MENTION_TOKEN,
+    EVERYONE_MENTION_NAME,
+    EVERYONE_MENTION_STUDENT,
+    EVERYONE_MENTION_TAG,
+    EVERYONE_MENTION_TOKEN,
+    getMentionTokenForStudent,
+    hasAiAssistantMention,
+    hasEveryoneMention,
+    isAiAssistantId,
+    isEveryoneMentionId,
 } from "@/utils/aiAssistant";
 import { resolveAvatarUri } from "@/utils/avatar";
+import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
+import {
+    uploadPostFile,
+    uploadPostGif,
+    uploadPostImage,
+} from "@/utils/cloudinaryUpload";
+import { getFileIconDetails } from "@/utils/fileTypeHelper";
+import { Ionicons } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
+import { Image } from "expo-image";
+import {
+    collection,
+    getDocs,
+} from "firebase/firestore";
+import React, { useEffect, useRef, useState } from "react";
+import {
+    ActivityIndicator,
+    FlatList,
+    Modal,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
+} from "react-native";
+import { auth, db } from "../../../Firebase_configure";
+import ConfirmDialog from "./ConfirmDialog";
 
 const MAX_FILES = 10;
 const MAX_CHARACTERS = 1250;
@@ -82,6 +83,9 @@ interface CommentComposerProps {
   replyingTo?: { id: string; name: string; text: string } | null;
   onCancelReply?: () => void;
   autoExpand?: boolean;
+  // Optional: fired as the user types (true) and when the box is cleared or a
+  // message is sent (false). Consumers debounce/throttle any side effects.
+  onTypingChange?: (isTyping: boolean) => void;
 }
 
 let cachedStudents: Student[] | null = null;
@@ -95,6 +99,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
   replyingTo = null,
   onCancelReply,
   autoExpand = false,
+  onTypingChange,
 }) => {
   const [commentText, setCommentText] = useState("");
   const [isAnonymous, setIsAnonymous] = useState(false);
@@ -116,6 +121,8 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
   const [loadingGifs, setLoadingGifs] = useState(false);
   const [gifError, setGifError] = useState<string | null>(null);
   const [selection, setSelection] = useState({ start: 0, end: 0 });
+  const [infoDialog, setInfoDialog] = useState<{ title: string; description: string } | null>(null);
+  const showInfo = (title: string, description: string) => setInfoDialog({ title, description });
   const textInputRef = useRef<TextInput>(null);
 
   useEffect(() => {
@@ -184,15 +191,15 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
     return studentsRequest;
   };
 
-  const pickFiles = async () => {
+  const pickPhotos = async () => {
     try {
       if (files.length >= maxFiles) {
-        Alert.alert("Maximum Files Reached", `You can only attach up to ${maxFiles} files per comment.`);
+        showInfo("Maximum Files Reached", `You can only attach up to ${maxFiles} files per comment.`);
         return;
       }
 
       const result = await DocumentPicker.getDocumentAsync({
-        type: ["image/*", "application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+        type: "image/*",
         multiple: true,
         copyToCacheDirectory: true,
       });
@@ -202,7 +209,40 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         const filesToAdd = result.assets.slice(0, remainingSlots);
 
         if (result.assets.length > remainingSlots) {
-          Alert.alert("File Limit", `Only ${remainingSlots} more file(s) can be added. Maximum is ${maxFiles} files per comment.`);
+          showInfo("File Limit", `Only ${remainingSlots} more file(s) can be added. Maximum is ${maxFiles} files per comment.`);
+        }
+
+        const newFiles = filesToAdd.map((picked) => ({
+          uri: picked.uri || "",
+          mimeType: picked.mimeType ?? "image/jpeg",
+          name: picked.name ?? `photo_${Date.now()}.jpg`,
+        }));
+        setFiles([...files, ...newFiles]);
+      }
+    } catch (error) {
+      console.error("Error picking photos:", error);
+    }
+  };
+
+  const pickDocuments = async () => {
+    try {
+      if (files.length >= maxFiles) {
+        showInfo("Maximum Files Reached", `You can only attach up to ${maxFiles} files per comment.`);
+        return;
+      }
+
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "*/*",
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+
+      if (!result.canceled && result.assets?.length > 0) {
+        const remainingSlots = maxFiles - files.length;
+        const filesToAdd = result.assets.slice(0, remainingSlots);
+
+        if (result.assets.length > remainingSlots) {
+          showInfo("File Limit", `Only ${remainingSlots} more file(s) can be added. Maximum is ${maxFiles} files per comment.`);
         }
 
         const newFiles = filesToAdd.map((picked) => ({
@@ -213,19 +253,21 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         setFiles([...files, ...newFiles]);
       }
     } catch (error) {
-      console.error("Error picking files:", error);
+      console.error("Error picking documents:", error);
     }
   };
 
+  const pickFiles = pickDocuments;
+
   const handleAddLink = () => {
     if (!linkUrl.trim()) {
-      Alert.alert("Error", "Please enter a valid URL");
+      showInfo("Error", "Please enter a valid URL");
       return;
     }
 
     const urlPattern = /^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$/;
     if (!urlPattern.test(linkUrl)) {
-      Alert.alert("Invalid URL", "Please enter a valid website URL");
+      showInfo("Invalid URL", "Please enter a valid website URL");
       return;
     }
 
@@ -314,6 +356,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
   const handleChangeText = (nextText: string) => {
     setCommentText(nextText);
     syncTaggedUsersFromText(nextText);
+    onTypingChange?.(nextText.trim().length > 0);
   };
 
   const handleSelectMention = (person: MentionDraft) => {
@@ -419,6 +462,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       setSelectedGif(null);
       setIsAnonymous(false);
       setSelection({ start: 0, end: 0 });
+      onTypingChange?.(false);
 
       textInputRef.current?.focus();
 
@@ -433,9 +477,9 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         error?.code === "unavailable" ||
         error?.code === "ECONNREFUSED"
       ) {
-        Alert.alert("Connection Error", "Unable to post comment. Please check your internet connection and try again.", [{ text: "OK" }]);
+        showInfo("Connection Error", "Unable to post comment. Please check your internet connection and try again.");
       } else {
-        Alert.alert("Error", "Failed to post comment. Please try again.");
+        showInfo("Error", "Failed to post comment. Please try again.");
       }
     } finally {
       setUploading(false);
@@ -561,7 +605,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
     <Image 
       source={{ uri: selectedGif }} 
       style={composerStyles.gifImageCompact} 
-      resizeMode="cover"
+      contentFit="cover"
     />
     <TouchableOpacity 
       style={composerStyles.removeGifBtn} 
@@ -595,10 +639,19 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
             <View style={composerStyles.optionsRow}>
               <TouchableOpacity
                 style={composerStyles.optionBtn}
-                onPress={pickFiles}
+                onPress={pickPhotos}
                 disabled={files.length >= maxFiles}
+                accessibilityLabel="Attach photos"
               >
                 <Ionicons name="images" size={19} color={files.length >= maxFiles ? "#f0e7e2" : "#4f9cff"} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={composerStyles.optionBtn}
+                onPress={pickDocuments}
+                disabled={files.length >= maxFiles}
+                accessibilityLabel="Attach files"
+              >
+                <Ionicons name="attach" size={20} color={files.length >= maxFiles ? "#f0e7e2" : "#e0a53d"} />
               </TouchableOpacity>
               <TouchableOpacity
                 style={composerStyles.optionBtn}
@@ -646,26 +699,29 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
             {/* File previews */}
             {files.length > 0 && (
               <View style={composerStyles.filesPreviewRow}>
-                {files.map((f, i) => (
-                  <View key={i} style={composerStyles.filePreviewItem}>
-                    {f.mimeType.startsWith("image/") ? (
-                      <Image source={{ uri: f.uri }} style={composerStyles.previewImage} />
-                    ) : (
-                      <View style={composerStyles.previewDoc}>
-                        <Ionicons name={f.mimeType.includes("pdf") ? "document-text" : "document"} size={14} color="#4f9cff" />
-                        <Text style={composerStyles.previewDocName} numberOfLines={1}>
-                          {f.name.length > 6 ? f.name.substring(0, 6) + "…" : f.name}
-                        </Text>
-                      </View>
-                    )}
-                    <TouchableOpacity
-                      style={composerStyles.removeFileBtn}
-                      onPress={() => setFiles(files.filter((_, idx) => idx !== i))}
-                    >
-                      <Ionicons name="close-circle" size={14} color="#e0a53d" />
-                    </TouchableOpacity>
-                  </View>
-                ))}
+                {files.map((f, i) => {
+                  const fileDetails = getFileIconDetails(f.mimeType, f.name);
+                  return (
+                    <View key={i} style={composerStyles.filePreviewItem}>
+                      {f.mimeType.startsWith("image/") ? (
+                        <Image source={{ uri: f.uri }} style={composerStyles.previewImage} />
+                      ) : (
+                        <View style={composerStyles.previewDoc}>
+                          <Ionicons name={fileDetails.icon} size={14} color={fileDetails.color} />
+                          <Text style={composerStyles.previewDocName} numberOfLines={1}>
+                            {f.name.length > 8 ? f.name.substring(0, 8) + "…" : f.name}
+                          </Text>
+                        </View>
+                      )}
+                      <TouchableOpacity
+                        style={composerStyles.removeFileBtn}
+                        onPress={() => setFiles(files.filter((_, idx) => idx !== i))}
+                      >
+                        <Ionicons name="close-circle" size={14} color="#e0a53d" />
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
                 <Text style={composerStyles.fileLimitText}>{files.length}/{maxFiles}</Text>
               </View>
             )}
@@ -772,7 +828,12 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
             )}
 
             {isNearLimit && (
-              <Text style={[composerStyles.charCountText, remainingChars < 50 && { color: "#e0a53d" }]}>
+              <Text
+                style={[
+                  composerStyles.charCountText,
+                  remainingChars < 50 && composerStyles.charCountTextWarning,
+                ]}
+              >
                 {remainingChars} left
               </Text>
             )}
@@ -798,7 +859,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                 style={composerStyles.tagAllButton}
                 onPress={() => {
                   const allTagged = students.filter((s) => !taggedUsers.find((u) => u.id === s.id));
-                  if (allTagged.length === 0) { Alert.alert("Info", "Everyone is already tagged!"); return; }
+                  if (allTagged.length === 0) { showInfo("Info", "Everyone is already tagged!"); return; }
                   setTaggedUsers([...taggedUsers, ...allTagged]);
                 }}
               >
@@ -964,7 +1025,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         <Image
           source={{ uri: thumbnailUrl }}
           style={composerStyles.gifThumbnail}
-          resizeMode="cover"
+          contentFit="cover"
         />
       </TouchableOpacity>
     );
@@ -982,6 +1043,17 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
           </View>
         </View>
       </Modal>
+
+      <ConfirmDialog
+        visible={!!infoDialog}
+        title={infoDialog?.title ?? ""}
+        description={infoDialog?.description}
+        singleAction
+        confirmText="OK"
+        destructive
+        onConfirm={() => setInfoDialog(null)}
+        onCancel={() => setInfoDialog(null)}
+      />
     </>
   );
 };
@@ -1305,16 +1377,34 @@ const composerStyles = StyleSheet.create({
     marginBottom: 0,
     borderWidth: 1,
     borderColor: "#e0a53d",
+    shadowColor: "#5f0909",
+    shadowOpacity: 0.22,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   sendButtonDisabled: {
     backgroundColor: "#f0d2c2",
     borderColor: "#f0d2c2",
+    shadowOpacity: 0,
+    elevation: 0,
   },
   charCountText: {
+    alignSelf: "flex-end",
     color: "#9b766c",
     fontSize: 10,
+    fontWeight: "700",
     textAlign: "right",
-    marginTop: 1,
+    marginTop: 4,
+    backgroundColor: "#fbeee5",
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    overflow: "hidden",
+  },
+  charCountTextWarning: {
+    color: "#a61f1f",
+    backgroundColor: "#fbe0da",
   },
 
   modalOverlay: {

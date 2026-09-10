@@ -1,33 +1,38 @@
-import { Ionicons } from "@expo/vector-icons";
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import * as ImagePicker from "expo-image-picker";
-import {
-  Animated,
-  Dimensions,
-  Image,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from "react-native";
-import ConfirmDialog from "./ConfirmDialog";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
-import { runOnJS } from "react-native-reanimated";
 import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
 import { uploadServerImage } from "@/utils/cloudinaryUpload";
-import type {
-  CommunityChannel,
-  CommunityServer,
-  ServerJoinRequestRecord,
+import {
+    type ChannelType,
+    type CommunityChannel,
+    type CommunityServer,
+    getChannelDefaultEmoji,
+    isStaffOnlyChannel,
+    type ServerJoinRequestRecord,
 } from "@/utils/communityServers";
+import { Ionicons } from "@expo/vector-icons";
+import { Image } from "expo-image";
+import * as ImagePicker from "expo-image-picker";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+    Alert,
+    Animated,
+    Dimensions,
+    FlatList,
+    KeyboardAvoidingView,
+    Modal,
+    Platform,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Switch,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
+} from "react-native";
+import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
+import { runOnJS } from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import ConfirmDialog from "./ConfirmDialog";
 
 export type ServerEditPatch = {
   name: string;
@@ -89,12 +94,30 @@ type ServerDrawerProps = {
     patch: Partial<ServerEditPatch>,
   ) => void | Promise<void>;
   onDeleteServer?: (serverId: string) => void | Promise<void>;
+  // Task 6: a non-admin manager (teacher) asks an admin to delete the server
+  // instead of deleting it outright.
+  onRequestServerDeletion?: (
+    serverId: string,
+    reason: string,
+  ) => void | Promise<void>;
   onCreateThread?: (
     serverId: string,
     label: string,
     emoji?: string,
     description?: string,
+    channelType?: ChannelType,
   ) => void | Promise<void>;
+  onEditChannel?: (
+    serverId: string,
+    channelId: string,
+    updates: {
+      label?: string;
+      emoji?: string;
+      hint?: string;
+      channelType?: ChannelType;
+    },
+  ) => void | Promise<void>;
+  onDeleteChannel?: (serverId: string, channelId: string) => void | Promise<void>;
   onRequestJoin?: (serverId: string) => void | Promise<void>;
   onApproveJoinRequest?: (
     serverId: string,
@@ -177,22 +200,24 @@ function TitleColorPicker({
   );
 }
 
-function RailAvatar({
+function RailAvatarComponent({
   server,
   selected,
-  onPress,
-  onLongPress,
+  onSelectServer,
+  onOpenEdit,
 }: {
   server: CommunityServer;
   selected: boolean;
-  onPress: () => void;
-  onLongPress?: () => void;
+  onSelectServer: (serverId: string) => void;
+  onOpenEdit?: (server: CommunityServer) => void;
 }) {
   return (
     <TouchableOpacity
       style={[styles.railAvatarWrap, selected && styles.railAvatarWrapSelected]}
-      onPress={onPress}
-      onLongPress={onLongPress}
+      onPress={() => onSelectServer(server.id)}
+      onLongPress={
+        server.canManage && onOpenEdit ? () => onOpenEdit(server) : undefined
+      }
       activeOpacity={0.82}
     >
       {selected && <View style={styles.selectedRailBridge} />}
@@ -217,19 +242,298 @@ function RailAvatar({
     </TouchableOpacity>
   );
 }
+const RailAvatar = React.memo(RailAvatarComponent, (prev, next) => {
+  return (
+    prev.selected === next.selected &&
+    prev.server.id === next.server.id &&
+    prev.server.name === next.server.name &&
+    prev.server.accent === next.server.accent &&
+    prev.server.logoUri === next.server.logoUri &&
+    prev.server.emoji === next.server.emoji &&
+    prev.server.membershipState === next.server.membershipState &&
+    prev.server.canManage === next.server.canManage &&
+    prev.onSelectServer === next.onSelectServer &&
+    prev.onOpenEdit === next.onOpenEdit
+  );
+});
 
-function ChannelRow({
+const STROKE_CARDINAL_DIRS = [
+  [-1, 0], [1, 0], [0, -1], [0, 1],
+  [-0.7, -0.7], [-0.7, 0.7], [0.7, -0.7], [0.7, 0.7],
+] as const;
+
+const ServerHeroTitle = React.memo(function ServerHeroTitle({
+  title,
+  strokeSize = 0,
+  strokeColor = "#000000",
+  titleColor = "#fffaf7",
+  titleSize = 22,
+  titleAlign = "left",
+  titleStroke = "none",
+}: {
+  title: string;
+  strokeSize?: number;
+  strokeColor?: string;
+  titleColor?: string;
+  titleSize?: number;
+  titleAlign?: "left" | "center" | "right";
+  titleStroke?: "none" | "subtle" | "medium" | "strong";
+}) {
+  const hasStroke = titleStroke !== "none" && strokeSize > 0;
+  const offsets = useMemo(() => {
+    if (!hasStroke) return [];
+    return STROKE_CARDINAL_DIRS.map(([dx, dy]) => [
+      Math.round(dx * strokeSize),
+      Math.round(dy * strokeSize),
+    ]);
+  }, [hasStroke, strokeSize]);
+
+  return (
+    <View style={{ position: "relative", width: "100%" }}>
+      {offsets.map(([x, y], index) => (
+        <Text
+          key={`title-stroke-${index}`}
+          style={[
+            styles.heroTitle,
+            {
+              position: "absolute",
+              left: x,
+              top: y,
+              width: "100%",
+              color: strokeColor,
+              fontSize: titleSize,
+              textAlign: titleAlign,
+            },
+          ]}
+          pointerEvents="none"
+        >
+          {title}
+        </Text>
+      ))}
+      <Text
+        style={[
+          styles.heroTitle,
+          {
+            color: titleColor,
+            fontSize: titleSize,
+            textAlign: titleAlign,
+          },
+        ]}
+      >
+        {title}
+      </Text>
+    </View>
+  );
+});
+
+type DrawerHeaderProps = {
+  selectedServer: CommunityServer;
+  membershipState: string;
+  canEnterThreads: boolean;
+  canLeaveServer: boolean;
+  pendingJoinRequests: ServerJoinRequestRecord[];
+  onOpenMembers: () => void;
+  onRequestJoin?: (serverId: string) => void;
+  onOpenUserProfile?: (userId?: string, profileDocId?: string) => void;
+  onApproveJoinRequest?: (serverId: string, userId: string) => void;
+  onRejectJoinRequest?: (serverId: string, userId: string) => void;
+  onLeaveServer?: (serverId: string) => void;
+  onOpenThreadCreate: () => void;
+};
+
+const DrawerHeader = React.memo(function DrawerHeader({
+  selectedServer,
+  membershipState,
+  canEnterThreads,
+  canLeaveServer,
+  pendingJoinRequests,
+  onOpenMembers,
+  onRequestJoin,
+  onOpenUserProfile,
+  onApproveJoinRequest,
+  onRejectJoinRequest,
+  onLeaveServer,
+  onOpenThreadCreate,
+}: DrawerHeaderProps) {
+  return (
+    <>
+      <View style={[styles.heroCard, { backgroundColor: selectedServer.accent }]}>
+        <View style={styles.heroContent}>
+          <View style={styles.heroBadge}>
+            {selectedServer.logoUri ? (
+              <Image
+                source={{ uri: avatarThumb(selectedServer.logoUri, AVATAR_SIZE_SMALL) }}
+                style={styles.heroBadgeImage}
+              />
+            ) : (
+              <Text style={styles.heroBadgeEmoji}>
+                {selectedServer.emoji || "🏫"}
+              </Text>
+            )}
+          </View>
+          <ServerHeroTitle
+            title={selectedServer.name}
+            strokeSize={selectedServer.titleStrokeSize ?? 0}
+            strokeColor={selectedServer.titleStrokeColor || "#000000"}
+            titleColor={selectedServer.titleColor || "#fffaf7"}
+            titleSize={selectedServer.titleSize || 22}
+            titleAlign={selectedServer.titleAlign || "left"}
+            titleStroke={selectedServer.titleStroke || "none"}
+          />
+          <Text
+            style={[
+              styles.heroSubtitle,
+              { fontSize: selectedServer.descriptionSize || 13 },
+            ]}
+          >
+            {selectedServer.description || "Community workspace"}
+          </Text>
+          <View style={styles.heroMetaRow}>
+            <TouchableOpacity
+              style={styles.metaPill}
+              activeOpacity={0.82}
+              onPress={onOpenMembers}
+            >
+              <Ionicons name="people-outline" size={14} color="#fffaf7" />
+              <Text style={styles.metaPillText}>
+                {selectedServer.memberCount.toLocaleString()} members
+              </Text>
+            </TouchableOpacity>
+            <View style={styles.metaPill}>
+              <Ionicons
+                name={
+                  selectedServer.isPublic ? "globe-outline" : "lock-closed-outline"
+                }
+                size={14}
+                color="#fffaf7"
+              />
+              <Text style={styles.metaPillText}>
+                {selectedServer.isPublic ? "Public" : "Private"}
+              </Text>
+            </View>
+          </View>
+        </View>
+      </View>
+
+      {!canEnterThreads && (
+        <View style={styles.accessCard}>
+          {membershipState === "available" && (
+            <TouchableOpacity
+              style={styles.joinButton}
+              onPress={() => onRequestJoin?.(selectedServer.id)}
+              activeOpacity={0.82}
+            >
+              <Ionicons name="paper-plane-outline" size={16} color="#fffaf7" />
+              <Text style={styles.joinButtonText}>Request to Join</Text>
+            </TouchableOpacity>
+          )}
+          {membershipState === "pending" && (
+            <View style={styles.pendingAccessPill}>
+              <Ionicons name="time-outline" size={15} color="#8a5a10" />
+              <Text style={styles.pendingAccessText}>Request Pending</Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      {selectedServer.canManage && pendingJoinRequests.length > 0 && (
+        <View style={styles.requestSection}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Join Requests</Text>
+            <Text style={styles.sectionCount}>
+              {pendingJoinRequests.length}
+            </Text>
+          </View>
+          {pendingJoinRequests.map((request) => (
+            <View key={`${request.serverId}_${request.userId}`} style={styles.requestCard}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.requestName}>
+                  {request.requesterName || request.userId}
+                </Text>
+                <Text style={styles.requestMeta}>
+                  {request.course || "Course not provided"}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => onOpenUserProfile?.(request.userId)}
+                  activeOpacity={0.78}
+                  style={styles.requestProfileLink}
+                >
+                  <Text style={styles.requestProfileLinkText}>Open profile</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={styles.requestActionColumn}>
+                <TouchableOpacity
+                  style={styles.requestApprove}
+                  onPress={() =>
+                    onApproveJoinRequest?.(request.serverId, request.userId)
+                  }
+                  activeOpacity={0.82}
+                >
+                  <Ionicons name="checkmark" size={16} color="#fffaf7" />
+                  <Text style={styles.requestApproveText}>Accept</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.requestReject}
+                  onPress={() =>
+                    onRejectJoinRequest?.(request.serverId, request.userId)
+                  }
+                  activeOpacity={0.82}
+                >
+                  <Ionicons name="close" size={16} color="#c0392b" />
+                  <Text style={styles.requestRejectText}>Reject</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {canLeaveServer && (
+        <View style={styles.accessCard}>
+          <TouchableOpacity
+            style={styles.leaveButton}
+            onPress={() => onLeaveServer?.(selectedServer.id)}
+            activeOpacity={0.82}
+          >
+            <Ionicons name="exit-outline" size={16} color="#fffaf7" />
+            <Text style={styles.joinButtonText}>Leave Server</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      <View style={styles.sectionHeaderRow}>
+        <Text style={styles.sectionTitle}>Class Channels</Text>
+        {selectedServer.canManage && (
+          <TouchableOpacity
+            style={styles.threadAddButton}
+            onPress={onOpenThreadCreate}
+            activeOpacity={0.82}
+          >
+            <Ionicons name="add" size={15} color="#5f0909" />
+            <Text style={styles.threadAddButtonText}>New</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    </>
+  );
+});
+
+function ChannelRowComponent({
   channel,
   active,
   accent,
   disabled,
-  onPress,
+  canManage,
+  onSelect,
+  onOpenEdit,
 }: {
   channel: CommunityChannel;
   active: boolean;
   accent: string;
   disabled?: boolean;
-  onPress: () => void;
+  canManage?: boolean;
+  onSelect: (channelId: string) => void;
+  onOpenEdit?: (channel: CommunityChannel) => void;
 }) {
   return (
     <TouchableOpacity
@@ -238,7 +542,8 @@ function ChannelRow({
         active && styles.channelRowActive,
         disabled && styles.channelRowDisabled,
       ]}
-      onPress={onPress}
+      onPress={() => onSelect(channel.id)}
+      onLongPress={canManage && onOpenEdit ? () => onOpenEdit(channel) : undefined}
       disabled={disabled}
       activeOpacity={0.8}
     >
@@ -249,9 +554,28 @@ function ChannelRow({
         <Text style={styles.channelGlyphEmoji}>{channel.emoji || "💬"}</Text>
       </View>
       <View style={styles.channelCopy}>
-        <Text style={styles.channelLabel}>#{channel.label}</Text>
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <Text style={styles.channelLabel}>#{channel.label}</Text>
+          {isStaffOnlyChannel(channel) && (
+            <Ionicons name="lock-closed" size={11} color="#9b766c" style={{ marginLeft: 5 }} />
+          )}
+        </View>
         {!!channel.hint && <Text style={styles.channelHint}>{channel.hint}</Text>}
       </View>
+      {canManage && onOpenEdit && (
+        <TouchableOpacity
+          style={styles.channelEditAction}
+          onPress={(e) => {
+            e.stopPropagation?.();
+            onOpenEdit(channel);
+          }}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          activeOpacity={0.7}
+          accessibilityLabel={`Edit channel #${channel.label}`}
+        >
+          <Ionicons name="create-outline" size={15} color="#7d3b30" />
+        </TouchableOpacity>
+      )}
       {!!channel.unreadCount ? (
         <View style={styles.unreadBadge}>
           <Text style={styles.unreadBadgeText}>
@@ -264,8 +588,51 @@ function ChannelRow({
     </TouchableOpacity>
   );
 }
+const ChannelRow = React.memo(ChannelRowComponent);
 
-export default function ServerDrawer({
+function MemberRowComponent({
+  member,
+  onOpenProfile,
+}: {
+  member: ServerMemberPreview;
+  onOpenProfile?: (userId?: string, profileDocId?: string) => void;
+}) {
+  return (
+    <TouchableOpacity
+      style={styles.memberRow}
+      onPress={() =>
+        onOpenProfile?.(
+          member.userId || undefined,
+          member.profileDocId || undefined,
+        )
+      }
+      activeOpacity={0.82}
+    >
+      <View style={styles.memberAvatar}>
+        {member.avatarUri ? (
+          <Image
+            source={{ uri: avatarThumb(member.avatarUri, AVATAR_SIZE_SMALL) }}
+            style={styles.memberAvatarImage}
+          />
+        ) : (
+          <Text style={styles.memberAvatarText}>
+            {(member.name?.[0] || "M").toUpperCase()}
+          </Text>
+        )}
+      </View>
+      <View style={styles.memberCopy}>
+        <Text style={styles.memberName}>{member.name}</Text>
+        <Text style={styles.memberMeta}>
+          {[member.role, member.course].filter(Boolean).join(" • ") || "Member"}
+        </Text>
+      </View>
+      {member.isOnline ? <View style={styles.memberOnlineDot} /> : null}
+    </TouchableOpacity>
+  );
+}
+const MemberRow = React.memo(MemberRowComponent);
+
+function ServerDrawerComponent({
   visible,
   onClose,
   onExitServerView,
@@ -279,7 +646,10 @@ export default function ServerDrawer({
   onCreateServer,
   onEditServer,
   onDeleteServer,
+  onRequestServerDeletion,
   onCreateThread,
+  onEditChannel,
+  onDeleteChannel,
   onRequestJoin,
   onApproveJoinRequest,
   onRejectJoinRequest,
@@ -342,12 +712,48 @@ export default function ServerDrawer({
   const [editImageUploading, setEditImageUploading] = useState<"logo" | null>(null);
 
   const [threadName, setThreadName] = useState("");
+  const [threadType, setThreadType] = useState<ChannelType>("text");
   const [threadEmoji, setThreadEmoji] = useState("💬");
   const [threadDescription, setThreadDescription] = useState("");
 
+  const [editChannelVisible, setEditChannelVisible] = useState(false);
+  const [editingChannel, setEditingChannel] = useState<CommunityChannel | null>(null);
+  const [editChannelName, setEditChannelName] = useState("");
+  const [editChannelType, setEditChannelType] = useState<ChannelType>("text");
+  const [editChannelEmoji, setEditChannelEmoji] = useState("💬");
+  const [editChannelHint, setEditChannelHint] = useState("");
+
+  // Task 6: optional free-text reason attached to a deletion request.
+  const [deleteReason, setDeleteReason] = useState("");
+
+  const [localSelectedId, setLocalSelectedId] = useState<string | null>(selectedServerId ?? null);
+
+  useEffect(() => {
+    if (selectedServerId) {
+      setLocalSelectedId(selectedServerId);
+    }
+  }, [selectedServerId]);
+
+  const effectiveServerId = localSelectedId || selectedServerId;
+
+  const handleRailSelect = useCallback(
+    (serverId: string) => {
+      setLocalSelectedId(serverId);
+      onSelectServer(serverId);
+    },
+    [onSelectServer],
+  );
+
   const selectedServer = useMemo(
-    () => servers.find((server) => server.id === selectedServerId) || servers[0] || null,
-    [selectedServerId, servers],
+    () => servers.find((server) => server.id === effectiveServerId) || servers[0] || null,
+    [effectiveServerId, servers],
+  );
+
+  // Task 6: the server the edit sheet is currently open for (name/owner used
+  // by the deletion-request flow).
+  const editingServer = useMemo(
+    () => servers.find((server) => server.id === editServerId) || null,
+    [editServerId, servers],
   );
 
   useEffect(() => {
@@ -381,10 +787,11 @@ export default function ServerDrawer({
       setEditVisible(false);
       setThreadVisible(false);
       setMembersVisible(false);
+      setDeleteReason("");
     }
   }, [fadeAnim, slideAnim, visible]);
 
-  const openEdit = (server: CommunityServer) => {
+  const openEdit = useCallback((server: CommunityServer) => {
     if (!server.canManage) return;
     setEditServerId(server.id);
     setEditName(server.name);
@@ -402,8 +809,9 @@ export default function ServerDrawer({
     setEditTitleStrokeSize(server.titleStrokeSize ?? 0)
     setEditDescriptionSize(server.descriptionSize || 13);
     setEditIconMode(server.logoUri ? "image" : "emoji");
+    setDeleteReason("");
     setEditVisible(true);
-  };
+  }, []);
 
   const pickServerImage = async (kind: "logo") => {
     try {
@@ -526,19 +934,94 @@ export default function ServerDrawer({
     });
   };
 
+  // Task 6: non-admin managers (teachers) can't delete outright — this sends
+  // an admin-review request instead. Mirrors handleDeleteServer's ConfirmDialog
+  // shape.
+  const handleRequestServerDeletion = () => {
+    if (!editServerId || currentUserRole === "admin") return;
+    setConfirmDialog({
+      title: "Request server deletion",
+      description:
+        "Deleting removes this server for every member, so a teacher's request goes to an admin for approval. The server stays active until then.",
+      confirmText: "Send Request",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        await onRequestServerDeletion?.(editServerId, deleteReason.trim());
+        setDeleteReason("");
+        setEditVisible(false);
+      },
+    });
+  };
+
   const handleCreateThread = async () => {
     if (!selectedServer || !threadName.trim()) return;
     await onCreateThread?.(
       selectedServer.id,
       threadName.trim(),
-      threadEmoji.trim() || "💬",
+      threadEmoji.trim() || getChannelDefaultEmoji(threadType),
       threadDescription.trim(),
+      threadType,
     );
     setThreadVisible(false);
     setThreadName("");
     setThreadEmoji("💬");
     setThreadDescription("");
+    setThreadType("text");
   };
+
+  const openEditChannel = useCallback((channel: CommunityChannel) => {
+    setEditingChannel(channel);
+    setEditChannelName(channel.label);
+    const resolvedType: ChannelType =
+      channel.channelType ||
+      (channel.label.toLowerCase() === "rules"
+        ? "rules"
+        : channel.label.toLowerCase().includes("announcement")
+        ? "announcement"
+        : channel.label.toLowerCase() === "media"
+        ? "media"
+        : "text");
+    setEditChannelType(resolvedType);
+    setEditChannelEmoji(channel.emoji || getChannelDefaultEmoji(resolvedType));
+    setEditChannelHint(channel.hint || "");
+    setEditChannelVisible(true);
+  }, []);
+
+  const handleSaveChannel = useCallback(async () => {
+    if (!selectedServer || !editingChannel || !onEditChannel) return;
+    const trimmed = editChannelName.trim();
+    if (!trimmed) {
+      Alert.alert("Channel Name Required", "Please enter a valid channel name.");
+      return;
+    }
+    await onEditChannel(selectedServer.id, editingChannel.id, {
+      label: trimmed,
+      channelType: editChannelType,
+      emoji: editChannelEmoji.trim() || getChannelDefaultEmoji(editChannelType),
+      hint: editChannelHint.trim(),
+    });
+    setEditChannelVisible(false);
+    setEditingChannel(null);
+  }, [selectedServer, editingChannel, onEditChannel, editChannelName, editChannelType, editChannelEmoji, editChannelHint]);
+
+  const handleDeleteChannelPress = useCallback(() => {
+    if (!selectedServer || !editingChannel || !onDeleteChannel) return;
+    setConfirmDialog({
+      title: `Delete #${editingChannel.label}`,
+      description: "Are you sure you want to delete this channel? This action cannot be undone.",
+      confirmText: "Delete Channel",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setEditChannelVisible(false);
+        await onDeleteChannel(selectedServer.id, editingChannel.id);
+        setEditingChannel(null);
+      },
+    });
+  }, [selectedServer, editingChannel, onDeleteChannel]);
 
   const membershipState = selectedServer?.membershipState || "joined";
   const canEnterThreads = membershipState === "joined";
@@ -568,6 +1051,85 @@ export default function ServerDrawer({
     [onClose],
   );
 
+  // ── Virtualized-list plumbing ──────────────────────────────────────────
+  // Stable refs so the React.memo'd row components (RailAvatar / ChannelRow /
+  // MemberRow) can actually bail out of re-rendering, matching the memoized
+  // renderItem approach used by ServerChannelScreen's message list.
+  const channelData = useMemo(
+    () =>
+      selectedServer
+        ? selectedServer.sections.flatMap((section) => section.channels)
+        : [],
+    [selectedServer],
+  );
+
+  const keyExtractorId = useCallback((item: { id: string }) => item.id, []);
+
+  const renderServerItem = useCallback(
+    ({ item }: { item: CommunityServer }) => (
+      <RailAvatar
+        server={item}
+        selected={item.id === effectiveServerId}
+        onSelectServer={handleRailSelect}
+        onOpenEdit={openEdit}
+      />
+    ),
+    [effectiveServerId, handleRailSelect, openEdit],
+  );
+
+  const renderChannelItem = useCallback(
+    ({ item }: { item: CommunityChannel }) => (
+      <ChannelRow
+        channel={item}
+        active={item.id === selectedChannelId}
+        accent={selectedServer?.accent ?? "#8f3a2b"}
+        disabled={!canEnterThreads}
+        canManage={selectedServer?.canManage}
+        onSelect={onSelectChannel}
+        onOpenEdit={openEditChannel}
+      />
+    ),
+    [selectedChannelId, selectedServer?.accent, selectedServer?.canManage, canEnterThreads, onSelectChannel, openEditChannel],
+  );
+
+  const renderMemberItem = useCallback(
+    ({ item }: { item: ServerMemberPreview }) => (
+      <MemberRow member={item} onOpenProfile={onOpenUserProfile} />
+    ),
+    [onOpenUserProfile],
+  );
+
+  const renderHeader = useCallback(() => {
+    if (!selectedServer) return null;
+    return (
+      <DrawerHeader
+        selectedServer={selectedServer}
+        membershipState={membershipState}
+        canEnterThreads={canEnterThreads}
+        canLeaveServer={canLeaveServer}
+        pendingJoinRequests={pendingJoinRequests}
+        onOpenMembers={() => setMembersVisible(true)}
+        onRequestJoin={onRequestJoin}
+        onOpenUserProfile={onOpenUserProfile}
+        onApproveJoinRequest={onApproveJoinRequest}
+        onRejectJoinRequest={onRejectJoinRequest}
+        onLeaveServer={onLeaveServer}
+        onOpenThreadCreate={() => setThreadVisible(true)}
+      />
+    );
+  }, [
+    canEnterThreads,
+    canLeaveServer,
+    membershipState,
+    onApproveJoinRequest,
+    onLeaveServer,
+    onOpenUserProfile,
+    onRejectJoinRequest,
+    onRequestJoin,
+    pendingJoinRequests,
+    selectedServer,
+  ]);
+
   return (
     <>
       <Modal visible={visible} transparent animationType="none" onRequestClose={onClose}>
@@ -588,20 +1150,24 @@ export default function ServerDrawer({
                 <Ionicons name="people-outline" size={15} color="#fffaf7" />
                 <Text style={styles.communityRailLabelText}>COMMUNITY</Text>
               </View>
-              <ScrollView
+              <FlatList
+                style={styles.railList}
+                data={servers}
+                keyExtractor={keyExtractorId}
+                renderItem={renderServerItem}
+                extraData={effectiveServerId}
+                getItemLayout={(_, index) => ({
+                  length: 80,
+                  offset: 80 * index,
+                  index,
+                })}
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={styles.railContent}
-              >
-                {servers.map((server) => (
-                  <RailAvatar
-                    key={server.id}
-                    server={server}
-                    selected={server.id === selectedServer?.id}
-                    onPress={() => onSelectServer(server.id)}
-                    onLongPress={server.canManage ? () => openEdit(server) : undefined}
-                  />
-                ))}
-              </ScrollView>
+                initialNumToRender={10}
+                maxToRenderPerBatch={6}
+                windowSize={5}
+                removeClippedSubviews={Platform.OS === "android"}
+              />
 
               {canCreateServer && (
                 <TouchableOpacity
@@ -639,240 +1205,20 @@ export default function ServerDrawer({
                     )}
                   </View>
 
-                  <ScrollView
+                  <FlatList
                     style={styles.panelScroll}
                     contentContainerStyle={{ paddingBottom: insets.bottom + 28 }}
                     showsVerticalScrollIndicator={false}
-                  >
-                    <View style={[styles.heroCard, { backgroundColor: selectedServer.accent }]}>
-                      <View style={styles.heroContent}>
-                      <View style={styles.heroBadge}>
-                        {selectedServer.logoUri ? (
-                          <Image
-                            source={{ uri: avatarThumb(selectedServer.logoUri, AVATAR_SIZE_SMALL) }}
-                            style={styles.heroBadgeImage}
-                          />
-                        ) : (
-                          <Text style={styles.heroBadgeEmoji}>
-                            {selectedServer.emoji || "🏫"}
-                          </Text>
-                        )}
-                      </View>
-                      {(() => {
-  const strokeSize = selectedServer.titleStrokeSize ?? 0;
-  const strokeColor = selectedServer.titleStrokeColor || "#000000";
-  const titleSize = selectedServer.titleSize || 22;
-  const titleAlign = selectedServer.titleAlign || "left";
-
-  const strokeOffsets: [number, number][] = [];
-
-  if (
-    selectedServer.titleStroke !== "none" &&
-    strokeSize > 0
-  ) {
-    const steps = Math.max(24, strokeSize * 12);
-
-    for (let i = 0; i < steps; i++) {
-      const angle = (i / steps) * Math.PI * 2;
-
-      strokeOffsets.push([
-        Math.round(Math.cos(angle) * strokeSize),
-        Math.round(Math.sin(angle) * strokeSize),
-      ]);
-    }
-  }
-
-  return (
-    <View
-      style={{
-        position: "relative",
-        width: "100%",
-      }}
-    >
-      {strokeOffsets.map(([x, y], index) => (
-        <Text
-          key={`title-stroke-${index}`}
-          style={[
-            styles.heroTitle,
-            {
-              position: "absolute",
-              left: x,
-              top: y,
-
-              width: "100%",
-
-              color: strokeColor,
-              fontSize: titleSize,
-              textAlign: titleAlign,
-            },
-          ]}
-          pointerEvents="none"
-        >
-          {selectedServer.name}
-        </Text>
-      ))}
-
-      <Text
-        style={[
-          styles.heroTitle,
-          {
-            color: selectedServer.titleColor || "#fffaf7",
-            fontSize: titleSize,
-            textAlign: titleAlign,
-          },
-        ]}
-      >
-        {selectedServer.name}
-      </Text>
-    </View>
-  );
-})()}
-                      <Text
-                        style={[
-                          styles.heroSubtitle,
-                          { fontSize: selectedServer.descriptionSize || 13 },
-                        ]}
-                      >
-                        {selectedServer.description || "Community workspace"}
-                      </Text>
-                      <View style={styles.heroMetaRow}>
-                        <TouchableOpacity
-                          style={styles.metaPill}
-                          activeOpacity={0.82}
-                          onPress={() => setMembersVisible(true)}
-                        >
-                          <Ionicons name="people-outline" size={14} color="#fffaf7" />
-                          <Text style={styles.metaPillText}>
-                            {selectedServer.memberCount.toLocaleString()} members
-                          </Text>
-                        </TouchableOpacity>
-                        <View style={styles.metaPill}>
-                          <Ionicons
-                            name={
-                              selectedServer.isPublic ? "globe-outline" : "lock-closed-outline"
-                            }
-                            size={14}
-                            color="#fffaf7"
-                          />
-                          <Text style={styles.metaPillText}>
-                            {selectedServer.isPublic ? "Public" : "Private"}
-                          </Text>
-                        </View>
-                      </View>
-                      </View>
-                    </View>
-
-                    {!canEnterThreads && (
-                      <View style={styles.accessCard}>
-                        {membershipState === "available" && (
-                          <TouchableOpacity
-                            style={styles.joinButton}
-                            onPress={() => onRequestJoin?.(selectedServer.id)}
-                            activeOpacity={0.82}
-                          >
-                            <Ionicons name="paper-plane-outline" size={16} color="#fffaf7" />
-                            <Text style={styles.joinButtonText}>Request to Join</Text>
-                          </TouchableOpacity>
-                        )}
-                        {membershipState === "pending" && (
-                          <View style={styles.pendingAccessPill}>
-                            <Ionicons name="time-outline" size={15} color="#8a5a10" />
-                            <Text style={styles.pendingAccessText}>Request Pending</Text>
-                          </View>
-                        )}
-                      </View>
-                    )}
-
-                    {selectedServer.canManage && pendingJoinRequests.length > 0 && (
-                      <View style={styles.requestSection}>
-                        <View style={styles.sectionHeaderRow}>
-                          <Text style={styles.sectionTitle}>Join Requests</Text>
-                          <Text style={styles.sectionCount}>
-                            {pendingJoinRequests.length}
-                          </Text>
-                        </View>
-                        {pendingJoinRequests.map((request) => (
-                          <View key={`${request.serverId}_${request.userId}`} style={styles.requestCard}>
-                            <View style={{ flex: 1 }}>
-                              <Text style={styles.requestName}>
-                                {request.requesterName || request.userId}
-                              </Text>
-                              <Text style={styles.requestMeta}>
-                                {request.course || "Course not provided"}
-                              </Text>
-                              <TouchableOpacity
-                                onPress={() => onOpenUserProfile?.(request.userId)}
-                                activeOpacity={0.78}
-                                style={styles.requestProfileLink}
-                              >
-                                <Text style={styles.requestProfileLinkText}>Open profile</Text>
-                              </TouchableOpacity>
-                            </View>
-                            <View style={styles.requestActionColumn}>
-                              <TouchableOpacity
-                                style={styles.requestApprove}
-                                onPress={() =>
-                                  onApproveJoinRequest?.(request.serverId, request.userId)
-                                }
-                                activeOpacity={0.82}
-                              >
-                                <Ionicons name="checkmark" size={16} color="#fffaf7" />
-                                <Text style={styles.requestApproveText}>Accept</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity
-                                style={styles.requestReject}
-                                onPress={() =>
-                                  onRejectJoinRequest?.(request.serverId, request.userId)
-                                }
-                                activeOpacity={0.82}
-                              >
-                                <Ionicons name="close" size={16} color="#c0392b" />
-                                <Text style={styles.requestRejectText}>Reject</Text>
-                              </TouchableOpacity>
-                            </View>
-                          </View>
-                        ))}
-                      </View>
-                    )}
-
-                    {canLeaveServer && (
-                      <View style={styles.accessCard}>
-                        <TouchableOpacity
-                          style={styles.leaveButton}
-                          onPress={() => onLeaveServer?.(selectedServer.id)}
-                          activeOpacity={0.82}
-                        >
-                          <Ionicons name="exit-outline" size={16} color="#fffaf7" />
-                          <Text style={styles.joinButtonText}>Leave Server</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
-
-                    <View style={styles.sectionHeaderRow}>
-                          <Text style={styles.sectionTitle}>Class Channels</Text>
-                      {selectedServer.canManage && (
-                        <TouchableOpacity
-                          style={styles.threadAddButton}
-                          onPress={() => setThreadVisible(true)}
-                          activeOpacity={0.82}
-                        >
-                          <Ionicons name="add" size={15} color="#5f0909" />
-                          <Text style={styles.threadAddButtonText}>New</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-
-                    {selectedServer.sections.flatMap((section) => section.channels).map((channel) => (
-                      <ChannelRow
-                        key={channel.id}
-                        channel={channel}
-                        active={channel.id === selectedChannelId}
-                        accent={selectedServer.accent}
-                        disabled={!canEnterThreads}
-                        onPress={() => onSelectChannel(channel.id)}
-                      />
-                    ))}
-                  </ScrollView>
+                    data={channelData}
+                    keyExtractor={keyExtractorId}
+                    renderItem={renderChannelItem}
+                    extraData={selectedChannelId}
+                    initialNumToRender={10}
+                    maxToRenderPerBatch={6}
+                    windowSize={5}
+                    removeClippedSubviews={Platform.OS === "android"}
+                    ListHeaderComponent={renderHeader}
+                  />
                 </>
               ) : (
                 <View style={styles.emptyState}>
@@ -1341,6 +1687,34 @@ export default function ServerDrawer({
               />
             </View>
 
+            {/* Task 6: teachers/moderators can't delete a server outright —
+                they send a request for an admin to approve. */}
+            {currentUserRole !== "admin" && editingServer && (
+              <View style={styles.requestDeleteBlock}>
+                <Text style={styles.fieldLabel}>Delete this server</Text>
+                <Text style={styles.requestDeleteHint}>
+                  Deleting removes the server for every member, so a teacher&apos;s
+                  request goes to an admin for approval first.
+                </Text>
+                <TextInput
+                  style={[styles.input, styles.inputMulti]}
+                  value={deleteReason}
+                  onChangeText={setDeleteReason}
+                  placeholder="Reason (optional) — e.g. course finished, no longer used"
+                  placeholderTextColor="#b9a49b"
+                  multiline
+                />
+                <TouchableOpacity
+                  style={styles.requestDeleteButton}
+                  onPress={handleRequestServerDeletion}
+                  activeOpacity={0.85}
+                >
+                  <Ionicons name="trash-outline" size={15} color="#8f3a2b" />
+                  <Text style={styles.requestDeleteButtonText}>Request Deletion</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
             <View style={styles.modalActions}>
               {currentUserRole === "admin" ? (
                 <TouchableOpacity style={styles.dangerButton} onPress={handleDeleteServer}>
@@ -1373,12 +1747,62 @@ export default function ServerDrawer({
               </TouchableOpacity>
             </View>
 
+            <Text style={styles.fieldLabel}>Channel Type</Text>
+            <View style={styles.channelTypeGrid}>
+              {(
+                [
+                  ["text", "Text", "chatbubbles-outline", "💬", "Discussion for all members"],
+                  ["announcement", "Announcement", "megaphone-outline", "📢", "Staff only send; students react & forward"],
+                  ["rules", "Rules", "shield-checkmark-outline", "📜", "Guidelines; staff post, students react"],
+                  ["media", "Media", "images-outline", "📸", "Photos, videos & file sharing for all"],
+                ] as const
+              ).map(([typeKey, title, iconName, defaultEmoji, hint]) => {
+                const isSelected = threadType === typeKey;
+                return (
+                  <TouchableOpacity
+                    key={typeKey}
+                    style={[
+                      styles.channelTypeCard,
+                      isSelected && {
+                        borderColor: selectedServer?.accent || "#5f0909",
+                        backgroundColor: `${selectedServer?.accent || "#5f0909"}14`,
+                      },
+                    ]}
+                    onPress={() => {
+                      setThreadType(typeKey as ChannelType);
+                      setThreadEmoji(defaultEmoji);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons
+                      name={iconName as any}
+                      size={18}
+                      color={isSelected ? selectedServer?.accent || "#5f0909" : "#7d3b30"}
+                    />
+                    <View style={{ flex: 1, marginLeft: 8 }}>
+                      <Text
+                        style={[
+                          styles.channelTypeTitle,
+                          isSelected && { color: selectedServer?.accent || "#5f0909", fontWeight: "700" },
+                        ]}
+                      >
+                        {title}
+                      </Text>
+                      <Text style={styles.channelTypeHint} numberOfLines={1}>
+                        {hint}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
             <Text style={styles.fieldLabel}>Channel Name</Text>
             <TextInput
               style={styles.input}
               value={threadName}
               onChangeText={setThreadName}
-              placeholder="resources"
+              placeholder={threadType === "rules" ? "rules" : threadType === "announcement" ? "announcements" : threadType === "media" ? "media" : "discussion"}
               placeholderTextColor="#b89a92"
             />
 
@@ -1418,6 +1842,126 @@ export default function ServerDrawer({
         </View>
       </Modal>
 
+      {/* ── Edit Channel Modal ────────────────────────────────────────── */}
+      <Modal visible={editChannelVisible} transparent animationType="fade" onRequestClose={() => setEditChannelVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <View>
+                <Text style={styles.modalTitle}>Edit Channel</Text>
+                <Text style={styles.channelTypeHint}>
+                  #{editingChannel?.label || "channel"}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setEditChannelVisible(false)}>
+                <Ionicons name="close" size={22} color="#8f3a2b" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.fieldLabel}>Channel Type</Text>
+            <View style={styles.channelTypeGrid}>
+              {(
+                [
+                  ["text", "Text", "chatbubbles-outline", "💬", "Discussion for all members"],
+                  ["announcement", "Announcement", "megaphone-outline", "📢", "Staff only send; students react & forward"],
+                  ["rules", "Rules", "shield-checkmark-outline", "📜", "Guidelines; staff post, students react"],
+                  ["media", "Media", "images-outline", "📸", "Photos, videos & file sharing for all"],
+                ] as const
+              ).map(([typeKey, title, iconName, defaultEmoji, hint]) => {
+                const isSelected = editChannelType === typeKey;
+                return (
+                  <TouchableOpacity
+                    key={typeKey}
+                    style={[
+                      styles.channelTypeCard,
+                      isSelected && {
+                        borderColor: selectedServer?.accent || "#5f0909",
+                        backgroundColor: `${selectedServer?.accent || "#5f0909"}14`,
+                      },
+                    ]}
+                    onPress={() => {
+                      setEditChannelType(typeKey as ChannelType);
+                      setEditChannelEmoji(defaultEmoji);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons
+                      name={iconName as any}
+                      size={18}
+                      color={isSelected ? selectedServer?.accent || "#5f0909" : "#7d3b30"}
+                    />
+                    <View style={{ flex: 1, marginLeft: 8 }}>
+                      <Text
+                        style={[
+                          styles.channelTypeTitle,
+                          isSelected && { color: selectedServer?.accent || "#5f0909", fontWeight: "700" },
+                        ]}
+                      >
+                        {title}
+                      </Text>
+                      <Text style={styles.channelTypeHint} numberOfLines={1}>
+                        {hint}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={styles.fieldLabel}>Channel Name</Text>
+            <TextInput
+              style={styles.input}
+              value={editChannelName}
+              onChangeText={setEditChannelName}
+              placeholder="channel-name"
+              placeholderTextColor="#b89a92"
+            />
+
+            <Text style={styles.fieldLabel}>Channel Emoji</Text>
+            <TextInput
+              style={styles.input}
+              value={editChannelEmoji}
+              onChangeText={setEditChannelEmoji}
+              placeholder="💬"
+              placeholderTextColor="#b89a92"
+              maxLength={3}
+            />
+
+            <Text style={styles.fieldLabel}>Channel Description</Text>
+            <TextInput
+              style={[styles.input, styles.inputMulti]}
+              value={editChannelHint}
+              onChangeText={setEditChannelHint}
+              placeholder="What is this channel for?"
+              placeholderTextColor="#b89a92"
+              multiline
+            />
+
+            <TouchableOpacity
+              style={styles.channelDeleteBtn}
+              onPress={handleDeleteChannelPress}
+              activeOpacity={0.82}
+            >
+              <Ionicons name="trash-outline" size={16} color="#c0392b" />
+              <Text style={styles.channelDeleteBtnText}>Delete Channel</Text>
+            </TouchableOpacity>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.secondaryButton} onPress={() => setEditChannelVisible(false)}>
+                <Text style={styles.secondaryButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.primaryButton, { backgroundColor: selectedServer?.accent || "#5f0909" }]}
+                onPress={handleSaveChannel}
+                disabled={!editChannelName.trim()}
+              >
+                <Text style={styles.primaryButtonText}>Save Changes</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={membersVisible} transparent animationType="fade" onRequestClose={() => setMembersVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
@@ -1433,40 +1977,23 @@ export default function ServerDrawer({
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={styles.memberList} showsVerticalScrollIndicator={false}>
-              {serverMembers.length > 0 ? (
-                serverMembers.map((member) => (
-                  <TouchableOpacity
-                    key={member.id}
-                    style={styles.memberRow}
-                    onPress={() => onOpenUserProfile?.(member.userId || undefined, member.profileDocId || undefined)}
-                    activeOpacity={0.82}
-                  >
-                    <View style={styles.memberAvatar}>
-                      {member.avatarUri ? (
-                        <Image source={{ uri: avatarThumb(member.avatarUri, AVATAR_SIZE_SMALL) }} style={styles.memberAvatarImage} />
-                      ) : (
-                        <Text style={styles.memberAvatarText}>
-                          {(member.name?.[0] || "M").toUpperCase()}
-                        </Text>
-                      )}
-                    </View>
-                    <View style={styles.memberCopy}>
-                      <Text style={styles.memberName}>{member.name}</Text>
-                      <Text style={styles.memberMeta}>
-                        {[member.role, member.course].filter(Boolean).join(" • ") || "Member"}
-                      </Text>
-                    </View>
-                    {member.isOnline ? <View style={styles.memberOnlineDot} /> : null}
-                  </TouchableOpacity>
-                ))
-              ) : (
+            <FlatList
+              style={styles.memberList}
+              data={membersVisible ? serverMembers : []}
+              keyExtractor={keyExtractorId}
+              renderItem={renderMemberItem}
+              showsVerticalScrollIndicator={false}
+              initialNumToRender={10}
+              maxToRenderPerBatch={6}
+              windowSize={5}
+              removeClippedSubviews={Platform.OS === "android"}
+              ListEmptyComponent={
                 <View style={styles.memberEmptyState}>
                   <Ionicons name="people-outline" size={28} color="#c9b0a8" />
                   <Text style={styles.memberEmptyText}>No member list available yet.</Text>
                 </View>
-              )}
-            </ScrollView>
+              }
+            />
           </View>
         </View>
       </Modal>
@@ -1485,12 +2012,15 @@ export default function ServerDrawer({
   );
 }
 
+const ServerDrawer = React.memo(ServerDrawerComponent);
+export default ServerDrawer;
+
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
   },
   backdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: "rgba(8, 2, 2, 0.74)",
   },
   drawerShell: {
@@ -1519,6 +2049,10 @@ const styles = StyleSheet.create({
     fontSize: 8.5,
     fontWeight: "900",
     letterSpacing: 0.7,
+  },
+  railList: {
+    flex: 1,
+    alignSelf: "stretch",
   },
   railContent: {
     alignItems: "center",
@@ -2297,5 +2831,84 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#fff0ef",
+  },
+  // Task 6: "Request Deletion" block shown to non-admin managers in the edit sheet.
+  requestDeleteBlock: {
+    marginTop: 4,
+    marginBottom: 4,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#efdcd2",
+  },
+  requestDeleteHint: {
+    color: "#9b766c",
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 10,
+  },
+  requestDeleteButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#f5c6c2",
+    backgroundColor: "#fff0ef",
+    paddingVertical: 11,
+  },
+  requestDeleteButtonText: {
+    color: "#8f3a2b",
+    fontSize: 13.5,
+    fontWeight: "800",
+  },
+  channelTypeGrid: {
+    gap: 8,
+    marginBottom: 14,
+  },
+  channelTypeCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 10,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: "#e8dbd5",
+    backgroundColor: "#fffaf7",
+  },
+  channelTypeTitle: {
+    fontSize: 13.5,
+    fontWeight: "600",
+    color: "#4d1b17",
+  },
+  channelTypeHint: {
+    fontSize: 11,
+    color: "#9b766c",
+    marginTop: 1,
+  },
+  channelEditAction: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: "#fff0ea",
+    marginRight: 6,
+    borderWidth: 1,
+    borderColor: "#eedfd7",
+  },
+  channelDeleteBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#f5c6c2",
+    backgroundColor: "#fff0ef",
+    marginTop: 10,
+    marginBottom: 6,
+  },
+  channelDeleteBtnText: {
+    color: "#c0392b",
+    fontSize: 13,
+    fontWeight: "700",
   },
 });

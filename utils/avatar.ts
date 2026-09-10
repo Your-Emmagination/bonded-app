@@ -1,6 +1,8 @@
 export type AvatarSourceCandidate = {
   profileImage?: string | null;
   profilePic?: string | null;
+  photoURL?: string | null;
+  avatarUri?: string | null;
 };
 
 const cleanAvatarValue = (value?: string | null): string | null => {
@@ -13,5 +15,10 @@ export const resolveAvatarUri = (
   source?: AvatarSourceCandidate | null,
 ): string | null => {
   if (!source) return null;
-  return cleanAvatarValue(source.profileImage) || cleanAvatarValue(source.profilePic);
+  return (
+    cleanAvatarValue(source.profileImage) ||
+    cleanAvatarValue(source.profilePic) ||
+    cleanAvatarValue(source.photoURL) ||
+    cleanAvatarValue(source.avatarUri)
+  );
 };

@@ -2,10 +2,21 @@ name = "bonded-ai-worker"
 main = "src/index.js"
 compatibility_date = "2026-04-30"
 
+# Analytics daily rollup. Runs once a day at 00:15 UTC and writes
+# dailyStats/{YYYY-MM-DD} for the day that just ended. See runDailyRollup()
+# in src/index.js. Cron syntax: "minute hour day-of-month month day-of-week".
+[triggers]
+crons = ["15 0 * * *"]
+
 [vars]
-GROQ_MODEL = "openai/gpt-oss-20b"
 ALLOWED_ORIGIN = "*"
 FIREBASE_PROJECT_ID = "bonded-app-c8483"
+OPENMODERATION_PROVIDER = "openai"
+OPENMODERATION_MODEL = "omni-moderation-latest"
+OPENMODERATION_THRESHOLD = "0.5"
+
+BREVO_SENDER = "bonded.csap@gmail.com"
+BREVO_SENDER_NAME = "BondED"
 
 [observability.logs]
 enabled = true

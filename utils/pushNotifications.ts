@@ -1,6 +1,8 @@
+import { getDirectNotificationTarget } from "./messengerState";
 import Constants from "expo-constants";
 import type { User } from "firebase/auth";
 import {
+  arrayRemove,
   arrayUnion,
   collection,
   doc,
@@ -73,6 +75,11 @@ type ExpoPushMessage = {
 
 let notificationsModulePromise: Promise<NotificationsModule | null> | null = null;
 let notificationHandlerConfigured = false;
+
+// The Expo push token identifies the install, not the account — it is the same
+// string whoever is signed in, and it survives logout. Cached at registration
+// so logout can remove it from the outgoing account without a round trip.
+let cachedDevicePushToken: string | null = null;
 
 const isExpoGo =
   Constants.executionEnvironment === EXPO_GO_EXECUTION_ENVIRONMENT ||
@@ -256,6 +263,31 @@ const persistPushTokenForUser = async (user: User, pushToken: string) => {
   );
 };
 
+/**
+ * This device's Expo token, without ever prompting for permission — the only
+ * caller is logout, where a permission dialog would be jarring, and a device
+ * that was never granted permission has no token registered to remove.
+ */
+const resolveDevicePushToken = async (notifications: NotificationsModule) => {
+  if (cachedDevicePushToken) {
+    return cachedDevicePushToken;
+  }
+
+  const projectId = getExpoProjectId();
+  if (!projectId) {
+    return null;
+  }
+
+  const { status } = await notifications.getPermissionsAsync();
+  if (status !== "granted") {
+    return null;
+  }
+
+  const expoPushToken = await notifications.getExpoPushTokenAsync({ projectId });
+  cachedDevicePushToken = expoPushToken.data || null;
+  return cachedDevicePushToken;
+};
+
 const extractPushTokens = (value: unknown) => {
   if (typeof value === "string") {
     return isExpoPushToken(value) ? [value] : [];
@@ -339,6 +371,11 @@ const navigateFromNotificationResponse = (
   router: RouterLike,
 ) => {
   const notificationData = response?.notification.request.content.data;
+  const directConversationId = getDirectNotificationTarget(notificationData || {});
+  if (directConversationId) {
+    router.push({ pathname: "/(main)/DirectChatScreen", params: { conversationId: directConversationId } });
+    return true;
+  }
   const emergencyTarget =
     readEmergencyAlertTargetFromNotificationData(notificationData);
 
@@ -401,8 +438,48 @@ export const registerDeviceForPushNotifications = async (user: User) => {
     return null;
   }
 
+  cachedDevicePushToken = pushToken;
   await persistPushTokenForUser(user, pushToken);
   return pushToken;
+};
+
+/**
+ * Detach this device from the signed-in user's push token document.
+ *
+ * Without this, the account that just logged out still lists this device's
+ * token, so every notification addressed to them keeps ringing here after
+ * someone else signs in — rendering their actor name and message preview on
+ * the new user's lock screen.
+ *
+ * Must be awaited BEFORE signOut(): the userPushTokens rule only permits the
+ * write while request.auth.uid still matches the document id.
+ */
+export const unregisterDeviceForPushNotifications = async (user: User) => {
+  const notifications = await loadNotificationsModule();
+  if (!notifications) {
+    return false;
+  }
+
+  const pushToken = await resolveDevicePushToken(notifications);
+  if (!pushToken) {
+    return false;
+  }
+
+  await setDoc(
+    doc(db, "userPushTokens", user.uid),
+    {
+      expoPushTokens: arrayRemove(pushToken),
+      pushNotificationsUpdatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+
+  // Anything already in the tray was addressed to the account that is leaving,
+  // so it must not survive into the next session either.
+  await notifications.dismissAllNotificationsAsync().catch(() => null);
+  await notifications.setBadgeCountAsync(0).catch(() => null);
+
+  return true;
 };
 
 export const getLastPushNotificationResponse = async () => {

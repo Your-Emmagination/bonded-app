@@ -1,28 +1,29 @@
 // app/LoginScreen.tsx
 import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
-import ConfirmDialog from "./(main)/components/ConfirmDialog";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Image } from "expo-image";
+import { useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { sendPasswordResetEmail, signInWithEmailAndPassword } from "firebase/auth";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { signInWithEmailAndPassword } from "firebase/auth";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  Animated,
-  Image,
-  Keyboard,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Animated,
+    Keyboard,
+    KeyboardAvoidingView,
+    Modal,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth } from "../Firebase_configure";
+import ConfirmDialog from "./(main)/components/ConfirmDialog";
 
 const TERMS_ACCEPTED_KEY = "termsAccepted";
 
@@ -160,6 +161,7 @@ function TermsModal({ visible, onAccept, onDecline }: {
 }
 
 export default function LoginScreen() {
+  const router = useRouter();
   const [studentID, setStudentID] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -334,54 +336,10 @@ const handleTermsDecline = useCallback(() => {
     }
   }, [studentID, password, loading, shakeAnimation]);
 
-  const handleForgotPassword = useCallback(async () => {
-    if (loading) return;
-
-    const trimmedID = studentID.trim();
-    if (!trimmedID) {
-      setError("Enter your ID above, then tap \"Forgot password?\"");
-      shakeAnimation();
-      return;
-    }
-
-    let email = trimmedID.toLowerCase();
-    if (!email.includes("@")) {
-      if (email.startsWith("teach-")) email += "@teacher.csap";
-      else if (email.startsWith("admin-")) email += "@admin.csap";
-      else email += "@student.csap";
-    }
-
-    try {
-      await sendPasswordResetEmail(auth, email);
-    } catch (err: any) {
-      if (err.code === "auth/invalid-email") {
-        setError("That ID doesn't look right — check it and try again.");
-        shakeAnimation();
-        return;
-      }
-      if (err.code === "auth/network-request-failed") {
-        setError("Network error. Check your connection and try again.");
-        shakeAnimation();
-        return;
-      }
-      // For auth/user-not-found and anything else, fall through to the same
-      // "sent" message below — don't reveal whether an account exists for
-      // this ID, so this can't be used to enumerate valid accounts.
-    }
-
-    setConfirmDialog({
-      title: "Check Your Email",
-      description: `If an account exists for ${email}, we've sent a password reset link to it.`,
-      confirmText: "OK",
-      singleAction: true,
-      destructive: false,
-      onConfirm: () => setConfirmDialog(null),
-    });
-  }, [studentID, loading, shakeAnimation]);
 
   return (
     <SafeAreaView edges={["left", "right", "bottom"]} style={styles.container}>
-      <StatusBar style="light" backgroundColor="#5f0909" />
+      <StatusBar style="light" />
 
       <TermsModal
         visible={showTerms}
@@ -423,7 +381,7 @@ const handleTermsDecline = useCallback(() => {
                 <Image
                   source={require("../assets/images/BondEDlogo.png")}
                   style={styles.logo}
-                  resizeMode="contain"
+                  contentFit="contain"
                 />
                 <Text style={styles.brandText}>BondED</Text>
                 <Text style={styles.loginTitle}>Welcome Back</Text>
@@ -488,7 +446,12 @@ const handleTermsDecline = useCallback(() => {
 
                 <TouchableOpacity
                   style={styles.forgotPasswordLink}
-                  onPress={handleForgotPassword}
+                  onPress={() =>
+                    router.push({
+                      pathname: "/ForgotPasswordScreen",
+                      params: { id: studentID.trim() },
+                    })
+                  }
                   activeOpacity={0.7}
                   disabled={loading}
                 >

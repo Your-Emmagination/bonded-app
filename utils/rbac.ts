@@ -1,6 +1,7 @@
 import type { User } from "firebase/auth";
 import { collection, doc, getDoc, getDocs, limit, query, where } from "firebase/firestore";
-import { db } from "../Firebase_configure";
+import { auth, db } from "../Firebase_configure";
+import { getCachedMyProfile } from "./offlineStorage";
 
 export type UserRole = "student" | "moderator" | "teacher" | "admin";
 
@@ -101,6 +102,33 @@ export function getStudentDocIdFromAuthUser(user: User | null | undefined): stri
 export async function getUserDataByAuthUser(user: User | null | undefined): Promise<UserData | null> {
   if (!user) return null;
 
+  // Fast-path: check offline storage cache first so profile is available immediately on cold start
+  try {
+    const cached = await getCachedMyProfile<StudentRecord>(user.uid);
+    if (cached && (cached.profileImage || cached.firstname)) {
+      const roleValue = normalizeUserRole(cached.role);
+      const normalizedCached: UserData = {
+        studentID: cached.studentID || user.uid,
+        firstname: cached.firstname || "",
+        lastname: cached.lastname || "",
+        email: cached.email || user.email || "",
+        course: cached.course,
+        yearlvl: cached.yearlvl,
+        role: roleValue,
+        permissions: cached.permissions || getDefaultPermissions(),
+        profileImage: cached.profileImage || (user as any).photoURL || null,
+        bio: cached.bio,
+        isOnline: cached.isOnline,
+        userId: user.uid,
+      };
+      cacheUserDataForKeys(normalizedCached, [
+        user.uid,
+        normalizedCached.studentID,
+        user.email?.split("@")[0]?.trim(),
+      ]);
+    }
+  } catch {}
+
   const emailPrefix = getStudentDocIdFromAuthUser(user);
   const docIds = Array.from(
     new Set([emailPrefix, user.uid].filter(Boolean) as string[]),
@@ -109,6 +137,7 @@ export async function getUserDataByAuthUser(user: User | null | undefined): Prom
   for (const docId of docIds) {
     const data = await getUserData(docId);
     if (data) {
+      cacheUserDataForKeys(data, [user.uid]);
       return {
         ...data,
         userId: user.uid,
@@ -116,7 +145,7 @@ export async function getUserDataByAuthUser(user: User | null | undefined): Prom
     }
   }
 
-  return null;
+  return userDataCache.get(user.uid) ?? null;
 }
 
 export async function resolveUserRoleForAuthUser(user: User | null | undefined): Promise<UserRole> {
@@ -200,6 +229,7 @@ const scoreCandidate = (candidate: StudentRecord & { id: string }, requestedId: 
   if (candidate.yearlvl) score += 1;
   if (candidate.studentID && candidate.studentID === candidate.id) score += 4;
   if (candidate.userId && candidate.userId === requestedId) score += 3;
+  if ((candidate as any).uid && (candidate as any).uid === requestedId) score += 3;
   return score;
 };
 
@@ -217,6 +247,50 @@ const cacheUserDataForKeys = (
     userDataCache.set(key, userData);
   });
 };
+
+export type UserDataListener = (userId: string, data: Partial<UserData>) => void;
+const userDataListeners = new Set<UserDataListener>();
+
+export function subscribeToUserDataUpdates(listener: UserDataListener): () => void {
+  userDataListeners.add(listener);
+  return () => {
+    userDataListeners.delete(listener);
+  };
+}
+
+export function invalidateUserDataCache(userId?: string | null): void {
+  if (userId) {
+    userDataCache.delete(userId);
+  } else {
+    userDataCache.clear();
+  }
+}
+
+export function updateUserDataCache(
+  keys: (string | null | undefined)[],
+  partial: Partial<UserData>,
+): void {
+  const normalizedKeys = Array.from(
+    new Set(keys.map((key) => key?.trim()).filter(Boolean) as string[]),
+  );
+
+  normalizedKeys.forEach((key) => {
+    const existing = userDataCache.get(key);
+    if (existing) {
+      userDataCache.set(key, { ...existing, ...partial });
+    }
+  });
+
+  normalizedKeys.forEach((key) => {
+    userDataListeners.forEach((listener) => {
+      try {
+        listener(key, partial);
+      } catch (err) {
+        console.warn("[rbac] Error notifying user data listener:", err);
+      }
+    });
+  });
+}
 
 export function peekUserData(userId: string | null | undefined): UserData | null | undefined {
   if (!userId) return undefined;
@@ -256,8 +330,25 @@ export async function getUserData(userId: string): Promise<UserData | null> {
 
     await loadCandidateDoc(userId);
 
+    // If userId matches current user, also load emailPrefix and offline cache immediately
+    if (auth.currentUser?.uid === userId) {
+      const authEmailPrefix = auth.currentUser.email?.split("@")[0]?.trim();
+      if (authEmailPrefix) await loadCandidateDoc(authEmailPrefix);
+      try {
+        const cached = await getCachedMyProfile<StudentRecord>(userId);
+        if (cached && (cached.profileImage || cached.firstname)) {
+          addCandidate(cached.studentID || userId, {
+            ...cached,
+            userId,
+            profileImage: cached.profileImage || auth.currentUser.photoURL || null,
+          });
+        }
+      } catch {}
+    }
+
     const lookupQueries = [
       query(collection(db, "students"), where("userId", "==", userId), limit(5)),
+      query(collection(db, "students"), where("uid", "==", userId), limit(5)),
       query(collection(db, "students"), where("studentID", "==", userId), limit(5)),
     ];
 
@@ -290,15 +381,15 @@ export async function getUserData(userId: string): Promise<UserData | null> {
       studentID: bestCandidate.studentID || bestCandidate.id || userId,
       firstname: bestCandidate.firstname || "",
       lastname: bestCandidate.lastname || "",
-      email: bestCandidate.email || "",
+      email: bestCandidate.email || (auth.currentUser?.uid === userId ? auth.currentUser.email || "" : ""),
       course: bestCandidate.course,
       yearlvl: bestCandidate.yearlvl,
       role: roleValue,
       permissions: bestCandidate.permissions || getDefaultPermissions(),
-      profileImage: bestCandidate.profileImage,
+      profileImage: bestCandidate.profileImage || (auth.currentUser?.uid === userId ? auth.currentUser.photoURL : null) || null,
       bio: bestCandidate.bio,
       isOnline: bestCandidate.isOnline,
-      userId: bestCandidate.userId || userId,
+      userId: bestCandidate.userId || (bestCandidate as any).uid || userId,
     };
 
     cacheUserDataForKeys(normalizedUserData, [
@@ -306,11 +397,13 @@ export async function getUserData(userId: string): Promise<UserData | null> {
       bestCandidate.id,
       bestCandidate.studentID,
       bestCandidate.userId,
+      (bestCandidate as any).uid,
       bestCandidate.email?.split("@")[0]?.trim(),
       ...candidates.flatMap((candidate) => [
         candidate.id,
         candidate.studentID,
         candidate.userId,
+        (candidate as any).uid,
         candidate.email?.split("@")[0]?.trim(),
       ]),
     ]);
@@ -346,6 +439,17 @@ export function hasRole(
 
 export function isStaff(role: UserRole | undefined): boolean {
   return hasRole(role, "moderator", "teacher", "admin");
+}
+
+export function canReportContent(
+  viewerRole: unknown,
+  authorRole: unknown,
+  isAnonymous = false,
+): boolean {
+  return (
+    parseUserRole(viewerRole) === "student" &&
+    (isAnonymous || parseUserRole(authorRole) === "student")
+  );
 }
 
 export function isAdmin(role: UserRole | undefined): boolean {
@@ -410,22 +514,11 @@ export function getRoleColor(role: UserRole): string {
 
 export function canViewAnonymousIdentity(
   viewerRole: UserRole | undefined,
-  postAuthorRole: UserRole | undefined,
+  _postAuthorRole: UserRole | undefined,
   isAnonymous: boolean,
 ): boolean {
   if (!isAnonymous) return true;
-  if (!viewerRole) return false;
-
-  if (viewerRole === "admin") return true;
-
-  if (
-    (viewerRole === "teacher" || viewerRole === "moderator") &&
-    postAuthorRole === "student"
-  ) {
-    return true;
-  }
-
-  return false;
+  return isStaff(viewerRole);
 }
 
 type DeleteContentAccessArgs = {

@@ -1,42 +1,51 @@
 // app/(main)/(tabs)/AiChatScreen.tsx
+import { AI_ASSISTANT_NAME } from "@/utils/aiAssistant";
+import { useNetworkStatus } from "@/utils/networkUtils";
+import { requestNonGenerativeChatbotReply } from "@/utils/nonGenerativeChatbot";
+import {
+    getCachedAiConversations,
+    getCachedAiMessages,
+    saveCachedAiConversations,
+    saveCachedAiMessages,
+} from "@/utils/offlineStorage";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
-  addDoc,
-  collection,
-  doc,
-  getDocs,
-  onSnapshot,
-  orderBy,
-  query,
-  serverTimestamp,
-  updateDoc,
-  writeBatch,
+    addDoc,
+    collection,
+    deleteDoc,
+    doc,
+    getDoc,
+    getDocs,
+    limit,
+    onSnapshot,
+    orderBy,
+    query,
+    serverTimestamp,
+    setDoc,
+    updateDoc,
+    writeBatch,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { NativeScrollEvent, NativeSyntheticEvent } from "react-native";
+import type { KeyboardEvent, NativeScrollEvent, NativeSyntheticEvent } from "react-native";
 import {
-  ActivityIndicator,
-  Animated,
-  FlatList,
-  KeyboardAvoidingView,
-  Platform,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Animated,
+    FlatList,
+    Keyboard,
+    Modal,
+    Platform,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
-import { AI_ASSISTANT_NAME } from "@/utils/aiAssistant";
-import {
-  requestNonGenerativeChatbotReply,
-  type ChatbotIntent,
-} from "@/utils/nonGenerativeChatbot";
-import { useNetworkStatus } from "@/utils/networkUtils";
-import { useRelativeTimeNow } from "@/utils/relativeTime";
 import ConfirmDialog from "../components/ConfirmDialog";
+import { ChatSkeleton } from "../components/Skeleton";
 
 type ChatRole = "user" | "assistant";
 type ChatFeedback = "up" | "down";
@@ -50,6 +59,138 @@ type ChatMessage = {
   confidence?: number | null;
   feedback?: ChatFeedback | null;
 };
+
+type ConversationSummary = {
+  id: string;
+  title?: string | null;
+  createdAt?: any;
+  updatedAt?: any;
+  origin?: string;
+};
+
+// How many past conversations to show per page in the history list, and how
+// many more each "Load more" tap adds — same limit + "Load more" pattern the
+// admin list screens use (ManageUsersScreen / ManageModerationScreen).
+const HISTORY_PAGE_SIZE = 20;
+
+// A conversation's display title: the first user message, whitespace-collapsed
+// and truncated with an ellipsis. Same convention as notification previews
+// (`sanitizePreview` in utils/notifications.ts), just a shorter cap.
+function deriveConversationTitle(text: string, maxLength = 60): string | null {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength - 3)}...`
+    : normalized;
+}
+
+const CONVERSATION_FALLBACK_TITLE = "New conversation";
+
+// Firestore writeBatch caps at 500 ops; stay well under it when copying or
+// deleting a whole conversation's messages.
+const BATCH_CHUNK = 400;
+
+async function commitInChunks(
+  refs: { ref: any }[],
+  apply: (batch: ReturnType<typeof writeBatch>, ref: any) => void,
+) {
+  for (let start = 0; start < refs.length; start += BATCH_CHUNK) {
+    const batch = writeBatch(db);
+    for (const { ref } of refs.slice(start, start + BATCH_CHUNK)) {
+      apply(batch, ref);
+    }
+    await batch.commit();
+  }
+}
+
+/**
+ * One-time move of a user's legacy single conversation
+ * (`aiDirectMessages/{uid}/messages`) into the multi-conversation shape
+ * (`aiConversations/{uid}/conversations/{id}/messages`).
+ *
+ * Design choice — copy, don't reference: the old flat collection had no
+ * conversation document to hang a title/updatedAt off, and branching every
+ * read/write on "is this the legacy path?" would spread through the whole
+ * screen. Instead we copy the messages into a real conversation once.
+ *
+ * Safety:
+ * - Idempotent. Messages are copied with their original document IDs, so a
+ *   retry after a partial failure overwrites rather than duplicates.
+ * - Non-destructive until proven complete. The old docs are only deleted
+ *   after every message has been copied; if anything fails first, the throw
+ *   propagates before the delete and `aiDirectMessages/{uid}/messages` stays
+ *   fully intact for the next attempt.
+ * - Marked done via `aiConversations/{uid}.legacyMigratedAt` so it runs at
+ *   most once per user in the normal case (one getDoc on subsequent opens).
+ */
+async function migrateLegacyAiConversation(uid: string): Promise<void> {
+  const markerRef = doc(db, "aiConversations", uid);
+  const markerSnap = await getDoc(markerRef);
+  if (markerSnap.exists() && markerSnap.data()?.legacyMigratedAt) return;
+
+  const legacySnap = await getDocs(
+    query(
+      collection(db, "aiDirectMessages", uid, "messages"),
+      orderBy("createdAt", "asc"),
+    ),
+  );
+
+  if (!legacySnap.empty) {
+    const legacyDocs = legacySnap.docs;
+    const conversationRef = doc(
+      collection(db, "aiConversations", uid, "conversations"),
+    );
+    const firstUserMessage = legacyDocs.find(
+      (entry) => entry.data()?.role === "user",
+    );
+    const firstCreatedAt = legacyDocs[0].data()?.createdAt ?? serverTimestamp();
+    const lastCreatedAt =
+      legacyDocs[legacyDocs.length - 1].data()?.createdAt ?? serverTimestamp();
+
+    await setDoc(conversationRef, {
+      createdAt: firstCreatedAt,
+      updatedAt: lastCreatedAt,
+      title:
+        deriveConversationTitle(String(firstUserMessage?.data()?.text ?? "")) ??
+        null,
+      origin: "legacy",
+    });
+
+    await commitInChunks(
+      legacyDocs.map((entry) => ({ ref: entry })),
+      (batch, entry) => {
+        batch.set(
+          doc(
+            db,
+            "aiConversations",
+            uid,
+            "conversations",
+            conversationRef.id,
+            "messages",
+            entry.id,
+          ),
+          entry.data(),
+        );
+      },
+    );
+
+    // Copy is complete — now it's safe to remove the originals. Best effort:
+    // orphaned legacy docs are harmless, and the marker below stops re-runs.
+    try {
+      await commitInChunks(
+        legacyDocs.map((entry) => ({ ref: entry.ref })),
+        (batch, ref) => batch.delete(ref),
+      );
+    } catch (cleanupError) {
+      console.warn(
+        "[AiChat] legacy cleanup failed (copied data is intact):",
+        cleanupError,
+      );
+    }
+  }
+
+  await setDoc(markerRef, { legacyMigratedAt: serverTimestamp() }, { merge: true });
+}
 
 function getTimeAgo(timestamp: any, nowMs = Date.now()) {
   if (!timestamp?.toDate) return "";
@@ -69,7 +210,7 @@ function getTimeAgo(timestamp: any, nowMs = Date.now()) {
 }
 
 const GREETING_TEXT =
-  "Hello! I'm Bonded AI. I can help with BondED campus information, upcoming events, academic programs, date/time, and basic calculations.";
+  "Hello! I'm B.E.A. I can help with BondED campus information, upcoming events, academic programs, and date/time.";
 
 const SUGGESTED_QUESTIONS = [
   "What programs are offered?",
@@ -80,6 +221,11 @@ const SUGGESTED_QUESTIONS = [
 
 const FALLBACK_REPLY_TEXT =
   "Sorry, I ran into a problem answering that. Please try again.";
+
+// Must match styles.composer's paddingBottom — the resting-state clearance
+// for the bottom tab bar. Kept as a named constant so the keyboard-lift
+// math below stays in sync with it instead of drifting out of sync.
+const COMPOSER_RESTING_BOTTOM_PADDING = 96;
 
 function FadeSlideIn({
   children,
@@ -366,6 +512,33 @@ export default function AiChatScreen() {
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [confirmClearVisible, setConfirmClearVisible] = useState(false);
+
+  // Multi-conversation state. `activeConversationId` null + `startingNewChat`
+  // true = a fresh, not-yet-persisted chat (the conversation doc is created
+  // lazily on the first message). null + false = nothing picked yet (initial
+  // load will select the most recent conversation).
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [conversationsLoading, setConversationsLoading] = useState(true);
+  const [migrating, setMigrating] = useState(true);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(
+    null,
+  );
+  const [startingNewChat, setStartingNewChat] = useState(false);
+  const [historyVisible, setHistoryVisible] = useState(false);
+  const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE_SIZE);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const [confirmDeleteConversationId, setConfirmDeleteConversationId] = useState<
+    string | null
+  >(null);
+  const [deletingConversationId, setDeletingConversationId] = useState<
+    string | null
+  >(null);
+  // Latest values readable from inside the conversations snapshot without
+  // making it a dependency (which would tear down / rebuild the listener).
+  const activeConversationIdRef = useRef<string | null>(null);
+  const startingNewChatRef = useRef(false);
+
   const hasInitializedSuggestions = useRef(false);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const { isOffline } = useNetworkStatus();
@@ -382,6 +555,8 @@ export default function AiChatScreen() {
   // until the list actually reaches the bottom. A brand-new/first chat does
   // not use this path.
   const pendingInitialBottomScrollRef = useRef(false);
+  const userScrolledUpRef = useRef(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const previousMessageCountRef = useRef(0);
   // Reuses the previous ChatMessage object for a doc whose relevant fields
   // haven't changed, instead of remapping every doc into a brand-new object
@@ -390,6 +565,12 @@ export default function AiChatScreen() {
   // would otherwise give every row a fresh `item` reference and force the
   // whole list to re-render.
   const messagesCacheRef = useRef<Map<string, ChatMessage>>(new Map());
+  // Animated composer lift while the keyboard is open — same
+  // Keyboard.addListener + Animated.Value pattern ServerChannelScreen uses.
+  // KeyboardAvoidingView was removed because its `behavior` is `undefined`
+  // on Android (no adjustment happens at all there), which is why the
+  // composer used to end up hidden behind the keyboard on Android.
+  const composerBottom = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, setUser);
@@ -397,21 +578,212 @@ export default function AiChatScreen() {
   }, []);
 
   useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      (event: KeyboardEvent) => {
+        const keyboardHeight = event.endCoordinates?.height || 0;
+        // The composer already carries COMPOSER_RESTING_BOTTOM_PADDING of
+        // its own bottom padding (clearance for the tab bar when the
+        // keyboard is closed) — subtract it here so the lift doesn't stack
+        // on top of that and leave a gap above the keyboard.
+        const lift = Math.max(0, keyboardHeight - COMPOSER_RESTING_BOTTOM_PADDING);
+        Animated.timing(composerBottom, {
+          toValue: lift,
+          duration: Platform.OS === "ios" ? event.duration || 250 : 220,
+          useNativeDriver: false,
+        }).start(() => {
+          if (isNearBottomRef.current || !userScrolledUpRef.current) {
+            requestAnimationFrame(() => {
+              listRef.current?.scrollToEnd({ animated: true });
+            });
+          }
+        });
+      },
+    );
+
+    const hideSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      (event: KeyboardEvent) => {
+        Animated.timing(composerBottom, {
+          toValue: 0,
+          duration: Platform.OS === "ios" ? event.duration || 250 : 180,
+          useNativeDriver: false,
+        }).start();
+      },
+    );
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, [composerBottom]);
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    startingNewChatRef.current = startingNewChat;
+  }, [startingNewChat]);
+
+  // Per-user reset + one-time legacy migration.
+  useEffect(() => {
+    activeConversationIdRef.current = null;
+    startingNewChatRef.current = false;
+    setConversations([]);
+    setActiveConversationId(null);
+    setStartingNewChat(false);
+    setHistoryLimit(HISTORY_PAGE_SIZE);
+    setMessages([]);
+
+    if (!user?.uid) {
+      setMigrating(false);
+      setConversationsLoading(false);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setMigrating(true);
+    migrateLegacyAiConversation(user.uid)
+      .catch((error) => {
+        // Never blocks the screen. The legacy messages stay untouched in
+        // aiDirectMessages/{uid}/messages, so nothing is lost — migration
+        // just retries on the next open.
+        console.error(
+          "[AiChat] history migration failed; previous messages are preserved in aiDirectMessages:",
+          error,
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setMigrating(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid]);
+
+  // Live list of the user's conversations, most-recently-updated first,
+  // bounded by historyLimit (grown by "Load more").
+  useEffect(() => {
+    if (!user?.uid) {
+      setConversations([]);
+      setConversationsLoading(false);
+      return;
+    }
+
+    let isMounted = true;
+    getCachedAiConversations<ConversationSummary>(user.uid).then((cached) => {
+      if (isMounted && cached && cached.length > 0) {
+        setConversations((prev) => (prev.length === 0 ? cached : prev));
+        setConversationsLoading(false);
+        if (
+          !activeConversationIdRef.current &&
+          !startingNewChatRef.current &&
+          cached[0]?.id
+        ) {
+          setLoading(true);
+          setActiveConversationId(cached[0].id);
+        }
+      }
+    });
+
+    // Only the first page gates the full-screen skeleton; a "Load more"
+    // re-subscribe is covered by the in-modal `historyLoadingMore` spinner.
+    if (historyLimit === HISTORY_PAGE_SIZE) {
+      setConversationsLoading(true);
+    }
+    const conversationsQuery = query(
+      collection(db, "aiConversations", user.uid, "conversations"),
+      orderBy("updatedAt", "desc"),
+      limit(historyLimit),
+    );
+
+    const unsubscribe = onSnapshot(
+      conversationsQuery,
+      (snapshot) => {
+        const list: ConversationSummary[] = snapshot.docs.map((entry) => ({
+          id: entry.id,
+          ...(entry.data() as Omit<ConversationSummary, "id">),
+        }));
+        setConversations(list);
+        setHistoryHasMore(snapshot.size === historyLimit);
+        setConversationsLoading(false);
+        setHistoryLoadingMore(false);
+        saveCachedAiConversations(user.uid, list);
+
+        // Pick the most recent conversation as active on first load. Never
+        // override an explicit choice or a new-chat-in-progress.
+        if (
+          !activeConversationIdRef.current &&
+          !startingNewChatRef.current &&
+          list[0]?.id
+        ) {
+          setLoading(true);
+          setActiveConversationId(list[0].id);
+        }
+      },
+      (error) => {
+        console.error("Error loading Bonded AI conversations:", error);
+        setConversationsLoading(false);
+        setHistoryLoadingMore(false);
+      },
+    );
+
+    return unsubscribe;
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [user?.uid, historyLimit]);
+
+  // Reset the scroll/cache bookkeeping whenever the active conversation
+  // (or user) changes — each conversation opens at its own latest message.
+  useEffect(() => {
     hasJumpedToLatestRef.current = false;
     pendingInitialBottomScrollRef.current = false;
     previousMessageCountRef.current = 0;
     isNearBottomRef.current = true;
+    userScrolledUpRef.current = false;
+    setShowScrollToBottom(false);
     messagesCacheRef.current = new Map();
 
-    if (!user?.uid) {
+    const timer = setTimeout(() => {
+      if (!userScrolledUpRef.current) {
+        listRef.current?.scrollToEnd({ animated: false });
+      }
+      pendingInitialBottomScrollRef.current = false;
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [user?.uid, activeConversationId]);
+
+  // Messages for the active conversation.
+  useEffect(() => {
+    if (!user?.uid || !activeConversationId) {
       setMessages([]);
       setLoading(false);
       return;
     }
 
+    let isMounted = true;
+    getCachedAiMessages<ChatMessage>(user.uid, activeConversationId).then((cached) => {
+      if (isMounted && cached && cached.length > 0) {
+        setMessages((prev) => (prev.length === 0 ? cached : prev));
+        setLoading(false);
+      }
+    });
+
     setLoading(true);
     const messagesQuery = query(
-      collection(db, "aiDirectMessages", user.uid, "messages"),
+      collection(
+        db,
+        "aiConversations",
+        user.uid,
+        "conversations",
+        activeConversationId,
+        "messages",
+      ),
       orderBy("createdAt", "asc"),
     );
 
@@ -456,6 +828,7 @@ export default function AiChatScreen() {
 
         setMessages(nextMessages);
         setLoading(false);
+        saveCachedAiMessages(user.uid, activeConversationId, nextMessages);
       },
       (error) => {
         console.error("Error loading Bonded AI chat history:", error);
@@ -464,7 +837,11 @@ export default function AiChatScreen() {
     );
 
     return unsubscribe;
-  }, [user?.uid]);
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [user?.uid, activeConversationId]);
 
   useEffect(() => {
     const previousCount = previousMessageCountRef.current;
@@ -488,24 +865,38 @@ export default function AiChatScreen() {
       return;
     }
 
-    // Only auto-scroll for an actual new message, and only when the reader
-    // was already near the bottom (or it's their own message) — otherwise
-    // this would yank someone back down while they're scrolled up reading
-    // older history, which is what happened when this ran on every render.
     const gotNewMessage = messages.length > previousCount;
     const lastMessage = messages[messages.length - 1];
     const shouldAutoScroll =
-      gotNewMessage && (isNearBottomRef.current || lastMessage?.role === "user");
+      gotNewMessage && (!userScrolledUpRef.current || isNearBottomRef.current || lastMessage?.role === "user");
 
     if (shouldAutoScroll) {
+      userScrolledUpRef.current = false;
+      isNearBottomRef.current = true;
+      setShowScrollToBottom(false);
       requestAnimationFrame(() => {
         listRef.current?.scrollToEnd({ animated: true });
       });
     }
   }, [messages]);
 
+  const handleScrollBeginDrag = useCallback(() => {
+    userScrolledUpRef.current = true;
+    pendingInitialBottomScrollRef.current = false;
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    userScrolledUpRef.current = false;
+    isNearBottomRef.current = true;
+    setShowScrollToBottom(false);
+    listRef.current?.scrollToEnd({ animated: true });
+  }, []);
+
   useEffect(() => {
     if (!sending) return;
+    userScrolledUpRef.current = false;
+    isNearBottomRef.current = true;
+    setShowScrollToBottom(false);
     requestAnimationFrame(() => {
       listRef.current?.scrollToEnd({ animated: true });
     });
@@ -516,32 +907,32 @@ export default function AiChatScreen() {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
       const distanceFromBottom =
         contentSize.height - contentOffset.y - layoutMeasurement.height;
-      isNearBottomRef.current = distanceFromBottom < 120;
 
-      if (
-        pendingInitialBottomScrollRef.current &&
-        distanceFromBottom <= 8
-      ) {
-        pendingInitialBottomScrollRef.current = false;
+      const nearBottom = distanceFromBottom < 100;
+      isNearBottomRef.current = nearBottom;
+
+      if (nearBottom) {
+        userScrolledUpRef.current = false;
+        setShowScrollToBottom(false);
+      } else if (distanceFromBottom > 200 && userScrolledUpRef.current) {
+        setShowScrollToBottom(true);
       }
     },
     [],
   );
 
-  // FlatList measures long/wrapping messages progressively, so the content
-  // height right after the initial scrollToEnd can still grow afterward —
-  // without this, the list can settle partway up instead of at the true
-  // bottom on a first load with long AI replies. Gating on isNearBottomRef
-  // keeps this from re-snapping someone who has deliberately scrolled up.
+  // Like ChatGPT, Claude, and Gemini: follow expanding messages progressively
+  // down as long as the user hasn't explicitly scrolled up to read earlier history.
   const handleContentSizeChange = useCallback(() => {
     if (pendingInitialBottomScrollRef.current) {
       listRef.current?.scrollToEnd({ animated: false });
       return;
     }
 
-    if (!isNearBottomRef.current) return;
-    listRef.current?.scrollToEnd({ animated: false });
-  }, []);
+    if (!userScrolledUpRef.current || sending) {
+      listRef.current?.scrollToEnd({ animated: true });
+    }
+  }, [sending]);
 
   const handleListLayout = useCallback(() => {
     if (!pendingInitialBottomScrollRef.current) return;
@@ -559,94 +950,251 @@ export default function AiChatScreen() {
     setSuggestionsOpen(messages.length === 0);
   }, [loading, messages.length]);
 
+  // Returns the id of the conversation to write into, creating it lazily on
+  // the first message so "New Chat" never litters empty conversation docs.
+  const ensureActiveConversation = useCallback(
+    async (firstMessageText: string): Promise<string | null> => {
+      const userId = user?.uid;
+      if (!userId) return null;
+      if (activeConversationIdRef.current) return activeConversationIdRef.current;
+
+      const conversationRef = await addDoc(
+        collection(db, "aiConversations", userId, "conversations"),
+        {
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+          title: deriveConversationTitle(firstMessageText),
+        },
+      );
+      activeConversationIdRef.current = conversationRef.id;
+      startingNewChatRef.current = false;
+      setActiveConversationId(conversationRef.id);
+      setStartingNewChat(false);
+      return conversationRef.id;
+    },
+    [user?.uid],
+  );
+
   const sendMessage = useCallback(
     async (rawText: string) => {
       const text = rawText.trim();
       const userId = user?.uid;
       if (!text || !userId || sending) return;
 
-      // Conversation memory: if the most recent assistant reply in THIS
-      // chat answered a filterable intent (programs/events/staff), a short
-      // follow-up like "what about BSTM?" can reuse that same intent's
-      // answer function instead of getting reclassified from scratch. Only
-      // looks at already-loaded local state — nothing extra is persisted.
-      const previousAssistantMessage = [...messages]
-        .reverse()
-        .find((message) => message.role === "assistant" && message.intent);
-      const previousIntent = (previousAssistantMessage?.intent || undefined) as
-        | ChatbotIntent
-        | undefined;
-
       setInputText("");
       setSuggestionsOpen(false);
       setSending(true);
+      userScrolledUpRef.current = false;
+      isNearBottomRef.current = true;
+      setShowScrollToBottom(false);
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToEnd({ animated: true });
+      });
+      let conversationId: string | null = null;
       try {
-        await addDoc(collection(db, "aiDirectMessages", userId, "messages"), {
+        conversationId = await ensureActiveConversation(text);
+        if (!conversationId) return;
+
+        const messagesCollection = collection(
+          db,
+          "aiConversations",
+          userId,
+          "conversations",
+          conversationId,
+          "messages",
+        );
+        const conversationRef = doc(
+          db,
+          "aiConversations",
+          userId,
+          "conversations",
+          conversationId,
+        );
+
+        await addDoc(messagesCollection, {
           text,
           role: "user",
           createdAt: serverTimestamp(),
           intent: null,
           confidence: null,
         });
+        // Bump updatedAt so this conversation sorts to the top of history.
+        await updateDoc(conversationRef, { updatedAt: serverTimestamp() });
 
-        const result = await requestNonGenerativeChatbotReply(text, { previousIntent });
+        const result = await requestNonGenerativeChatbotReply(text);
 
-        await addDoc(collection(db, "aiDirectMessages", userId, "messages"), {
+        await addDoc(messagesCollection, {
           text: result.reply,
           role: "assistant",
           createdAt: serverTimestamp(),
           intent: result.intent,
           confidence: result.confidence,
         });
+        await updateDoc(conversationRef, { updatedAt: serverTimestamp() });
       } catch (error) {
         console.error("Error getting Bonded AI reply:", error);
-        await addDoc(collection(db, "aiDirectMessages", userId, "messages"), {
-          text: FALLBACK_REPLY_TEXT,
-          role: "assistant",
-          createdAt: serverTimestamp(),
-          intent: null,
-          confidence: null,
-        }).catch(() => null);
+        if (conversationId) {
+          await addDoc(
+            collection(
+              db,
+              "aiConversations",
+              userId,
+              "conversations",
+              conversationId,
+              "messages",
+            ),
+            {
+              text: FALLBACK_REPLY_TEXT,
+              role: "assistant",
+              createdAt: serverTimestamp(),
+              intent: null,
+              confidence: null,
+            },
+          ).catch(() => null);
+        }
       } finally {
         setSending(false);
       }
     },
-    [sending, user?.uid, messages],
+    [sending, user?.uid, ensureActiveConversation],
   );
 
   const handleFeedback = useCallback(
     (messageId: string, nextFeedback: ChatFeedback | null) => {
       const userId = user?.uid;
-      if (!userId) return;
-      updateDoc(doc(db, "aiDirectMessages", userId, "messages", messageId), {
-        feedback: nextFeedback,
-      }).catch((error) => {
+      if (!userId || !activeConversationId) return;
+      updateDoc(
+        doc(
+          db,
+          "aiConversations",
+          userId,
+          "conversations",
+          activeConversationId,
+          "messages",
+          messageId,
+        ),
+        { feedback: nextFeedback },
+      ).catch((error) => {
         console.error("Error saving Bonded AI feedback:", error);
       });
     },
-    [user?.uid],
+    [user?.uid, activeConversationId],
   );
 
+  const startNewChat = useCallback(() => {
+    activeConversationIdRef.current = null;
+    startingNewChatRef.current = true;
+    setHistoryVisible(false);
+    setActiveConversationId(null);
+    setStartingNewChat(true);
+    setMessages([]);
+    setInputText("");
+    setSending(false);
+    setSuggestionsOpen(true);
+    setLoading(false);
+  }, []);
+
+  const selectConversation = useCallback((conversationId: string) => {
+    setHistoryVisible(false);
+    if (conversationId === activeConversationIdRef.current) return;
+    activeConversationIdRef.current = conversationId;
+    startingNewChatRef.current = false;
+    setStartingNewChat(false);
+    setLoading(true);
+    setActiveConversationId(conversationId);
+  }, []);
+
+  const loadMoreHistory = useCallback(() => {
+    if (historyLoadingMore || !historyHasMore) return;
+    setHistoryLoadingMore(true);
+    setHistoryLimit((current) => current + HISTORY_PAGE_SIZE);
+  }, [historyLoadingMore, historyHasMore]);
+
+  // Wipes only the *current* conversation's messages. The conversation doc
+  // (and every other conversation) is left intact.
   const clearConversation = useCallback(async () => {
     const userId = user?.uid;
-    if (!userId) return;
+    const conversationId = activeConversationId;
+    if (!userId || !conversationId) return;
 
     setClearing(true);
     try {
       const snapshot = await getDocs(
-        collection(db, "aiDirectMessages", userId, "messages"),
+        collection(
+          db,
+          "aiConversations",
+          userId,
+          "conversations",
+          conversationId,
+          "messages",
+        ),
       );
-      const batch = writeBatch(db);
-      snapshot.docs.forEach((item) => batch.delete(item.ref));
-      await batch.commit();
+      await commitInChunks(
+        snapshot.docs.map((entry) => ({ ref: entry.ref })),
+        (batch, ref) => batch.delete(ref),
+      );
       setSuggestionsOpen(true);
     } catch (error) {
-      console.error("Error clearing Bonded AI chat history:", error);
+      console.error("Error clearing Bonded AI conversation:", error);
     } finally {
       setClearing(false);
       setConfirmClearVisible(false);
     }
-  }, [user?.uid]);
+  }, [user?.uid, activeConversationId]);
+
+  const deleteConversation = useCallback(
+    async (conversationId: string) => {
+      const userId = user?.uid;
+      if (!userId) return;
+
+      setDeletingConversationId(conversationId);
+      try {
+        const snapshot = await getDocs(
+          collection(
+            db,
+            "aiConversations",
+            userId,
+            "conversations",
+            conversationId,
+            "messages",
+          ),
+        );
+        await commitInChunks(
+          snapshot.docs.map((entry) => ({ ref: entry.ref })),
+          (batch, ref) => batch.delete(ref),
+        );
+        await deleteDoc(
+          doc(db, "aiConversations", userId, "conversations", conversationId),
+        );
+
+        if (activeConversationIdRef.current === conversationId) {
+          const nextConversation = conversations.find(
+            (conversation) => conversation.id !== conversationId,
+          );
+          if (nextConversation) {
+            activeConversationIdRef.current = nextConversation.id;
+            startingNewChatRef.current = false;
+            setStartingNewChat(false);
+            setLoading(true);
+            setActiveConversationId(nextConversation.id);
+          } else {
+            activeConversationIdRef.current = null;
+            startingNewChatRef.current = true;
+            setActiveConversationId(null);
+            setStartingNewChat(true);
+            setMessages([]);
+            setLoading(false);
+          }
+        }
+      } catch (error) {
+        console.error("Error deleting Bonded AI conversation:", error);
+      } finally {
+        setDeletingConversationId(null);
+        setConfirmDeleteConversationId(null);
+      }
+    },
+    [user?.uid, conversations],
+  );
 
   const canSend = !!inputText.trim() && !sending && !!user?.uid;
 
@@ -667,15 +1215,38 @@ export default function AiChatScreen() {
           <Text style={styles.headerTitle}>{AI_ASSISTANT_NAME}</Text>
           <Text style={styles.headerSubtitle}>Your BondED assistant</Text>
         </View>
-        {messages.length > 0 && (
-          <TouchableOpacity
-            onPress={() => setConfirmClearVisible(true)}
-            style={styles.headerActionButton}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Ionicons name="trash-outline" size={19} color="#e7cdbf" />
-          </TouchableOpacity>
-        )}
+        <View style={styles.headerActions}>
+          {!!user && (
+            <TouchableOpacity
+              onPress={startNewChat}
+              style={styles.headerActionButton}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="New chat"
+            >
+              <Ionicons name="create-outline" size={19} color="#e7cdbf" />
+            </TouchableOpacity>
+          )}
+          {conversations.length > 0 && (
+            <TouchableOpacity
+              onPress={() => setHistoryVisible(true)}
+              style={styles.headerActionButton}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="Conversation history"
+            >
+              <Ionicons name="time-outline" size={19} color="#e7cdbf" />
+            </TouchableOpacity>
+          )}
+          {messages.length > 0 && !!activeConversationId && (
+            <TouchableOpacity
+              onPress={() => setConfirmClearVisible(true)}
+              style={styles.headerActionButton}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="Clear this conversation"
+            >
+              <Ionicons name="trash-outline" size={19} color="#e7cdbf" />
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       {isOffline && (
@@ -687,25 +1258,27 @@ export default function AiChatScreen() {
         </View>
       )}
 
-      <KeyboardAvoidingView
-        style={styles.flexFill}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
-        {loading || !user ? (
-          <View style={styles.loadingWrap}>
-            <ActivityIndicator size="large" color="#e0a53d" />
-          </View>
+      <View style={styles.flexFill}>
+        {!user || migrating || conversationsLoading || loading ? (
+          <ChatSkeleton count={6} />
         ) : (
           <FlatList
             ref={listRef}
             data={messages}
             keyExtractor={(item) => item.id}
             renderItem={renderItem}
+            // Virtualization tuning, consistent with the other message/
+            // comment lists in the app.
+            initialNumToRender={20}
+            maxToRenderPerBatch={10}
+            windowSize={11}
+            removeClippedSubviews={Platform.OS === "android"}
             contentContainerStyle={
               messages.length ? styles.listContent : styles.emptyListContent
             }
             ListEmptyComponent={<EmptyState />}
             ListFooterComponent={sending ? <TypingBubble /> : null}
+            onScrollBeginDrag={handleScrollBeginDrag}
             onScroll={handleListScroll}
             scrollEventThrottle={100}
             onLayout={handleListLayout}
@@ -713,9 +1286,21 @@ export default function AiChatScreen() {
           />
         )}
 
-        {suggestionsOpen && <SuggestionsBar onSelect={sendMessage} />}
+        {showScrollToBottom && (
+          <TouchableOpacity
+            style={styles.scrollToBottomBtn}
+            onPress={scrollToBottom}
+            activeOpacity={0.85}
+            accessibilityLabel="Scroll to latest messages"
+          >
+            <Ionicons name="chevron-down" size={20} color="#fff" />
+          </TouchableOpacity>
+        )}
 
-        <View style={styles.composer}>
+        <Animated.View style={{ marginBottom: composerBottom }}>
+          {suggestionsOpen && <SuggestionsBar onSelect={sendMessage} />}
+
+          <View style={styles.composer}>
           <TouchableOpacity
             onPress={() => setSuggestionsOpen((open) => !open)}
             style={[
@@ -754,18 +1339,131 @@ export default function AiChatScreen() {
               />
             )}
           </TouchableOpacity>
+          </View>
+        </Animated.View>
+      </View>
+
+      <Modal
+        visible={historyVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setHistoryVisible(false)}
+      >
+        <View style={styles.historyBackdrop}>
+          <View style={styles.historyCard}>
+            <View style={styles.historyHeader}>
+              <Text style={styles.historyTitle}>Conversations</Text>
+              <TouchableOpacity
+                onPress={() => setHistoryVisible(false)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Ionicons name="close" size={22} color="#7a3b2e" />
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.historyNewButton}
+              onPress={startNewChat}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="add" size={18} color="#5f0909" />
+              <Text style={styles.historyNewButtonText}>New chat</Text>
+            </TouchableOpacity>
+
+            <FlatList
+              data={conversations}
+              keyExtractor={(item) => item.id}
+              style={styles.historyList}
+              contentContainerStyle={styles.historyListContent}
+              keyboardShouldPersistTaps="handled"
+              renderItem={({ item }) => {
+                const isActive = item.id === activeConversationId;
+                return (
+                  <View
+                    style={[
+                      styles.historyRow,
+                      isActive && styles.historyRowActive,
+                    ]}
+                  >
+                    <TouchableOpacity
+                      style={styles.historyRowMain}
+                      onPress={() => selectConversation(item.id)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.historyRowTitle} numberOfLines={1}>
+                        {item.title?.trim() || CONVERSATION_FALLBACK_TITLE}
+                      </Text>
+                      <Text style={styles.historyRowMeta}>
+                        {getTimeAgo(item.updatedAt) || "New"}
+                        {item.origin === "legacy" ? " · earlier chat" : ""}
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.historyDeleteButton}
+                      onPress={() => setConfirmDeleteConversationId(item.id)}
+                      disabled={deletingConversationId === item.id}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      accessibilityLabel="Delete conversation"
+                    >
+                      {deletingConversationId === item.id ? (
+                        <ActivityIndicator size="small" color="#b3261e" />
+                      ) : (
+                        <Ionicons name="trash-outline" size={18} color="#b3261e" />
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                );
+              }}
+              ListEmptyComponent={
+                <Text style={styles.historyEmptyText}>
+                  No past conversations yet.
+                </Text>
+              }
+              ListFooterComponent={
+                historyHasMore ? (
+                  <TouchableOpacity
+                    style={styles.historyLoadMore}
+                    onPress={loadMoreHistory}
+                    disabled={historyLoadingMore}
+                    activeOpacity={0.85}
+                  >
+                    {historyLoadingMore ? (
+                      <ActivityIndicator size="small" color="#5f0909" />
+                    ) : (
+                      <Text style={styles.historyLoadMoreText}>Load more</Text>
+                    )}
+                  </TouchableOpacity>
+                ) : null
+              }
+            />
+          </View>
         </View>
-      </KeyboardAvoidingView>
+      </Modal>
 
       <ConfirmDialog
         visible={confirmClearVisible}
-        title="Clear conversation?"
-        description="This deletes your entire chat history with Bonded AI. This can't be undone."
+        title="Clear this conversation?"
+        description="This clears every message in the current conversation. Your other conversations aren't affected. This can't be undone."
         confirmText="Clear"
         destructive
         loading={clearing}
         onConfirm={clearConversation}
         onCancel={() => setConfirmClearVisible(false)}
+      />
+
+      <ConfirmDialog
+        visible={!!confirmDeleteConversationId}
+        title="Delete this conversation?"
+        description="This permanently removes this conversation and all of its messages. Your other conversations aren't affected."
+        confirmText="Delete"
+        destructive
+        loading={!!deletingConversationId}
+        onConfirm={() => {
+          if (confirmDeleteConversationId) {
+            void deleteConversation(confirmDeleteConversationId);
+          }
+        }}
+        onCancel={() => setConfirmDeleteConversationId(null)}
       />
     </SafeAreaView>
   );
@@ -814,6 +1512,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
   },
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+  },
   headerActionButton: {
     width: 34,
     height: 34,
@@ -852,6 +1555,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 16,
     paddingBottom: 12,
+  },
+  scrollToBottomBtn: {
+    position: "absolute",
+    right: 16,
+    bottom: 80,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "#7a3b2e",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+    zIndex: 20,
   },
   emptyState: {
     flexDirection: "row",
@@ -1035,5 +1755,113 @@ const styles = StyleSheet.create({
   sendButtonDisabled: {
     backgroundColor: "#f0d2c2",
     borderColor: "#f0d2c2",
+  },
+  historyBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "flex-end",
+  },
+  historyCard: {
+    backgroundColor: "#f6f1ed",
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingTop: 16,
+    paddingBottom: 28,
+    maxHeight: "82%",
+  },
+  historyHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingBottom: 12,
+  },
+  historyTitle: {
+    color: "#4d1b17",
+    fontSize: 18,
+    fontWeight: "900",
+  },
+  historyNewButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    marginHorizontal: 20,
+    marginBottom: 8,
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: "#fff8f4",
+    borderWidth: 1,
+    borderColor: "#e0a53d",
+  },
+  historyNewButtonText: {
+    color: "#5f0909",
+    fontSize: 13.5,
+    fontWeight: "800",
+  },
+  historyList: {
+    flexGrow: 0,
+  },
+  historyListContent: {
+    paddingHorizontal: 20,
+    paddingTop: 4,
+    paddingBottom: 8,
+  },
+  historyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#fffaf7",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+    paddingLeft: 14,
+    paddingRight: 6,
+    marginBottom: 8,
+  },
+  historyRowActive: {
+    borderColor: "#e0a53d",
+    backgroundColor: "#fff8f4",
+  },
+  historyRowMain: {
+    flex: 1,
+    paddingVertical: 12,
+  },
+  historyRowTitle: {
+    color: "#4d1b17",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  historyRowMeta: {
+    color: "#9b766c",
+    fontSize: 11.5,
+    marginTop: 3,
+  },
+  historyDeleteButton: {
+    width: 38,
+    height: 38,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  historyEmptyText: {
+    color: "#9b766c",
+    fontSize: 13,
+    textAlign: "center",
+    paddingVertical: 24,
+  },
+  historyLoadMore: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    marginTop: 2,
+    borderRadius: 12,
+    backgroundColor: "#fff8f4",
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+  },
+  historyLoadMoreText: {
+    color: "#5f0909",
+    fontSize: 13,
+    fontWeight: "800",
   },
 });

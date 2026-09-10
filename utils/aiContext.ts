@@ -1,5 +1,5 @@
+import { AI_ASSISTANT_NAME, isAiAssistantId } from "./aiAssistant";
 import type { AiContextMessage } from "./aiWorker";
-import { isAiAssistantId } from "./aiAssistant";
 
 type TaggedUser = {
   id: string;
@@ -106,7 +106,7 @@ export const buildAiConversationContext = <
     if (item.aiReply?.text?.trim()) {
       context.push({
         role: "assistant",
-        name: "Bonded AI",
+        name: AI_ASSISTANT_NAME,
         content: item.aiReply.text.trim(),
       });
     }

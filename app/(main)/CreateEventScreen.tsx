@@ -160,6 +160,8 @@ const CreateEventScreen = () => {
           : auth.currentUser.displayName || auth.currentUser.email || "Unknown";
       const eventData = {
         ...form,
+        // App-wide search: lowercased title for the prefix-range query.
+        titleLower: form.title.trim().toLowerCase(),
         status,
         createdBy: auth.currentUser.uid,
         createdByName:

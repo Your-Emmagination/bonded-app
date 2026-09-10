@@ -1,5 +1,5 @@
+import { AI_ASSISTANT_NAME } from "@/utils/aiAssistant";
 import { Ionicons } from "@expo/vector-icons";
-import React from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import ExpandableText from "./ExpandableText";
 
@@ -29,7 +29,7 @@ export default function AiReplyCard({
         <View style={styles.badge}>
           <Ionicons name="sparkles" size={13} color="#fff7f0" />
         </View>
-        <Text style={styles.title}>Bonded AI</Text>
+        <Text style={styles.title}>{AI_ASSISTANT_NAME}</Text>
       </View>
       {isGenerating ? (
         <View style={styles.pendingRow}>

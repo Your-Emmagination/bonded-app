@@ -7,14 +7,13 @@
     "icon": "./assets/images/icon.png",
     "scheme": "bondedapp",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "backgroundColor": "#5f0909",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.encabo.bondedapp",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSCameraUsageDescription": "BondEd uses your camera when you host a live stream.",
+        "NSCameraUsageDescription": "BondEd uses your camera to take photos in messages and host live streams.",
         "NSMicrophoneUsageDescription": "BondEd uses your microphone when you host a live stream."
       }
     },
@@ -34,9 +33,7 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false,
-      "usesCleartextTraffic": true
+      "predictiveBackGestureEnabled": false
     },
     "web": {
       "output": "static",
@@ -44,6 +41,14 @@
       "bundler": "metro"
     },
     "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
       "expo-router",
       [
         "expo-notifications",
@@ -74,7 +79,20 @@
       "expo-web-browser",
       "expo-font",
       "expo-video",
-      "expo-audio"
+      "expo-audio",
+      "expo-file-system",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "BondEd needs access to your photos to save images you download from chats.",
+          "savePhotosPermission": "BondEd saves photos you download from chats to your gallery.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      "expo-image",
+      "expo-asset",
+      "expo-status-bar"
     ],
     "experiments": {
       "typedRoutes": true,

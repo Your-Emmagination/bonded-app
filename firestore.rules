@@ -11,18 +11,44 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isAdminDoc(docId) {
+      return exists(/databases/$(database)/documents/students/$(docId)) &&
+        get(/databases/$(database)/documents/students/$(docId)).data.role in [
+          'admin', '4', 4
+        ];
+    }
+
     function isAdmin() {
-      return signedIn() &&
-        request.auth.token.role == 'admin';
+      return signedIn() && (
+        (('role' in request.auth.token) && request.auth.token.role == 'admin') ||
+        isAdminDoc(request.auth.uid) ||
+        (
+          request.auth.token.email != null &&
+          isAdminDoc(request.auth.token.email.split('@')[0])
+        )
+      );
+    }
+
+    function isStaffDoc(docId) {
+      return exists(/databases/$(database)/documents/students/$(docId)) &&
+        get(/databases/$(database)/documents/students/$(docId)).data.role in [
+          'moderator', 'teacher', 'admin', '2', '3', '4', 2, 3, 4
+        ];
     }
 
     function isStaff() {
-      return signedIn() &&
-        request.auth.token.role in [
+      return signedIn() && (
+        (('role' in request.auth.token) && request.auth.token.role in [
           'moderator',
           'teacher',
           'admin'
-        ];
+        ]) ||
+        isStaffDoc(request.auth.uid) ||
+        (
+          request.auth.token.email != null && 
+          isStaffDoc(request.auth.token.email.split('@')[0])
+        )
+      );
     }
 
     function isStudentOwner(studentId) {
@@ -37,9 +63,31 @@ service cloud.firestore {
 
     function isContentOwner(data) {
       return signedIn() && (
-        data.userId == request.auth.uid ||
-        data.realUserId == request.auth.uid
+        (('userId' in data) && data.userId == request.auth.uid) ||
+        (('realUserId' in data) && data.realUserId == request.auth.uid)
       );
+    }
+
+    // Staff members may review other users' moderation state, but they must
+    // never approve their own flagged content and must not rewrite the
+    // author's text while reviewing it. Content changes belong to the author
+    // and must re-enter the pending -> OpenModeration flow.
+    function isStaffModerationReview(data) {
+      return isStaff() &&
+        request.resource.data.moderationStatus in ['approved', 'pending'] &&
+        request.resource.data.moderationReviewedBy == request.auth.uid &&
+        request.resource.data.moderationReviewedAt is timestamp &&
+        !(
+          isContentOwner(data) &&
+          ('moderationStatus' in data) &&
+          data.moderationStatus == 'pending' &&
+          request.resource.data.moderationStatus == 'approved'
+        ) &&
+        request.resource.data.diff(data).affectedKeys().hasOnly([
+          'moderationStatus',
+          'moderationReviewedAt',
+          'moderationReviewedBy'
+        ]);
     }
 
     function validPostFlair(data) {
@@ -48,6 +96,50 @@ service cloud.firestore {
         'event_moments', 'community', 'fun_humor', 'achievement',
         'lost_found', 'projects', 'sports', 'announcement'
       ] && (data.flair != 'announcement' || isStaff());
+    }
+
+    function hasStudentRole(userId) {
+      return userId is string &&
+        exists(/databases/$(database)/documents/students/$(userId)) &&
+        get(/databases/$(database)/documents/students/$(userId)).data.role in [
+          'student', '1', 1
+        ];
+    }
+
+    function isStudentAuthoredContent(data) {
+      return (
+        (('role' in data) && data.role in ['student', '1', 1]) ||
+        (('userRole' in data) && data.userRole in ['student', '1', 1]) ||
+        (('realUserId' in data) && hasStudentRole(data.realUserId)) ||
+        (
+          ('userId' in data) &&
+          data.userId != 'anonymous' &&
+          hasStudentRole(data.userId)
+        )
+      );
+    }
+
+    function isAnonymousContent(data) {
+      return (
+        (('isAnonymous' in data) && data.isAnonymous == true) ||
+        (('userId' in data) && data.userId == 'anonymous')
+      );
+    }
+
+    function validAiReplyUpdate() {
+      return (
+        !('aiReply' in request.resource.data) &&
+        ('aiReply' in resource.data) &&
+        resource.data.aiReply is map &&
+        resource.data.aiReply.status == 'processing'
+      ) || (
+        request.resource.data.aiReply is map &&
+        request.resource.data.aiReply.model in [
+          'bonded-nlp-naive-bayes-v1',
+          'bonded-intent-tfidf-logreg-v2'
+        ] &&
+        request.resource.data.aiReply.status in ['processing', 'completed']
+      );
     }
     // =========================================================
     // SAFE LIST TOGGLE / COUNTER HELPERS
@@ -92,6 +184,32 @@ service cloud.firestore {
         );
     }
 
+    // Older posts may not have likedBy/bookmarkedBy because those arrays were
+    // not initialized when the post was created. Allow the first authenticated
+    // user to create the missing list only with their own UID.
+    function validInitialOwnListAdd(newList) {
+      return signedIn() &&
+        newList is list &&
+        newList.size() == 1 &&
+        request.auth.uid in newList;
+    }
+
+    function validInitialOwnLikeAdd(newList, newCount, oldData) {
+      return validInitialOwnListAdd(newList) &&
+        newCount is number &&
+        (
+          (
+            ('likeCount' in oldData) &&
+            oldData.likeCount is number &&
+            newCount == oldData.likeCount + 1
+          ) ||
+          (
+            !('likeCount' in oldData) &&
+            newCount == 1
+          )
+        );
+    }
+
     
     function isAiMessageOwner(data) {
   return signedIn() &&
@@ -100,9 +218,14 @@ service cloud.firestore {
     exists(
       /databases/$(database)/documents/communityThreadMessages/$(data.aiSourceMessageId)
     ) &&
-    get(
-      /databases/$(database)/documents/communityThreadMessages/$(data.aiSourceMessageId)
-    ).data.userId == request.auth.uid &&
+    (
+      get(
+        /databases/$(database)/documents/communityThreadMessages/$(data.aiSourceMessageId)
+      ).data.userId == request.auth.uid ||
+      get(
+        /databases/$(database)/documents/communityThreadMessages/$(data.aiSourceMessageId)
+      ).data.realUserId == request.auth.uid
+    ) &&
     get(
       /databases/$(database)/documents/communityThreadMessages/$(data.aiSourceMessageId)
     ).data.serverId == data.serverId &&
@@ -122,6 +245,41 @@ service cloud.firestore {
         get(
           /databases/$(database)/documents/communityServerMemberships/$(serverId + '_' + request.auth.uid)
         ).data.status == 'joined';
+    }
+
+    // Task 3: who may pin/unpin messages in a server's channels — the server's
+    // creator/owner or any app-wide staff member. Same authority shape as the
+    // communityServers update/delete rule; identical get()s in one evaluation
+    // are cached, so this costs a single extra read.
+    function canManageServerPins(serverId) {
+      return signedIn() && (
+        isStaff() ||
+        get(
+          /databases/$(database)/documents/communityServers/$(serverId)
+        ).data.createdBy == request.auth.uid ||
+        get(
+          /databases/$(database)/documents/communityServers/$(serverId)
+        ).data.ownerId == request.auth.uid
+      );
+    }
+
+    // Rules & Announcements permissions:
+    // Only staff (admin, moderator, teacher) or server owner can post messages
+    // in rules and announcements channels. Students can only react and forward.
+    function isStaffOnlyChannel(channelId) {
+      return channelId.matches('.*(_rules|_announcement|_announcements).*');
+    }
+
+    function canPostInThreadChannel(serverId, channelId) {
+      return !isStaffOnlyChannel(channelId) ||
+        isStaff() ||
+        (
+          exists(/databases/$(database)/documents/communityServers/$(serverId)) &&
+          (
+            get(/databases/$(database)/documents/communityServers/$(serverId)).data.createdBy == request.auth.uid ||
+            get(/databases/$(database)/documents/communityServers/$(serverId)).data.ownerId == request.auth.uid
+          )
+        );
     }
 
     // =========================================================
@@ -144,10 +302,74 @@ service cloud.firestore {
 
       allow create: if signedIn() && isStaff();
 
-      allow update, delete: if signedIn() && (
+      allow update: if signedIn() && (
+        isAdmin() ||
+        (
+          (
+            isStaff() ||
+            resource.data.createdBy == request.auth.uid ||
+            resource.data.ownerId == request.auth.uid
+          ) &&
+          // Task 6: flipping a server into the deleted state is no longer a
+          // unilateral teacher action. Only an admin may set isDeleted — either
+          // directly, or by approving a communityServerDeletionRequests entry.
+          // Every other server edit (name, accent, sections, memberCount, …)
+          // is unchanged for owners/staff.
+          request.resource.data.get('isDeleted', false) != true
+        )
+      );
+
+      allow delete: if signedIn() && (
         isStaff() ||
         resource.data.createdBy == request.auth.uid ||
         resource.data.ownerId == request.auth.uid
+      );
+    }
+
+
+    // =========================================================
+    // SERVER DELETION REQUESTS
+    // =========================================================
+    // Task 6: a teacher (server owner/creator or staff) asks for a server to
+    // be deleted; an admin approves or rejects. Mirrors the join-request shape
+    // — signed-in read, id-bound self create, requester can delete/cancel —
+    // but the review (status -> approved/rejected) is admin-only, since a
+    // teacher is also "staff" and must not resolve a deletion request.
+
+    match /communityServerDeletionRequests/{requestId} {
+
+      allow read, list: if signedIn();
+
+      allow create: if signedIn() &&
+        isStaff() &&
+        request.resource.data.requestedBy == request.auth.uid &&
+        requestId == request.resource.data.serverId + '_' + request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.serverId is string &&
+        request.resource.data.serverName is string &&
+        request.resource.data.createdAt is timestamp;
+
+      // Admin review only — the sole path that sets an approved/rejected status
+      // and the reviewer fields. A teacher is also "staff" but must NOT resolve
+      // a deletion request (their own or a peer's), so this is isAdmin(), not
+      // isStaff(). The client pairs 'approved' with the actual server
+      // soft-delete. The requester doesn't update — they cancel or re-submit
+      // by deleting (below) and creating a fresh request, mirroring how join
+      // requests are torn down.
+      allow update: if signedIn() &&
+        isAdmin() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'reviewedBy', 'reviewedAt', 'updatedAt'
+        ]) &&
+        request.resource.data.status in ['approved', 'rejected'] &&
+        request.resource.data.reviewedBy == request.auth.uid &&
+        request.resource.data.reviewedAt is timestamp;
+
+      // Mirrors the join-request delete clause: staff cleanup, or the
+      // requester cancelling / clearing their own request.
+      allow delete: if signedIn() && (
+        isStaff() ||
+        resource.data.requestedBy == request.auth.uid
       );
     }
 
@@ -203,18 +425,80 @@ service cloud.firestore {
     request.resource.data.serverId is string &&
     request.resource.data.channelId is string &&
     (
-      request.resource.data.userId == request.auth.uid ||
-      isAiMessageOwner(request.resource.data)
+      (
+        (
+          request.resource.data.userId == request.auth.uid ||
+          (request.resource.data.userId == 'anonymous' && request.resource.data.realUserId == request.auth.uid)
+        ) &&
+        request.resource.data.moderationStatus == 'pending'
+      ) ||
+      (
+        isAiMessageOwner(request.resource.data) &&
+        request.resource.data.moderationStatus == 'approved'
+      )
     ) &&
     (
       isServerMember(request.resource.data.serverId) ||
       isStaff()
-    );
+    ) &&
+    canPostInThreadChannel(request.resource.data.serverId, request.resource.data.channelId);
 
   allow update: if signedIn() && (
-    isContentOwner(resource.data) ||
-    isAiMessageOwner(resource.data) ||
-    isStaff()
+    (
+      isContentOwner(resource.data) &&
+      request.resource.data.userId == resource.data.userId &&
+      request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'text', 'files', 'taggedUsers', 'link', 'updatedAt',
+        'moderationStatus', 'moderationReasons', 'moderatedAtMs',
+        'moderationModel', 'moderationRuleSource', 'aiReply'
+      ]) &&
+      request.resource.data.moderationStatus == 'pending'
+    ) ||
+    (
+      isAiMessageOwner(resource.data) &&
+      request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'text', 'aiStatus'
+      ])
+    ) ||
+    (
+      // Reactions: any joined member of the server can toggle their own
+      // reaction on ANY message in it, not just their own. Deliberately
+      // narrow — this branch can only ever write the `reactions` field, so
+      // it does not loosen the author-only text/attachment edit branch above.
+      isServerMember(resource.data.serverId) &&
+      request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'reactions'
+      ])
+    ) ||
+    (
+      // Pins (Task 3): a server owner/creator or app-wide staff can pin or
+      // unpin any message in that server's channels. Same narrow principle as
+      // the reactions branch — this branch can ONLY write the pin fields, so
+      // it never loosens the author-only edit branch above.
+      canManageServerPins(resource.data.serverId) &&
+      request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'pinned', 'pinnedAt', 'pinnedBy', 'pinnedByName'
+      ])
+    ) ||
+    (
+      // Self-edit (Task 4A): the message's own author fixing a typo in text
+      // they already sent. This is routine chat hygiene, NOT a moderation
+      // event, so it deliberately does not re-enter the pending flow the
+      // author branch above requires. Strictly author-only (isContentOwner,
+      // never the "any member" reactions permission), scoped to exactly
+      // text + editedAt, and only within 15 minutes of sending so an old
+      // message others have already seen can't be rewritten.
+      isContentOwner(resource.data) &&
+      request.resource.data.userId == resource.data.userId &&
+      request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'text', 'editedAt'
+      ]) &&
+      request.resource.data.text is string &&
+      request.resource.data.text.size() > 0 &&
+      request.resource.data.editedAt is timestamp &&
+      request.time < resource.data.createdAt + duration.value(15, 'm')
+    ) ||
+    isStaffModerationReview(resource.data)
   );
 
   allow delete: if signedIn() && (
@@ -222,6 +506,232 @@ service cloud.firestore {
     isStaff()
   );
 }
+
+
+    // =========================================================
+    // CHANNEL READ RECEIPTS
+    // =========================================================
+    // One doc per member per channel (id = "<channelId>_<uid>") recording how
+    // far they've read, with name/avatar denormalised for the read strip. A
+    // member can only ever write their own doc.
+
+    match /channelReads/{readId} {
+
+      allow read, list: if signedIn();
+
+      allow create, update: if signedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        readId == request.resource.data.channelId + '_' + request.auth.uid &&
+        request.resource.data.serverId is string &&
+        request.resource.data.channelId is string &&
+        request.resource.data.lastReadAtMs is number &&
+        request.resource.data.updatedAt is timestamp;
+
+      allow delete: if false;
+    }
+
+    // Feature 6: transient "user X is typing in channel Y" presence. One doc per
+    // user per channel, id-bound to the writer, and only ever carrying the
+    // typing fields. A user may clear their own doc; nobody else's.
+    match /typingIndicators/{typingId} {
+
+      allow read, list: if signedIn();
+
+      allow create, update: if signedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        typingId == request.resource.data.channelId + '_' + request.auth.uid &&
+        request.resource.data.serverId is string &&
+        request.resource.data.channelId is string &&
+        request.resource.data.updatedAt is timestamp;
+
+      allow delete: if signedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // Task 4B: per-user, per-channel notification mute. One doc per user per
+    // channel (id = "<channelId>_<uid>"); presence == muted. Publicly readable
+    // like channelReads so a sender can skip muted recipients at mention
+    // fan-out. A user may only create/clear their own doc — muting for
+    // yourself never affects anyone else.
+    match /channelMutes/{muteId} {
+
+      allow read, list: if signedIn();
+
+      allow create: if signedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        muteId == request.resource.data.channelId + '_' + request.auth.uid &&
+        request.resource.data.serverId is string &&
+        request.resource.data.channelId is string &&
+        request.resource.data.updatedAt is timestamp;
+
+      allow update: if false;
+
+      allow delete: if signedIn() && resource.data.userId == request.auth.uid;
+    }
+
+
+    // =========================================================
+    // DIRECT CONVERSATIONS & MESSAGES (MESSENGER)
+    // =========================================================
+
+    match /directConversations/{conversationId} {
+      function ownMapChange(field) {
+        return request.resource.data.get(field, {}).diff(resource.data.get(field, {}))
+          .affectedKeys().hasOnly([request.auth.uid]);
+      }
+
+      function validReceipt(field) {
+        let before = resource.data.get(field, {});
+        let after = request.resource.data.get(field, {});
+        return ownMapChange(field) && (
+          before == after || (
+            after.get(request.auth.uid, null) is timestamp &&
+            after[request.auth.uid] <= request.time &&
+            (!(request.auth.uid in before) || after[request.auth.uid] >= before[request.auth.uid])
+          )
+        );
+      }
+
+      function validMetadataUpdate() {
+        let changed = request.resource.data.diff(resource.data).affectedKeys();
+        let oldMute = resource.data.get('mutedBy', []);
+        let newMute = request.resource.data.get('mutedBy', []);
+        return changed.hasOnly(['participantDetails', 'nicknames', 'themeColor', 'quickEmoji',
+            'mutedBy', 'pinnedMessageIds', 'lastReadAt', 'lastDeliveredAt', 'unreadCounts']) &&
+          ownMapChange('participantDetails') && validReceipt('lastReadAt') && validReceipt('lastDeliveredAt') &&
+          (oldMute == newMute || validOwnListToggle(oldMute, newMute)) &&
+          ownMapChange('unreadCounts') &&
+          (!changed.hasAny(['unreadCounts']) || request.resource.data.unreadCounts[request.auth.uid] == 0);
+      }
+
+      function validNewMessage() {
+        let after = request.resource.data;
+        let latest = after.lastMessage;
+        let messagePath = /databases/$(database)/documents/directConversations/$(conversationId)/messages/$(latest.id);
+        let message = getAfter(messagePath).data;
+        return !exists(messagePath) && latest.senderId == request.auth.uid &&
+          latest.createdAt == request.time && after.updatedAt == request.time &&
+          message.senderId == request.auth.uid && message.createdAt == request.time &&
+          (latest.text == message.text || (message.text == '' && latest.text in ['Sent an image', 'Sent a file']));
+      }
+
+      function validSendUpdate() {
+        let after = request.resource.data;
+        let recipient = resource.data.participants[0] == request.auth.uid
+          ? resource.data.participants[1] : resource.data.participants[0];
+        let oldCounts = resource.data.get('unreadCounts', {});
+        return after.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'updatedAt', 'unreadCounts', 'participantDetails']) &&
+          validNewMessage() && ownMapChange('participantDetails') &&
+          after.unreadCounts.diff(oldCounts).affectedKeys().hasOnly([recipient]) &&
+          after.unreadCounts[recipient] == oldCounts.get(recipient, 0) + 1;
+      }
+
+      function validDeleteForMe() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedThrough', 'unreadCounts']) &&
+          validReceipt('deletedThrough') && ownMapChange('unreadCounts') &&
+          request.resource.data.deletedThrough[request.auth.uid] == resource.data.lastMessage.createdAt &&
+          request.resource.data.unreadCounts[request.auth.uid] == 0;
+      }
+
+      function validDeletedPreview() {
+        let before = resource.data.lastMessage;
+        let after = request.resource.data.lastMessage;
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'pinnedMessageIds']) &&
+          before.senderId == request.auth.uid &&
+          after.diff(before).affectedKeys().hasOnly(['text', 'isImage', 'isFile']) &&
+          after.text == 'Message deleted' && after.isImage == false && after.isFile == false;
+      }
+
+      // Participant can read the conversation; allow get when doc does not exist yet
+      allow get: if signedIn() && (
+        resource == null ||
+        request.auth.uid in resource.data.participants
+      );
+      allow list: if signedIn() && request.auth.uid in resource.data.participants;
+
+      // A new conversation must be created atomically with its first message.
+      allow create: if signedIn() &&
+        request.resource.data.type == 'direct' &&
+        request.resource.data.participants is list &&
+        request.resource.data.participants.size() == 2 &&
+        request.resource.data.participants.toSet().size() == 2 &&
+        request.resource.data.participants[0] is string &&
+        request.resource.data.participants[1] is string &&
+        request.auth.uid in request.resource.data.participants &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.get('lastReadAt', {}) == {} &&
+        request.resource.data.get('lastDeliveredAt', {}) == {} &&
+        request.resource.data.get('deletedThrough', {}) == {} &&
+        request.resource.data.unreadCounts.keys().hasOnly(request.resource.data.participants) &&
+        request.resource.data.unreadCounts[request.auth.uid] == 0 &&
+        request.resource.data.unreadCounts[
+          request.resource.data.participants[0] == request.auth.uid
+            ? request.resource.data.participants[1] : request.resource.data.participants[0]
+        ] == 1 && validNewMessage();
+
+      // Participants can update conversation metadata (lastMessage, unreadCounts, nicknames, themes, pins, mutes)
+      allow update: if signedIn() && request.auth.uid in resource.data.participants &&
+        (validMetadataUpdate() || validSendUpdate() || validDeletedPreview() || validDeleteForMe());
+
+      // Normal users delete their own view through deletedThrough, never the shared thread.
+      allow delete: if signedIn() && isStaff();
+
+      match /messages/{messageId} {
+        function validReaction(emoji) {
+          let before = resource.data.get('reactions', {}).get(emoji, []);
+          let after = request.resource.data.get('reactions', {}).get(emoji, []);
+          return before == after || validOwnListToggle(before, after);
+        }
+
+        function validReactions() {
+          return request.resource.data.get('reactions', {}).diff(resource.data.get('reactions', {}))
+              .affectedKeys().hasOnly(['👍', '❤️', '😂', '😮', '😢', '🙏']) &&
+            validReaction('👍') && validReaction('❤️') && validReaction('😂') &&
+            validReaction('😮') && validReaction('😢') && validReaction('🙏');
+        }
+
+        // Participants of the parent conversation can read/list messages
+        allow read, list: if signedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/directConversations/$(conversationId)).data.participants;
+
+        // Participants can send messages (senderId must match auth.uid)
+        allow create: if signedIn() &&
+          request.resource.data.senderId == request.auth.uid &&
+          request.resource.data.conversationId == conversationId &&
+          request.resource.data.createdAt == request.time &&
+          request.resource.data.text is string && request.resource.data.text.size() <= 2000 &&
+          request.resource.data.files is list && request.resource.data.files.size() <= 10 &&
+          (request.resource.data.text.size() > 0 || request.resource.data.files.size() > 0) &&
+          request.resource.data.status == 'sent' &&
+          request.resource.data.seenBy.keys().hasOnly([request.auth.uid]) &&
+          request.resource.data.seenBy[request.auth.uid] == request.time &&
+          request.resource.data.reactions == {} && request.resource.data.pinned == false &&
+          request.resource.data.get('deleted', false) == false &&
+          getAfter(/databases/$(database)/documents/directConversations/$(conversationId)).data.lastMessage.id == messageId &&
+          request.auth.uid in getAfter(/databases/$(database)/documents/directConversations/$(conversationId)).data.participants;
+
+        // Participants can update reactions, seenBy/status, pins, or edit their own message
+      allow update: if signedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/directConversations/$(conversationId)).data.participants &&
+          (
+            (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions']) && validReactions()) ||
+            (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pinned', 'pinnedAt', 'pinnedBy']) &&
+              request.resource.data.pinned is bool &&
+              (request.resource.data.pinned == false ||
+                (request.resource.data.pinnedBy == request.auth.uid && request.resource.data.pinnedAt == request.time))) ||
+            (resource.data.senderId == request.auth.uid &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'files', 'deleted', 'pinned', 'editedAt']) &&
+              request.resource.data.deleted == true && request.resource.data.text == 'Message deleted' &&
+              request.resource.data.files == [] && request.resource.data.pinned == false &&
+              request.resource.data.editedAt == request.time)
+          );
+
+        // Author or staff can delete
+        allow delete: if signedIn() && (
+          resource.data.senderId == request.auth.uid ||
+          isStaff()
+        );
+      }
+    }
 
 
     // =========================================================
@@ -241,13 +751,7 @@ service cloud.firestore {
   // Online status fields may also be updated.
   allow update: if signedIn() && (
     isStudentOwner(studentId) ||
-    isAdmin() ||
-    request.resource.data.diff(resource.data)
-      .affectedKeys()
-      .hasOnly([
-        'isOnline',
-        'lastSeen'
-      ])
+    isAdmin()
   );
 
   // Student can delete their own profile.
@@ -308,8 +812,7 @@ match /userNotificationSettings/{userId} {
       );
 
       // Spark-compatible architecture: clients may create/edit only PENDING
-      // posts. The Cloudflare Worker uses a server credential to approve or
-      // reject them. A modified client cannot self-approve a post.
+      // posts. The Cloudflare Worker uses a server credential to approve them or leave them pending for human review. A modified client cannot self-approve a post.
       allow create: if signedIn() &&
         request.resource.data.realUserId == request.auth.uid &&
         (
@@ -323,7 +826,27 @@ match /userNotificationSettings/{userId} {
         request.resource.data.moderationStatus == 'pending';
 
       allow update: if signedIn() && (
-        isStaff() ||
+        isStaffModerationReview(resource.data) ||
+        (
+          isStaff() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'pinnedAt',
+            'pinnedBy',
+            'pinExpiresAt',
+            'targetDate',
+            'targetDateLabel'
+          ]) &&
+          (
+            (
+              request.resource.data.pinnedAt is timestamp &&
+              request.resource.data.pinnedBy == request.auth.uid
+            ) ||
+            (
+              request.resource.data.pinnedAt == null &&
+              request.resource.data.pinnedBy == null
+            )
+          )
+        ) ||
         (
           isContentOwner(resource.data) &&
           request.resource.data.userId == resource.data.userId &&
@@ -332,6 +855,7 @@ match /userNotificationSettings/{userId} {
             .affectedKeys()
             .hasOnly([
               'content',
+              'searchTerms',
               'files',
               'taggedUsers',
               'isAnonymous',
@@ -341,7 +865,12 @@ match /userNotificationSettings/{userId} {
               'moderationReasons',
               'moderatedAtMs',
               'aiPrompt',
-              'flair'
+              'flair',
+              'pinnedAt',
+              'pinnedBy',
+              'pinExpiresAt',
+              'targetDate',
+              'targetDateLabel'
             ]) &&
           validPostFlair(request.resource.data) &&
           request.resource.data.moderationStatus == 'pending'
@@ -350,20 +879,43 @@ match /userNotificationSettings/{userId} {
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'likedBy', 'likeCount'
           ]) &&
-          validOwnListToggleWithCount(
-            resource.data.likedBy,
-            request.resource.data.likedBy,
-            resource.data.likeCount,
-            request.resource.data.likeCount
+          (
+            (
+              ('likedBy' in resource.data) &&
+              ('likeCount' in resource.data) &&
+              validOwnListToggleWithCount(
+                resource.data.likedBy,
+                request.resource.data.likedBy,
+                resource.data.likeCount,
+                request.resource.data.likeCount
+              )
+            ) ||
+            (
+              !('likedBy' in resource.data) &&
+              validInitialOwnLikeAdd(
+                request.resource.data.likedBy,
+                request.resource.data.likeCount,
+                resource.data
+              )
+            )
           )
         ) ||
         (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'bookmarkedBy'
           ]) &&
-          validOwnListToggle(
-            resource.data.bookmarkedBy,
-            request.resource.data.bookmarkedBy
+          (
+            (
+              ('bookmarkedBy' in resource.data) &&
+              validOwnListToggle(
+                resource.data.bookmarkedBy,
+                request.resource.data.bookmarkedBy
+              )
+            ) ||
+            (
+              !('bookmarkedBy' in resource.data) &&
+              validInitialOwnListAdd(request.resource.data.bookmarkedBy)
+            )
           )
         ) ||
         (
@@ -381,9 +933,23 @@ match /userNotificationSettings/{userId} {
         (
           isContentOwner(resource.data) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['aiReply']) &&
-          request.resource.data.aiReply is map &&
-          request.resource.data.aiReply.model == 'bonded-nlp-naive-bayes-v1' &&
-          request.resource.data.aiReply.status in ['processing', 'completed']
+          validAiReplyUpdate()
+        ) ||
+        (
+          // Part 4 (Lost & Found resolution detector): ANY signed-in user
+          // (the commenter, not just the post owner) can flag a potential
+          // resolution — this only ever sets a dismissible prompt, never
+          // resolvedAt itself, and only on lost_found posts.
+          resource.data.flair == 'lost_found' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resolutionPrompt']) &&
+          request.resource.data.resolutionPrompt is map
+        ) ||
+        (
+          // Only the post owner can dismiss the prompt or confirm
+          // resolution (the only path that ever sets resolvedAt).
+          isContentOwner(resource.data) &&
+          resource.data.flair == 'lost_found' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resolvedAt', 'resolutionPrompt'])
         )
       );
 
@@ -414,7 +980,7 @@ match /userNotificationSettings/{userId} {
         request.resource.data.moderationStatus == 'pending';
 
       allow update: if signedIn() && (
-        isStaff() ||
+        isStaffModerationReview(resource.data) ||
         (
           isContentOwner(resource.data) &&
           request.resource.data.userId == resource.data.userId &&
@@ -429,9 +995,7 @@ match /userNotificationSettings/{userId} {
         (
           isContentOwner(resource.data) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['aiReply']) &&
-          request.resource.data.aiReply is map &&
-          request.resource.data.aiReply.model == 'bonded-nlp-naive-bayes-v1' &&
-          request.resource.data.aiReply.status in ['processing', 'completed']
+          validAiReplyUpdate()
         ) ||
         (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
@@ -475,7 +1039,7 @@ match /userNotificationSettings/{userId} {
         request.resource.data.moderationStatus == 'pending';
 
       allow update: if signedIn() && (
-        isStaff() ||
+        isStaffModerationReview(resource.data) ||
         (
           isContentOwner(resource.data) &&
           request.resource.data.userId == resource.data.userId &&
@@ -490,9 +1054,7 @@ match /userNotificationSettings/{userId} {
         (
           isContentOwner(resource.data) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['aiReply']) &&
-          request.resource.data.aiReply is map &&
-          request.resource.data.aiReply.model == 'bonded-nlp-naive-bayes-v1' &&
-          request.resource.data.aiReply.status in ['processing', 'completed']
+          validAiReplyUpdate()
         ) ||
         (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -567,11 +1129,14 @@ match /userNotificationSettings/{userId} {
 
       allow read: if signedIn();
 
+      // Polls are created as pending. The Cloudflare Worker re-reads the
+      // poll and uses OpenModeration before changing moderationStatus.
       allow create: if signedIn() &&
         request.resource.data.userId is string &&
         request.resource.data.userId == request.auth.uid &&
         request.resource.data.question is string &&
         request.resource.data.createdAt is timestamp &&
+        request.resource.data.moderationStatus == 'pending' &&
         validPostFlair(request.resource.data);
 
       allow update: if signedIn() && (
@@ -589,9 +1154,26 @@ match /userNotificationSettings/{userId} {
             'username',
             'isAnonymous',
             'flair',
-            'updatedAt'
+            'updatedAt',
+            'moderationStatus',
+            'moderationReasons',
+            'moderatedAtMs',
+            'options',
+            'totalVotes'
           ]) &&
-          validPostFlair(request.resource.data)
+          request.resource.data.moderationStatus == 'pending' &&
+          validPostFlair(request.resource.data) &&
+          (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+              'options',
+              'totalVotes'
+            ]) ||
+            (
+              resource.data.totalVotes == 0 &&
+              request.resource.data.totalVotes == 0 &&
+              request.resource.data.options is list
+            )
+          )
         ) ||
         (
           request.resource.data.userId == resource.data.userId &&
@@ -616,7 +1198,7 @@ match /userNotificationSettings/{userId} {
             request.resource.data.commentCount == resource.data.commentCount - 1
           )
         ) ||
-        isStaff()
+        isStaffModerationReview(resource.data)
       );
 
       allow delete: if signedIn() && (
@@ -694,8 +1276,9 @@ match /userNotificationSettings/{userId} {
     match /reports/{reportId} {
 
       allow create: if signedIn() &&
+        !isStaff() &&
         request.resource.data.reportedBy == request.auth.uid &&
-        request.resource.data.contentType in ['post', 'comment', 'reply'] &&
+        request.resource.data.contentType in ['post', 'poll', 'comment', 'reply'] &&
         request.resource.data.contentId is string &&
         request.resource.data.reason is string &&
         request.resource.data.status == 'pending' &&
@@ -703,7 +1286,18 @@ match /userNotificationSettings/{userId} {
         (
           (request.resource.data.contentType == 'post' &&
             exists(/databases/$(database)/documents/posts/$(request.resource.data.contentId)) &&
-            !isContentOwner(get(/databases/$(database)/documents/posts/$(request.resource.data.contentId)).data)) ||
+            !isContentOwner(get(/databases/$(database)/documents/posts/$(request.resource.data.contentId)).data) &&
+            (
+              isAnonymousContent(get(/databases/$(database)/documents/posts/$(request.resource.data.contentId)).data) ||
+              isStudentAuthoredContent(get(/databases/$(database)/documents/posts/$(request.resource.data.contentId)).data)
+            )) ||
+          (request.resource.data.contentType == 'poll' &&
+            exists(/databases/$(database)/documents/polls/$(request.resource.data.contentId)) &&
+            !isContentOwner(get(/databases/$(database)/documents/polls/$(request.resource.data.contentId)).data) &&
+            (
+              isAnonymousContent(get(/databases/$(database)/documents/polls/$(request.resource.data.contentId)).data) ||
+              isStudentAuthoredContent(get(/databases/$(database)/documents/polls/$(request.resource.data.contentId)).data)
+            )) ||
           (request.resource.data.contentType == 'comment' &&
             exists(/databases/$(database)/documents/comments/$(request.resource.data.contentId)) &&
             !isContentOwner(get(/databases/$(database)/documents/comments/$(request.resource.data.contentId)).data)) ||
@@ -736,6 +1330,52 @@ match /userNotificationSettings/{userId} {
 
 
     // =========================================================
+    // AI CONVERSATIONS (multiple named chats per user; supersedes the
+    // single aiDirectMessages thread above)
+    // =========================================================
+
+    // Per-user parent doc; only holds the one-time legacy-migration marker.
+    match /aiConversations/{userId} {
+
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /aiConversations/{userId}/conversations/{conversationId} {
+
+      allow read, list: if signedIn() && request.auth.uid == userId;
+
+      allow create, update, delete: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /aiConversations/{userId}/conversations/{conversationId}/messages/{messageId} {
+
+      allow read, list: if signedIn() && request.auth.uid == userId;
+
+      allow create: if signedIn() && request.auth.uid == userId &&
+        request.resource.data.text is string &&
+        request.resource.data.role in ['user', 'assistant'] &&
+        request.resource.data.createdAt is timestamp;
+
+      allow update, delete: if signedIn() && request.auth.uid == userId;
+    }
+
+
+    // =========================================================
+    // DAILY ANALYTICS ROLLUPS
+    // =========================================================
+    // One document per day (id = YYYY-MM-DD), written only by the Cloudflare
+    // Worker's cron job via a service-account token (which bypasses these
+    // rules). Clients read them for the Analytics screen; no client writes.
+
+    match /dailyStats/{dateId} {
+
+      allow read, list: if isStaff();
+
+      allow write: if false;
+    }
+
+
+    // =========================================================
     // CHATBOT UNANSWERED QUESTIONS
     // =========================================================
 
@@ -749,7 +1389,53 @@ match /userNotificationSettings/{userId} {
         request.resource.data.confidence is number &&
         request.resource.data.createdAt is timestamp;
 
-      allow update, delete: if false;
+      // Staff (moderator/teacher/admin) can clear reviewed questions from
+      // the list once they've added an AI Memory entry or training example
+      // for them. Entries stay immutable otherwise — no edits, only removal.
+      allow update: if false;
+      allow delete: if isStaff();
+    }
+
+
+    // =========================================================
+    // CHATBOT GENERAL-KNOWLEDGE CACHE
+    // =========================================================
+    // One doc per normalized question (utils/knowledgeCache.ts), storing an
+    // answer retrieved live from a public API (Wikipedia, Wiktionary, REST
+    // Countries — see utils/generalKnowledgeApi.ts) so the same question
+    // next time is answered from Firestore instead of another API call.
+    // Any signed-in user's app can write a cache entry (it's retrieved,
+    // cited text, not user-authored content), bounded by size/shape so a
+    // modified client can't stuff arbitrary large payloads in here. Staff
+    // can delete a bad entry to force a re-fetch.
+
+    // =========================================================
+    // AUTH CODES (password reset / recovery-email verification)
+    // =========================================================
+    // 6-digit codes for the email-based password reset flow. Written, read
+    // and deleted only by the trusted Cloudflare Worker via the service
+    // account (which bypasses these rules). Codes are stored hashed and are
+    // never exposed to any client, so all direct client access is denied.
+
+    match /authCodes/{codeId} {
+      allow read, write: if false;
+    }
+
+    match /chatbotKnowledgeCache/{cacheKey} {
+
+      allow read, list: if signedIn();
+
+      allow create, update: if signedIn() &&
+        request.resource.data.answer is string &&
+        request.resource.data.answer.size() > 0 &&
+        request.resource.data.answer.size() <= 4000 &&
+        request.resource.data.question is string &&
+        request.resource.data.question.size() <= 500 &&
+        request.resource.data.provider in [
+          'wikipedia', 'restcountries', 'wiktionary', 'frankfurter', 'open-meteo'
+        ];
+
+      allow delete: if isStaff();
     }
 
 
@@ -773,6 +1459,40 @@ match /userNotificationSettings/{userId} {
       allow update: if isStaff();
 
       allow delete: if isStaff();
+    }
+
+
+    // =========================================================
+    // CAMPUS KNOWLEDGE FAQ
+    // =========================================================
+    // Admin-maintained FAQ answers the non-generative chatbot reads at
+    // runtime (campus_knowledge intent). Any signed-in user may read so the
+    // assistant can answer; only admins may add, edit, or remove entries.
+
+    match /campusFaq/{faqId} {
+
+      function validCampusFaq(data) {
+        return data.question is string &&
+          data.question.size() > 0 &&
+          data.question.size() <= 300 &&
+          data.answer is string &&
+          data.answer.size() > 0 &&
+          data.answer.size() <= 2000;
+      }
+
+      allow read, list: if signedIn();
+
+      allow create: if isAdmin() &&
+        validCampusFaq(request.resource.data) &&
+        request.resource.data.updatedBy == request.auth.uid &&
+        request.resource.data.updatedAt is timestamp;
+
+      allow update: if isAdmin() &&
+        validCampusFaq(request.resource.data) &&
+        request.resource.data.updatedBy == request.auth.uid &&
+        request.resource.data.updatedAt is timestamp;
+
+      allow delete: if isAdmin();
     }
   }
 }

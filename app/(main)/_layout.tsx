@@ -90,6 +90,34 @@ export default function MainLayout() {
         }}
       />
       <Stack.Screen
+        name="ManageCampusFaqScreen"
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
+      />
+      <Stack.Screen
+        name="AnalyticsScreen"
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: "#f6f1ed" },
+        }}
+      />
+      <Stack.Screen
+        name="MessagesScreen"
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: "#fffaf7" },
+        }}
+      />
+      <Stack.Screen
+        name="DirectChatScreen"
+        options={{
+          animation: "slide_from_right",
+          contentStyle: { backgroundColor: "#fffaf7" },
+        }}
+      />
+      <Stack.Screen
         name="ServerChannelScreen"
         options={{
           animation: "none",

@@ -4,12 +4,8 @@ export const POST_FLAIRS = [
   { id: "academic", label: "Academic", emoji: "🎓", staffOnly: false },
   { id: "study", label: "Study", emoji: "📚", staffOnly: false },
   { id: "help", label: "Help / Advice", emoji: "🆘", staffOnly: false },
-  { id: "event_moments", label: "Event Moments", emoji: "📸", staffOnly: false },
-  { id: "community", label: "Community", emoji: "🤝", staffOnly: false },
-  { id: "fun_humor", label: "Fun / Humor", emoji: "😂", staffOnly: false },
   { id: "achievement", label: "Achievement", emoji: "🏆", staffOnly: false },
   { id: "lost_found", label: "Lost & Found", emoji: "🔎", staffOnly: false },
-  { id: "projects", label: "Projects", emoji: "💻", staffOnly: false },
   { id: "sports", label: "Sports", emoji: "🏀", staffOnly: false },
   { id: "announcement", label: "Announcement", emoji: "📢", staffOnly: true },
 ] as const;

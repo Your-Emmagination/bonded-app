@@ -3,6 +3,10 @@
 # dependencies
 node_modules/
 
+# Python (chatbot_training/*.py)
+__pycache__/
+*.pyc
+
 # Expo
 .expo/
 dist/

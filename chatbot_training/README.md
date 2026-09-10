@@ -29,6 +29,15 @@ These values are a baseline, not a guarantee of production accuracy. Add real an
 - `programs` — answered from the `programs` Firestore collection.
 - `events` — answered from the `events` Firestore collection.
 - `staff_directory` — "who are the teachers/moderators/admins" questions, answered from the `students` Firestore collection (`role` field). The reply is filtered to whichever of the words "teacher", "moderator", or "admin" actually appear in the question — e.g. "who are the teachers" only returns teachers, "who are the teachers and moderators" returns both but not admins. If none of those words appear (e.g. "list the staff", "who manages this app"), all three roles are shown together. Only `firstname`/`lastname` are ever surfaced — no email, studentID, or other profile fields.
+- `campus_knowledge` — "how BondED works" and school-policy questions, answered from the staff-maintained `campusFaq` Firestore collection with the bundled offline FAQ index (`utils/campusKnowledgeIndex.ts`) as a fallback.
+
+## Post-flair answer sources
+
+Beyond the trained intents, `answerFromAnySource` also grounds replies in recent approved `posts`, matched by token overlap (same minimum-match threshold of 2 as AI Memory):
+
+- **Announcement posts** — staff-authored, scanned unconditionally as a last resort (90-day window).
+- **Lost & Found posts** — only when the query mentions lost/found/missing/misplaced; resolved posts are excluded (21-day window).
+- **Help / Advice posts** — only when the query itself is help-seeking (help/advice/struggling/explain/stuck/confused); surfaces related peer questions (45-day window). Checked after campus knowledge since it is student-authored, lower-authority content.
 
 ## Filipino / Taglish support
 
@@ -77,3 +86,31 @@ For example:
 ```
 
 Then retrain and compare the evaluation report.
+
+## Epoch-trained source router
+
+B.E.A. now has a first-stage non-generative source router trained with epochs.
+It decides which knowledge source may answer before the existing intent/retrieval
+logic runs:
+
+- `bonded` -> BondED/local conversation + live Firestore only
+- `general` -> bundled general-knowledge retrieval only
+- `utility` -> calculator/date/time only
+
+Train/retrain it from the project root:
+
+```bash
+python chatbot_training/train_source_router.py
+```
+
+The trainer uses `intent_training.csv` plus a sample of
+`general_knowledge/general_knowledge.csv`, trains a one-hidden-layer MLP with
+validation + early stopping, and regenerates:
+
+- `utils/sourceRouterModel.ts`
+- `chatbot_training/source_router_evaluation.json`
+
+The model is non-generative. It only selects a source; it does not write answers.
+Changing Firestore events, profiles, programs, or other live data does not require
+retraining because the router learns the type of request, while Firestore remains
+the source of the current answer.

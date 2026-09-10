@@ -1,6 +1,6 @@
 {
   "projects": {
-    "Default": "bonded-app-c8483"
+    "default": "bonded-app-c8483"
   },
   "targets": {},
   "etags": {}

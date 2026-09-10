@@ -1,35 +1,36 @@
+import {
+    type AiMemoryEntry,
+    type AiMemoryScopeType,
+    makeAiMemoryChannelScopeId,
+} from "@/utils/aiMemory";
+import { canManageAiMemory, resolveUserRoleForAuthUser } from "@/utils/rbac";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import {
-  addDoc,
-  collection,
-  deleteDoc,
-  doc,
-  onSnapshot,
-  serverTimestamp,
-  setDoc,
+    addDoc,
+    collection,
+    deleteDoc,
+    doc,
+    onSnapshot,
+    serverTimestamp,
+    setDoc,
 } from "firebase/firestore";
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
-  Alert,
-  Modal,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Modal,
+    ScrollView,
+    StyleSheet,
+    Switch,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
-import {
-  type AiMemoryEntry,
-  type AiMemoryScopeType,
-  makeAiMemoryChannelScopeId,
-} from "@/utils/aiMemory";
-import { canManageAiMemory, resolveUserRoleForAuthUser } from "@/utils/rbac";
+import ConfirmDialog from "./components/ConfirmDialog";
+import { ListSkeleton } from "./components/Skeleton";
 
 type DraftState = {
   id?: string | null;
@@ -55,6 +56,14 @@ const emptyDraft: DraftState = {
 
 export default function AiMemoryScreen() {
   const router = useRouter();
+  // Optional pre-fill coming from UnansweredQuestionsScreen's clustered
+  // suggestions — title and tags only, never content. Staff always write
+  // the actual answer themselves; this just saves them re-typing the
+  // question pattern and starts the editor already open.
+  const { prefillTitle, prefillTags } = useLocalSearchParams<{
+    prefillTitle?: string;
+    prefillTags?: string;
+  }>();
   const [loading, setLoading] = useState(true);
   const [allowed, setAllowed] = useState(false);
   const [entries, setEntries] = useState<AiMemoryEntry[]>([]);
@@ -112,6 +121,9 @@ export default function AiMemoryScreen() {
     return unsubscribe;
   }, [allowed]);
 
+  const [scopeFilter, setScopeFilter] = useState<"all" | AiMemoryScopeType>("all");
+  const [search, setSearch] = useState("");
+
   const groupedStats = useMemo(
     () => ({
       global: entries.filter((entry) => entry.scopeType === "global").length,
@@ -121,10 +133,37 @@ export default function AiMemoryScreen() {
     [entries],
   );
 
+  const visibleEntries = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return entries.filter((entry) => {
+      if (scopeFilter !== "all" && entry.scopeType !== scopeFilter) return false;
+      if (!query) return true;
+      return (
+        entry.title.toLowerCase().includes(query) ||
+        entry.content.toLowerCase().includes(query) ||
+        entry.tags.some((tag) => tag.toLowerCase().includes(query))
+      );
+    });
+  }, [entries, scopeFilter, search]);
+
   const openCreate = () => {
     setDraft(emptyDraft);
     setShowEditor(true);
   };
+
+  useEffect(() => {
+    if (!allowed) return;
+    const title = Array.isArray(prefillTitle) ? prefillTitle[0] : prefillTitle;
+    const tags = Array.isArray(prefillTags) ? prefillTags[0] : prefillTags;
+    if (!title) return;
+    setDraft({ ...emptyDraft, title, tags: tags || "" });
+    setShowEditor(true);
+    // Only meant to fire once when arriving from the suggestion flow, not
+    // every time this screen re-renders — intentionally omitting
+    // prefillTitle/prefillTags from deps would cause an eslint warning, so
+    // this is scoped to only actually run when `allowed` first becomes true.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowed]);
 
   const openEdit = (entry: AiMemoryEntry) => {
     setDraft({
@@ -140,9 +179,38 @@ export default function AiMemoryScreen() {
     setShowEditor(true);
   };
 
+  const [dialog, setDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const showInfo = (title: string, description: string) =>
+    setDialog({
+      title,
+      description,
+      confirmText: "OK",
+      singleAction: true,
+      onConfirm: () => setDialog(null),
+    });
+
   const saveEntry = async () => {
     if (!draft.title.trim() || !draft.content.trim()) {
-      Alert.alert("Missing Info", "Title and content are required.");
+      showInfo("Missing Info", "Title and content are required.");
+      return;
+    }
+
+    const trimmedScopeId = draft.scopeId.trim();
+    if (draft.scopeType !== "global" && !trimmedScopeId) {
+      showInfo(
+        "Missing Scope ID",
+        `Enter a ${draft.scopeType} scope ID, or switch scope back to Global.`,
+      );
       return;
     }
 
@@ -152,8 +220,11 @@ export default function AiMemoryScreen() {
         recordType: "aiMemory",
         title: draft.title.trim(),
         content: draft.content.trim(),
-        scopeType: "global",
-        scopeId: null,
+        // Previously this was hardcoded to "global" no matter what the admin
+        // picked above, so every entry silently lost its Server/Channel
+        // scope on save. Now it persists whatever was actually selected.
+        scopeType: draft.scopeType,
+        scopeId: draft.scopeType === "global" ? null : trimmedScopeId,
         tags: draft.tags
           .split(",")
           .map((tag) => tag.trim())
@@ -182,36 +253,38 @@ export default function AiMemoryScreen() {
       setDraft(emptyDraft);
     } catch (error) {
       console.error("Error saving AI memory:", error);
-      Alert.alert("Error", "Failed to save AI memory.");
+      showInfo("Error", "Failed to save AI memory.");
     } finally {
       setSaving(false);
     }
   };
 
-  const removeEntry = async (entryId: string) => {
-    Alert.alert("Delete Memory", "Remove this memory entry?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            await deleteDoc(doc(db, "communityServers", entryId));
-          } catch (error) {
-            console.error("Error deleting AI memory:", error);
-            Alert.alert("Error", "Failed to delete AI memory.");
-          }
-        },
+  const removeEntry = (entryId: string) => {
+    setDialog({
+      title: "Delete Memory",
+      description: "Remove this memory entry? This can't be undone.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: async () => {
+        setDeletingId(entryId);
+        try {
+          await deleteDoc(doc(db, "communityServers", entryId));
+          setDialog(null);
+        } catch (error) {
+          console.error("Error deleting AI memory:", error);
+          showInfo("Error", "Failed to delete AI memory.");
+        } finally {
+          setDeletingId(null);
+        }
       },
-    ]);
+    });
   };
 
   if (loading) {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.centerState}>
-          <ActivityIndicator size="large" color="#e0a53d" />
-        </View>
+        <ListSkeleton showAvatar={false} count={6} />
       </SafeAreaView>
     );
   }
@@ -223,7 +296,7 @@ export default function AiMemoryScreen() {
           <Ionicons name="lock-closed-outline" size={42} color="#e0a53d" />
           <Text style={styles.emptyTitle}>Access Restricted</Text>
           <Text style={styles.emptyText}>
-            Only admins, teachers, and moderators can manage Bonded AI memory.
+            Only admins, teachers, and moderators can manage B.E.A. memory.
           </Text>
         </View>
       </SafeAreaView>
@@ -238,9 +311,9 @@ export default function AiMemoryScreen() {
           <Ionicons name="arrow-back" size={22} color="#fffaf7" />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Bonded AI Memory</Text>
+          <Text style={styles.headerTitle}>B.E.A. Memory</Text>
           <Text style={styles.headerSubtitle}>
-            Global long-term knowledge for Bonded AI
+            Global long-term knowledge for B.E.A.
           </Text>
         </View>
         <TouchableOpacity onPress={openCreate} style={styles.addButton}>
@@ -249,22 +322,70 @@ export default function AiMemoryScreen() {
       </View>
 
       <View style={styles.statsRow}>
-        <View style={styles.statPill}>
-          <Text style={styles.statValue}>{entries.length}</Text>
-          <Text style={styles.statLabel}>Total</Text>
-        </View>
-        <View style={styles.statPill}>
-          <Text style={styles.statValue}>{groupedStats.global}</Text>
-          <Text style={styles.statLabel}>Global</Text>
-        </View>
-        <View style={styles.statPill}>
-          <Text style={styles.statValue}>{groupedStats.server}</Text>
-          <Text style={styles.statLabel}>Server</Text>
-        </View>
-        <View style={styles.statPill}>
-          <Text style={styles.statValue}>{groupedStats.channel}</Text>
-          <Text style={styles.statLabel}>Channel</Text>
-        </View>
+        <TouchableOpacity
+          style={[styles.statPill, scopeFilter === "all" && styles.statPillActive]}
+          activeOpacity={0.8}
+          onPress={() => setScopeFilter("all")}
+        >
+          <Text style={[styles.statValue, scopeFilter === "all" && styles.statValueActive]}>
+            {entries.length}
+          </Text>
+          <Text style={[styles.statLabel, scopeFilter === "all" && styles.statLabelActive]}>
+            Total
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.statPill, scopeFilter === "global" && styles.statPillActive]}
+          activeOpacity={0.8}
+          onPress={() => setScopeFilter("global")}
+        >
+          <Text style={[styles.statValue, scopeFilter === "global" && styles.statValueActive]}>
+            {groupedStats.global}
+          </Text>
+          <Text style={[styles.statLabel, scopeFilter === "global" && styles.statLabelActive]}>
+            Global
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.statPill, scopeFilter === "server" && styles.statPillActive]}
+          activeOpacity={0.8}
+          onPress={() => setScopeFilter("server")}
+        >
+          <Text style={[styles.statValue, scopeFilter === "server" && styles.statValueActive]}>
+            {groupedStats.server}
+          </Text>
+          <Text style={[styles.statLabel, scopeFilter === "server" && styles.statLabelActive]}>
+            Server
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.statPill, scopeFilter === "channel" && styles.statPillActive]}
+          activeOpacity={0.8}
+          onPress={() => setScopeFilter("channel")}
+        >
+          <Text style={[styles.statValue, scopeFilter === "channel" && styles.statValueActive]}>
+            {groupedStats.channel}
+          </Text>
+          <Text style={[styles.statLabel, scopeFilter === "channel" && styles.statLabelActive]}>
+            Channel
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.searchBox}>
+        <Ionicons name="search-outline" size={18} color="#9b766c" />
+        <TextInput
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search title, content, or tags..."
+          placeholderTextColor="#b99c93"
+          style={styles.searchInput}
+        />
+        {!!search && (
+          <TouchableOpacity onPress={() => setSearch("")} hitSlop={8}>
+            <Ionicons name="close-circle" size={17} color="#9b766c" />
+          </TouchableOpacity>
+        )}
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -273,7 +394,9 @@ export default function AiMemoryScreen() {
           <Text style={styles.helperText}>Server scope ID example: `bsis`</Text>
           <Text style={styles.helperText}>Channel scope ID example: `bsis:bsis_general`</Text>
           <Text style={styles.helperText}>
-            All saved memory is treated as global and prioritized by Bonded AI.
+            B.E.A. currently searches every active memory entry regardless of
+            scope, ranked by priority — scope here is for your own organization
+            (filtering this list, and future per-server/channel targeting).
           </Text>
         </View>
 
@@ -285,8 +408,16 @@ export default function AiMemoryScreen() {
               Add facts like developers, project history, rules, FAQ answers, or server-specific knowledge.
             </Text>
           </View>
+        ) : visibleEntries.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Ionicons name="search-outline" size={42} color="#c59a8a" />
+            <Text style={styles.emptyTitle}>No matches</Text>
+            <Text style={styles.emptyText}>
+              Nothing matches this filter or search. Try clearing the search or picking a different scope.
+            </Text>
+          </View>
         ) : (
-          entries.map((entry) => (
+          visibleEntries.map((entry) => (
             <View key={entry.id} style={styles.memoryCard}>
               <View style={styles.memoryHeader}>
                 <View style={styles.scopeBadge}>
@@ -303,12 +434,24 @@ export default function AiMemoryScreen() {
                 <Text style={styles.tagsText}>{entry.tags.join(" • ")}</Text>
               )}
               <View style={styles.cardActions}>
-                <TouchableOpacity style={styles.cardAction} onPress={() => openEdit(entry)}>
+                <TouchableOpacity
+                  style={styles.cardAction}
+                  onPress={() => openEdit(entry)}
+                  disabled={deletingId === entry.id}
+                >
                   <Ionicons name="create-outline" size={16} color="#5f0909" />
                   <Text style={styles.cardActionText}>Edit</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.cardAction} onPress={() => removeEntry(entry.id)}>
-                  <Ionicons name="trash-outline" size={16} color="#9b1f1c" />
+                <TouchableOpacity
+                  style={styles.cardAction}
+                  onPress={() => removeEntry(entry.id)}
+                  disabled={deletingId === entry.id}
+                >
+                  {deletingId === entry.id ? (
+                    <ActivityIndicator size="small" color="#9b1f1c" />
+                  ) : (
+                    <Ionicons name="trash-outline" size={16} color="#9b1f1c" />
+                  )}
                   <Text style={[styles.cardActionText, { color: "#9b1f1c" }]}>Delete</Text>
                 </TouchableOpacity>
               </View>
@@ -437,6 +580,19 @@ export default function AiMemoryScreen() {
           </ScrollView>
         </SafeAreaView>
       </Modal>
+
+      <ConfirmDialog
+        visible={!!dialog}
+        title={dialog?.title ?? ""}
+        description={dialog?.description}
+        confirmText={dialog?.confirmText ?? "Confirm"}
+        cancelText={dialog?.cancelText}
+        destructive={dialog?.destructive ?? true}
+        singleAction={dialog?.singleAction ?? false}
+        loading={!!deletingId}
+        onConfirm={() => dialog?.onConfirm()}
+        onCancel={() => setDialog(null)}
+      />
     </SafeAreaView>
   );
 }
@@ -505,15 +661,44 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#ead7cf",
   },
+  statPillActive: {
+    backgroundColor: "#5f0909",
+    borderColor: "#5f0909",
+  },
   statValue: {
     color: "#5f0909",
     fontSize: 18,
     fontWeight: "800",
   },
+  statValueActive: {
+    color: "#fffaf7",
+  },
   statLabel: {
     color: "#9b766c",
     fontSize: 11,
     marginTop: 2,
+  },
+  statLabelActive: {
+    color: "#f0d2c2",
+  },
+  searchBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 16,
+    marginTop: 12,
+    backgroundColor: "#fffaf7",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+    paddingHorizontal: 12,
+    height: 42,
+  },
+  searchInput: {
+    flex: 1,
+    color: "#4d1b17",
+    fontSize: 14,
+    height: "100%",
   },
   scrollContent: {
     padding: 16,

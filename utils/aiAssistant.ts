@@ -1,5 +1,5 @@
 export const AI_ASSISTANT_ID = "ai-assistant";
-export const AI_ASSISTANT_NAME = "Bonded AI";
+export const AI_ASSISTANT_NAME = "B.E.A.";
 export const AI_ASSISTANT_EMAIL = "ai@bonded.local";
 export const AI_ASSISTANT_STUDENT_ID = "AI";
 export const EVERYONE_MENTION_ID = "everyone-mention";
@@ -20,8 +20,8 @@ export const EVERYONE_MENTION_TAG = {
 
 export const AI_ASSISTANT_STUDENT = {
   id: AI_ASSISTANT_ID,
-  firstname: "Bonded",
-  lastname: "AI",
+  firstname: "B.E.A.",
+  lastname: "",
   email: AI_ASSISTANT_EMAIL,
   studentID: AI_ASSISTANT_STUDENT_ID,
 };

@@ -1,100 +1,110 @@
 // Updated CommentModal.tsx 
-import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import {
-  View,
-  Text,
-  Modal,
-  TouchableOpacity,
-  TextInput,
-  StyleSheet,
-  FlatList,
-  Image,
-  ActivityIndicator,
-  BackHandler,
-  Alert,
-  Linking,
-  Dimensions,
-  KeyboardEvent ,
-  Keyboard,
-  Animated,
-  Platform,
-} from "react-native";
 import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
+import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { Ionicons } from "@expo/vector-icons";
+import { Image } from "expo-image";
 import { useRouter } from "expo-router";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+    ActivityIndicator,
+    Animated,
+    BackHandler,
+    Dimensions,
+    FlatList,
+    Keyboard,
+    KeyboardEvent,
+    Linking,
+    Modal,
+    Platform,
+    Image as RNImage,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
+} from "react-native";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import ReanimatedAnimated, {
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-  withTiming,
+    runOnJS,
+    useAnimatedStyle,
+    useSharedValue,
+    withSpring,
+    withTiming,
 } from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import {
-  collection,
-  addDoc,
-  query,
-  where,
-  onSnapshot,
-  orderBy,
-  updateDoc,
-  doc,
-  getDoc,
-  getDocs,
-  limit,
-  startAfter,
-  increment,
-  serverTimestamp,
-  deleteDoc,
-  deleteField,
-} from "firebase/firestore";
-import { db, auth } from "../../../Firebase_configure";
-import {
-  createMentionNotifications,
-  createNotification,
-  removeLikeNotification,
-  resolveMentionRecipientIds,
-  upsertLikeNotification,
-} from "@/utils/notifications";
 import { hasAiAssistantMention, isAiAssistantId } from "@/utils/aiAssistant";
-import {
-  AI_REQUEST_COOLDOWN_MS,
-  requestAiReplyFromWorker,
-  reserveAiCooldown,
-} from "@/utils/aiWorker";
 import { getAiErrorMessage } from "@/utils/aiConfig";
 import {
-  canViewModeratedContent,
-  getModerationPreviewText,
-  runLocalModerationRules,
-  requestModerationDecision,
-  requestFirestoreModerationDecision,
-  type ModerationDecision,
-} from "@/utils/contentModeration";
+    AI_REQUEST_COOLDOWN_MS,
+    requestAiReplyFromWorker,
+    reserveAiCooldown,
+} from "@/utils/aiWorker";
 import { resolveAvatarUri } from "@/utils/avatar";
-
-import ReplyThread from "./ReplyThread";
 import {
-  canDeleteContent,
-  canViewAnonymousIdentity,
-  getUserData,
-  getRoleColor,
-  getRoleDisplayName,
-  parseUserRole,
-  UserRole,
-} from "@/utils/rbac";
+    SELF_HARM_SAFETY_MESSAGE,
+    canViewModeratedContent,
+    requestFirestoreModerationDecision,
+    type ModerationDecision
+} from "@/utils/contentModeration";
+import {
+    confirmLostAndFoundResolution,
+    dismissLostAndFoundResolutionPrompt,
+    flagPotentialResolution,
+} from "@/utils/lostAndFoundResolution";
+import {
+    createMentionNotifications,
+    createNotification,
+    removeLikeNotification,
+    resolveMentionRecipientIds,
+    upsertLikeNotification,
+} from "@/utils/notifications";
+import {
+    getCachedComments,
+    saveCachedComments,
+} from "@/utils/offlineStorage";
+import {
+    addDoc,
+    collection,
+    deleteDoc,
+    deleteField,
+    doc,
+    getDoc,
+    getDocs,
+    increment,
+    limit,
+    onSnapshot,
+    orderBy,
+    query,
+    serverTimestamp,
+    startAfter,
+    updateDoc,
+    where,
+} from "firebase/firestore";
+import { auth, db } from "../../../Firebase_configure";
 
-import CommentComposer from "./CommentComposer";
-import AiReplyCard from "./AiReplyCard";
-import ExpandableText from "./ExpandableText";
-import ImageZoomViewer from "./ImageZoomViewer";
-import { buildUserProfileHref } from "@/utils/profileNavigation";
+import {
+    UserRole,
+    canDeleteContent,
+    canViewAnonymousIdentity,
+    getRoleColor,
+    getRoleDisplayName,
+    getUserData,
+    isStaff,
+    parseUserRole,
+    subscribeToUserDataUpdates,
+} from "@/utils/rbac";
+import ReplyThread from "./ReplyThread";
+
 import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
+import AiReplyCard from "./AiReplyCard";
+import CommentComposer from "./CommentComposer";
 import ConfirmDialog from "./ConfirmDialog";
 import ContentActionMenu from "./ContentActionMenu";
+import ExpandableText from "./ExpandableText";
+import ImageZoomViewer from "./ImageZoomViewer";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const KEYBOARD_COMPOSER_LIFT = Platform.OS === "android" ? 14 : 8;
@@ -159,7 +169,7 @@ type CommentModalProps = {
 
 type SortOption = "latest" | "relevant" | "all";
 
-const CommentItem: React.FC<{
+type CommentItemProps = {
   item: Comment;
   user: any;
   onLike: (commentId: string) => void;
@@ -168,7 +178,22 @@ const CommentItem: React.FC<{
   onOptionsPress: (comment: Comment, authorRole?: UserRole) => void;
   getTimeAgo: (timestamp: any) => string;
   isHighlighted?: boolean;
-}> = ({
+  onImagePress: (images: string[], startIndex: number) => void;
+  onLinkPress: (url: string) => void;
+  onTagClick: (taggedUserId: string) => void;
+  onFilePress: (url: string, filename: string) => void;
+};
+
+// React.memo here now has a real effect: previously the call site spread
+// onImagePress/onLinkPress/onTagClick/onFilePress INTO the `item` object on
+// every render (`item={{ ...item, onImagePress: ... }}`), which meant a
+// brand-new `item` object every render regardless of whether the actual
+// comment data changed — memo would never have bailed out. These are now
+// passed as their own props (see the interface above and the call site
+// below), so `item` can stay referentially stable across renders where the
+// underlying comment document hasn't changed, and memo can actually skip
+// re-rendering comments unaffected by whatever caused the list to re-render.
+function CommentItemComponent({
   item,
   user,
   onLike,
@@ -177,23 +202,39 @@ const CommentItem: React.FC<{
   onOptionsPress,
   getTimeAgo,
   isHighlighted = false,
-}) => {
+  onImagePress,
+  onLinkPress,
+  onTagClick,
+  onFilePress,
+}: CommentItemProps) {
   const [authorData, setAuthorData] = useState<any>(null);
   const [revealed, setRevealed] = useState(false);
   useEffect(() => {
+    let isActive = true;
+    const userIdToFetch = item.realUserId || item.userId;
     const fetchAuthor = async () => {
-      const userIdToFetch = item.realUserId || item.userId;
       if (userIdToFetch && userIdToFetch !== "anonymous") {
         try {
           const data = await getUserData(userIdToFetch);
-          setAuthorData(data);
+          if (isActive) setAuthorData(data);
         } catch (err) {
-          console.log("Error fetching author:", err);
+          console.error("Error fetching author:", err);
         }
       }
     };
     fetchAuthor();
-  }, [item.realUserId, item.userId]);
+
+    const unsubscribe = subscribeToUserDataUpdates((updatedId, updatedData) => {
+      if (isActive && userIdToFetch && (updatedId === userIdToFetch || updatedId === authorData?.studentID)) {
+        setAuthorData((prev: any) => (prev ? { ...prev, ...updatedData } : null));
+      }
+    });
+
+    return () => {
+      isActive = false;
+      unsubscribe();
+    };
+  }, [authorData?.studentID, item.realUserId, item.userId]);
 
   const authorRole = parseUserRole(authorData?.role) ?? parseUserRole(item.role);
   const roleColor = getRoleColor(authorRole || "student");
@@ -212,16 +253,20 @@ const CommentItem: React.FC<{
     ? `${authorData.firstname || ""} ${authorData.lastname || ""}`.trim()
     : "";
 
+  const authorId = item.realUserId || item.userId;
+  const isCurrentUser = !!user?.uid && authorId === user.uid;
+  const isStaffViewer = isStaff(parseUserRole(user?.role));
+
   const displayName = isIdentityVisible
     ? authorFullName || item.username?.trim() || "User"
-    : "Anonymous";
+    : (item.isAnonymous && isCurrentUser && isStaffViewer ? "Anonymous (You)" : "Anonymous");
 
   const canClickProfile =
     isIdentityVisible && !!authorData?.userId && authorData.userId !== "anonymous";
-  const avatarUri = resolveAvatarUri({
-    profileImage: item.profileImage || authorData?.profileImage,
-    profilePic: item.profilePic,
-  });
+  const liveAvatar = isCurrentUser
+    ? resolveAvatarUri(user)
+    : (resolveAvatarUri(authorData) || resolveAvatarUri({ profileImage: item.profileImage, profilePic: item.profilePic }));
+  const avatarUri = isIdentityVisible ? liveAvatar : null;
 
   const liked = item.likes?.includes(user?.uid);
 
@@ -232,7 +277,7 @@ const CommentItem: React.FC<{
 
   useEffect(() => {
     if (imageFiles.length > 0) {
-      Image.getSize(imageFiles[0].url, (w, h) => {
+      RNImage.getSize(imageFiles[0].url, (w, h) => {
         const ratio = h / w;
         setImageHeight(Math.min(SCREEN_WIDTH * ratio, 500));
       }, () => setImageHeight(200));
@@ -322,20 +367,20 @@ const CommentItem: React.FC<{
 
       {gifFiles.length > 0 && (
         <View style={styles.commentGifContainer}>
-          <Image source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }} style={styles.commentGif} resizeMode="cover" />
+          <Image source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }} style={styles.commentGif} contentFit="cover" />
         </View>
       )}
 
       {imageFiles.length > 0 && (
         <TouchableOpacity
           activeOpacity={0.9}
-          onPress={() => item.onImagePress?.(imageFiles.map(f => f.url), 0)}
+          onPress={() => onImagePress?.(imageFiles.map(f => f.url), 0)}
           style={styles.commentImageContainer}
         >
           <Image
             source={{ uri: feedImage(imageFiles[0].url, FEED_IMAGE_WIDTH) }}
             style={[styles.commentImageFull, { height: imageHeight }]}
-            resizeMode="cover"
+            contentFit="cover"
           />
           {imageFiles.length > 1 && (
             <View style={styles.imageCountBadge}>
@@ -348,30 +393,34 @@ const CommentItem: React.FC<{
 
       {docFiles.length > 0 && (
         <View style={styles.commentDocsContainer}>
-          {docFiles.map((file, idx) => (
-            <TouchableOpacity
-              key={idx}
-              style={styles.commentDocItem}
-              onPress={() => item.onFilePress?.(file.url, getFileDisplayName(file))}
-            >
-              <Ionicons
-                name={file.mimeType.includes("pdf") ? "document-text" : "document"}
-                size={16}
-                color="#4f9cff"
-              />
-              <Text style={styles.commentDocText} numberOfLines={1}>
-                {getFileDisplayName(file)}
-              </Text>
-              <Ionicons name="download-outline" size={14} color="#9b766c" />
-            </TouchableOpacity>
-          ))}
+          {docFiles.map((file, idx) => {
+            const displayName = getFileDisplayName(file);
+            const details = getFileIconDetails(file.mimeType, displayName);
+            return (
+              <TouchableOpacity
+                key={idx}
+                style={styles.commentDocItem}
+                onPress={() => onFilePress?.(file.url, displayName)}
+              >
+                <Ionicons
+                  name={details.icon}
+                  size={16}
+                  color={details.color}
+                />
+                <Text style={styles.commentDocText} numberOfLines={1}>
+                  {displayName}
+                </Text>
+                <Ionicons name="download-outline" size={14} color="#9b766c" />
+              </TouchableOpacity>
+            );
+          })}
         </View>
       )}
 
 {item.link && (
   <TouchableOpacity
     style={styles.commentLinkPreview}
-    onPress={() => item.onLinkPress?.(item.link?.url ?? '')}
+    onPress={() => onLinkPress?.(item.link?.url ?? '')}
   >
     <Ionicons name="link" size={16} color="#4f9cff" />
     <View style={{ flex: 1, marginLeft: 8 }}>
@@ -387,7 +436,7 @@ const CommentItem: React.FC<{
 )}
 
       {item.taggedUsers && item.taggedUsers.length > 0 && (
-        <TaggedUsersDisplay taggedUsers={item.taggedUsers} onTagClick={item.onTagClick} />
+        <TaggedUsersDisplay taggedUsers={item.taggedUsers} onTagClick={onTagClick} />
       )}
 
       <AiReplyCard reply={item.aiReply} compact />
@@ -416,7 +465,9 @@ const CommentItem: React.FC<{
       </View>
     </View>
   );
-};
+}
+
+const CommentItem = React.memo(CommentItemComponent);
 
 const TaggedUsersDisplay = ({
   taggedUsers,
@@ -493,6 +544,15 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const [editingText, setEditingText] = useState("");
   const [savingCommentEdit, setSavingCommentEdit] = useState(false);
   const [commentActionMenu, setCommentActionMenu] = useState<Comment | null>(null);
+  // Part 4: live post fields, used only to show the "mark as found?" prompt
+  // to the original poster when Lost & Found resolution is detected.
+  const [postFields, setPostFields] = useState<{
+    userId?: string;
+    realUserId?: string;
+    flair?: string;
+    resolutionPrompt?: { commentId: string; commentText: string; flaggedAtMs: number } | null;
+  } | null>(null);
+  const [resolvingPrompt, setResolvingPrompt] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string;
     description?: string;
@@ -644,8 +704,27 @@ const CommentModal: React.FC<CommentModalProps> = ({
     return unsubscribe;
   }, []);
 
+  // Part 4: live subscription so the "mark as found?" banner (owner-only)
+  // appears/disappears as resolutionPrompt changes, without a manual refetch.
   useEffect(() => {
     if (!postId) return;
+    const unsubscribe = onSnapshot(doc(db, "posts", postId), (snap) => {
+      setPostFields(snap.exists() ? (snap.data() as typeof postFields) : null);
+    });
+    return unsubscribe;
+  }, [postId]);
+
+  useEffect(() => {
+    if (!postId) return;
+
+    let isMounted = true;
+    getCachedComments<Comment>(postId).then((cached) => {
+      if (isMounted && cached && cached.length > 0) {
+        setComments((prev) => (prev.length === 0 ? cached : prev));
+        setLoading(false);
+      }
+    });
+
     setLoading(true);
     setHasMoreComments(true);
     lastCommentDocRef.current = null;
@@ -671,9 +750,14 @@ const CommentModal: React.FC<CommentModalProps> = ({
         }));
       setComments(fetchedComments);
       setLoading(false);
+      saveCachedComments(postId, fetchedComments);
     });
 
     return unsubscribe;
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
   }, [postId, user?.role, user?.uid]);
 
   useEffect(() => {
@@ -786,35 +870,17 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const handleSend = async (commentData: any) => {
     if (!user?.uid) return;
 
+    const shouldTriggerAi =
+      hasAiAssistantMention(commentData.text) ||
+      (commentData.taggedUsers || []).some((tag: any) => isAiAssistantId(tag.id));
+
     const newComment = {
       ...commentData,
       postId,
       createdAt: serverTimestamp(),
     };
-    // Fast local gate: only clearly prohibited content blocks synchronously.
-    // Safe/ambiguous text is written as pending immediately; server moderation
-    // continues in the background so the composer can reset without waiting.
-    const localDecision = runLocalModerationRules(
-      getModerationPreviewText({
-        text: commentData.text,
-        linkTitle: commentData.link?.title,
-        fileCount: commentData.files?.length,
-      }),
-    );
-
-    if (localDecision.status === "rejected") {
-      setConfirmDialog({
-        title: "Comment Blocked",
-        description: localDecision.reasons?.[0] || "This comment violates the community guidelines.",
-        confirmText: "OK",
-        singleAction: true,
-        destructive: true,
-        onConfirm: () => setConfirmDialog(null),
-      });
-      return;
-    }
-
-    // Never let the client self-approve. Every comment enters Firestore as pending.
+    // Pure OpenModeration text flow: never block locally. Every comment is
+    // written as pending first and then re-read by the trusted Worker.
     newComment.moderationStatus = "pending";
     newComment.moderationReasons = [];
     newComment.moderatedAtMs = null;
@@ -823,34 +889,47 @@ const CommentModal: React.FC<CommentModalProps> = ({
     void (async () => {
       let moderationDecision: ModerationDecision;
       try {
-      moderationDecision = await requestFirestoreModerationDecision({
-        collectionName: "comments",
-        documentId: commentRef.id,
-        scope: "comment",
-      });
-    } catch (error) {
-      console.warn("[Comment] Server moderation unavailable; comment remains pending:", error);
-      setConfirmDialog({
-        title: "Comment Pending Review",
-        description: "Automatic moderation is temporarily unavailable. Your comment is waiting for moderator approval.",
-        confirmText: "OK",
-        singleAction: true,
-        destructive: false,
-        onConfirm: () => setConfirmDialog(null),
-      });
-      return;
-    }
-    if (moderationDecision.status !== "approved") {
-      setConfirmDialog({
-        title: moderationDecision.status === "rejected" ? "Comment Blocked" : "Comment Pending Review",
-        description: moderationDecision.reasons?.[0] || (moderationDecision.status === "rejected" ? "This comment was blocked." : "This comment is waiting for moderator approval."),
-        confirmText: "OK",
-        singleAction: true,
-        destructive: moderationDecision.status === "rejected",
-        onConfirm: () => setConfirmDialog(null),
-      });
-      return;
-    }
+        moderationDecision = await requestFirestoreModerationDecision({
+          collectionName: "comments",
+          documentId: commentRef.id,
+          scope: "comment",
+        });
+      } catch (error) {
+        console.warn("[Comment] Server moderation unavailable; comment remains pending:", error);
+        setConfirmDialog({
+          title: "Comment Pending Review",
+          description: "Automatic moderation is temporarily unavailable. Your comment is waiting for reviewer approval.",
+          confirmText: "OK",
+          singleAction: true,
+          destructive: false,
+          onConfirm: () => setConfirmDialog(null),
+        });
+        return;
+      }
+
+      if (moderationDecision.selfHarm === true) {
+        setConfirmDialog({
+          title: "We’re concerned about your safety",
+          description: SELF_HARM_SAFETY_MESSAGE,
+          confirmText: "OK",
+          singleAction: true,
+          destructive: false,
+          onConfirm: () => setConfirmDialog(null),
+        });
+        return;
+      }
+
+      if (moderationDecision.status !== "approved") {
+        setConfirmDialog({
+          title: "Comment Pending Review",
+          description: moderationDecision.reasons?.[0] || "This comment is waiting for reviewer approval.",
+          confirmText: "OK",
+          singleAction: true,
+          destructive: false,
+          onConfirm: () => setConfirmDialog(null),
+        });
+        return;
+      }
 
     await updateDoc(doc(db, "posts", postId), {
       commentCount: increment(1),
@@ -859,6 +938,17 @@ const CommentModal: React.FC<CommentModalProps> = ({
     const postSnap = await getDoc(doc(db, "posts", postId));
     const postData = postSnap.exists() ? postSnap.data() : null;
     const postOwnerId = postData?.realUserId || postData?.userId;
+
+    // Part 4: background-only, never generates a chat reply — only flags a
+    // dismissible "mark as found?" prompt for the original poster later.
+    if (postData?.flair === "lost_found") {
+      void flagPotentialResolution({
+        postId,
+        commentId: commentRef.id,
+        commentText: commentData.text || "",
+      }).catch((error) => console.error("[Comment] Resolution detection failed:", error));
+    }
+
       const actor = {
         id: user.uid,
         name: commentData.username,
@@ -904,10 +994,6 @@ const CommentModal: React.FC<CommentModalProps> = ({
         console.error("Comment notifications failed:", error);
       }
     }
-
-    const shouldTriggerAi =
-      hasAiAssistantMention(commentData.text) ||
-      (commentData.taggedUsers || []).some((tag: any) => isAiAssistantId(tag.id));
 
     if (!shouldTriggerAi) {
       return;
@@ -1201,7 +1287,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         }
       });
     } catch (error) {
-      console.log("Navigation error:", error);
+      console.error("Navigation error:", error);
       setIsNavigating(false);
     }
   }, [closeAndNavigate, user, router, setIsNavigating]);
@@ -1225,12 +1311,12 @@ const CommentModal: React.FC<CommentModalProps> = ({
         }
       });
     } catch (error) {
-      console.log("Navigation error:", error);
+      console.error("Navigation error:", error);
       setIsNavigating(false);
     }
   }, [closeAndNavigate, user, router, setIsNavigating]);
 
-  const handleLinkPress = (url: string) => {
+  const handleLinkPress = useCallback((url: string) => {
     Linking.canOpenURL(url)
       .then((supported) => {
         if (supported) Linking.openURL(url);
@@ -1251,9 +1337,9 @@ const CommentModal: React.FC<CommentModalProps> = ({
         destructive: true,
         onConfirm: () => setConfirmDialog(null),
       }));
-  };
+  }, []);
 
-  const handleFilePress = async (url: string, filename: string) => {
+  const handleFilePress = useCallback(async (url: string, filename: string) => {
     try {
       const supported = await Linking.canOpenURL(url);
       if (supported) {
@@ -1279,13 +1365,13 @@ const CommentModal: React.FC<CommentModalProps> = ({
         onConfirm: () => setConfirmDialog(null),
       });
     }
-  };
+  }, []);
 
-  const handleImagePress = (images: string[], startIndex: number) => {
+  const handleImagePress = useCallback((images: string[], startIndex: number) => {
     setSelectedImages(images);
     setSelectedImageIndex(startIndex);
     setImageViewerVisible(true);
-  };
+  }, []);
 
   const getTimeAgo = (timestamp: any) => {
     if (!timestamp) return "";
@@ -1299,6 +1385,37 @@ const CommentModal: React.FC<CommentModalProps> = ({
     if (diffHr < 24) return `${diffHr}h ago`;
     const diffDay = Math.floor(diffHr / 24);
     return `${diffDay}d ago`;
+  };
+
+  // Part 4: only the original poster ever sees this — never other viewers.
+  const isPostOwner =
+    !!user?.uid &&
+    !!postFields &&
+    (postFields.userId === user.uid || postFields.realUserId === user.uid);
+  const activeResolutionPrompt = isPostOwner ? postFields?.resolutionPrompt : null;
+
+  const handleConfirmResolution = async () => {
+    if (!postId || resolvingPrompt) return;
+    setResolvingPrompt(true);
+    try {
+      await confirmLostAndFoundResolution(postId);
+    } catch (error) {
+      console.error("[CommentModal] Failed to confirm resolution:", error);
+    } finally {
+      setResolvingPrompt(false);
+    }
+  };
+
+  const handleDismissResolution = async () => {
+    if (!postId || resolvingPrompt) return;
+    setResolvingPrompt(true);
+    try {
+      await dismissLostAndFoundResolutionPrompt(postId);
+    } catch (error) {
+      console.error("[CommentModal] Failed to dismiss resolution prompt:", error);
+    } finally {
+      setResolvingPrompt(false);
+    }
   };
 
   if (!internalVisible) return null;
@@ -1403,22 +1520,48 @@ const CommentModal: React.FC<CommentModalProps> = ({
       </TouchableOpacity>
     </View>
 
+    {activeResolutionPrompt && (
+      <View style={styles.resolutionBanner}>
+        <Ionicons name="checkmark-circle-outline" size={18} color="#2f9e44" />
+        <Text style={styles.resolutionBannerText}>
+          Looks like this might be resolved — mark as found?
+        </Text>
+        <View style={styles.resolutionBannerActions}>
+          <TouchableOpacity
+            style={styles.resolutionBannerDismiss}
+            onPress={handleDismissResolution}
+            disabled={resolvingPrompt}
+          >
+            <Text style={styles.resolutionBannerDismissText}>Dismiss</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.resolutionBannerConfirm}
+            onPress={handleConfirmResolution}
+            disabled={resolvingPrompt}
+          >
+            <Text style={styles.resolutionBannerConfirmText}>Mark as found</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    )}
+
     {/* FlatList and Composer now scroll freely without triggering dismiss gestures */}
     <View style={styles.contentArea}>
       <FlatList
         ref={flatListRef}
         data={displayedComments}
         keyExtractor={(item) => item.id}
+        // Virtualization tuning: comment threads can include images and grow
+        // long on popular posts, so keep the render window modest instead of
+        // RN's default full-list rendering.
+        initialNumToRender={12}
+        maxToRenderPerBatch={8}
+        windowSize={9}
+        removeClippedSubviews={Platform.OS === "android"}
         renderItem={({ item }) =>
           loading ? null : (
             <CommentItem
-              item={{
-                ...item,
-                onImagePress: handleImagePress,
-                onLinkPress: handleLinkPress,
-                onTagClick: handleTagClick,
-                onFilePress: handleFilePress,
-              }}
+              item={item}
               user={user}
               onLike={handleLikeComment}
               onProfileClick={handleProfileClick}
@@ -1426,6 +1569,10 @@ const CommentModal: React.FC<CommentModalProps> = ({
               onOptionsPress={handleCommentOptions}
               getTimeAgo={getTimeAgo}
               isHighlighted={item.id === initialCommentId}
+              onImagePress={handleImagePress}
+              onLinkPress={handleLinkPress}
+              onTagClick={handleTagClick}
+              onFilePress={handleFilePress}
             />
           )
         }
@@ -1494,7 +1641,13 @@ const CommentModal: React.FC<CommentModalProps> = ({
       setSelectedComment(null);
     }}
     commentId={selectedComment.id}
-    commentAuthor={selectedComment.isAnonymous ? "Anonymous" : selectedComment.username || "User"}
+    commentAuthor={
+      selectedComment.isAnonymous
+        ? (!!user?.uid && (selectedComment.realUserId || selectedComment.userId) === user.uid && isStaff(parseUserRole(user?.role))
+            ? "Anonymous (You)"
+            : "Anonymous")
+        : selectedComment.username || "User"
+    }
     currentUser={user}
     initialReplyId={
       selectedComment.id === initialCommentId
@@ -1566,8 +1719,42 @@ const CommentModal: React.FC<CommentModalProps> = ({
             }
             setSavingCommentEdit(true);
             try {
-              await updateDoc(doc(db, "comments", editingComment.id), { text: nextText, updatedAt: serverTimestamp() });
+              await updateDoc(doc(db, "comments", editingComment.id), {
+                text: nextText,
+                updatedAt: serverTimestamp(),
+                moderationStatus: "pending",
+                moderationReasons: [],
+                moderatedAtMs: null,
+                aiReply: deleteField(),
+              });
+
+              const moderationDecision = await requestFirestoreModerationDecision({
+                collectionName: "comments",
+                documentId: editingComment.id,
+                scope: "comment",
+              });
+
               setEditingComment(null);
+
+              if (moderationDecision.selfHarm === true) {
+                setConfirmDialog({
+                  title: "We’re concerned about your safety",
+                  description: SELF_HARM_SAFETY_MESSAGE,
+                  confirmText: "OK",
+                  singleAction: true,
+                  destructive: false,
+                  onConfirm: () => setConfirmDialog(null),
+                });
+              } else if (moderationDecision.status === "pending") {
+                setConfirmDialog({
+                  title: "Comment Pending Review",
+                  description: "Your edited comment is waiting for reviewer approval.",
+                  confirmText: "OK",
+                  singleAction: true,
+                  destructive: false,
+                  onConfirm: () => setConfirmDialog(null),
+                });
+              }
             } catch (error) {
               console.error("Error editing comment:", error);
               setConfirmDialog({
@@ -1604,7 +1791,7 @@ const styles = StyleSheet.create({
   editSaveButton: { flex: 1, minHeight: 44, borderRadius: 12, backgroundColor: "#7a0020", alignItems: "center", justifyContent: "center" },
   editSaveText: { color: "#fff", fontWeight: "700" },
   modalOverlay: { flex: 1 },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.82)" },
+  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: "rgba(0,0,0,0.82)" },
 modalContainer: {
   position: "absolute",
   bottom: 0,
@@ -1657,6 +1844,48 @@ modalContainer: {
   },
   sortText: { color: "#9b766c", fontSize: 13, fontWeight: "600" },
   sortTextActive: { color: "#e0a53d" },
+
+  resolutionBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: "#eafaf0",
+    borderBottomWidth: 1,
+    borderBottomColor: "#cdeedb",
+  },
+  resolutionBannerText: {
+    flex: 1,
+    color: "#1f6e3d",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  resolutionBannerActions: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  resolutionBannerDismiss: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 14,
+  },
+  resolutionBannerDismissText: {
+    color: "#6b8f7a",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  resolutionBannerConfirm: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
+    backgroundColor: "#2f9e44",
+  },
+  resolutionBannerConfirmText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "700",
+  },
 
   emptyContainer: {
     flex: 1,

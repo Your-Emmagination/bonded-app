@@ -1,48 +1,60 @@
 // app/(main)/(tabs)/DashboardScreen.tsx
 const YEAR_LEVEL_OPTIONS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "Graduated"];
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  ScrollView, 
-  ActivityIndicator,
-  TouchableOpacity,
-  Dimensions,
-  Alert,
-  TextInput,
-  Image,
-} from "react-native";
-import { Ionicons } from "@expo/vector-icons";
 import { avatarThumb, feedImage } from "@/utils/cloudinaryImages";
-import ImageZoomViewer from "../components/ImageZoomViewer";
-import { createModerationNotification } from "@/utils/notifications";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useNetworkStatus } from "@/utils/networkUtils";
+import {
+    createModerationApprovalNotification,
+    createModerationNotification,
+    createServerDeletionOutcomeNotification,
+} from "@/utils/notifications";
+import {
+    getCachedDashboardData,
+    saveCachedDashboardData,
+} from "@/utils/offlineStorage";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
+import {
+    canManageAiMemory,
+    canManageUsers,
+    getPermissionsForRole,
+    getRoleDisplayName,
+    getRoleHierarchyLevel,
+    isStaff,
+    parseUserRole,
+    resolveUserRoleForAuthUser,
+    type UserRole,
+} from "@/utils/rbac";
+import { Ionicons } from "@expo/vector-icons";
+import { Image } from "expo-image";
+import { useFocusEffect, useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
 import {
-  collection,
-  query,
-  onSnapshot,
-  where,
-  doc,
-  updateDoc,
-  deleteDoc,
-  serverTimestamp,
+    collection,
+    deleteDoc,
+    doc,
+    getCountFromServer,
+    onSnapshot,
+    query,
+    serverTimestamp,
+    setDoc,
+    updateDoc,
+    where,
 } from "firebase/firestore";
-import { db, auth } from "../../../Firebase_configure";
-import { useRouter } from "expo-router";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  canManageUsers,
-  canManageAiMemory,
-  getPermissionsForRole,
-  getRoleDisplayName,
-  getRoleHierarchyLevel,
-  isStaff,
-  parseUserRole,
-  resolveUserRoleForAuthUser,
-  type UserRole,
-} from "@/utils/rbac";
-import { buildUserProfileHref } from "@/utils/profileNavigation";
+    ActivityIndicator,
+    Dimensions,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { auth, db } from "../../../Firebase_configure";
+import ConfirmDialog from "../components/ConfirmDialog";
+import ImageZoomViewer from "../components/ImageZoomViewer";
+import { DashboardSkeleton } from "../components/Skeleton";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -87,8 +99,50 @@ const MANAGED_ROLE_OPTIONS: {
 ];
 
 export default function DashboardScreen() {
+  const { isOffline } = useNetworkStatus();
   const [userRole, setUserRole] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // Single dialog state used to render every alert on this screen through
+  // the app's branded ConfirmDialog instead of the bare native Alert.alert.
+  const [dialog, setDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
+  const showInfo = (title: string, description?: string, onConfirm?: () => void) => {
+    setDialog({
+      title,
+      description,
+      confirmText: "OK",
+      singleAction: true,
+      onConfirm: () => {
+        setDialog(null);
+        onConfirm?.();
+      },
+    });
+  };
+  const showConfirm = (options: {
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    onConfirm: () => void;
+  }) => {
+    setDialog({
+      ...options,
+      onConfirm: () => {
+        setDialog(null);
+        options.onConfirm();
+      },
+    });
+  };
+
   const [stats, setStats] = useState({
     totalPosts: 0,
     totalPolls: 0,
@@ -107,12 +161,28 @@ export default function DashboardScreen() {
       userId?: string | null;
       isAnonymous?: boolean;
       reasons: string[];
+      categories?: string[];
+      priority?: "normal" | "critical";
+      safetyType?: string | null;
       createdAt?: any;
       imageUrl?: string | null;
     }[]
   >([]);
   const [moderationImageViewerUrl, setModerationImageViewerUrl] = useState<string | null>(null);
   const [moderationBusyId, setModerationBusyId] = useState<string | null>(null);
+  // Task 6: pending server-deletion requests (admin review queue).
+  const [deletionRequests, setDeletionRequests] = useState<
+    {
+      id: string;
+      serverId: string;
+      serverName: string;
+      requestedBy: string;
+      requesterName: string;
+      reason: string;
+      createdAt?: any;
+    }[]
+  >([]);
+  const [deletionBusyId, setDeletionBusyId] = useState<string | null>(null);
   const [managedUsers, setManagedUsers] = useState<ManagedUserRecord[]>([]);
   const [managedUserSearch, setManagedUserSearch] = useState("");
   const [managedUserFilter, setManagedUserFilter] =
@@ -128,6 +198,13 @@ export default function DashboardScreen() {
   const canManageModeration = isStaff(normalizedUserRole);
   const canOpenAiMemory = canManageAiMemory(normalizedUserRole);
   const canOpenManageUsers = canManageUsers(normalizedUserRole);
+  // User and moderation management live on dedicated screens now — the "Manage
+  // Users" quick action links to ManageUsersScreen, which owns the paginated,
+  // virtualized roster. This flag keeps the old inline sections (and their
+  // handlers) parked but unrendered; there is no separate students listener
+  // feeding them any more (dashboard stats use getCountFromServer), so the
+  // inline roster is not a second live copy of that data to keep correct.
+  const showInlineManagementSections = false;
   const currentStudentDocId = auth.currentUser?.email?.split("@")[0] || null;
   const managedUserRoleCounts = useMemo(
     () => ({
@@ -193,7 +270,7 @@ export default function DashboardScreen() {
         }
 
         const role = await resolveUserRoleForAuthUser(user);
-        console.log("📊 Dashboard - User Role:", role);
+        if (__DEV__) console.log("📊 Dashboard - User Role:", role);
         setUserRole(role);
       } catch (error) {
         console.error("Error loading role:", error);
@@ -221,43 +298,104 @@ export default function DashboardScreen() {
 
   
 
-  // Real-time stats listeners
+  useEffect(() => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    getCachedDashboardData<typeof stats>(uid).then((cached) => {
+      if (cached) {
+        setStats(cached);
+      }
+    });
+  }, [userRole]);
+
+  // Stat-card counts. Previously six live onSnapshot listeners on whole
+  // collections (posts / polls / students x2 / comments / events) just to read
+  // snapshot.size — every one downloaded and held every document, live,
+  // forever. getCountFromServer returns just the number, server-side, no docs.
+  // One-shot, so we refresh it when the tab regains focus.
+  const refreshStats = useCallback(async () => {
+    if (!auth.currentUser) return;
+    try {
+      const [posts, polls, users, online, comments, events] = await Promise.all([
+        getCountFromServer(collection(db, "posts")),
+        getCountFromServer(collection(db, "polls")),
+        getCountFromServer(collection(db, "students")),
+        getCountFromServer(
+          query(collection(db, "students"), where("isOnline", "==", true)),
+        ),
+        getCountFromServer(collection(db, "comments")),
+        getCountFromServer(collection(db, "events")),
+      ]);
+      const nextStats = {
+        totalPosts: posts.data().count,
+        totalPolls: polls.data().count,
+        totalUsers: users.data().count,
+        onlineUsers: online.data().count,
+        totalComments: comments.data().count,
+        totalEvents: events.data().count,
+      };
+      setStats((prev) => ({
+        ...prev,
+        ...nextStats,
+      }));
+      if (auth.currentUser?.uid) {
+        saveCachedDashboardData(auth.currentUser.uid, nextStats);
+      }
+    } catch (error) {
+      console.error("Error loading dashboard stats:", error);
+    }
+  }, []);
+
+  // Refresh on focus, and again once the role (and therefore auth) has
+  // resolved on the first visit.
+  useFocusEffect(
+    useCallback(() => {
+      if (userRole) void refreshStats();
+    }, [refreshStats, userRole]),
+  );
+
+  // Moderation queue listeners — currently dormant behind
+  // showInlineManagementSections (see the note on that flag). Only wired up
+  // when the inline management sections are actually shown, so this stays a
+  // no-op today.
   useEffect(() => {
     if (!auth.currentUser) return;
+    if (!(canManageModeration && showInlineManagementSections)) return;
 
-  const extractPreviewImageUrl = (
-    item: any,
-    type: "post" | "poll" | "comment" | "reply" | "message",
-  ): string | null => {
-    if (type === "poll") {
+    const extractPreviewImageUrl = (
+      item: any,
+      type: "post" | "poll" | "comment" | "reply" | "message",
+    ): string | null => {
+      if (type === "poll") {
+        return typeof item.imageUrl === "string" ? item.imageUrl : null;
+      }
+
+      const files = Array.isArray(item.files) ? item.files : [];
+      const firstImage = files.find(
+        (f: any) =>
+          typeof f?.mimeType === "string" &&
+          f.mimeType.startsWith("image/") &&
+          !f.mimeType.includes("gif"),
+      );
+      if (firstImage?.url) return firstImage.url;
+
+      // Legacy single-image field still used by some older posts.
       return typeof item.imageUrl === "string" ? item.imageUrl : null;
-    }
+    };
 
-    const files = Array.isArray(item.files) ? item.files : [];
-    const firstImage = files.find(
-      (f: any) =>
-        typeof f?.mimeType === "string" &&
-        f.mimeType.startsWith("image/") &&
-        !f.mimeType.includes("gif"),
-    );
-    if (firstImage?.url) return firstImage.url;
-
-    // Legacy single-image field still used by some older posts.
-    return typeof item.imageUrl === "string" ? item.imageUrl : null;
-  };
-
-  const unsubscribers: (() => void)[] = [];
+    const unsubscribers: (() => void)[] = [];
     const subscribePending = (
       collectionName: string,
       type: "post" | "poll" | "comment" | "reply" | "message",
       textSelector: (data: any) => string,
     ) =>
-      onSnapshot(collection(db, collectionName), (snapshot) => {
+      onSnapshot(
+        query(collection(db, collectionName), where("moderationStatus", "==", "pending")),
+        (snapshot) => {
         setModerationItems((prev) => {
           const remaining = prev.filter((item) => item.type !== type);
           const pendingItems = snapshot.docs
             .map((item) => ({ id: item.id, ...item.data() }))
-            .filter((item: any) => item.moderationStatus === "pending")
             .map((item: any) => ({
               id: item.id,
               type,
@@ -269,106 +407,53 @@ export default function DashboardScreen() {
               reasons: Array.isArray(item.moderationReasons)
                 ? item.moderationReasons
                 : [],
+              categories: Array.isArray(item.moderationCategories)
+                ? item.moderationCategories
+                : [],
+              priority:
+                item.moderationPriority === "critical"
+                  ? ("critical" as const)
+                  : ("normal" as const),
+              safetyType: item.moderationSafetyType ?? null,
               createdAt: item.createdAt,
               imageUrl: extractPreviewImageUrl(item, type),
             }));
           return [...remaining, ...pendingItems].sort((a, b) => {
+            if ((a.priority === "critical") !== (b.priority === "critical")) {
+              return a.priority === "critical" ? -1 : 1;
+            }
             const first = a.createdAt?.toMillis?.() || 0;
             const second = b.createdAt?.toMillis?.() || 0;
             return second - first;
           });
         });
-      });
-
-    // Posts count
-    const postsQuery = query(collection(db, "posts"));
-    const unsubPosts = onSnapshot(postsQuery, (snapshot) => {
-      setStats(prev => ({ ...prev, totalPosts: snapshot.size }));
-    });
-    unsubscribers.push(unsubPosts);
-
-    // Polls count
-    const pollsQuery = query(collection(db, "polls"));
-    const unsubPolls = onSnapshot(pollsQuery, (snapshot) => {
-      setStats(prev => ({ ...prev, totalPolls: snapshot.size }));
-    });
-    unsubscribers.push(unsubPolls);
-
-    // Users count
-    const usersQuery = query(collection(db, "students"));
-    const unsubUsers = onSnapshot(usersQuery, (snapshot) => {
-      setStats(prev => ({ ...prev, totalUsers: snapshot.size }));
-
-      if (!canOpenManageUsers) return;
-
-      const nextUsers = snapshot.docs.map((item) => {
-        const data = item.data() as ManagedUserRecord;
-        return {
-          id: item.id,
-          userId: data.userId ?? null,
-          firstname: data.firstname || "",
-          lastname: data.lastname || "",
-          email: data.email || "",
-          studentID: data.studentID || item.id,
-          course: data.course || "",
-          yearlvl: data.yearlvl || "",
-          role: data.role || "student",
-          isOnline: data.isOnline === true,
-          profileImage: data.profileImage || null,
-        } satisfies ManagedUserRecord;
-      });
-
-      setManagedUsers(nextUsers);
-    });
-    unsubscribers.push(unsubUsers);
-
-    // Online users count
-    const onlineQuery = query(collection(db, "students"), where("isOnline", "==", true));
-    const unsubOnline = onSnapshot(onlineQuery, (snapshot) => {
-      setStats(prev => ({ ...prev, onlineUsers: snapshot.size }));
-    });
-    unsubscribers.push(unsubOnline);
-
-    // Comments count
-    const commentsQuery = query(collection(db, "comments"));
-    const unsubComments = onSnapshot(commentsQuery, (snapshot) => {
-      setStats(prev => ({ ...prev, totalComments: snapshot.size }));
-    });
-    unsubscribers.push(unsubComments);
-
-    // Events count
-    const eventsQuery = query(collection(db, "events"));
-    const unsubEvents = onSnapshot(eventsQuery, (snapshot) => {
-      setStats(prev => ({ ...prev, totalEvents: snapshot.size }));
-    });
-    unsubscribers.push(unsubEvents);
-
-    if (canManageModeration) {
-      unsubscribers.push(
-        subscribePending("posts", "post", (item) => item.content || "[empty post]"),
+      },
       );
-      unsubscribers.push(
-        subscribePending("polls", "poll", (item) => item.question || "[empty poll]"),
-      );
-      unsubscribers.push(
-        subscribePending("comments", "comment", (item) => item.text || "[empty comment]"),
-      );
-      unsubscribers.push(
-        subscribePending("replies", "reply", (item) => item.text || "[empty reply]"),
-      );
-      unsubscribers.push(
-        subscribePending(
-          "communityThreadMessages",
-          "message",
-          (item) => item.text || "[empty message]",
-        ),
-      );
-    }
+
+    unsubscribers.push(
+      subscribePending("posts", "post", (item) => item.content || "[empty post]"),
+    );
+    unsubscribers.push(
+      subscribePending("polls", "poll", (item) => item.question || "[empty poll]"),
+    );
+    unsubscribers.push(
+      subscribePending("comments", "comment", (item) => item.text || "[empty comment]"),
+    );
+    unsubscribers.push(
+      subscribePending("replies", "reply", (item) => item.text || "[empty reply]"),
+    );
+    unsubscribers.push(
+      subscribePending(
+        "communityThreadMessages",
+        "message",
+        (item) => item.text || "[empty message]",
+      ),
+    );
 
     return () => {
       unsubscribers.forEach(unsub => unsub());
     };
-  }, [canManageModeration, canOpenManageUsers]);
+  }, [canManageModeration]);
 
   const getCollectionNameForType = (
     type: "post" | "poll" | "comment" | "reply" | "message",
@@ -379,20 +464,56 @@ export default function DashboardScreen() {
     return `${type}s`;
   };
 
-  const handleApproveModeration = async (
-    itemId: string,
-    type: "post" | "poll" | "comment" | "reply" | "message",
-  ) => {
+  const handleApproveModeration = async (item: (typeof moderationItems)[number]) => {
+    if (isOffline) {
+      showInfo("Offline", "Approving content is unavailable while offline.");
+      return;
+    }
+    const reviewerUid = auth.currentUser?.uid || null;
+    const authorUid = item.realUserId || item.userId || null;
+
+    if (!reviewerUid) {
+      showInfo("Sign In Required", "You must be signed in to review content.");
+      return;
+    }
+
+    if (authorUid && reviewerUid === authorUid) {
+      showInfo(
+        "Self-Approval Not Allowed",
+        "You cannot approve content that you authored. Another Teacher, Moderator, or Admin must review it.",
+      );
+      return;
+    }
+
     try {
-      setModerationBusyId(itemId);
-      await updateDoc(doc(db, getCollectionNameForType(type), itemId), {
+      setModerationBusyId(item.id);
+      await updateDoc(doc(db, getCollectionNameForType(item.type), item.id), {
         moderationStatus: "approved",
         moderationReviewedAt: serverTimestamp(),
-        moderationReviewedBy: auth.currentUser?.uid || null,
+        moderationReviewedBy: reviewerUid,
       });
+
+      if (
+        authorUid &&
+        authorUid !== "anonymous" &&
+        (item.type === "post" || item.type === "poll")
+      ) {
+        await createModerationApprovalNotification({
+          recipientId: authorUid,
+          moderator: {
+            id: reviewerUid,
+            name: auth.currentUser?.displayName || "A moderator",
+          },
+          entityType: item.type,
+          entityId: item.id,
+          preview: item.text,
+        }).catch((error) => {
+          console.error("Error sending approval notification:", error);
+        });
+      }
     } catch (error) {
       console.error("Error approving content:", error);
-      Alert.alert("Error", "Failed to approve content.");
+      showInfo("Error", "Failed to approve content.");
     } finally {
       setModerationBusyId(null);
     }
@@ -406,46 +527,188 @@ export default function DashboardScreen() {
     userId?: string | null;
     reasons: string[];
   }) => {
-    Alert.alert("Delete Content", "This will permanently remove the restricted content.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            setModerationBusyId(item.id);
-            await deleteDoc(doc(db, getCollectionNameForType(item.type), item.id));
+    if (isOffline) {
+      showInfo("Offline", "Deleting content is unavailable while offline.");
+      return;
+    }
+    showConfirm({
+      title: "Delete Content",
+      description: "This will permanently remove the flagged content.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: async () => {
+        try {
+          setModerationBusyId(item.id);
+          await deleteDoc(doc(db, getCollectionNameForType(item.type), item.id));
 
-            const recipientId = item.realUserId || item.userId;
-            if (
-              recipientId &&
-              recipientId !== "anonymous" &&
-              (item.type === "post" || item.type === "comment" || item.type === "reply")
-            ) {
-              await createModerationNotification({
-                recipientId,
-                moderator: {
-                  id: auth.currentUser?.uid || "moderation-system",
-                  name: auth.currentUser?.displayName || "A moderator",
-                },
-                entityType: item.type,
-                entityId: item.id,
-                reasons: item.reasons,
-                preview: item.text,
-              }).catch((error) => {
-                // Don't let a notification failure look like the delete itself failed.
-                console.error("Error sending moderation notification:", error);
-              });
-            }
-          } catch (error) {
-            console.error("Error deleting content:", error);
-            Alert.alert("Error", "Failed to delete content.");
-          } finally {
-            setModerationBusyId(null);
+          const recipientId = item.realUserId || item.userId;
+          if (
+            recipientId &&
+            recipientId !== "anonymous" &&
+            (item.type === "post" || item.type === "comment" || item.type === "reply")
+          ) {
+            await createModerationNotification({
+              recipientId,
+              moderator: {
+                id: auth.currentUser?.uid || "moderation-system",
+                name: auth.currentUser?.displayName || "A moderator",
+              },
+              entityType: item.type,
+              entityId: item.id,
+              reasons: item.reasons,
+              preview: item.text,
+            }).catch((error) => {
+              // Don't let a notification failure look like the delete itself failed.
+              console.error("Error sending moderation notification:", error);
+            });
           }
-        },
+        } catch (error) {
+          console.error("Error deleting content:", error);
+          showInfo("Error", "Failed to delete content.");
+        } finally {
+          setModerationBusyId(null);
+        }
       },
-    ]);
+    });
+  };
+
+  // Task 6: admins watch the pending server-deletion queue. Non-admins never
+  // see or resolve these (the Firestore rule enforces the same).
+  useEffect(() => {
+    if (normalizedUserRole !== "admin") {
+      setDeletionRequests([]);
+      return;
+    }
+    const unsubscribe = onSnapshot(
+      query(
+        collection(db, "communityServerDeletionRequests"),
+        where("status", "==", "pending"),
+      ),
+      (snapshot) => {
+        setDeletionRequests(
+          snapshot.docs
+            .map((entry) => {
+              const data = entry.data() as any;
+              return {
+                id: entry.id,
+                serverId: String(data.serverId || ""),
+                serverName: String(data.serverName || "Unknown server"),
+                requestedBy: String(data.requestedBy || ""),
+                requesterName: String(data.requesterName || "A teacher"),
+                reason: data.reason ? String(data.reason) : "",
+                createdAt: data.createdAt,
+              };
+            })
+            .sort(
+              (a, b) =>
+                (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0),
+            ),
+        );
+      },
+      (error) =>
+        console.error("Error loading server deletion requests:", error),
+    );
+    return unsubscribe;
+  }, [normalizedUserRole]);
+
+  // Task 6: approving is the deletion — the admin's one action both soft-deletes
+  // the server (same isDeleted flip HomeScreen uses) and resolves the request,
+  // then notifies the requesting teacher.
+  const handleApproveServerDeletion = (
+    request: (typeof deletionRequests)[number],
+  ) => {
+    if (isOffline) {
+      showInfo("Offline", "Approving server deletions is unavailable while offline.");
+      return;
+    }
+    showConfirm({
+      title: "Approve & delete server?",
+      description: `"${request.serverName}" will be removed for every member. This can't be undone.`,
+      confirmText: "Approve & Delete",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: async () => {
+        setDeletionBusyId(request.id);
+        try {
+          await setDoc(
+            doc(db, "communityServers", request.serverId),
+            {
+              isDeleted: true,
+              deletedAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true },
+          );
+          await setDoc(
+            doc(db, "communityServerDeletionRequests", request.id),
+            {
+              status: "approved",
+              reviewedBy: auth.currentUser?.uid || null,
+              reviewedAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true },
+          );
+          await createServerDeletionOutcomeNotification({
+            recipientId: request.requestedBy,
+            admin: {
+              id: auth.currentUser?.uid || "",
+              name: auth.currentUser?.displayName || "An admin",
+            },
+            serverId: request.serverId,
+            serverName: request.serverName,
+            approved: true,
+          }).catch((error) => {
+            console.error("Error notifying deletion requester:", error);
+          });
+        } catch (error) {
+          console.error("Error approving server deletion:", error);
+          showInfo("Error", "Couldn't complete the deletion. Please try again.");
+        } finally {
+          setDeletionBusyId(null);
+        }
+      },
+    });
+  };
+
+  const handleRejectServerDeletion = async (
+    request: (typeof deletionRequests)[number],
+  ) => {
+    if (isOffline) {
+      showInfo("Offline", "Rejecting server deletions is unavailable while offline.");
+      return;
+    }
+    setDeletionBusyId(request.id);
+    try {
+      await setDoc(
+        doc(db, "communityServerDeletionRequests", request.id),
+        {
+          status: "rejected",
+          reviewedBy: auth.currentUser?.uid || null,
+          reviewedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      await createServerDeletionOutcomeNotification({
+        recipientId: request.requestedBy,
+        admin: {
+          id: auth.currentUser?.uid || "",
+          name: auth.currentUser?.displayName || "An admin",
+        },
+        serverId: request.serverId,
+        serverName: request.serverName,
+        approved: false,
+      }).catch((error) => {
+        console.error("Error notifying deletion requester:", error);
+      });
+    } catch (error) {
+      console.error("Error rejecting server deletion:", error);
+      showInfo("Error", "Couldn't reject the request. Please try again.");
+    } finally {
+      setDeletionBusyId(null);
+    }
   };
 
   const handleOpenModeratedUser = (item: {
@@ -454,7 +717,7 @@ export default function DashboardScreen() {
   }) => {
     const targetUserId = item.realUserId || item.userId;
     if (!targetUserId || targetUserId === "anonymous") {
-      Alert.alert("Unavailable", "No linked user profile was found for this content.");
+      showInfo("Unavailable", "No linked user profile was found for this content.");
       return;
     }
 
@@ -485,7 +748,7 @@ export default function DashboardScreen() {
     (managedUser: ManagedUserRecord) => {
       const targetUserId = managedUser.userId || managedUser.studentID || managedUser.id;
       if (!targetUserId) {
-        Alert.alert("Unavailable", "This user does not have a linked profile yet.");
+        showInfo("Unavailable", "This user does not have a linked profile yet.");
         return;
       }
 
@@ -512,30 +775,27 @@ const handleYearLevelChange = useCallback(
     if (!canOpenManageUsers) return;
     if (managedUser.yearlvl === nextYearLvl) return;
 
-    Alert.alert(
-      "Update Year Level",
-      `Change ${getManagedUserName(managedUser)}'s year level to ${nextYearLvl}?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Update",
-          onPress: async () => {
-            try {
-              setManagedUserBusyId(managedUser.id);
-              await updateDoc(doc(db, "students", managedUser.id), {
-                yearlvl: nextYearLvl,
-                updatedAt: serverTimestamp(),
-              });
-            } catch (error) {
-              console.error("Error updating year level:", error);
-              Alert.alert("Error", "Failed to update year level.");
-            } finally {
-              setManagedUserBusyId(null);
-            }
-          },
-        },
-      ]
-    );
+    showConfirm({
+      title: "Update Year Level",
+      description: `Change ${getManagedUserName(managedUser)}'s year level to ${nextYearLvl}?`,
+      confirmText: "Update",
+      cancelText: "Cancel",
+      destructive: false,
+      onConfirm: async () => {
+        try {
+          setManagedUserBusyId(managedUser.id);
+          await updateDoc(doc(db, "students", managedUser.id), {
+            yearlvl: nextYearLvl,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (error) {
+          console.error("Error updating year level:", error);
+          showInfo("Error", "Failed to update year level.");
+        } finally {
+          setManagedUserBusyId(null);
+        }
+      },
+    });
   },
   [canOpenManageUsers]
 );
@@ -550,40 +810,37 @@ const handleYearLevelChange = useCallback(
         (managedUser.userId && managedUser.userId === auth.currentUser?.uid) ||
         managedUser.id === currentStudentDocId
       ) {
-        Alert.alert(
+        showInfo(
           "Action Blocked",
           "For safety, you cannot change your own role from the dashboard.",
         );
         return;
       }
 
-      Alert.alert(
-        "Update Role",
-        `Change ${getManagedUserName(managedUser)} to ${getRoleDisplayName(nextRole)}?`,
-        [
-          { text: "Cancel", style: "cancel" },
-          {
-            text: "Update",
-            onPress: async () => {
-              try {
-                setManagedUserBusyId(managedUser.id);
-                await updateDoc(doc(db, "students", managedUser.id), {
-                  role: nextRole,
-                  permissions: getPermissionsForRole(nextRole),
-                  updatedAt: serverTimestamp(),
-                  roleUpdatedAt: serverTimestamp(),
-                  roleUpdatedBy: auth.currentUser?.uid || null,
-                });
-              } catch (error) {
-                console.error("Error updating user role:", error);
-                Alert.alert("Error", "Failed to update user role.");
-              } finally {
-                setManagedUserBusyId(null);
-              }
-            },
-          },
-        ],
-      );
+      showConfirm({
+        title: "Update Role",
+        description: `Change ${getManagedUserName(managedUser)} to ${getRoleDisplayName(nextRole)}?`,
+        confirmText: "Update",
+        cancelText: "Cancel",
+        destructive: false,
+        onConfirm: async () => {
+          try {
+            setManagedUserBusyId(managedUser.id);
+            await updateDoc(doc(db, "students", managedUser.id), {
+              role: nextRole,
+              permissions: getPermissionsForRole(nextRole),
+              updatedAt: serverTimestamp(),
+              roleUpdatedAt: serverTimestamp(),
+              roleUpdatedBy: auth.currentUser?.uid || null,
+            });
+          } catch (error) {
+            console.error("Error updating user role:", error);
+            showInfo("Error", "Failed to update user role.");
+          } finally {
+            setManagedUserBusyId(null);
+          }
+        },
+      });
     },
     [canOpenManageUsers, currentStudentDocId],
   );
@@ -591,9 +848,7 @@ const handleYearLevelChange = useCallback(
   if (loading) {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
-          <ActivityIndicator size="large" color="#e0a53d" />
-        </View>
+        <DashboardSkeleton />
       </SafeAreaView>
     );
   }
@@ -612,6 +867,15 @@ const handleYearLevelChange = useCallback(
             <Ionicons name={getRoleIcon(userRole)} size={20} color="#fff" />
           </View>
         </View>
+
+        {isOffline && (
+          <View style={styles.offlineStatusBar}>
+            <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+            <Text style={styles.offlineStatusText}>
+              Offline mode • Viewing saved dashboard metrics
+            </Text>
+          </View>
+        )}
 
         {/* Stats Grid */}
         <View style={styles.statsGrid}>
@@ -660,6 +924,13 @@ const handleYearLevelChange = useCallback(
           {(userRole === "admin" || userRole === "teacher" || userRole === "moderator") && (
             <>
               <ActionButton
+                icon="stats-chart-outline"
+                label="Analytics"
+                color="#356a59"
+                onPress={() => router.push("/AnalyticsScreen" as any)}
+              />
+
+              <ActionButton
                 icon="calendar-outline"
                 label="Manage Events"
                 color="#00d4ff"
@@ -672,7 +943,7 @@ const handleYearLevelChange = useCallback(
                     icon="people-outline"
                     label="Manage Users"
                     color="#ff9f43"
-                    onPress={scrollToManageUsers}
+                    onPress={() => router.push("/ManageUsersScreen" as any)}
                   />
                   <ActionButton
                     icon="school-outline"
@@ -689,10 +960,18 @@ const handleYearLevelChange = useCallback(
                 color="#ff5c93"
                 onPress={() => router.push("/ReportManagementScreen" as any)}
               />
+              {canManageModeration && (
+                <ActionButton
+                  icon="shield-checkmark-outline"
+                  label="Manage Moderation"
+                  color="#7f2220"
+                  onPress={() => router.push("/ManageModerationScreen" as any)}
+                />
+              )}
               {canOpenAiMemory && (
                 <ActionButton
                   icon="library-outline"
-                  label="Manage AI Memory"
+                  label="Manage B.E.A. Memory"
                   color="#e0a53d"
                   onPress={() => router.push("/AiMemoryScreen")}
                 />
@@ -705,11 +984,19 @@ const handleYearLevelChange = useCallback(
                   onPress={() => router.push("/UnansweredQuestionsScreen" as any)}
                 />
               )}
+              {userRole === "admin" && (
+                <ActionButton
+                  icon="book-outline"
+                  label="Manage Campus FAQ"
+                  color="#5f0909"
+                  onPress={() => router.push("/ManageCampusFaqScreen" as any)}
+                />
+              )}
             </>
           )}
         </View>
 
-        {canOpenManageUsers && (
+        {showInlineManagementSections && canOpenManageUsers && (
           <View
             style={styles.section}
             onLayout={(event) => {
@@ -1032,13 +1319,13 @@ const handleYearLevelChange = useCallback(
           </View>
         )}
 
-        {canManageModeration && (
+        {showInlineManagementSections && canManageModeration && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Moderation Queue</Text>
             {moderationItems.length === 0 ? (
               <View style={styles.comingSoonCard}>
                 <Ionicons name="shield-checkmark-outline" size={48} color="#b88f87" />
-                <Text style={styles.comingSoonText}>No restricted content waiting for review</Text>
+                <Text style={styles.comingSoonText}>No flagged content waiting for review</Text>
               </View>
             ) : (
               moderationItems.map((item) => (
@@ -1049,6 +1336,14 @@ const handleYearLevelChange = useCallback(
                     </View>
                     <Text style={styles.reviewAuthor}>by {item.author}</Text>
                   </View>
+                  {item.priority === "critical" && (
+                    <View style={styles.reviewCriticalBadge}>
+                      <Ionicons name="warning" size={15} color="#7a1212" />
+                      <Text style={styles.reviewCriticalText}>
+                        PRIORITY SAFETY REVIEW · SELF-HARM / INTENT
+                      </Text>
+                    </View>
+                  )}
                   <Text style={styles.reviewBody} numberOfLines={4}>
                     {item.text}
                   </Text>
@@ -1060,7 +1355,7 @@ const handleYearLevelChange = useCallback(
                       <Image
                         source={{ uri: feedImage(item.imageUrl, 240) }}
                         style={styles.reviewImage}
-                        resizeMode="cover"
+                        contentFit="cover"
                       />
                     </TouchableOpacity>
                   )}
@@ -1077,11 +1372,23 @@ const handleYearLevelChange = useCallback(
                       </Text>
                     </TouchableOpacity>
                     <TouchableOpacity
-                      style={[styles.reviewButton, styles.reviewApprove]}
-                      onPress={() => handleApproveModeration(item.id, item.type)}
-                      disabled={moderationBusyId === item.id}
+                      style={[
+                        styles.reviewButton,
+                        styles.reviewApprove,
+                        (item.realUserId || item.userId) === auth.currentUser?.uid &&
+                          styles.reviewButtonDisabled,
+                      ]}
+                      onPress={() => handleApproveModeration(item)}
+                      disabled={
+                        moderationBusyId === item.id ||
+                        (item.realUserId || item.userId) === auth.currentUser?.uid
+                      }
                     >
-                      <Text style={styles.reviewApproveText}>Approve</Text>
+                      <Text style={styles.reviewApproveText}>
+                        {(item.realUserId || item.userId) === auth.currentUser?.uid
+                          ? "Own Content"
+                          : "Approve"}
+                      </Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.reviewButton, styles.reviewDelete]}
@@ -1089,6 +1396,62 @@ const handleYearLevelChange = useCallback(
                       disabled={moderationBusyId === item.id}
                     >
                       <Text style={styles.reviewDeleteText}>Delete</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))
+            )}
+          </View>
+        )}
+
+        {/* Task 6: Server deletion requests — admin-only review queue. */}
+        {userRole === "admin" && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Server Deletion Requests</Text>
+            {deletionRequests.length === 0 ? (
+              <View style={styles.comingSoonCard}>
+                <Ionicons name="trash-outline" size={48} color="#b88f87" />
+                <Text style={styles.comingSoonText}>
+                  No server deletion requests waiting
+                </Text>
+              </View>
+            ) : (
+              deletionRequests.map((request) => (
+                <View key={request.id} style={styles.reviewCard}>
+                  <View style={styles.reviewHeader}>
+                    <View style={styles.reviewTypePill}>
+                      <Text style={styles.reviewTypeText}>SERVER</Text>
+                    </View>
+                    <Text style={styles.reviewAuthor}>by {request.requesterName}</Text>
+                  </View>
+                  <Text style={styles.reviewBody} numberOfLines={2}>
+                    {request.serverName}
+                  </Text>
+                  {!!request.reason && (
+                    <Text style={styles.reviewReason}>{request.reason}</Text>
+                  )}
+                  <View style={styles.reviewActions}>
+                    <TouchableOpacity
+                      style={[
+                        styles.reviewButton,
+                        styles.reviewApprove,
+                        deletionBusyId === request.id && styles.reviewButtonDisabled,
+                      ]}
+                      onPress={() => handleApproveServerDeletion(request)}
+                      disabled={deletionBusyId === request.id}
+                    >
+                      <Text style={styles.reviewApproveText}>Approve &amp; Delete</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.reviewButton,
+                        styles.reviewDelete,
+                        deletionBusyId === request.id && styles.reviewButtonDisabled,
+                      ]}
+                      onPress={() => handleRejectServerDeletion(request)}
+                      disabled={deletionBusyId === request.id}
+                    >
+                      <Text style={styles.reviewDeleteText}>Reject</Text>
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -1124,6 +1487,17 @@ const handleYearLevelChange = useCallback(
         visible={!!moderationImageViewerUrl}
         onClose={() => setModerationImageViewerUrl(null)}
         showActions={false}
+      />
+      <ConfirmDialog
+        visible={!!dialog}
+        title={dialog?.title ?? ""}
+        description={dialog?.description}
+        confirmText={dialog?.confirmText ?? "Confirm"}
+        cancelText={dialog?.cancelText}
+        destructive={dialog?.destructive ?? true}
+        singleAction={dialog?.singleAction ?? false}
+        onConfirm={() => dialog?.onConfirm()}
+        onCancel={() => setDialog(null)}
       />
     </SafeAreaView>
   );
@@ -1763,6 +2137,27 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
+  reviewCriticalBadge: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: "#ffd8d8",
+    borderWidth: 1,
+    borderColor: "#e59a9a",
+  },
+  reviewCriticalText: {
+    color: "#7a1212",
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  reviewButtonDisabled: {
+    opacity: 0.45,
+  },
   reviewBody: {
     color: "#4d1b17",
     fontSize: 14,
@@ -1816,5 +2211,20 @@ const styles = StyleSheet.create({
   reviewDeleteText: {
     color: "#9b1f1c",
     fontWeight: "700",
+  },
+  offlineStatusBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#ffedd5",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#fed7aa",
+  },
+  offlineStatusText: {
+    fontSize: 12,
+    color: "#9a3412",
+    fontWeight: "600",
   },
 });

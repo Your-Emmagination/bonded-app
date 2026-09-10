@@ -12,9 +12,11 @@ import {
   where,
 } from "firebase/firestore";
 import { auth, db } from "../Firebase_configure";
+import { getAiWorkerUrl } from "./aiConfig";
 import { EVERYONE_MENTION_ID } from "./aiAssistant";
 
 export type NotificationType =
+  | "direct_message"
   | "like"
   | "comment"
   | "reply"
@@ -22,10 +24,14 @@ export type NotificationType =
   | "activity"
   | "event"
   | "emergency"
-  | "moderation";
+  | "moderation"
+  | "moderation_approved"
+  | "server_deletion";
 
 export type NotificationEntityType =
+  | "direct_message"
   | "post"
+  | "poll"
   | "comment"
   | "reply"
   | "event"
@@ -53,7 +59,7 @@ type CreateNotificationInput = {
 type LikeNotificationInput = {
   recipientId?: string | null;
   actor: NotificationActor;
-  entityType: Exclude<NotificationEntityType, "event" | "emergency">;
+  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message">;
   entityId: string;
   preview?: string | null;
   parentId?: string | null;
@@ -178,49 +184,46 @@ export const createNotification = async ({
     return;
   }
 
-  // Push notifications are sent by the dedicated Node.js backend.
-  // Cloudflare remains the AI backend; it is no longer used for push delivery.
- console.log("PUSH DEBUG:", { savedNotificationId, hasUser: !!auth.currentUser });
-if (savedNotificationId && auth.currentUser) {
+  // Push delivery runs on the free Cloudflare Worker (cloudflare/ai-worker/
+  // src/push.js) + the free Expo Push API — no billable server. The client
+  // only sends this notification's id; the Worker re-reads the doc, checks
+  // the caller is the notification's actor, applies the recipient's sound
+  // setting, and sends. Fire-and-forget: a push failure must never break the
+  // Firestore write or the like/comment action that triggered it.
+  if (savedNotificationId && auth.currentUser) {
     try {
-      const idToken = await auth.currentUser.getIdToken();
-      const backendUrl = (
-        process.env.EXPO_PUBLIC_BONDED_NOTIFICATION_BACKEND_URL || ""
-      ).replace(/\/$/, "");
-
-      if (!backendUrl) {
-        console.warn(
-          "Push notification backend URL is not configured. Set EXPO_PUBLIC_BONDED_NOTIFICATION_BACKEND_URL."
-        );
+      const workerUrl = getAiWorkerUrl();
+      if (!workerUrl) {
+        if (__DEV__) {
+          console.warn(
+            "Push skipped: EXPO_PUBLIC_AI_WORKER_URL is not configured.",
+          );
+        }
         return;
       }
 
-      const response = await fetch(`${backendUrl}/notifications/push`, {
+      const idToken = await auth.currentUser.getIdToken();
+      const response = await fetch(workerUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${idToken}`,
         },
         body: JSON.stringify({
+          mode: "push-notification",
           notificationId: savedNotificationId,
         }),
       });
 
-      const responseBody = await response.text().catch(() => "");
-
-      if (!response.ok) {
+      if (!response.ok && __DEV__) {
         console.warn(
-          "Push notification backend failed:",
+          "Push worker failed:",
           response.status,
-          responseBody,
+          await response.text().catch(() => ""),
         );
-      } else {
-        console.log("Push notification backend response:", responseBody);
       }
     } catch (error) {
-      // Push delivery must never prevent the Firestore notification from
-      // being created or make likes/comments fail.
-      console.warn("Push notification backend error:", error);
+      console.warn("Push worker error:", error);
     }
   }
 };
@@ -238,10 +241,11 @@ export const upsertLikeNotification = async ({
   }
 
   const likeMessages: Record<
-    Exclude<NotificationEntityType, "event" | "emergency">,
+    Exclude<NotificationEntityType, "event" | "emergency" | "direct_message">,
     string
   > = {
     post: "liked your post",
+    poll: "liked your poll",
     comment: "liked your comment",
     reply: "liked your reply",
   };
@@ -453,7 +457,7 @@ export const createEmergencyNotifications = async ({
 export type ModerationNotificationInput = {
   recipientId?: string | null;
   moderator: NotificationActor;
-  entityType: Exclude<NotificationEntityType, "event" | "emergency">;
+  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message">;
   entityId: string;
   reasons?: string[];
   preview?: string | null;
@@ -461,10 +465,11 @@ export type ModerationNotificationInput = {
 };
 
 const MODERATION_ENTITY_LABEL: Record<
-  Exclude<NotificationEntityType, "event" | "emergency">,
+  Exclude<NotificationEntityType, "event" | "emergency" | "direct_message">,
   string
 > = {
   post: "post",
+  poll: "poll",
   comment: "comment",
   reply: "reply",
 };
@@ -496,6 +501,80 @@ export const createModerationNotification = async ({
     parentId,
     preview,
     message: `removed your ${label} for violating community guidelines${reasonSuffix}`,
+  });
+};
+
+export type ModerationApprovalNotificationInput = {
+  recipientId?: string | null;
+  moderator: NotificationActor;
+  entityType: "post" | "poll";
+  entityId: string;
+  preview?: string | null;
+};
+
+export const createModerationApprovalNotification = async ({
+  recipientId,
+  moderator,
+  entityType,
+  entityId,
+  preview,
+}: ModerationApprovalNotificationInput) => {
+  if (!recipientId) return;
+
+  await createNotification({
+    recipientId,
+    actor: moderator,
+    type: "moderation_approved",
+    entityType,
+    entityId,
+    preview,
+    message: `approved your ${entityType}. It is now visible on Home`,
+    notificationId: [
+      "moderation_approved",
+      cleanIdPart(recipientId),
+      cleanIdPart(moderator.id),
+      entityType,
+      cleanIdPart(entityId),
+    ].join("_"),
+  });
+};
+
+export type ServerDeletionOutcomeNotificationInput = {
+  recipientId?: string | null;
+  admin: NotificationActor;
+  serverId: string;
+  serverName: string;
+  approved: boolean;
+};
+
+/**
+ * Task 6: tells the teacher who asked for a server to be deleted what the
+ * reviewing admin decided — approved (the server is gone) or rejected (it
+ * stays). Informational only, so it carries no navigable entity id.
+ */
+export const createServerDeletionOutcomeNotification = async ({
+  recipientId,
+  admin,
+  serverId,
+  serverName,
+  approved,
+}: ServerDeletionOutcomeNotificationInput) => {
+  await createNotification({
+    recipientId,
+    actor: admin,
+    type: "server_deletion",
+    // Not a navigable target — "server" is just a label; the empty entityId
+    // makes the notification list treat a tap as a no-op.
+    entityType: "server" as NotificationEntityType,
+    entityId: "",
+    message: approved
+      ? `approved your request to delete "${serverName}". The server has been removed.`
+      : `rejected your request to delete "${serverName}". The server is still active.`,
+    notificationId: [
+      "server_deletion",
+      cleanIdPart(recipientId || ""),
+      cleanIdPart(serverId),
+    ].join("_"),
   });
 };
 

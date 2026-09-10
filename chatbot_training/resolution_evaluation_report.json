@@ -1,0 +1,38 @@
+{
+  "training_rows": 51,
+  "labels": [
+    "not_resolved",
+    "resolved"
+  ],
+  "cross_validation_accuracy": 0.9800000000000001,
+  "cross_validation_std": 0.039999999999999994,
+  "holdout_accuracy": 0.9230769230769231,
+  "classification_report": {
+    "not_resolved": {
+      "precision": 1.0,
+      "recall": 0.8571428571428571,
+      "f1-score": 0.9230769230769231,
+      "support": 7.0
+    },
+    "resolved": {
+      "precision": 0.8571428571428571,
+      "recall": 1.0,
+      "f1-score": 0.9230769230769231,
+      "support": 6.0
+    },
+    "accuracy": 0.9230769230769231,
+    "macro avg": {
+      "precision": 0.9285714285714286,
+      "recall": 0.9285714285714286,
+      "f1-score": 0.9230769230769231,
+      "support": 13.0
+    },
+    "weighted avg": {
+      "precision": 0.9340659340659341,
+      "recall": 0.9230769230769231,
+      "f1-score": 0.9230769230769231,
+      "support": 13.0
+    }
+  },
+  "generative_ai": false
+}

@@ -1,34 +1,41 @@
+import { getDirectNotificationTarget } from "@/utils/messengerState";
+import { useNetworkStatus } from "@/utils/networkUtils";
+import {
+    getCachedNotifications,
+    saveCachedNotifications,
+} from "@/utils/offlineStorage";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
+import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
-  collection,
-  doc,
-  getDoc,
-  onSnapshot,
-  query,
-  updateDoc,
-  where,
-  writeBatch,
+    collection,
+    doc,
+    getDoc,
+    onSnapshot,
+    query,
+    updateDoc,
+    where,
+    writeBatch,
 } from "firebase/firestore";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Image, RefreshControl } from "react-native";
-import ConfirmDialog from "../components/ConfirmDialog";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  Animated,
-  Modal,
-  SectionList,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+    Animated,
+    Modal,
+    Platform, RefreshControl, SectionList,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
+import ConfirmDialog from "../components/ConfirmDialog";
+import { ListSkeleton } from "../components/Skeleton";
 
 type NotificationType =
+  | "direct_message"
   | "like"
   | "comment"
   | "reply"
@@ -36,7 +43,8 @@ type NotificationType =
   | "activity"
   | "event"
   | "emergency"
-  | "moderation";
+  | "moderation"
+  | "moderation_approved";
 type TimeSection = "Today" | "Yesterday" | "This Week" | "This Month" | "Older";
 type FilterOption =
   | "All"
@@ -49,11 +57,15 @@ type FilterOption =
 type NotificationItem = {
   id: string;
   type: NotificationType;
-  entityType?: "post" | "comment" | "reply" | "event" | "emergency";
+  entityType?: "post" | "poll" | "comment" | "reply" | "event" | "emergency" | "direct_message";
   entityId?: string;
   parentId?: string | null;
   actorName: string;
-  actorAvatar?: string; // Add avatar URL support
+  // Firestore field written by utils/notifications.ts is `actorProfileImage`
+  // (see createNotification's payload). This used to read a nonexistent
+  // `actorAvatar` field, so avatars never rendered — every row silently fell
+  // back to the initial-letter placeholder. Fixed to read the real field.
+  actorProfileImage?: string | null;
   message: string;
   preview?: string | null;
   createdAt?: any;
@@ -93,6 +105,7 @@ const NotificationsScreen = () => {
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const { isOffline } = useNetworkStatus();
   const scaleAnim = useRef(new Animated.Value(0)).current;
   const router = useRouter();
   const { unavailable } = useLocalSearchParams<{
@@ -122,6 +135,14 @@ const NotificationsScreen = () => {
       return;
     }
 
+    let isMounted = true;
+    getCachedNotifications<NotificationItem>(user.uid).then((cached) => {
+      if (isMounted && cached && cached.length > 0) {
+        setNotifications((prev) => (prev.length === 0 ? cached : prev));
+        setLoading(false);
+      }
+    });
+
     setLoading(true);
     const notificationsQuery = query(
       collection(db, "notifications"),
@@ -137,13 +158,18 @@ const NotificationsScreen = () => {
             ...(notificationDoc.data() as Omit<NotificationItem, "id">),
           }))
           .sort((first, second) => {
-            const firstTime = first.createdAt?.toMillis?.() || 0;
-            const secondTime = second.createdAt?.toMillis?.() || 0;
-            return secondTime - firstTime;
+            const toMillis = (value: any) => {
+              if (value?.toMillis) return value.toMillis();
+              if (!value) return 0;
+              const parsed = new Date(value).getTime();
+              return Number.isNaN(parsed) ? 0 : parsed;
+            };
+            return toMillis(second.createdAt) - toMillis(first.createdAt);
           });
 
         setNotifications(fetchedNotifications);
         setLoading(false);
+        saveCachedNotifications(user.uid, fetchedNotifications);
       },
       (error) => {
         console.error("Error loading notifications:", error);
@@ -151,7 +177,10 @@ const NotificationsScreen = () => {
       },
     );
 
-    return unsubscribe;
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
   }, [user?.uid]);
 
   const unreadCount = useMemo(
@@ -293,7 +322,20 @@ const onRefresh = useCallback(() => {
 
  const handleNotificationPress = async (notification: NotificationItem) => {
   // Mark as read in the background; navigation must never wait on this write.
-  void markAsRead(notification.id);
+   void markAsRead(notification.id);
+   const directConversationId = getDirectNotificationTarget(notification);
+   if (directConversationId) {
+     router.push({ pathname: "/(main)/DirectChatScreen", params: { conversationId: directConversationId } });
+     return;
+   }
+
+  // Priority safety/moderation notifications are queue shortcuts rather than
+  // normal content-navigation notifications. Pending content may intentionally
+  // be hidden, so take authorized reviewers directly to the dashboard queue.
+  if (notification.type === "moderation" && notification.parentId === "moderation-queue") {
+    router.push("/(main)/(tabs)/DashboardScreen");
+    return;
+  }
 
   if (!notification.entityType || !notification.entityId) {
     return;
@@ -305,6 +347,55 @@ const onRefresh = useCallback(() => {
       params: { eventId: notification.entityId },
     });
     return;
+  }
+
+  if (
+    notification.type === "moderation_approved" &&
+    (notification.entityType === "post" || notification.entityType === "poll")
+  ) {
+    try {
+      const targetSnapshot = await getDoc(
+        doc(
+          db,
+          notification.entityType === "post" ? "posts" : "polls",
+          notification.entityId,
+        ),
+      );
+      const isApproved =
+        targetSnapshot.exists() &&
+        String(targetSnapshot.data()?.moderationStatus || "approved").toLowerCase() ===
+          "approved";
+
+      if (!isApproved) {
+        throw new Error("approved-content-unavailable");
+      }
+
+      router.push({
+        pathname: "/(main)/(tabs)/HomeScreen",
+        params: {
+          notificationKey: `${notification.id}:${Date.now()}`,
+          ...(notification.entityType === "post"
+            ? { notificationPostId: notification.entityId }
+            : { notificationPollId: notification.entityId }),
+        },
+      });
+      return;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.message !== "approved-content-unavailable"
+      ) {
+        console.warn("Unable to open approved content:", error);
+      }
+      setConfirmDialog({
+        title: "Content not available",
+        description: "This content has been deleted or is no longer available.",
+        confirmText: "OK",
+        singleAction: true,
+        onConfirm: () => setConfirmDialog(null),
+      });
+      return;
+    }
   }
 
   let targetExists = false;
@@ -367,6 +458,17 @@ const onRefresh = useCallback(() => {
 };
 
   const markAllAsRead = async () => {
+    if (isOffline) {
+      setConfirmDialog({
+        title: "No Connection",
+        description: "Please check your internet connection to mark notifications as read.",
+        confirmText: "OK",
+        singleAction: true,
+        onConfirm: () => setConfirmDialog(null),
+      });
+      return;
+    }
+
     const unreadNotifications = notifications.filter(
       (notification) => !notification.read,
     );
@@ -403,6 +505,8 @@ const onRefresh = useCallback(() => {
         return "warning";
       case "moderation":
         return "shield-outline";
+      case "moderation_approved":
+        return "checkmark-circle";
       default:
         return "notifications";
     }
@@ -424,6 +528,8 @@ const onRefresh = useCallback(() => {
         return { icon: "#ff2d2d", bg: "#ff2d2d22" };
       case "moderation":
         return { icon: "#e0913d", bg: "#e0913d22" };
+      case "moderation_approved":
+        return { icon: "#2f855a", bg: "#2f855a20" };
       default:
         return { icon: "#b88f87", bg: "#b88f8720" };
     }
@@ -431,7 +537,7 @@ const onRefresh = useCallback(() => {
 
   const renderEmptyState = () => (
     <View style={styles.emptyContainer}>
-      <Ionicons name="notifications-off-outline" size={64} color="#666" />
+      <Ionicons name="notifications-off-outline" size={64} color="#c59a8a" />
       <Text style={styles.emptyText}>No notifications yet</Text>
       <Text style={styles.emptySubtext}>
         You&apos;ll see likes, comments, replies, mentions, and event alerts here
@@ -455,8 +561,8 @@ const onRefresh = useCallback(() => {
     >
       {/* Avatar Container with Badge Overlay */}
       <View style={styles.avatarContainer}>
-        {item.actorAvatar ? (
-          <Image source={{ uri: item.actorAvatar }} style={styles.avatarImage} />
+        {item.actorProfileImage ? (
+          <Image source={{ uri: item.actorProfileImage }} style={styles.avatarImage} />
         ) : (
           <View style={[styles.avatarPlaceholder, { backgroundColor: colors.bg }]}>
             <Text style={[styles.avatarInitial, { color: colors.icon }]}>
@@ -536,17 +642,34 @@ const onRefresh = useCallback(() => {
         </View>
 
         {loading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#e0a53d" />
-            <Text style={styles.loadingText}>Loading notifications...</Text>
-          </View>
+          <ListSkeleton
+            count={6}
+            contentStyle={styles.skeletonContent}
+            rowStyle={styles.skeletonRow}
+          />
         ) : groupedNotifications.length === 0 ? (
           renderEmptyState()
         ) : (
-          <SectionList
+          <View style={{ flex: 1 }}>
+            {isOffline && notifications.length > 0 && (
+              <View style={styles.offlineStatusBar}>
+                <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+                <Text style={styles.offlineStatusText}>
+                  Offline mode • Viewing saved notifications
+                </Text>
+              </View>
+            )}
+            <SectionList
   sections={groupedNotifications}
   keyExtractor={(item) => item.id}
   renderItem={renderNotificationItem}
+  // Virtualization tuning (previously using RN's defaults): notification
+  // rows include an avatar image each, so a smaller render window keeps
+  // scrolling smooth on long notification histories.
+  initialNumToRender={10}
+  maxToRenderPerBatch={10}
+  windowSize={8}
+  removeClippedSubviews={Platform.OS === "android"}
   stickySectionHeadersEnabled={true} // 👈 Keeps section header visible on scroll
   renderSectionHeader={({ section: { title } }) => (
     <View style={styles.timePillContainer}>
@@ -567,6 +690,7 @@ const onRefresh = useCallback(() => {
     />
   }
 />
+          </View>
         )}
       </View>
 
@@ -791,6 +915,21 @@ timePillText: {
     borderWidth: 1,
     borderColor: "#dfc9c1",
   },
+ skeletonContent: {
+  paddingTop: 6,
+ },
+ skeletonRow: {
+  backgroundColor: "#fffaf7",
+  marginHorizontal: 16,
+  marginBottom: 10,
+  borderRadius: 14,
+  borderWidth: 1,
+  borderColor: "#e8d3b2",
+  borderLeftWidth: 4,
+  borderLeftColor: "#e0a53d",
+  paddingHorizontal: 16,
+  paddingVertical: 14,
+ },
  notificationItem: {
   flexDirection: "row",
   alignItems: "flex-start",
@@ -828,6 +967,8 @@ avatarImage: {
   height: 44,
   borderRadius: 22,
   backgroundColor: "#e0e0e0",
+  borderWidth: 1,
+  borderColor: "rgba(95,9,9,0.08)",
 },
 avatarPlaceholder: {
   width: 44,
@@ -964,6 +1105,22 @@ previewBox: {
   filterOptionTextActive: {
     color: "#5f0909",
     fontWeight: "600",
+  },
+  offlineStatusBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#ffedd5",
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#fed7aa",
+    gap: 6,
+  },
+  offlineStatusText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#9a3412",
   },
 });
 

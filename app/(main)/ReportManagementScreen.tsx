@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   Modal,
   Pressable,
   RefreshControl,
@@ -26,6 +25,7 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "../../Firebase_configure";
 import ConfirmDialog from "./components/ConfirmDialog";
+import { ListSkeleton } from "./components/Skeleton";
 import {
   getUserData,
   isStaff,
@@ -441,9 +441,13 @@ export default function ReportManagementScreen() {
 
   if (authLoading || loading) {
     return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" color="#e0a53d" />
-        <Text style={styles.loadingText}>Loading reports...</Text>
+      <View style={styles.container}>
+        <ListSkeleton
+          count={5}
+          showAvatar={false}
+          contentStyle={styles.skeletonContent}
+          rowStyle={styles.skeletonCard}
+        />
       </View>
     );
   }
@@ -618,35 +622,41 @@ export default function ReportManagementScreen() {
                     </TouchableOpacity>
                   </View>
 
-                  <View style={[styles.statusLarge, { backgroundColor: status.bg }]}>
-                    <Ionicons name={status.icon} size={17} color={status.color} />
-                    <Text style={[styles.statusLargeText, { color: status.color }]}>{status.label}</Text>
-                  </View>
+                  <ScrollView
+                    style={styles.detailScroll}
+                    showsVerticalScrollIndicator={false}
+                    contentContainerStyle={styles.detailScrollContent}
+                  >
+                    <View style={[styles.statusLarge, { backgroundColor: status.bg }]}>
+                      <Ionicons name={status.icon} size={17} color={status.color} />
+                      <Text style={[styles.statusLargeText, { color: status.color }]}>{status.label}</Text>
+                    </View>
 
-                  <Text style={styles.detailLabel}>Reason</Text>
-                  <Text style={styles.detailValue}>{normalizeReason(selectedReport.reason)}</Text>
+                    <Text style={styles.detailLabel}>Reason</Text>
+                    <Text style={styles.detailValue}>{normalizeReason(selectedReport.reason)}</Text>
 
-                  <Text style={styles.detailLabel}>Reported Content</Text>
-                  <View style={styles.contentPreviewCard}>
-                    <Text style={styles.contentAuthor}>{selectedReport.contentAuthor || "Unknown author"}</Text>
-                    <Text style={styles.contentPreviewText}>{selectedReport.contentText || "No content preview available."}</Text>
-                    {!selectedReport.contentExists && (
-                      <Text style={styles.deletedHint}>The reported content is no longer available.</Text>
-                    )}
-                  </View>
+                    <Text style={styles.detailLabel}>Reported Content</Text>
+                    <View style={styles.contentPreviewCard}>
+                      <Text style={styles.contentAuthor}>{selectedReport.contentAuthor || "Unknown author"}</Text>
+                      <Text style={styles.contentPreviewText}>{selectedReport.contentText || "No content preview available."}</Text>
+                      {!selectedReport.contentExists && (
+                        <Text style={styles.deletedHint}>The reported content is no longer available.</Text>
+                      )}
+                    </View>
 
-                  <Text style={styles.detailLabel}>Original AI Moderation</Text>
-                  <Text style={styles.detailValue}>
-                    {selectedReport.originalModerationStatus
-                      ? `${selectedReport.originalModerationStatus}${selectedReport.originalModerationModel ? ` • ${selectedReport.originalModerationModel}` : ""}`
-                      : "No moderation result recorded"}
-                  </Text>
+                    <Text style={styles.detailLabel}>Original AI Moderation</Text>
+                    <Text style={styles.detailValue}>
+                      {selectedReport.originalModerationStatus
+                        ? `${selectedReport.originalModerationStatus}${selectedReport.originalModerationModel ? ` • ${selectedReport.originalModerationModel}` : ""}`
+                        : "No moderation result recorded"}
+                    </Text>
 
-                  <Text style={styles.detailLabel}>Reported By</Text>
-                  <Text style={styles.detailValue}>{selectedReport.reporterName || selectedReport.reportedBy}</Text>
+                    <Text style={styles.detailLabel}>Reported By</Text>
+                    <Text style={styles.detailValue}>{selectedReport.reporterName || selectedReport.reportedBy}</Text>
 
-                  <Text style={styles.detailLabel}>Submitted</Text>
-                  <Text style={styles.detailValue}>{formatDate(selectedReport.createdAt)}</Text>
+                    <Text style={styles.detailLabel}>Submitted</Text>
+                    <Text style={styles.detailValue}>{formatDate(selectedReport.createdAt)}</Text>
+                  </ScrollView>
 
                   {selectedReport.status === "pending" ? (
                     <View style={styles.detailActions}>
@@ -788,6 +798,15 @@ const styles = StyleSheet.create({
     padding: 15,
     marginBottom: 12,
   },
+  skeletonContent: { padding: 16 },
+  skeletonCard: {
+    backgroundColor: "#fffaf7",
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#eadbd3",
+    padding: 16,
+    marginBottom: 12,
+  },
   reportTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 },
   typeBadge: {
     flexDirection: "row",
@@ -817,6 +836,8 @@ const styles = StyleSheet.create({
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "center", paddingHorizontal: 18 },
   detailCard: { maxHeight: "88%", backgroundColor: "#fffaf7", borderRadius: 22, borderWidth: 1, borderColor: "#eadbd3", padding: 18 },
   detailHeader: { flexDirection: "row", alignItems: "center", gap: 11 },
+  detailScroll: { flexShrink: 1 },
+  detailScrollContent: { paddingBottom: 4 },
   detailIcon: { width: 46, height: 46, borderRadius: 15, backgroundColor: "rgba(224,165,61,0.14)", justifyContent: "center", alignItems: "center" },
   detailTitle: { color: "#4d1b17", fontSize: 18, fontWeight: "800" },
   detailSubtitle: { color: "#9b766c", fontSize: 12, marginTop: 2 },

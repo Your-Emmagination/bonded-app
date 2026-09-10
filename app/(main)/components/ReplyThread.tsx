@@ -1,95 +1,101 @@
 import { hasAiAssistantMention, isAiAssistantId } from "@/utils/aiAssistant";
 import { getAiErrorMessage } from "@/utils/aiConfig";
 import {
-  buildAiConversationContext,
-  summarizeAiVisibleContent,
+    buildAiConversationContext,
+    summarizeAiVisibleContent,
 } from "@/utils/aiContext";
 import {
-  AI_REQUEST_COOLDOWN_MS,
-  requestAiReplyFromWorker,
-  reserveAiCooldown,
+    AI_REQUEST_COOLDOWN_MS,
+    requestAiReplyFromWorker,
+    reserveAiCooldown,
 } from "@/utils/aiWorker";
 import { resolveAvatarUri } from "@/utils/avatar";
-import ConfirmDialog from "./ConfirmDialog";
 import {
-  AVATAR_SIZE_SMALL,
-  FEED_IMAGE_WIDTH,
-  avatarThumb,
-  feedImage,
+    AVATAR_SIZE_SMALL,
+    FEED_IMAGE_WIDTH,
+    avatarThumb,
+    feedImage,
 } from "@/utils/cloudinaryImages";
 import {
-  canViewModeratedContent,
-  getModerationPreviewText,
-  runLocalModerationRules,
-  requestModerationDecision,
-  requestFirestoreModerationDecision,
-  type ModerationDecision,
+    SELF_HARM_SAFETY_MESSAGE,
+    canViewModeratedContent,
+    requestFirestoreModerationDecision,
+    type ModerationDecision
 } from "@/utils/contentModeration";
+import { getFileIconDetails } from "@/utils/fileTypeHelper";
+import { flagPotentialResolution } from "@/utils/lostAndFoundResolution";
 import {
-  createMentionNotifications,
-  createNotification,
-  removeLikeNotification,
-  resolveMentionRecipientIds,
-  upsertLikeNotification,
+    createMentionNotifications,
+    createNotification,
+    removeLikeNotification,
+    resolveMentionRecipientIds,
+    upsertLikeNotification,
 } from "@/utils/notifications";
+import {
+    getCachedReplies,
+    saveCachedReplies,
+} from "@/utils/offlineStorage";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import {
-  canDeleteContent,
-  canViewAnonymousIdentity,
-  getRoleColor,
-  getRoleDisplayName,
-  getUserData,
-  parseUserRole,
-  UserRole,
+    UserRole,
+    canDeleteContent,
+    canViewAnonymousIdentity,
+    getRoleColor,
+    getRoleDisplayName,
+    getUserData,
+    isStaff,
+    parseUserRole,
+    subscribeToUserDataUpdates,
 } from "@/utils/rbac";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
+import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import {
-  addDoc,
-  arrayRemove,
-  arrayUnion,
-  collection,
-  deleteDoc,
-  deleteField,
-  doc,
-  getDoc,
-  getDocs,
-  limit,
-  startAfter,
-  increment,
-  onSnapshot,
-  orderBy,
-  query,
-  serverTimestamp,
-  updateDoc,
-  where,
-  type DocumentData,
-  type QueryDocumentSnapshot,
+    addDoc,
+    arrayRemove,
+    arrayUnion,
+    collection,
+    deleteDoc,
+    deleteField,
+    doc,
+    getDoc,
+    getDocs,
+    increment,
+    limit,
+    onSnapshot,
+    orderBy,
+    query,
+    serverTimestamp,
+    startAfter,
+    updateDoc,
+    where,
+    type DocumentData,
+    type QueryDocumentSnapshot,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  Animated,
-  BackHandler,
-  FlatList,
-  Image,
-  Keyboard,
-  KeyboardEvent,
-  Linking,
-  Modal,
-  PanResponder,
-  Platform,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Animated,
+    BackHandler,
+    FlatList,
+    Keyboard,
+    KeyboardEvent,
+    Linking,
+    Modal,
+    PanResponder,
+    Platform,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { db } from "../../../Firebase_configure";
 import AiReplyCard from "./AiReplyCard";
 import CommentComposer from "./CommentComposer";
+import ConfirmDialog from "./ConfirmDialog";
 import ExpandableText from "./ExpandableText";
 import ImageZoomViewer from "./ImageZoomViewer";
 
@@ -228,10 +234,9 @@ const ReplyBubble: React.FC<{
 
   useEffect(() => {
     let cancelled = false;
+    const uid = item.realUserId || item.userId;
 
     const fetchAuthor = async () => {
-      const uid = item.realUserId || item.userId;
-
       if (!uid || uid === "anonymous") {
         return;
       }
@@ -249,10 +254,21 @@ const ReplyBubble: React.FC<{
 
     fetchAuthor();
 
+    const unsubscribe = subscribeToUserDataUpdates((updatedId, updatedData) => {
+      if (
+        !cancelled &&
+        uid &&
+        (updatedId === uid || updatedId === authorData?.studentID)
+      ) {
+        setAuthorData((prev: any) => (prev ? { ...prev, ...updatedData } : null));
+      }
+    });
+
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [item.realUserId, item.userId]);
+  }, [authorData?.studentID, item.realUserId, item.userId]);
 
   const authorRole = parseUserRole(getAuthorRole(authorData, item.role));
   const roleColor = getRoleColor(authorRole || "student");
@@ -267,13 +283,17 @@ const ReplyBubble: React.FC<{
 
   const isIdentityVisible = !isAnon || (revealed && canReveal);
 
+  const authorId = item.realUserId || item.userId;
+  const isSelf = isCurrentUser || (!!currentUser?.uid && authorId === currentUser.uid);
+  const isStaffViewer = isStaff(parseUserRole(currentUser?.role));
+
   const displayName = isIdentityVisible
     ? authorData
       ? `${authorData.firstname || ""} ${authorData.lastname || ""}`.trim() ||
         item.username ||
         "User"
       : item.username || "User"
-    : "Anonymous";
+    : (isAnon && isSelf && isStaffViewer ? "Anonymous (You)" : "Anonymous");
 
   const initial = isIdentityVisible
     ? (
@@ -300,10 +320,10 @@ const ReplyBubble: React.FC<{
 
   const taggedUsers = item.taggedUsers ?? [];
 
-  const avatarUri = resolveAvatarUri({
-    profileImage: item.profileImage || authorData?.profileImage,
-    profilePic: item.profilePic,
-  });
+  const liveAvatar = isSelf
+    ? resolveAvatarUri(currentUser)
+    : (resolveAvatarUri(authorData) || resolveAvatarUri({ profileImage: item.profileImage, profilePic: item.profilePic }));
+  const avatarUri = isIdentityVisible ? liveAvatar : null;
 
   const showHeader = !isSameSenderAsPrev;
   const showAvatar = !isCurrentUser && !isSameSenderAsNext;
@@ -532,7 +552,7 @@ const ReplyBubble: React.FC<{
                   ),
                 }}
                 style={styles.gifImage}
-                resizeMode="cover"
+                contentFit="cover"
               />
             </View>
           )}
@@ -556,7 +576,7 @@ const ReplyBubble: React.FC<{
                   ),
                 }}
                 style={styles.imagePreview}
-                resizeMode="cover"
+                contentFit="cover"
               />
 
               {imageFiles.length > 1 && (
@@ -571,55 +591,55 @@ const ReplyBubble: React.FC<{
 
           {docFiles.length > 0 && (
             <View style={styles.docsContainer}>
-              {docFiles.map((file, idx) => (
-                <TouchableOpacity
-                  key={`${file.url}-${idx}`}
-                  style={[
-                    styles.docItem,
-                    isCurrentUser &&
-                      styles.docItemRight,
-                  ]}
-                  onPress={() =>
-                    onFilePress(file.url)
-                  }
-                >
-                  <Ionicons
-                    name={
-                      file.mimeType.includes("pdf")
-                        ? "document-text"
-                        : "document"
-                    }
-                    size={14}
-                    color={
-                      isCurrentUser
-                        ? "#fff"
-                        : "#4f9cff"
-                    }
-                  />
-
-                  <Text
+              {docFiles.map((file, idx) => {
+                const displayName = getFileDisplayName(file);
+                const details = getFileIconDetails(file.mimeType, displayName);
+                return (
+                  <TouchableOpacity
+                    key={`${file.url}-${idx}`}
                     style={[
-                      styles.docText,
-                      isCurrentUser && {
-                        color: "#fff",
-                      },
+                      styles.docItem,
+                      isCurrentUser &&
+                        styles.docItemRight,
                     ]}
-                    numberOfLines={1}
-                  >
-                    {getFileDisplayName(file)}
-                  </Text>
-
-                  <Ionicons
-                    name="download-outline"
-                    size={12}
-                    color={
-                      isCurrentUser
-                        ? "#ffffff99"
-                        : "#9b766c"
+                    onPress={() =>
+                      onFilePress(file.url)
                     }
-                  />
-                </TouchableOpacity>
-              ))}
+                  >
+                    <Ionicons
+                      name={details.icon}
+                      size={14}
+                      color={
+                        isCurrentUser
+                          ? "#fff"
+                          : details.color
+                      }
+                    />
+
+                    <Text
+                      style={[
+                        styles.docText,
+                        isCurrentUser && {
+                          color: "#fff",
+                        },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {displayName}
+                    </Text>
+
+                    <Ionicons
+                      name="download-outline"
+                      size={12}
+                      color={
+                        isCurrentUser
+                          ? "#ffffff99"
+                          : "#9b766c"
+                      }
+                    />
+                  </TouchableOpacity>
+                );
+              })}
             </View>
           )}
 
@@ -1106,6 +1126,14 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   useEffect(() => {
     if (!commentId) return;
 
+    let isMounted = true;
+    getCachedReplies<Reply>(commentId).then((cached) => {
+      if (isMounted && cached && cached.length > 0) {
+        setReplies((prev) => (prev.length === 0 ? cached : prev));
+        setLoading(false);
+      }
+    });
+
     setLoading(true);
 
     lastReplyDocRef.current = null;
@@ -1148,7 +1176,10 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         lastReplyDocRef.current = snapshot.docs[snapshot.docs.length - 1] || null;
         setHasMoreReplies(snapshot.size === 20);
         setReplies(fetched.reverse());
+        const reversed = fetched.reverse();
+        setReplies(reversed);
         setLoading(false);
+        saveCachedReplies(commentId, reversed);
 
         if (currentUser?.uid) {
           const unseenReplies =
@@ -1182,6 +1213,10 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     );
 
     return unsubscribe;
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
   }, [
     commentId,
     currentUser?.role,
@@ -1366,6 +1401,10 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     async (replyData: any) => {
       if (!currentUser) return;
 
+      const shouldTriggerAi =
+        hasAiAssistantMention(replyData.text) ||
+        (replyData.taggedUsers || []).some((tag: any) => isAiAssistantId(tag.id));
+
       const newReply: any = {
         ...replyData,
         commentId,
@@ -1381,29 +1420,8 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         }),
       };
 
-      // Fast local gate: only clearly prohibited content blocks synchronously.
-      // Safe/ambiguous text is written as pending immediately; server moderation
-      // continues in the background so the reply composer can reset promptly.
-      const localDecision = runLocalModerationRules(
-        getModerationPreviewText({
-          text: replyData.text,
-          linkTitle: replyData.link?.title,
-          fileCount: replyData.files?.length,
-        }),
-      );
-
-      if (localDecision.status === "rejected") {
-        setConfirmDialog({
-          title: "Reply Blocked",
-          description: localDecision.reasons?.[0] || "This reply violates the community guidelines.",
-          confirmText: "OK",
-          singleAction: true,
-          destructive: true,
-          onConfirm: () => setConfirmDialog(null),
-        });
-        return;
-      }
-
+      // Pure OpenModeration text flow: no local keyword or blocklist checks.
+      // Every reply is written as pending before the trusted Worker evaluates it.
       newReply.moderationStatus = "pending";
       newReply.moderationReasons = [];
       newReply.moderationModel = null;
@@ -1415,36 +1433,49 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       void (async () => {
         let moderationDecision: ModerationDecision;
         try {
-        moderationDecision = await requestFirestoreModerationDecision({
-          collectionName: "replies",
-          documentId: replyRef.id,
-          scope: "reply",
-        });
-      } catch (error) {
-        console.warn("[Reply] Server moderation unavailable; reply remains pending:", error);
-        setConfirmDialog({
-          title: "Reply Pending Review",
-          description: "Automatic moderation is temporarily unavailable. Your reply is waiting for moderator approval.",
-          confirmText: "OK",
-          singleAction: true,
-          destructive: false,
-          onConfirm: () => setConfirmDialog(null),
-        });
-        return;
-      }
+          moderationDecision = await requestFirestoreModerationDecision({
+            collectionName: "replies",
+            documentId: replyRef.id,
+            scope: "reply",
+          });
+        } catch (error) {
+          console.warn("[Reply] Server moderation unavailable; reply remains pending:", error);
+          setConfirmDialog({
+            title: "Reply Pending Review",
+            description: "Automatic moderation is temporarily unavailable. Your reply is waiting for reviewer approval.",
+            confirmText: "OK",
+            singleAction: true,
+            destructive: false,
+            onConfirm: () => setConfirmDialog(null),
+          });
+          return;
+        }
 
-      if (moderationDecision.status !== "approved") {
-        setConfirmDialog({
-          title: moderationDecision.status === "rejected" ? "Reply Blocked" : "Reply Pending Review",
-          description: moderationDecision.reasons?.[0] || (moderationDecision.status === "rejected" ? "This reply was blocked." : "This reply is waiting for moderator approval."),
-          confirmText: "OK",
-          singleAction: true,
-          destructive: moderationDecision.status === "rejected",
-          onConfirm: () => setConfirmDialog(null),
-        });
-        setReplyingTo(null);
-        return;
-      }
+        if (moderationDecision.selfHarm === true) {
+          setConfirmDialog({
+            title: "We’re concerned about your safety",
+            description: SELF_HARM_SAFETY_MESSAGE,
+            confirmText: "OK",
+            singleAction: true,
+            destructive: false,
+            onConfirm: () => setConfirmDialog(null),
+          });
+          setReplyingTo(null);
+          return;
+        }
+
+        if (moderationDecision.status !== "approved") {
+          setConfirmDialog({
+            title: "Reply Pending Review",
+            description: moderationDecision.reasons?.[0] || "This reply is waiting for reviewer approval.",
+            confirmText: "OK",
+            singleAction: true,
+            destructive: false,
+            onConfirm: () => setConfirmDialog(null),
+          });
+          setReplyingTo(null);
+          return;
+        }
 
       await updateDoc(
         doc(
@@ -1475,6 +1506,18 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       const commentOwnerId =
         commentData?.realUserId ||
         commentData?.userId;
+
+      // Part 4: background-only, never generates a chat reply — only flags
+      // a dismissible "mark as found?" prompt for the original poster,
+      // shown in CommentModal (the parent post view), not here.
+      const replyPostId = commentData?.postId;
+      if (replyPostId) {
+        void flagPotentialResolution({
+          postId: replyPostId,
+          commentId: replyRef.id,
+          commentText: replyData.text || "",
+        }).catch((error) => console.error("[Reply] Resolution detection failed:", error));
+      }
 
       const replyingToReply =
         replyingTo
@@ -1611,20 +1654,6 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
           console.error("Reply mention notifications failed:", error);
         }
       }
-
-      const shouldTriggerAi =
-        hasAiAssistantMention(
-          replyData.text,
-        ) ||
-        (
-          replyData.taggedUsers ||
-          []
-        ).some(
-          (tag: any) =>
-            isAiAssistantId(
-              tag.id,
-            ),
-        );
 
       if (!shouldTriggerAi) {
         setReplyingTo(null);
@@ -2161,53 +2190,24 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       setSavingEdit(true);
 
       try {
-        const moderationDecision =
-          await requestModerationDecision(
-            {
-              text:
-                getModerationPreviewText(
-                  {
-                    text:
-                      trimmedText,
-                  },
-                ),
-              scope:
-                "reply",
-              serverId:
-                commentId,
-              channelId:
-                commentId,
-              authorId:
-                currentUser.uid,
-              authorRole:
-                currentUser.role,
-            },
-          );
-
         await updateDoc(
-          doc(
-            db,
-            "replies",
-            editingReplyId,
-          ),
+          doc(db, "replies", editingReplyId),
           {
             text: trimmedText,
-            moderationStatus:
-              moderationDecision.status,
-            moderationReasons:
-              moderationDecision.reasons,
-            moderationModel:
-              moderationDecision.model ??
-              null,
-            moderationRuleSource:
-              moderationDecision.ruleSource ??
-              null,
-            moderatedAtMs:
-              Date.now(),
-            aiReply:
-              deleteField(),
+            moderationStatus: "pending",
+            moderationReasons: [],
+            moderationModel: null,
+            moderationRuleSource: null,
+            moderatedAtMs: null,
+            aiReply: deleteField(),
           },
         );
+
+        const moderationDecision = await requestFirestoreModerationDecision({
+          collectionName: "replies",
+          documentId: editingReplyId,
+          scope: "reply",
+        });
 
         setEditingReplyId(
           null,
@@ -2217,25 +2217,23 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
           "",
         );
 
-        if (
-          moderationDecision.status ===
-          "pending"
-        ) {
+        if (moderationDecision.selfHarm === true) {
           setConfirmDialog({
-            title:
-              "Reply Pending Review",
-            description:
-              "Your edited reply was flagged and is waiting for moderator approval.",
-            confirmText:
-              "OK",
-            singleAction:
-              true,
-            destructive:
-              false,
-            onConfirm: () =>
-              setConfirmDialog(
-                null,
-              ),
+            title: "We’re concerned about your safety",
+            description: SELF_HARM_SAFETY_MESSAGE,
+            confirmText: "OK",
+            singleAction: true,
+            destructive: false,
+            onConfirm: () => setConfirmDialog(null),
+          });
+        } else if (moderationDecision.status === "pending") {
+          setConfirmDialog({
+            title: "Reply Pending Review",
+            description: "Your edited reply was flagged and is waiting for reviewer approval.",
+            confirmText: "OK",
+            singleAction: true,
+            destructive: false,
+            onConfirm: () => setConfirmDialog(null),
           });
         } else {
           setConfirmDialog({
@@ -2792,6 +2790,13 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             <FlatList
               ref={flatListRef}
               data={replies}
+              // Virtualization tuning: reply threads can include images and
+              // grow long, so keep the render window modest instead of RN's
+              // default rather than rendering the whole thread at once.
+              initialNumToRender={12}
+              maxToRenderPerBatch={8}
+              windowSize={9}
+              removeClippedSubviews={Platform.OS === "android"}
               onStartReached={loadMoreReplies}
               onStartReachedThreshold={0.5}
               ListHeaderComponent={loadingMore ? <ActivityIndicator color="#e0a53d" style={{ marginVertical: 16 }} /> : null}

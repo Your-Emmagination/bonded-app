@@ -22,7 +22,6 @@ import { useRouter } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -33,6 +32,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import ConfirmDialog from "./components/ConfirmDialog";
 import { auth, db, firebaseConfig } from "../../Firebase_configure";
 import {
   getPermissionsForRole,
@@ -173,6 +173,9 @@ async function createManagedUser(input: RegistrationInput): Promise<Registration
       studentID,
       firstname,
       lastname,
+      // App-wide search: lowercased name fields for the prefix-range query.
+      firstnameLower: firstname.trim().toLowerCase(),
+      lastnameLower: lastname.trim().toLowerCase(),
       email,
       course: course || "",
       yearlvl: yearlvl || "",
@@ -241,6 +244,46 @@ export default function AdminRegisterUserScreen() {
   const [programPickerOpen, setProgramPickerOpen] = useState(false);
   const [yearPickerOpen, setYearPickerOpen] = useState(false);
 
+  // Single dialog state used to render every alert on this screen through
+  // the app's branded ConfirmDialog instead of the bare native Alert.alert.
+  const [dialog, setDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
+  const showInfo = (title: string, description?: string, onConfirm?: () => void) => {
+    setDialog({
+      title,
+      description,
+      confirmText: "OK",
+      singleAction: true,
+      onConfirm: () => {
+        setDialog(null);
+        onConfirm?.();
+      },
+    });
+  };
+  const showConfirm = (options: {
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    onConfirm: () => void;
+  }) => {
+    setDialog({
+      ...options,
+      onConfirm: () => {
+        setDialog(null);
+        options.onConfirm();
+      },
+    });
+  };
+
   const email = useMemo(() => generatedEmail(studentID, role), [studentID, role]);
   const temporaryPassword = useMemo(() => `${lastname.trim()}12345`, [lastname]);
   const fullName = useMemo(() => `${firstname.trim()} ${lastname.trim()}`.trim(), [firstname, lastname]);
@@ -277,15 +320,15 @@ export default function AdminRegisterUserScreen() {
 
   const handleRegister = async () => {
     if (!firstname.trim() || !lastname.trim() || !studentID.trim()) {
-      Alert.alert("Incomplete Information", "First name, last name, and ID are required.");
+      showInfo("Incomplete Information", "First name, last name, and ID are required.");
       return;
     }
     if ((role === "student" || role === "moderator") && !selectedProgramId) {
-      Alert.alert("Select a Program", "Choose a program from Manage Programs before registering this account.");
+      showInfo("Select a Program", "Choose a program from Manage Programs before registering this account.");
       return;
     }
     if ((role === "student" || role === "moderator") && !YEAR_LEVELS.includes(yearlvl)) {
-      Alert.alert("Select Year Level", "Choose a valid year level.");
+      showInfo("Select Year Level", "Choose a valid year level.");
       return;
     }
 
@@ -300,13 +343,13 @@ export default function AdminRegisterUserScreen() {
         userType: role,
       });
 
-      Alert.alert(
+      showInfo(
         "User Registered",
         `${fullName}\n\nEmail: ${result.email}\nTemporary password: ${result.temporaryPassword}\n\nThe user should change the temporary password after signing in.`,
-        [{ text: "Done", onPress: () => router.back() }],
+        () => router.back(),
       );
     } catch (error: any) {
-      Alert.alert("Registration Failed", error?.message || "Unable to register the user.");
+      showInfo("Registration Failed", error?.message || "Unable to register the user.");
     } finally {
       setLoading(false);
     }
@@ -345,9 +388,9 @@ export default function AdminRegisterUserScreen() {
       }
 
       setBulkSummary({ created, failed });
-      Alert.alert("Import Complete", `${created} account${created === 1 ? "" : "s"} created.\n${failed} failed or skipped.`);
+      showInfo("Import Complete", `${created} account${created === 1 ? "" : "s"} created.\n${failed} failed or skipped.`);
     } catch (error: any) {
-      Alert.alert("CSV Import Failed", error?.message || "Unable to import the CSV.");
+      showInfo("CSV Import Failed", error?.message || "Unable to import the CSV.");
     } finally {
       setBulkLoading(false);
     }
@@ -472,6 +515,18 @@ export default function AdminRegisterUserScreen() {
           {bulkSummary && <View style={styles.summary}><Text style={styles.summaryText}>Created: {bulkSummary.created}  •  Failed: {bulkSummary.failed}</Text></View>}
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <ConfirmDialog
+        visible={!!dialog}
+        title={dialog?.title ?? ""}
+        description={dialog?.description}
+        confirmText={dialog?.confirmText ?? "Confirm"}
+        cancelText={dialog?.cancelText}
+        destructive={dialog?.destructive ?? true}
+        singleAction={dialog?.singleAction ?? false}
+        onConfirm={() => dialog?.onConfirm()}
+        onCancel={() => setDialog(null)}
+      />
     </SafeAreaView>
   );
 }

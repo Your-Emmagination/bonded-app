@@ -3,7 +3,6 @@ import { useRouter } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -29,6 +28,7 @@ import {
 import { auth, db } from "../../Firebase_configure";
 import { getUserData, parseUserRole } from "@/utils/rbac";
 import ConfirmDialog from "./components/ConfirmDialog";
+import { ListSkeleton } from "./components/Skeleton";
 
 type Program = {
   id: string;
@@ -50,8 +50,46 @@ export default function AdminManageProgramsScreen() {
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [description, setDescription] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<Program | null>(null);
-  const [deleting, setDeleting] = useState(false);
+
+  // Single dialog state used to render every alert on this screen through
+  // the app's branded ConfirmDialog instead of the bare native Alert.alert.
+  const [dialog, setDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
+  const showInfo = (title: string, description?: string, onConfirm?: () => void) => {
+    setDialog({
+      title,
+      description,
+      confirmText: "OK",
+      singleAction: true,
+      onConfirm: () => {
+        setDialog(null);
+        onConfirm?.();
+      },
+    });
+  };
+  const showConfirm = (options: {
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    onConfirm: () => void;
+  }) => {
+    setDialog({
+      ...options,
+      onConfirm: () => {
+        setDialog(null);
+        options.onConfirm();
+      },
+    });
+  };
 
   useEffect(() => {
     getUserData(auth.currentUser?.uid || "").then((data) => {
@@ -74,7 +112,7 @@ export default function AdminManageProgramsScreen() {
       (error) => {
         console.error("Program listener error:", error);
         setLoading(false);
-        Alert.alert("Unable to load programs", "Check your connection and Firestore rules.");
+        showInfo("Unable to load programs", "Check your connection and Firestore rules.");
       },
     );
     return unsubscribe;
@@ -110,7 +148,7 @@ export default function AdminManageProgramsScreen() {
     const cleanDescription = description.trim();
 
     if (!cleanName || !cleanCode) {
-      Alert.alert("Incomplete", "Program name and program code are required.");
+      showInfo("Incomplete", "Program name and program code are required.");
       return;
     }
 
@@ -121,17 +159,23 @@ export default function AdminManageProgramsScreen() {
           program.code.trim().toUpperCase() === cleanCode),
     );
     if (duplicate) {
-      Alert.alert("Already exists", `A program with ${duplicate.code} / ${duplicate.name} already exists.`);
+      showInfo("Already exists", `A program with ${duplicate.code} / ${duplicate.name} already exists.`);
       return;
     }
 
     setSaving(true);
     try {
+      // App-wide search: lowercased name/code for the prefix-range query.
+      const searchFields = {
+        nameLower: cleanName.toLowerCase(),
+        codeLower: cleanCode.toLowerCase(),
+      };
       if (editingId) {
         await updateDoc(doc(db, "programs", editingId), {
           name: cleanName,
           code: cleanCode,
           description: cleanDescription,
+          ...searchFields,
           updatedAt: serverTimestamp(),
           updatedBy: auth.currentUser?.uid || null,
         });
@@ -140,6 +184,7 @@ export default function AdminManageProgramsScreen() {
           name: cleanName,
           code: cleanCode,
           description: cleanDescription,
+          ...searchFields,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
           createdBy: auth.currentUser?.uid || null,
@@ -148,28 +193,27 @@ export default function AdminManageProgramsScreen() {
       setEditorVisible(false);
     } catch (error) {
       console.error("Save program error:", error);
-      Alert.alert("Save failed", "Unable to save the program. Check your permissions and connection.");
+      showInfo("Save failed", "Unable to save the program. Check your permissions and connection.");
     } finally {
       setSaving(false);
     }
   };
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleting(true);
+  const confirmDeleteProgram = async (program: Program) => {
     try {
-      await deleteDoc(doc(db, "programs", deleteTarget.id));
-      setDeleteTarget(null);
+      await deleteDoc(doc(db, "programs", program.id));
     } catch (error) {
       console.error("Delete program error:", error);
-      Alert.alert("Delete failed", "Unable to delete this program.");
-    } finally {
-      setDeleting(false);
+      showInfo("Delete failed", "Unable to delete this program.");
     }
   };
 
   if (authorized === null || loading) {
-    return <SafeAreaView style={styles.container}><ActivityIndicator size="large" color="#e0a53d" /></SafeAreaView>;
+    return (
+      <SafeAreaView style={styles.container}>
+        <ListSkeleton count={6} showAvatar={false} rowStyle={styles.skeletonCard} />
+      </SafeAreaView>
+    );
   }
 
   if (!authorized) {
@@ -246,7 +290,18 @@ export default function AdminManageProgramsScreen() {
                 <TouchableOpacity style={styles.iconButton} onPress={() => openEdit(program)}>
                   <Ionicons name="create-outline" size={19} color="#7a3b2e" />
                 </TouchableOpacity>
-                <TouchableOpacity style={[styles.iconButton, styles.deleteIcon]} onPress={() => setDeleteTarget(program)}>
+                <TouchableOpacity
+                  style={[styles.iconButton, styles.deleteIcon]}
+                  onPress={() =>
+                    showConfirm({
+                      title: "Delete program?",
+                      description: `${program.code} — ${program.name}`,
+                      confirmText: "Delete",
+                      destructive: true,
+                      onConfirm: () => confirmDeleteProgram(program),
+                    })
+                  }
+                >
                   <Ionicons name="trash-outline" size={19} color="#b3261e" />
                 </TouchableOpacity>
               </View>
@@ -285,14 +340,15 @@ export default function AdminManageProgramsScreen() {
       </Modal>
 
       <ConfirmDialog
-        visible={!!deleteTarget}
-        title="Delete program?"
-        description={deleteTarget ? `${deleteTarget.code} — ${deleteTarget.name}` : undefined}
-        confirmText="Delete"
-        destructive
-        loading={deleting}
-        onConfirm={confirmDelete}
-        onCancel={() => !deleting && setDeleteTarget(null)}
+        visible={!!dialog}
+        title={dialog?.title ?? ""}
+        description={dialog?.description}
+        confirmText={dialog?.confirmText ?? "Confirm"}
+        cancelText={dialog?.cancelText}
+        destructive={dialog?.destructive ?? true}
+        singleAction={dialog?.singleAction ?? false}
+        onConfirm={() => dialog?.onConfirm()}
+        onCancel={() => setDialog(null)}
       />
     </SafeAreaView>
   );
@@ -314,6 +370,7 @@ const styles = StyleSheet.create({
   addButtonText: { color: "#fffaf7", fontWeight: "800", fontSize: 14 },
   countText: { color: "#9b766c", fontSize: 12, fontWeight: "700", marginBottom: 8 },
   programCard: { backgroundColor: "#fffaf7", borderWidth: 1, borderColor: "#eadbd4", borderRadius: 16, padding: 14, marginBottom: 10, flexDirection: "row", alignItems: "center", gap: 11 },
+  skeletonCard: { backgroundColor: "#fffaf7", borderWidth: 1, borderColor: "#eadbd4", borderRadius: 16, padding: 16, marginBottom: 10 },
   programBadge: { width: 48, height: 48, borderRadius: 14, backgroundColor: "#f2e3d8", alignItems: "center", justifyContent: "center" },
   programBadgeText: { color: "#7a3b2e", fontWeight: "900", fontSize: 12 },
   programName: { color: "#4d1b17", fontWeight: "800", fontSize: 14.5 },

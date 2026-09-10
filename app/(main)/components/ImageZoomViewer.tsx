@@ -1,7 +1,9 @@
 // components/ImageZoomViewer.tsx
-import { Ionicons } from "@expo/vector-icons";
 import { FULLSCREEN_IMAGE_WIDTH, fullscreenImage } from "@/utils/cloudinaryImages";
-import React, { useCallback, useRef, useState } from "react";
+import { Ionicons } from "@expo/vector-icons";
+import * as FileSystem from "expo-file-system/legacy";
+import * as MediaLibrary from "expo-media-library/legacy";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
   FlatList,
@@ -21,6 +23,41 @@ import {
   State,
   TapGestureHandler,
 } from "react-native-gesture-handler";
+
+type SaveState = "idle" | "saving" | "saved" | "error";
+
+// Save the ORIGINAL image (not the Cloudinary-resized preview) to the device
+// gallery: request add-only permission, stream it to the cache, hand the
+// local file to MediaLibrary, then clean up.
+const saveImageToLibrary = async (remoteUrl: string): Promise<SaveState> => {
+  try {
+    const permission = await MediaLibrary.requestPermissionsAsync(true);
+    if (!permission.granted) return "error";
+
+    const cacheDir = FileSystem.cacheDirectory;
+    if (!cacheDir) return "error";
+
+    const extMatch = /\.(jpe?g|png|gif|webp|heic)(?:[?#]|$)/i.exec(remoteUrl);
+    const ext = extMatch ? extMatch[1].toLowerCase() : "jpg";
+    const localUri = `${cacheDir}bonded-${Date.now()}.${ext}`;
+
+    // A messenger draft is still a local camera/gallery file. Copy it so
+    // cleanup never deletes the attachment that the composer needs to send.
+    if (remoteUrl.startsWith("file://") || remoteUrl.startsWith("content://")) {
+      await FileSystem.copyAsync({ from: remoteUrl, to: localUri });
+    } else {
+      await FileSystem.downloadAsync(remoteUrl, localUri);
+    }
+    await MediaLibrary.saveToLibraryAsync(localUri);
+    await FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => {
+      // Best effort — a leftover cache file is harmless.
+    });
+    return "saved";
+  } catch (error) {
+    console.warn("[ImageZoomViewer] save failed:", error);
+    return "error";
+  }
+};
 
 interface Props {
   images: string[];
@@ -240,7 +277,27 @@ const ImageZoomViewer: React.FC<Props> = ({
   const { width, height } = useWindowDimensions();
   const [currentIndex, setCurrentIndex] = useState(startIndex);
   const [isZoomed, setIsZoomed] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
   const listRef = useRef<FlatList>(null);
+
+  const handleSave = useCallback(async () => {
+    if (saveState === "saving") return;
+    const target = images[currentIndex];
+    if (!target) return;
+    setSaveState("saving");
+    setSaveState(await saveImageToLibrary(target));
+  }, [images, currentIndex, saveState]);
+
+  // Auto-clear the save toast; also reset it when the page changes.
+  useEffect(() => {
+    if (saveState === "saved" || saveState === "error") {
+      const timer = setTimeout(() => setSaveState("idle"), 1800);
+      return () => clearTimeout(timer);
+    }
+  }, [saveState]);
+  useEffect(() => {
+    setSaveState("idle");
+  }, [currentIndex, visible]);
 
   const dismissY = useRef(new Animated.Value(0)).current;
   const hasImages = images.length > 0;
@@ -300,10 +357,40 @@ const ImageZoomViewer: React.FC<Props> = ({
     >
       {Platform.OS === "android" && <StatusBar hidden />}
       <GestureHandlerRootView style={styles.overlay}>
-        {/* Top Header - Close Button */}
+        {/* Top Header - Save + Close */}
+        <TouchableOpacity
+          style={styles.saveBtn}
+          onPress={handleSave}
+          activeOpacity={0.8}
+          disabled={saveState === "saving"}
+        >
+          <Ionicons
+            name={
+              saveState === "saved"
+                ? "checkmark"
+                : saveState === "error"
+                  ? "alert-circle-outline"
+                  : "download-outline"
+            }
+            size={22}
+            color="#FFFFFF"
+          />
+        </TouchableOpacity>
         <TouchableOpacity style={styles.closeBtn} onPress={onClose} activeOpacity={0.8}>
           <Ionicons name="close" size={26} color="#FFFFFF" />
         </TouchableOpacity>
+
+        {saveState !== "idle" && (
+          <View style={styles.saveToast} pointerEvents="none">
+            <Text style={styles.saveToastText}>
+              {saveState === "saving"
+                ? "Saving…"
+                : saveState === "saved"
+                  ? "Saved to Photos"
+                  : "Couldn't save photo"}
+            </Text>
+          </View>
+        )}
 
         {/* Outer Swipe Down Dismiss Handler */}
         <PanGestureHandler
@@ -424,6 +511,30 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.5)",
     borderRadius: 999,
     padding: 8,
+  },
+  saveBtn: {
+    position: "absolute",
+    top: Platform.OS === "ios" ? 54 : 20,
+    right: 62,
+    zIndex: 20,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    borderRadius: 999,
+    padding: 9,
+  },
+  saveToast: {
+    position: "absolute",
+    top: Platform.OS === "ios" ? 100 : 66,
+    alignSelf: "center",
+    zIndex: 20,
+    backgroundColor: "rgba(0,0,0,0.72)",
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  saveToastText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "600",
   },
   bottomContainer: {
     position: "absolute",

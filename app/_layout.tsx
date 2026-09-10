@@ -1,66 +1,106 @@
 // app/_layout.tsx
-import React from "react";
+import { subscribeToDirectMessageDelivery } from "@/utils/directMessages";
+import { useAppActive, usePresenceHeartbeat } from "@/utils/presence";
+import {
+    addPushNotificationResponseListener,
+    getLastPushNotificationResponse,
+    handlePushNotificationNavigation,
+    isPushNotificationsSupported,
+    playEmergencyAlertSound,
+    registerDeviceForPushNotifications,
+} from "@/utils/pushNotifications";
+import { resolveUserRoleForAuthUser } from "@/utils/rbac";
+import { Image } from "expo-image";
 import { Stack, useRouter, useSegments } from "expo-router";
-import { useEffect, useRef, useState } from "react";
+import { StatusBar } from "expo-status-bar";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
-import { auth, db } from "../Firebase_configure";
-import { ActivityIndicator, View } from "react-native";
-import { StatusBar } from "expo-status-bar";
+import { useEffect, useRef, useState } from "react";
+import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { resolveUserRoleForAuthUser } from "@/utils/rbac";
-import {
-  addPushNotificationResponseListener,
-  getLastPushNotificationResponse,
-  handlePushNotificationNavigation,
-  isPushNotificationsSupported,
-  playEmergencyAlertSound,
-  registerDeviceForPushNotifications,
-} from "@/utils/pushNotifications";
+import { auth, db } from "../Firebase_configure";
 
 export default function RootLayout() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
   const router = useRouter();
   const segments = useSegments();
   const hasNavigated = useRef(false);
   const lastHandledNotificationId = useRef<string | null>(null);
+  const appActive = useAppActive();
+  usePresenceHeartbeat(user);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    if (user?.uid && appActive) return subscribeToDirectMessageDelivery(user.uid);
+  }, [user?.uid, appActive]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      if (!isMounted) return;
       setUser(currentUser);
+
       if (!currentUser) {
         hasNavigated.current = false;
+        const currentSegment = segments[0] as string | undefined;
+        if (
+          currentSegment !== "LoginScreen" &&
+          currentSegment !== "ForgotPasswordScreen"
+        ) {
+          router.replace("/LoginScreen");
+        }
+        setIsAuthChecking(false);
+        return;
+      }
+
+      // User is logged in
+      const inMainApp = segments[0] === "(main)";
+      if (inMainApp) {
+        setIsAuthChecking(false);
+        return;
+      }
+
+      if (
+        !hasNavigated.current ||
+        segments[0] === "LoginScreen" ||
+        segments[0] === undefined ||
+        (segments[0] as string) === "index"
+      ) {
+        hasNavigated.current = true;
+        try {
+          const role = await resolveUserRoleForAuthUser(currentUser);
+          if (!isMounted) return;
+          const normalizedRole = role?.toLowerCase() || "student";
+          const isPrivileged = ["moderator", "teacher", "admin"].includes(normalizedRole);
+
+          if (isPrivileged) {
+            router.replace("/(main)/(tabs)/DashboardScreen");
+          } else {
+            router.replace("/(main)/(tabs)/HomeScreen");
+          }
+        } catch (error) {
+          console.error("Error resolving user role on startup:", error);
+          if (isMounted) {
+            router.replace("/(main)/(tabs)/HomeScreen");
+          }
+        } finally {
+          if (isMounted) {
+            setTimeout(() => {
+              if (isMounted) setIsAuthChecking(false);
+            }, 100);
+          }
+        }
+      } else {
+        setIsAuthChecking(false);
       }
     });
-    return unsubscribe;
-  }, []);
 
-  useEffect(() => {
-    if (user === undefined) return;
-
-    const inMainApp = segments[0] === "(main)";
-    const onLoginScreen =
-      segments[0] === "LoginScreen" || segments[0] === undefined;
-
-    if (inMainApp) return;
-
-    if (!user && !onLoginScreen) {
-      router.replace("/LoginScreen");
-    } else if (user && onLoginScreen && !hasNavigated.current) {
-      hasNavigated.current = true;
-
-      resolveUserRoleForAuthUser(user).then((role) => {
-        const normalizedRole = role?.toLowerCase() || "student";
-        const isPrivileged = ["moderator", "teacher", "admin"].includes(normalizedRole);
-
-        if (isPrivileged) {
-          router.replace("/(main)/(tabs)/DashboardScreen");
-        } else {
-          router.replace("/(main)/(tabs)/HomeScreen");
-        }
-      });
-    }
-  }, [user, segments, router]);
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [router, segments]);
 
   useEffect(() => {
     if (!user) {
@@ -206,20 +246,9 @@ export default function RootLayout() {
     };
   }, [router]);
 
-  if (user === undefined) {
-    return (
-      <GestureHandlerRootView style={{ flex: 1 }}>
-        <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f6f1ed" }}>
-          <StatusBar style="dark" backgroundColor="#f6f1ed" />
-          <ActivityIndicator size="large" color="#e0a53d" />
-        </View>
-      </GestureHandlerRootView>
-    );
-  }
-
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <StatusBar style="dark" backgroundColor="#f6f1ed" />
+      <StatusBar style={isAuthChecking ? "light" : "dark"} />
       <Stack
         screenOptions={{
           headerShown: false,
@@ -228,9 +257,32 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: "#f6f1ed" },
         }}
       >
+        <Stack.Screen name="index" />
         <Stack.Screen name="LoginScreen" />
+        <Stack.Screen name="ForgotPasswordScreen" />
         <Stack.Screen name="(main)" />
       </Stack>
+
+      {isAuthChecking && (
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            {
+              justifyContent: "center",
+              alignItems: "center",
+              backgroundColor: "#5f0909",
+              zIndex: 99999,
+            },
+          ]}
+        >
+          <Image
+            source={require("../assets/images/BondEDlogo.png")}
+            style={{ width: 140, height: 140 }}
+            contentFit="contain"
+          />
+          <ActivityIndicator size="small" color="#e0a53d" style={{ marginTop: 24 }} />
+        </View>
+      )}
     </GestureHandlerRootView>
   );
 }

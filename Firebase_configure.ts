@@ -1,8 +1,14 @@
-import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth, initializeAuth, type Auth } from "firebase/auth";
-import { getFirestore, type Firestore } from "firebase/firestore";
-import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { getApp, getApps, initializeApp } from "firebase/app";
+import { getAuth, initializeAuth, type Auth } from "firebase/auth";
+import {
+    getFirestore,
+    initializeFirestore,
+    persistentLocalCache,
+    persistentSingleTabManager,
+    type Firestore,
+} from "firebase/firestore";
+import { Platform } from "react-native";
 
 export const firebaseConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY || "AIzaSyCRNcZFWVFW-xOVGL846_CmpFMzPyGVjXg",
@@ -30,6 +36,18 @@ if (Platform.OS === "web") {
   });
 }
 
-export const db: Firestore = getFirestore(app);
+export let db: Firestore;
+
+if (Platform.OS === "web") {
+  try {
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache({ tabManager: persistentSingleTabManager({}) }),
+    });
+  } catch {
+    db = getFirestore(app);
+  }
+} else {
+  db = getFirestore(app);
+}
 
 export default app;

@@ -46,6 +46,12 @@ export default function NotificationTargetScreen() {
   const params = useLocalSearchParams<TargetParams>();
   const router = useRouter();
   const [target, setTarget] = useState<ResolvedTarget | null>(null);
+  // The comment/reply modal is rendered inline on this screen rather than as
+  // its own route, so closing it must only hide it locally — it must NOT
+  // call router.back(), which would pop this whole screen off the stack and
+  // dump the user back on the Notifications list instead of leaving them
+  // here on the underlying post. See commentModalVisible below.
+  const [commentModalVisible, setCommentModalVisible] = useState(false);
 
   const entityType = single(params.entityType);
   const entityId = single(params.entityId);
@@ -68,7 +74,10 @@ export default function NotificationTargetScreen() {
         let commentId: string | undefined;
         let replyId: string | undefined;
 
-        if (entityType === "post") {
+        if (entityType === "direct_message" && parentId) {
+          router.replace({ pathname: "/(main)/DirectChatScreen", params: { conversationId: parentId } });
+          return;
+        } else if (entityType === "post") {
           postId = entityId;
         } else if (entityType === "comment") {
           const commentSnap = await getDoc(doc(db, "comments", entityId));
@@ -123,6 +132,7 @@ export default function NotificationTargetScreen() {
           commentId,
           replyId,
         });
+        if (commentId) setCommentModalVisible(true);
       } catch (resolveError) {
         if (
           !(resolveError instanceof Error) ||
@@ -148,7 +158,7 @@ export default function NotificationTargetScreen() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backButton} hitSlop={8}>
           <Ionicons name="arrow-back" size={23} color="#5f0909" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Notification</Text>
@@ -157,11 +167,30 @@ export default function NotificationTargetScreen() {
 
       {!target ? (
         <View style={styles.center}>
-          <ActivityIndicator size="large" color="#8f3a2b" />
-          <Text style={styles.loadingText}>Opening content…</Text>
+          <View style={styles.loadingCard}>
+            <ActivityIndicator size="large" color="#8f3a2b" />
+            <Text style={styles.loadingText}>Opening content…</Text>
+          </View>
         </View>
-      ) : target ? (
-        <ScrollView contentContainerStyle={styles.content}>
+      ) : (
+        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+          <View style={styles.contextBanner}>
+            <View style={styles.contextIconCircle}>
+              <Ionicons
+                name={target.replyId ? "return-up-back-outline" : target.commentId ? "chatbubble-outline" : "document-text-outline"}
+                size={16}
+                color="#8f3a2b"
+              />
+            </View>
+            <Text style={styles.contextBannerText}>
+              {target.replyId
+                ? "Jumped here from a reply notification"
+                : target.commentId
+                  ? "Jumped here from a comment notification"
+                  : "Jumped here from a notification"}
+            </Text>
+          </View>
+
           <PostCard
             post={target.post}
             isLiked={target.post.likedBy?.includes(auth.currentUser?.uid || "") || false}
@@ -175,12 +204,12 @@ export default function NotificationTargetScreen() {
             getTimeAgo={timeAgo}
           />
         </ScrollView>
-      ) : null}
+      )}
 
       {target?.commentId ? (
         <CommentModal
-          visible
-          onClose={() => router.back()}
+          visible={commentModalVisible}
+          onClose={() => setCommentModalVisible(false)}
           postId={target.post.id}
           currentUserId={auth.currentUser?.uid}
           initialCommentId={target.commentId}
@@ -202,11 +231,48 @@ const styles = StyleSheet.create({
     borderBottomColor: "#e5cfc5",
     paddingHorizontal: 12,
     backgroundColor: "#fffaf7",
+    shadowColor: "#000",
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   backButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
   headerTitle: { flex: 1, textAlign: "center", fontSize: 18, fontWeight: "700", color: "#5f0909" },
   headerSpacer: { width: 42 },
   content: { padding: 12, paddingBottom: 32 },
+  contextBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#fff4ee",
+    borderWidth: 1,
+    borderColor: "#f0d2c2",
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 12,
+  },
+  contextIconCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "#fce3d6",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  contextBannerText: { flex: 1, color: "#7a3b2e", fontSize: 13, fontWeight: "600" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
-  loadingText: { marginTop: 12, color: "#805e56", fontSize: 15 },
+  loadingCard: {
+    alignItems: "center",
+    backgroundColor: "#fffaf7",
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#ead7cf",
+    paddingVertical: 32,
+    paddingHorizontal: 28,
+    width: "100%",
+    maxWidth: 320,
+  },
+  loadingText: { marginTop: 12, color: "#805e56", fontSize: 15, fontWeight: "600" },
 });

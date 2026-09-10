@@ -1,11 +1,14 @@
 export type CommunityMembershipState = "joined" | "pending" | "available";
 
+export type ChannelType = "text" | "announcement" | "rules" | "media";
+
 export type CommunityChannel = {
   id: string;
   label: string;
   icon: string;
   hint?: string;
   emoji?: string;
+  channelType?: ChannelType;
   badgeIcon?: string;
   unread?: boolean;
   unreadCount?: number;
@@ -82,17 +85,91 @@ const DEFAULT_CHANNEL_ICON = "chatbubbles-outline";
 const DEFAULT_CHANNEL_EMOJI = "💬";
 const DEFAULT_SERVER_EMOJI = "🏫";
 
+export function getChannelIcon(channelType?: ChannelType, fallbackIcon = DEFAULT_CHANNEL_ICON): string {
+  switch (channelType) {
+    case "rules":
+      return "shield-checkmark-outline";
+    case "announcement":
+      return "megaphone-outline";
+    case "media":
+      return "images-outline";
+    case "text":
+    default:
+      return fallbackIcon || DEFAULT_CHANNEL_ICON;
+  }
+}
+
+export function getChannelDefaultEmoji(channelType?: ChannelType): string {
+  switch (channelType) {
+    case "rules":
+      return "📜";
+    case "announcement":
+      return "📢";
+    case "media":
+      return "📸";
+    case "text":
+    default:
+      return DEFAULT_CHANNEL_EMOJI;
+  }
+}
+
+export function isStaffOnlyChannel(channel?: { channelType?: string; label?: string; id?: string } | null): boolean {
+  if (!channel) return false;
+  if (channel.channelType === "rules" || channel.channelType === "announcement") return true;
+  const lowerLabel = (channel.label || "").toLowerCase();
+  const lowerId = (channel.id || "").toLowerCase();
+  return (
+    lowerLabel === "rules" ||
+    lowerLabel === "announcement" ||
+    lowerLabel === "announcements" ||
+    lowerId.endsWith("_rules") ||
+    lowerId.endsWith("_announcement") ||
+    lowerId.endsWith("_announcements")
+  );
+}
+
 const buildDefaultSections = (serverId: string): CommunitySection[] => [
   {
+    id: `${serverId}_info_section`,
+    title: "Information",
+    channels: [
+      {
+        id: `${serverId}_rules`,
+        label: "rules",
+        channelType: "rules",
+        icon: "shield-checkmark-outline",
+        emoji: "📜",
+        hint: "Server rules and guidelines",
+      },
+      {
+        id: `${serverId}_announcements`,
+        label: "announcements",
+        channelType: "announcement",
+        icon: "megaphone-outline",
+        emoji: "📢",
+        hint: "Official notices and updates",
+      },
+    ],
+  },
+  {
     id: `${serverId}_general_section`,
-    title: "Class Channels",
+    title: "Channels",
     channels: [
       {
         id: `${serverId}_general`,
         label: "general",
+        channelType: "text",
         icon: DEFAULT_CHANNEL_ICON,
         emoji: DEFAULT_CHANNEL_EMOJI,
         hint: "Main class discussion",
+      },
+      {
+        id: `${serverId}_media`,
+        label: "media",
+        channelType: "media",
+        icon: "images-outline",
+        emoji: "📸",
+        hint: "Photos, videos, and file sharing",
       },
     ],
   },
@@ -112,6 +189,7 @@ export function appendThreadToSections(
   label: string,
   emoji = DEFAULT_CHANNEL_EMOJI,
   description?: string,
+  channelType: ChannelType = "text",
 ) {
   const nextLabel = label.trim();
   if (!nextLabel) {
@@ -133,28 +211,97 @@ export function appendThreadToSections(
     return baseSections;
   }
 
-  const firstSection = baseSections[0] ?? {
-    id: `${serverId}_general_section`,
-    title: "Class Channels",
+  const resolvedEmoji = emoji?.trim() || getChannelDefaultEmoji(channelType);
+  const resolvedIcon = getChannelIcon(channelType);
+
+  let targetSectionIndex = baseSections.findIndex((sec) =>
+    sec.title.toLowerCase().includes(channelType === "rules" || channelType === "announcement" ? "info" : "channel"),
+  );
+  if (targetSectionIndex < 0) {
+    targetSectionIndex = 0;
+  }
+
+  const targetSection = baseSections[targetSectionIndex] ?? {
+    id: `${serverId}_channels_section`,
+    title: "Channels",
     channels: [],
   };
 
-  return [
-    {
-      ...firstSection,
-      channels: [
-        ...firstSection.channels,
-        {
-          id: normalizedId,
-          label: slugifyLabel(nextLabel),
-          icon: DEFAULT_CHANNEL_ICON,
-          emoji,
-          hint: description?.trim() || `${nextLabel.trim()} channel`,
-        },
-      ],
-    },
-    ...baseSections.slice(1),
-  ];
+  const updatedTargetSection = {
+    ...targetSection,
+    channels: [
+      ...targetSection.channels,
+      {
+        id: normalizedId,
+        label: slugifyLabel(nextLabel),
+        channelType,
+        icon: resolvedIcon,
+        emoji: resolvedEmoji,
+        hint: description?.trim() || `${nextLabel.trim()} channel`,
+      },
+    ],
+  };
+
+  const newSections = [...baseSections];
+  newSections[targetSectionIndex] = updatedTargetSection;
+  return newSections;
+}
+
+export function updateChannelInSections(
+  sections: CommunitySection[] | undefined,
+  serverId: string,
+  channelId: string,
+  updates: {
+    label?: string;
+    emoji?: string;
+    hint?: string;
+    channelType?: ChannelType;
+  },
+): CommunitySection[] {
+  const baseSections =
+    Array.isArray(sections) && sections.length > 0
+      ? sections
+      : buildDefaultSections(serverId);
+
+  return baseSections.map((section) => ({
+    ...section,
+    channels: section.channels.map((channel) => {
+      if (channel.id !== channelId) {
+        return channel;
+      }
+
+      const nextChannelType = updates.channelType ?? channel.channelType ?? "text";
+      const nextLabel = updates.label?.trim() ? slugifyLabel(updates.label) : channel.label;
+      const nextEmoji = updates.emoji?.trim() || channel.emoji || getChannelDefaultEmoji(nextChannelType);
+      const nextIcon = getChannelIcon(nextChannelType, channel.icon);
+      const nextHint = updates.hint !== undefined ? updates.hint.trim() : channel.hint;
+
+      return {
+        ...channel,
+        label: nextLabel,
+        channelType: nextChannelType,
+        emoji: nextEmoji,
+        icon: nextIcon,
+        hint: nextHint,
+      };
+    }),
+  }));
+}
+
+export function deleteChannelFromSections(
+  sections: CommunitySection[] | undefined,
+  serverId: string,
+  channelId: string,
+): CommunitySection[] {
+  const baseSections =
+    Array.isArray(sections) && sections.length > 0
+      ? sections
+      : buildDefaultSections(serverId);
+
+  return baseSections.map((section) => ({
+    ...section,
+    channels: section.channels.filter((channel) => channel.id !== channelId),
+  }));
 }
 
 function ensureCustomServerShape(

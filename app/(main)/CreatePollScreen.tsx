@@ -2,14 +2,13 @@
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import { addDoc, collection, doc, getDoc, serverTimestamp, updateDoc } from "firebase/firestore";
 import React, { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   BackHandler,
   FlatList,
-  Image,
   KeyboardAvoidingView,
   ListRenderItem,
   Platform,
@@ -20,15 +19,18 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { Image } from "expo-image";
 import DropDownPicker from "react-native-dropdown-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
+import ConfirmDialog, { type ConfirmDialogVariant } from "./components/ConfirmDialog";
 import { uploadPostImage } from "@/utils/cloudinaryUpload";
 import {
-  getModerationPreviewText,
-  requestModerationDecision,
+  SELF_HARM_SAFETY_MESSAGE,
+  requestFirestoreModerationDecision,
 } from "@/utils/contentModeration";
-import { resolveUserRoleForAuthUser } from "@/utils/rbac";
+import { emitHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
+import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
 import {
   canUsePostFlair,
   DEFAULT_POST_FLAIR,
@@ -39,6 +41,9 @@ import {
 type PollOption = {
   id: string;
   text: string;
+  votes?: number;
+  voters?: string[];
+  isUserAdded?: boolean;
 };
 
 type PollDuration = {
@@ -53,6 +58,7 @@ type FormSection = {
 };
 
 type CreatePollRouteParams = {
+  editPollId?: string | string[];
   serverId?: string | string[];
   channelId?: string | string[];
   serverName?: string | string[];
@@ -67,6 +73,7 @@ const CreatePollScreen = () => {
   const [selectedFlair, setSelectedFlair] =
     useState<PostFlairId>(DEFAULT_POST_FLAIR);
   const [authorRole, setAuthorRole] = useState<string>("student");
+  const [studentAuthorName, setStudentAuthorName] = useState("");
   const [options, setOptions] = useState<PollOption[]>([
     { id: "1", text: "" },
     { id: "2", text: "" },
@@ -86,9 +93,47 @@ const CreatePollScreen = () => {
   const [allowAdding, setAllowAdding] = useState(false);
   const [pollImage, setPollImage] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [loadingEditPoll, setLoadingEditPoll] = useState(false);
+  const [optionsLocked, setOptionsLocked] = useState(false);
+  const [originalCreatedAtMs, setOriginalCreatedAtMs] = useState<number | null>(null);
+  const [infoDialog, setInfoDialog] = useState<{
+    title: string;
+    description: string;
+    variant: ConfirmDialogVariant;
+    onConfirm?: () => void;
+  } | null>(null);
+  // Single-button "OK" info messages render through the app's branded
+  // ConfirmDialog instead of the bare OS alert. The self-harm safety notice
+  // is intentionally left as a native Alert.alert call, untouched.
+  const getDialogVariant = useCallback((title: string): ConfirmDialogVariant => {
+    const normalizedTitle = title.trim().toLowerCase();
+    if (normalizedTitle.includes("success")) return "success";
+    if (
+      normalizedTitle.includes("info") ||
+      normalizedTitle.includes("review") ||
+      normalizedTitle.includes("pending") ||
+      normalizedTitle.includes("sent")
+    ) {
+      return "info";
+    }
+    if (
+      normalizedTitle.includes("error") ||
+      normalizedTitle.includes("failed") ||
+      normalizedTitle.includes("blocked")
+    ) {
+      return "destructive";
+    }
+    return "warning";
+  }, []);
+
+  const showInfo = useCallback((title: string, description: string, onConfirm?: () => void) => {
+    setInfoDialog({ title, description, variant: getDialogVariant(title), onConfirm });
+  }, [getDialogVariant]);
   const router = useRouter();
-  const { serverId, channelId, serverName, channelLabel } =
+  const { editPollId, serverId, channelId, serverName, channelLabel } =
     useLocalSearchParams<CreatePollRouteParams>();
+  const selectedEditPollId = getSingleParam(editPollId) || null;
+  const isEditMode = !!selectedEditPollId;
   const selectedServerId = getSingleParam(serverId) || null;
   const selectedChannelId = getSingleParam(channelId) || null;
   const selectedServerName = getSingleParam(serverName) || null;
@@ -107,9 +152,18 @@ const CreatePollScreen = () => {
     let active = true;
 
     const loadAuthorRole = async () => {
-      const role = await resolveUserRoleForAuthUser(auth.currentUser);
+      const [role, profile] = await Promise.all([
+        resolveUserRoleForAuthUser(auth.currentUser),
+        getUserDataByAuthUser(auth.currentUser),
+      ]);
       if (active) {
-        setAuthorRole(String(role || "student").toLowerCase());
+        const normalizedRole = String(role || "student").toLowerCase();
+        setAuthorRole(normalizedRole);
+        if (normalizedRole === "student") {
+          setStudentAuthorName(
+            `${profile?.firstname || ""} ${profile?.lastname || ""}`.trim(),
+          );
+        }
       }
     };
 
@@ -119,6 +173,78 @@ const CreatePollScreen = () => {
       active = false;
     };
   }, []);
+
+  React.useEffect(() => {
+    if (!selectedEditPollId || !auth.currentUser) return;
+
+    let active = true;
+    const loadPollForEdit = async () => {
+      setLoadingEditPoll(true);
+      try {
+        const snapshot = await getDoc(doc(db, "polls", selectedEditPollId));
+        if (!snapshot.exists()) {
+          showInfo("Poll Not Found", "This poll no longer exists.", () => router.back());
+          return;
+        }
+
+        const data: any = snapshot.data();
+        if (data.userId !== auth.currentUser?.uid) {
+          showInfo("Access Denied", "You can only edit your own polls.", () => router.back());
+          return;
+        }
+        if (!active) return;
+
+        const loadedOptions = Array.isArray(data.options) ? data.options : [];
+        const hasVotes =
+          Number(data.totalVotes || 0) > 0 ||
+          loadedOptions.some(
+            (option: any) =>
+              Number(option?.votes || 0) > 0 ||
+              (Array.isArray(option?.voters) && option.voters.length > 0),
+          );
+        const durationMs = Math.max(0, Number(data.durationMs || 0));
+        const createdAtMs =
+          typeof data.createdAt?.toMillis === "function"
+            ? data.createdAt.toMillis()
+            : typeof data.createdAt?.toDate === "function"
+              ? data.createdAt.toDate().getTime()
+              : Date.now();
+
+        setQuestion(String(data.question || ""));
+        setSelectedFlair((data.flair || DEFAULT_POST_FLAIR) as PostFlairId);
+        setOptions(
+          loadedOptions.map((option: any, index: number) => ({
+            id: String(index + 1),
+            text: String(option?.text || ""),
+            votes: Number(option?.votes || 0),
+            voters: Array.isArray(option?.voters) ? option.voters : [],
+            isUserAdded: option?.isUserAdded === true,
+          })),
+        );
+        setPollImage(data.imageUrl || null);
+        setAllowAdding(data.allowUsersToAddOption === true);
+        setAllowMultiple(data.allowMultiple === true);
+        setMaxSelections(Math.max(1, Number(data.maxSelections || 1)));
+        setDuration({
+          days: Math.floor(durationMs / (24 * 60 * 60 * 1000)),
+          hours: Math.floor((durationMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000)),
+          minutes: Math.floor((durationMs % (60 * 60 * 1000)) / (60 * 1000)),
+        });
+        setOriginalCreatedAtMs(createdAtMs);
+        setOptionsLocked(hasVotes);
+      } catch (error) {
+        console.error("Error loading poll for edit:", error);
+        showInfo("Error", "Failed to load the poll.", () => router.back());
+      } finally {
+        if (active) setLoadingEditPoll(false);
+      }
+    };
+
+    void loadPollForEdit();
+    return () => {
+      active = false;
+    };
+  }, [router, selectedEditPollId, showInfo]);
 
   // Unified dropdown management
   const closeAllDropdowns = useCallback(() => {
@@ -140,30 +266,33 @@ const CreatePollScreen = () => {
   );
 
   const addOption = useCallback(() => {
+    if (optionsLocked) return;
     const newId = String(
       Math.max(...options.map((o) => parseInt(o.id) || 0), 0) + 1,
     );
     setOptions([...options, { id: newId, text: "" }]);
-  }, [options]);
+  }, [options, optionsLocked]);
 
   const removeOption = useCallback(
     (id: string) => {
+      if (optionsLocked) return;
       if (options.length > 2) {
         setOptions(options.filter((opt) => opt.id !== id));
       } else {
-        Alert.alert("Error", "You must have at least 2 options");
+        showInfo("Error", "You must have at least 2 options");
       }
     },
-    [options],
+    [options, optionsLocked, showInfo],
   );
 
   const updateOption = useCallback(
     (id: string, text: string) => {
+      if (optionsLocked) return;
       setOptions(
         options.map((opt) => (opt.id === id ? { ...opt, text } : opt)),
       );
     },
-    [options],
+    [options, optionsLocked],
   );
 
   const updateDuration = useCallback(
@@ -189,14 +318,14 @@ const CreatePollScreen = () => {
           const url = await uploadPostImage(imageUri);
           setPollImage(url);
         } catch (error) {
-          Alert.alert("Error", "Failed to upload image");
+          showInfo("Error", "Failed to upload image");
           console.error(error);
         } finally {
           setUploading(false);
         }
       }
     } catch (error) {
-      Alert.alert("Error", "Failed to pick image");
+      showInfo("Error", "Failed to pick image");
       console.error(error);
     }
   };
@@ -207,23 +336,23 @@ const CreatePollScreen = () => {
 
   const validatePoll = (): boolean => {
     if (!question.trim()) {
-      Alert.alert("Error", "Please enter a question");
+      showInfo("Error", "Please enter a question");
       return false;
     }
 
     const filledOptions = options.filter((opt) => opt.text.trim());
     if (filledOptions.length < 2) {
-      Alert.alert("Error", "You must have at least 2 options");
+      showInfo("Error", "You must have at least 2 options");
       return false;
     }
 
     if (allowMultiple && maxSelections < 1) {
-      Alert.alert("Error", "Maximum selections must be at least 1");
+      showInfo("Error", "Maximum selections must be at least 1");
       return false;
     }
 
     if (allowMultiple && maxSelections > filledOptions.length) {
-      Alert.alert(
+      showInfo(
         "Error",
         `Maximum selections cannot exceed ${filledOptions.length}`,
       );
@@ -240,7 +369,7 @@ const CreatePollScreen = () => {
     try {
       const user = auth.currentUser;
       if (!user) {
-        Alert.alert("Error", "You must be logged in");
+        showInfo("Error", "You must be logged in");
         setLoading(false);
         return;
       }
@@ -250,37 +379,99 @@ const CreatePollScreen = () => {
         duration.days * 24 * 60 * 60 * 1000 +
         duration.hours * 60 * 60 * 1000 +
         duration.minutes * 60 * 1000;
-      const moderationDecision = await requestModerationDecision({
-        text: getModerationPreviewText({
-          text: `${question.trim()}\n${filledOptions.map((opt) => opt.text.trim()).join("\n")}`,
-        }),
-        scope: "post",
-        serverId: selectedServerId,
-        channelId: selectedChannelId,
-        authorId: user.uid,
-        authorRole,
-      });
+      // No local text filtering. The poll is always created as pending and the
+      // trusted Worker re-reads this exact text before calling OpenModeration.
 
       if (!canUsePostFlair(selectedFlair, authorRole)) {
-        Alert.alert(
+        showInfo(
           "Flair Not Allowed",
           "Announcement is reserved for authorized staff accounts.",
         );
         return;
       }
 
+      const normalizedOptions = filledOptions.map((opt) => ({
+        text: opt.text.trim(),
+        votes: Number(opt.votes || 0),
+        voters: Array.isArray(opt.voters) ? opt.voters : [],
+        ...(opt.isUserAdded ? { isUserAdded: true } : {}),
+      }));
+
+      if (isEditMode && selectedEditPollId) {
+        const updateData: Record<string, unknown> = {
+          question: question.trim(),
+          flair: selectedFlair,
+          imageUrl: pollImage || null,
+          allowUsersToAddOption: allowAdding,
+          durationMs,
+          expiresAt: new Date((originalCreatedAtMs || Date.now()) + durationMs),
+          moderationStatus: "pending",
+          moderationReasons: [],
+          moderatedAtMs: null,
+          updatedAt: serverTimestamp(),
+        };
+
+        if (!optionsLocked) {
+          updateData.options = normalizedOptions;
+          updateData.totalVotes = 0;
+          updateData.allowMultiple = allowMultiple;
+          updateData.maxSelections = allowMultiple ? maxSelections : 1;
+        }
+
+        await updateDoc(doc(db, "polls", selectedEditPollId), updateData);
+
+        let moderationDecision: any = { status: "pending", reasons: [] };
+        try {
+          moderationDecision = await requestFirestoreModerationDecision({
+            collectionName: "polls",
+            documentId: selectedEditPollId,
+            scope: "poll",
+          });
+        } catch (moderationError) {
+          console.warn(
+            "[CreatePoll] Server moderation unavailable; poll remains pending:",
+            moderationError,
+          );
+        }
+
+        if (moderationDecision.selfHarm === true) {
+          Alert.alert("We’re concerned about your safety", SELF_HARM_SAFETY_MESSAGE, [
+            { text: "OK", onPress: () => router.back() },
+          ]);
+          return;
+        }
+
+        showInfo(
+          moderationDecision.status === "approved" ? "Success" : "Poll Pending Review",
+          moderationDecision.status === "approved"
+            ? "Poll updated successfully!"
+            : "Your poll is waiting for moderator review and will stay hidden until approved.",
+          () => router.back(),
+        );
+        return;
+      }
+
+      let pollUsername =
+        user.displayName || user.email?.split("@")[0] || "Anonymous";
+      if (authorRole === "student") {
+        let resolvedStudentName = studentAuthorName;
+        if (!resolvedStudentName) {
+          const profile = await getUserDataByAuthUser(user);
+          resolvedStudentName =
+            `${profile?.firstname || ""} ${profile?.lastname || ""}`.trim();
+        }
+        pollUsername = resolvedStudentName || pollUsername;
+      }
+
       const pollData = {
         question: question.trim(),
         flair: selectedFlair,
-        options: filledOptions.map((opt) => ({
-          text: opt.text.trim(),
-          votes: 0,
-          voters: [],
-        })),
+        options: normalizedOptions,
         imageUrl: pollImage || null,
         allowUsersToAddOption: allowAdding,
         userId: user.uid,
-        username: user.displayName || user.email?.split("@")[0] || "Anonymous",
+        username: pollUsername,
+        ...(authorRole === "student" ? { userRole: "student" } : {}),
         isAnonymous: false,
         allowMultiple,
         maxSelections: allowMultiple ? maxSelections : 1,
@@ -291,22 +482,49 @@ const CreatePollScreen = () => {
         commentCount: 0,
         serverId: selectedServerId,
         channelId: selectedChannelId,
-        moderationStatus: moderationDecision.status,
-        moderationReasons: moderationDecision.reasons,
-        moderatedAtMs: Date.now(),
+        moderationStatus: "pending",
+        moderationReasons: [],
+        moderatedAtMs: null,
       };
 
-      await addDoc(collection(db, "polls"), pollData);
-      Alert.alert(
-        moderationDecision.status === "pending" ? "Poll Pending Review" : "Success",
-        moderationDecision.status === "pending"
-          ? "Your poll was flagged for moderator review and will stay hidden until approved."
-          : "Poll created successfully!",
-        [{ text: "OK", onPress: () => router.back() }],
+      const pollRef = await addDoc(collection(db, "polls"), pollData);
+
+      let moderationDecision: any = { status: "pending", reasons: [] };
+      try {
+        moderationDecision = await requestFirestoreModerationDecision({
+          collectionName: "polls",
+          documentId: pollRef.id,
+          scope: "poll",
+        });
+      } catch (moderationError) {
+        console.warn(
+          "[CreatePoll] Server moderation unavailable; poll remains pending:",
+          moderationError,
+        );
+      }
+
+      if (moderationDecision.selfHarm === true) {
+        Alert.alert("We’re concerned about your safety", SELF_HARM_SAFETY_MESSAGE, [
+          { text: "OK", onPress: () => router.back() },
+        ]);
+        return;
+      }
+
+      showInfo(
+        moderationDecision.status === "approved" ? "Success" : "Poll Pending Review",
+        moderationDecision.status === "approved"
+          ? "Poll created successfully!"
+          : "Your poll is waiting for moderator review and will stay hidden until approved.",
+        () => {
+          router.back();
+          if (moderationDecision.status === "approved") {
+            requestAnimationFrame(emitHomeFeedScrollToTop);
+          }
+        },
       );
     } catch (error) {
       console.error("Error creating poll:", error);
-      Alert.alert("Error", "Failed to create poll");
+      showInfo("Error", "Failed to create poll");
     } finally {
       setLoading(false);
     }
@@ -404,6 +622,11 @@ const CreatePollScreen = () => {
         return (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Options</Text>
+            {optionsLocked && (
+              <Text style={styles.lockedOptionsText}>
+                Choices can’t be changed after voting has started.
+              </Text>
+            )}
           </View>
         );
 
@@ -416,7 +639,8 @@ const CreatePollScreen = () => {
           <OptionItem
             option={option}
             index={index}
-            canDelete={options.length > 2}
+            canDelete={!optionsLocked && options.length > 2}
+            locked={optionsLocked}
             onUpdateOption={updateOption}
             onRemoveOption={removeOption}
           />
@@ -426,7 +650,7 @@ const CreatePollScreen = () => {
       case "addOption":
         return (
           <AddOptionButton
-            disabled={options.length >= 10}
+            disabled={optionsLocked || options.length >= 10}
             onPress={addOption}
           />
         );
@@ -444,6 +668,7 @@ const CreatePollScreen = () => {
             onOpenDropdown={() => openDropdown("maxSelections")}
             allowAdding={allowAdding}
             setAllowAdding={setAllowAdding}
+            choiceSettingsLocked={optionsLocked}
           />
         );
 
@@ -464,7 +689,11 @@ const CreatePollScreen = () => {
 
       case "button":
         return (
-          <CreateButton loading={loading} onPress={handleCreatePoll} />
+          <CreateButton
+            loading={loading || uploading}
+            onPress={handleCreatePoll}
+            editMode={isEditMode}
+          />
         );
 
       default:
@@ -483,7 +712,7 @@ const CreatePollScreen = () => {
           <TouchableOpacity onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color="#e0a53d" />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Create Poll</Text>
+          <Text style={styles.headerTitle}>{isEditMode ? "Edit Poll" : "Create Poll"}</Text>
           <View style={{ width: 24 }} />
         </View>
 
@@ -505,6 +734,11 @@ const CreatePollScreen = () => {
           </View>
         </View>
 
+        {loadingEditPoll ? (
+          <View style={styles.loadingEditContainer}>
+            <ActivityIndicator color="#e0a53d" />
+          </View>
+        ) : (
         <FlatList
           data={formSections}
           keyExtractor={(item) => item.id}
@@ -513,8 +747,24 @@ const CreatePollScreen = () => {
           scrollEnabled
           nestedScrollEnabled
         />
+        )}
       </KeyboardAvoidingView>
       </View>
+
+      <ConfirmDialog
+        visible={!!infoDialog}
+        title={infoDialog?.title ?? ""}
+        description={infoDialog?.description}
+        singleAction
+        confirmText="OK"
+        variant={infoDialog?.variant ?? "warning"}
+        onConfirm={() => {
+          const onConfirmCallback = infoDialog?.onConfirm;
+          setInfoDialog(null);
+          onConfirmCallback?.();
+        }}
+        onCancel={() => setInfoDialog(null)}
+      />
     </SafeAreaView>
   );
 };
@@ -590,12 +840,14 @@ const OptionItem = ({
   option,
   index,
   canDelete,
+  locked,
   onUpdateOption,
   onRemoveOption,
 }: {
   option: PollOption;
   index: number;
   canDelete: boolean;
+  locked: boolean;
   onUpdateOption: (id: string, text: string) => void;
   onRemoveOption: (id: string) => void;
 }) => (
@@ -610,6 +862,7 @@ const OptionItem = ({
           value={option.text}
           onChangeText={(text) => onUpdateOption(option.id, text)}
           maxLength={25}
+          editable={!locked}
         />
         {canDelete && (
           <TouchableOpacity
@@ -653,6 +906,7 @@ const SettingsSection = ({
   onOpenDropdown,
   allowAdding,
   setAllowAdding,
+  choiceSettingsLocked,
 }: {
   allowMultiple: boolean;
   setAllowMultiple: (v: boolean) => void;
@@ -664,6 +918,7 @@ const SettingsSection = ({
   onOpenDropdown: () => void;
   allowAdding: boolean;
   setAllowAdding: (v: boolean) => void;
+  choiceSettingsLocked: boolean;
 }) => (
   <View style={styles.section}>
     <Text style={styles.sectionTitle}>Poll Settings</Text>
@@ -679,6 +934,7 @@ const SettingsSection = ({
       <TouchableOpacity
         style={[styles.toggle, allowMultiple && styles.toggleActive]}
         onPress={() => setAllowMultiple(!allowMultiple)}
+        disabled={choiceSettingsLocked}
       >
         <View
           style={[
@@ -722,6 +978,7 @@ const SettingsSection = ({
           listItemLabelStyle={styles.listItemLabel}
           zIndex={3000}
           zIndexInverse={1000}
+          disabled={choiceSettingsLocked}
         />
       </View>
     )}
@@ -800,9 +1057,11 @@ const DurationSection = ({
 const CreateButton = ({
   loading,
   onPress,
+  editMode,
 }: {
   loading: boolean;
   onPress: () => void;
+  editMode: boolean;
 }) => (
   <TouchableOpacity
     style={[styles.createBtn, loading && styles.createBtnDisabled]}
@@ -812,7 +1071,7 @@ const CreateButton = ({
     {loading ? (
       <ActivityIndicator color="#fff" />
     ) : (
-      <Text style={styles.createBtnText}>Create Poll</Text>
+      <Text style={styles.createBtnText}>{editMode ? "Save Changes" : "Create Poll"}</Text>
     )}
   </TouchableOpacity>
 );
@@ -980,6 +1239,11 @@ const styles = StyleSheet.create({
     paddingVertical: 20,
     paddingBottom: 80,
   },
+  loadingEditContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   section: {
     marginBottom: 24,
   },
@@ -988,6 +1252,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "700",
     marginBottom: 12,
+  },
+  lockedOptionsText: {
+    color: "#8f6a60",
+    fontSize: 12.5,
+    lineHeight: 18,
+    marginTop: -6,
   },
   questionInput: {
     backgroundColor: "#fffdfa",
@@ -1133,6 +1403,11 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: "#9b766c",
     alignSelf: "flex-start",
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 2,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
   },
   toggleThumbActive: {
     backgroundColor: "#fff",

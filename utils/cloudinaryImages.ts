@@ -48,6 +48,7 @@ const CLOUDINARY_UPLOAD_MARKER = "/upload/";
 // If a new avatar/image spot is added later, reuse one of these rather
 // than introducing a new one-off size.
 export const AVATAR_SIZE_SMALL = 56; // inline/list avatars (feed, comments, members, headers — displayed 32-58px)
+export const AVATAR_SIZE_MEDIUM = 80; // chat headers and user previews (displayed 60-80px)
 export const AVATAR_SIZE_LARGE = 120; // profile-screen avatars (displayed 104-120px)
 export const FEED_IMAGE_WIDTH = 400; // post/poll/message/comment images and GIFs
 export const FULLSCREEN_IMAGE_WIDTH = 430; // baseline logical viewport width for the fullscreen viewer
@@ -131,3 +132,81 @@ export const fullscreenImage = (
   url: string | undefined | null,
   width: number = FULLSCREEN_IMAGE_WIDTH,
 ): string | undefined => getCloudinaryUrl(url, { width: scaleForDevice(width), crop: "limit" });
+
+/**
+ * Frame-grab thumbnail for a Cloudinary-hosted video (e.g.
+ * `.../video/upload/v169.../post_videos/post_video_123.mp4`), used to show a
+ * real preview image instead of a blank/generic card wherever a video
+ * attachment needs a lightweight, non-playing preview (moderation queue,
+ * list rows). Requests the frame at second 0 and delivers it as a JPEG via
+ * Cloudinary's video-to-image delivery — no re-upload or extra storage
+ * needed, same on-the-fly transform approach as getCloudinaryUrl above.
+ *
+ * Returns undefined for any URL that isn't a Cloudinary `/video/upload/`
+ * delivery URL — callers should treat a missing result the same as a load
+ * failure and fall back to a static placeholder (see ManageModerationScreen).
+ */
+const CLOUDINARY_VIDEO_UPLOAD_MARKER = "/video/upload/";
+
+export const videoThumb = (
+  url: string | undefined | null,
+  width: number = FEED_IMAGE_WIDTH,
+): string | undefined => {
+  if (!url) return undefined;
+  const markerIndex = url.indexOf(CLOUDINARY_VIDEO_UPLOAD_MARKER);
+  if (markerIndex === -1) return undefined;
+
+  const afterMarker = url.slice(markerIndex + CLOUDINARY_VIDEO_UPLOAD_MARKER.length);
+  // Swap the video extension for .jpg — Cloudinary serves a still frame when
+  // a video public ID is requested through the image-style delivery params.
+  const withoutExtension = afterMarker.replace(/\.[a-zA-Z0-9]+$/, "");
+  const transform = [`so_0`, `w_${scaleForDevice(width)}`, "c_limit", "q_auto", "f_jpg"].join(",");
+
+  return `${url.slice(0, markerIndex)}${CLOUDINARY_VIDEO_UPLOAD_MARKER}${transform}/${withoutExtension}.jpg`;
+};
+
+/**
+ * Video-playback quality tiers. Cloudinary re-encodes on the fly from the
+ * same URL — same transform-param approach as getCloudinaryUrl above, no
+ * separate transcoding pipeline. `q_auto:*` lets Cloudinary pick the codec
+ * bitrate for the target perceptual quality; the `w_*,c_limit` cap keeps a
+ * 4K source from being delivered at full resolution to a phone.
+ */
+export type VideoQualityTier = "saver" | "auto" | "high";
+
+export const VIDEO_QUALITY_TIERS: {
+  tier: VideoQualityTier;
+  label: string;
+  hint: string;
+}[] = [
+  { tier: "saver", label: "Data saver", hint: "Lowest data use — 480p" },
+  { tier: "auto", label: "Auto", hint: "Balanced — up to 720p" },
+  { tier: "high", label: "High", hint: "Best quality — up to 1080p" },
+];
+
+const VIDEO_QUALITY_TRANSFORMS: Record<VideoQualityTier, string> = {
+  saver: "q_auto:eco,w_480,c_limit,f_auto",
+  auto: "q_auto:good,w_720,c_limit,f_auto",
+  high: "q_auto:best,w_1080,c_limit,f_auto",
+};
+
+/**
+ * Returns a Cloudinary video delivery URL re-encoded for the given quality
+ * tier. Non-Cloudinary `/video/upload/` URLs and URLs that already carry a
+ * transform segment are returned unchanged, so this is safe to wrap any
+ * video source with.
+ */
+export const videoUrl = (
+  url: string | undefined | null,
+  tier: VideoQualityTier = "auto",
+): string | undefined => {
+  if (!url) return url ?? undefined;
+  const markerIndex = url.indexOf(CLOUDINARY_VIDEO_UPLOAD_MARKER);
+  if (markerIndex === -1) return url;
+
+  const afterMarker = url.slice(markerIndex + CLOUDINARY_VIDEO_UPLOAD_MARKER.length);
+  const firstSegment = afterMarker.split("/")[0];
+  if (/(^|,)(w_|h_|c_|q_|f_|so_|dpr_)/.test(firstSegment)) return url;
+
+  return `${url.slice(0, markerIndex)}${CLOUDINARY_VIDEO_UPLOAD_MARKER}${VIDEO_QUALITY_TRANSFORMS[tier]}/${afterMarker}`;
+};

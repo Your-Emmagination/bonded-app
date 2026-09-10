@@ -1,7 +1,6 @@
 // app/index.tsx
-import React from 'react';
-import { Redirect } from 'expo-router';
+import { View } from 'react-native';
 
 export default function Index() {
-  return <Redirect href="/LoginScreen" />;
+  return <View style={{ flex: 1, backgroundColor: '#5f0909' }} />;
 }

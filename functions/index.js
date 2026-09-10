@@ -227,10 +227,16 @@ function notificationTitle(notification) {
   }
 }
 
+/**
+ * Returns { sent, deadTokens }. deadTokens are the addresses Expo rejected as
+ * DeviceNotRegistered — permanently undeliverable, and pruned by the caller,
+ * which is the part that knows whose document they came from.
+ */
 async function sendExpoPushMessages(messages) {
-  if (!messages.length) return 0;
+  if (!messages.length) return { sent: 0, deadTokens: [] };
 
   let sent = 0;
+  const deadTokens = [];
 
   for (let index = 0; index < messages.length; index += 100) {
     const batch = messages.slice(index, index + 100);
@@ -252,10 +258,17 @@ async function sendExpoPushMessages(messages) {
       console.error("Expo push ticket errors:", rejected);
     }
 
+    // Expo returns tickets in message order, so tickets[i] belongs to batch[i].
+    batch.forEach((message, ticketIndex) => {
+      if (tickets[ticketIndex]?.details?.error === "DeviceNotRegistered") {
+        deadTokens.push(message.to);
+      }
+    });
+
     sent += batch.length;
   }
 
-  return sent;
+  return { sent, deadTokens };
 }
 
 /**
@@ -273,6 +286,14 @@ exports.sendNotificationPush = onDocumentCreated(
     const notification = snapshot.data() || {};
     const recipientId = clean(notification.recipientId);
     if (!recipientId) return;
+
+    if (notification.entityType === "direct_message") {
+      const conversationId = clean(notification.parentId);
+      if (!conversationId || conversationId.includes("/")) return;
+      const conversation = await db.collection("directConversations").doc(conversationId).get();
+      const data = conversation.data();
+      if (!data?.participants?.includes(recipientId) || !data.participants.includes(notification.actorId) || data.mutedBy?.includes(recipientId)) return;
+    }
 
     const [tokenSnap, settingsSnap] = await Promise.all([
       db.collection("userPushTokens").doc(recipientId).get(),
@@ -313,7 +334,17 @@ exports.sendNotificationPush = onDocumentCreated(
     }));
 
     try {
-      await sendExpoPushMessages(messages);
+      const { deadTokens } = await sendExpoPushMessages(messages);
+
+      // A DeviceNotRegistered address is dead for good — the app was
+      // uninstalled, or the install issued a fresh token. Drop it rather than
+      // retrying it on every future notification for this user.
+      if (deadTokens.length) {
+        await db
+          .collection("userPushTokens")
+          .doc(recipientId)
+          .update({ expoPushTokens: FieldValue.arrayRemove(...deadTokens) });
+      }
     } catch (error) {
       console.error(
         `Push delivery failed for notification ${snapshot.id}:`,
@@ -329,7 +360,65 @@ const MODERATION_WORKER_URL =
   process.env.MODERATION_WORKER_URL ||
   "https://bonded-ai-worker.encaboemmz77.workers.dev";
 
-async function requestServerModeration({ text, hasMedia }) {
+const MODERATION_BYPASS_ROLES = new Set(["teacher", "moderator", "admin"]);
+
+function normalizeModerationRole(value) {
+  if (typeof value === "number") {
+    return ({ 1: "student", 2: "teacher", 3: "moderator", 4: "admin" })[value] || "student";
+  }
+
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "1") return "student";
+  if (normalized === "2") return "teacher";
+  if (normalized === "3") return "moderator";
+  if (normalized === "4") return "admin";
+  return ["student", "teacher", "moderator", "admin"].includes(normalized)
+    ? normalized
+    : "student";
+}
+
+async function resolveTrustedModerationRole(userId) {
+  const uid = clean(userId);
+  if (!uid) return "student";
+
+  // Prefer Firebase Auth custom claims because they are server-controlled.
+  try {
+    const authUser = await auth.getUser(uid);
+    const claimedRole = normalizeModerationRole(authUser.customClaims?.role);
+    if (claimedRole !== "student" || authUser.customClaims?.role !== undefined) {
+      return claimedRole;
+    }
+  } catch (error) {
+    console.warn(`[Moderation] Could not resolve Auth role for ${uid}:`, error?.message || error);
+  }
+
+  // Fall back to the existing students collection shape used by BondED.
+  const byUserId = await db.collection("students").where("userId", "==", uid).limit(1).get();
+  if (!byUserId.empty) {
+    return normalizeModerationRole(byUserId.docs[0].data()?.role);
+  }
+
+  const byUid = await db.collection("students").where("uid", "==", uid).limit(1).get();
+  if (!byUid.empty) {
+    return normalizeModerationRole(byUid.docs[0].data()?.role);
+  }
+
+  const directDoc = await db.collection("students").doc(uid).get();
+  return directDoc.exists
+    ? normalizeModerationRole(directDoc.data()?.role)
+    : "student";
+}
+
+async function requestServerModeration({ text, hasMedia, callerRole = "student" }) {
+  if (MODERATION_BYPASS_ROLES.has(normalizeModerationRole(callerRole))) {
+    return {
+      status: "approved",
+      reasons: [],
+      matchedKeywords: [],
+      moderationSource: "staff-role-bypass",
+    };
+  }
+
   if (hasMedia) {
     return {
       status: "pending",
@@ -548,7 +637,7 @@ async function requestServerAiReply({ postId, postData }) {
 
   if (/\b(hello|hi|hey|good morning|good afternoon|good evening)\b/.test(text)) {
     return {
-      reply: "Hello! I'm Bonded AI. I can help with campus events, academic programs, school information, date/time, and basic calculations.",
+      reply: "Hello! I'm B.E.A. I can help with campus events, academic programs, school information, date/time, and basic calculations.",
       model: "bonded-deterministic-server-v1",
     };
   }
@@ -687,9 +776,13 @@ async function moderatePostSnapshot(snapshot) {
   const files = Array.isArray(data.files) ? data.files : [];
 
   try {
+    const callerRole = await resolveTrustedModerationRole(
+      data.realUserId || data.userId,
+    );
     const decision = await requestServerModeration({
       text,
       hasMedia: files.length > 0,
+      callerRole,
     });
 
     await snapshot.ref.update({

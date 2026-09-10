@@ -1,26 +1,74 @@
 // HomeScreen.tsx
+import { resolveAvatarUri } from "@/utils/avatar";
+import { avatarThumb } from "@/utils/cloudinaryImages";
+import { consumeServerDrawerReopenRequest } from "@/utils/communityNavigation";
+import {
+  appendThreadToSections,
+  buildCommunityServers,
+  deleteChannelFromSections,
+  makeCustomCommunityServerDraft,
+  updateChannelInSections,
+  type ChannelType,
+  type RemoteCommunityServerRecord,
+  type ServerJoinRequestRecord,
+  type ServerMembershipRecord,
+} from "@/utils/communityServers";
+import {
+  getCommunityChannelKey,
+  readCommunityChannelLastSeenMap,
+  type CommunityChannelLastSeenMap,
+} from "@/utils/communityUnread";
+import {
+  getDirectChatParams,
+  subscribeToTotalUnreadMessages,
+} from "@/utils/directMessages";
+import { subscribeHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
+import { useNetworkStatus } from "@/utils/networkUtils";
+import {
+  removeLikeNotification,
+  upsertLikeNotification,
+} from "@/utils/notifications";
+import {
+  getCachedFeed,
+  getCachedMyProfile,
+  getCachedServers,
+  saveCachedFeed,
+  saveCachedServers,
+} from "@/utils/offlineStorage";
+import { normalizePostFlair, POST_FLAIRS, type PostFlairId } from "@/utils/postFlairs";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
+import {
+  getStudentDocIdFromAuthUser,
+  getUserDataByAuthUser,
+  resolveUserRoleForAuthUser,
+  subscribeToUserDataUpdates,
+  UserRole,
+} from "@/utils/rbac";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter } from "expo-router";
-import { useFocusEffect } from "@react-navigation/native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Image } from "expo-image";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
   collection,
   deleteDoc,
   doc,
+  documentId,
   getDoc,
   getDocs,
   increment,
   limit,
-  startAfter,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   setDoc,
+  startAfter,
   updateDoc,
   where,
 } from "firebase/firestore";
-import React, {
+import {
   useCallback,
   useDeferredValue,
   useEffect,
@@ -30,72 +78,40 @@ import React, {
 } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Animated,
-  AppState,
-  AppStateStatus,
   Dimensions,
   FlatList,
-  Image,
   Linking,
   Modal,
-  Platform,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
-import {
-  removeLikeNotification,
-  upsertLikeNotification,
-} from "@/utils/notifications";
-import { useNetworkStatus } from "@/utils/networkUtils";
-import { buildUserProfileHref } from "@/utils/profileNavigation";
-import { resolveAvatarUri } from "@/utils/avatar";
-import { avatarThumb } from "@/utils/cloudinaryImages";
-import {
-  getStudentDocIdFromAuthUser,
-  getUserDataByAuthUser,
-  resolveUserRoleForAuthUser,
-  UserRole,
-} from "@/utils/rbac";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import PollCard from "../components/PollCard";
+import AnnouncementCarousel, { AnnouncementItem } from "../components/AnnouncementCarousel";
 import CommentModal from "../components/CommentModal";
-import PostCard from "../components/PostCard";
-import { normalizePostFlair, POST_FLAIRS, type PostFlairId } from "@/utils/postFlairs";
+import ConfirmDialog from "../components/ConfirmDialog";
 import ImageZoomViewer from "../components/ImageZoomViewer";
+import PollCard from "../components/PollCard";
+import PostCard from "../components/PostCard";
 import ServerDrawer, {
   ServerEditPatch,
   ServerMemberPreview,
 } from "../components/ServerDrawer";
-import {
-  appendThreadToSections,
-  buildCommunityServers,
-  makeCustomCommunityServerDraft,
-  type RemoteCommunityServerRecord,
-  type ServerJoinRequestRecord,
-  type ServerMembershipRecord,
-} from "@/utils/communityServers";
-import { consumeServerDrawerReopenRequest } from "@/utils/communityNavigation";
-import {
-  getCommunityChannelKey,
-  readCommunityChannelLastSeenMap,
-  type CommunityChannelLastSeenMap,
-} from "@/utils/communityUnread";
-import { subscribeHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
-import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { FeedSkeleton } from "../components/Skeleton";
 
 export const tabBarTranslateY = new Animated.Value(0);
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
+// Width of one card in the horizontal "Trending this week" scroller.
+const TRENDING_CARD_WIDTH = Math.min(320, Math.round(SCREEN_WIDTH * 0.82));
 const SELECTED_SERVER_KEY = "bonded.selectedCommunityServer";
 const HOME_SEARCH_HISTORY_KEY = "bonded.homeSearchHistory";
 const DEFAULT_CHANNEL_KEY = "general";
@@ -140,6 +156,9 @@ type Post = {
   channelId?: string | null;
   pinnedAt?: any;
   pinnedBy?: string | null;
+  pinExpiresAt?: any;
+  targetDate?: any;
+  targetDateLabel?: string | null;
   aiReply?: { text: string; model?: string | null; generatedAtMs?: number; status?: string | null };
   moderationStatus?: string;
   moderatedAtMs?: number;
@@ -191,6 +210,11 @@ type SearchResult = {
   id: string;
   kind: "post" | "poll" | "person";
   sourceId: string;
+  // People results need both identities: the auth uid owns posts/polls, while
+  // profileDocId identifies the students/{docId} profile document.
+  userId?: string;
+  profileDocId?: string;
+  avatarUri?: string | null;
   title: string;
   subtitle: string;
   meta?: string;
@@ -233,6 +257,7 @@ type CommunityThreadMessageLite = {
 type NotificationRouteParams = {
   notificationKey?: string | string[];
   notificationPostId?: string | string[];
+  notificationPollId?: string | string[];
   notificationCommentId?: string | string[];
   notificationReplyId?: string | string[];
   notificationOpenReply?: string | string[];
@@ -241,6 +266,7 @@ type NotificationRouteParams = {
 type NotificationTarget = {
   key: string;
   postId?: string;
+  pollId?: string;
   commentId?: string;
   replyId?: string;
   openReplyThread: boolean;
@@ -409,9 +435,15 @@ const areFeedItemsEquivalent = (first: FeedItem, second: FeedItem) => {
   if (first.type === "poll" && second.type === "poll") {
     return (
       first.question === second.question &&
+      first.imageUrl === second.imageUrl &&
       first.userId === second.userId &&
       first.username === second.username &&
       first.isAnonymous === second.isAnonymous &&
+      normalizePostFlair(first.flair) === normalizePostFlair(second.flair) &&
+      String(first.moderationStatus ?? "approved").toLowerCase() ===
+        String(second.moderationStatus ?? "approved").toLowerCase() &&
+      areStringArraysEqual(first.moderationReasons || [], second.moderationReasons || []) &&
+      first.moderatedAtMs === second.moderatedAtMs &&
       first.allowMultiple === second.allowMultiple &&
       first.maxSelections === second.maxSelections &&
       first.allowUsersToAddOption === second.allowUsersToAddOption &&
@@ -429,6 +461,49 @@ const areFeedItemsEquivalent = (first: FeedItem, second: FeedItem) => {
   return false;
 };
 
+// Both feed listeners watch this many documents, and loadMoreFeed pages in
+// the same size. The two must stay equal: itemsBelowLiveWindow tells a full
+// window (there is older content beyond it) from a partial one (there is not)
+// by comparing the snapshot size against this.
+const FEED_PAGE_SIZE = 20;
+
+/**
+ * The already-loaded items that sit *below* a listener's live window.
+ *
+ * Each listener only ever sees the newest FEED_PAGE_SIZE documents, so its
+ * snapshot cannot contain anything loadMoreFeed paged in underneath. Rebuilding
+ * the feed from the snapshot alone therefore drops every page the reader had
+ * scrolled into — one like on a recent post would rewind the whole feed. These
+ * are the items that must survive that rebuild.
+ *
+ * Membership is decided by the window's oldest timestamp rather than by "was
+ * it missing from the snapshot", so a document that was deleted, or pushed out
+ * of the window by newer arrivals, is still resolved correctly: a deletion
+ * lets the window refill from below and drop its floor past the removed item,
+ * while an item pushed out by newer posts falls under the floor and is kept.
+ */
+const itemsBelowLiveWindow = (
+  previousItems: FeedItem[],
+  type: FeedItem["type"],
+  windowItems: FeedItem[],
+): FeedItem[] => {
+  // A partial window means the collection fits inside it — nothing is older.
+  if (windowItems.length < FEED_PAGE_SIZE) return [];
+
+  const windowFloor = getTimestampValue(
+    windowItems[windowItems.length - 1].createdAt,
+  );
+  if (!windowFloor) return [];
+
+  const windowIds = new Set(windowItems.map((item) => item.id));
+  return previousItems.filter(
+    (item) =>
+      item.type === type &&
+      !windowIds.has(item.id) &&
+      getTimestampValue(item.createdAt) < windowFloor,
+  );
+};
+
 const mergeFeedItemsByIdentity = (
   previousItems: FeedItem[],
   nextItems: FeedItem[],
@@ -444,11 +519,25 @@ const mergeFeedItemsByIdentity = (
   });
 };
 
-const sortFeedItems = (items: FeedItem[]) =>
-  [...items].sort(
+export const isPostPinActive = (post: Post, nowMs: number = Date.now()): boolean => {
+  if (!post.pinnedAt) return false;
+  if (!post.pinExpiresAt) return true;
+  const expiresMs = getTimestampValue(post.pinExpiresAt);
+  return expiresMs > 0 ? nowMs < expiresMs : true;
+};
+
+const sortFeedItems = (items: FeedItem[]) => {
+  const nowMs = Date.now();
+  return [...items].sort(
     (first, second) => {
-      const firstPinned = first.type === "post" ? getTimestampValue(first.pinnedAt) : 0;
-      const secondPinned = second.type === "post" ? getTimestampValue(second.pinnedAt) : 0;
+      const firstPinned =
+        first.type === "post" && isPostPinActive(first, nowMs)
+          ? getTimestampValue(first.pinnedAt)
+          : 0;
+      const secondPinned =
+        second.type === "post" && isPostPinActive(second, nowMs)
+          ? getTimestampValue(second.pinnedAt)
+          : 0;
 
       if (firstPinned || secondPinned) {
         if (!firstPinned) return 1;
@@ -459,8 +548,50 @@ const sortFeedItems = (items: FeedItem[]) =>
       return getTimestampValue(second.createdAt) - getTimestampValue(first.createdAt);
     },
   );
+};
 
 const isGlobalFeedItem = (item: FeedItem) => !item.serverId;
+
+/**
+ * Whether an item is eligible to appear on Home right now.
+ *
+ * IMPORTANT: Home is never the moderation-review surface. Pending and
+ * rejected content must stay out of Home even when the viewer is an
+ * admin/teacher/moderator. Staff review pending content from the Moderation
+ * Queue instead. Legacy documents without a moderationStatus are treated as
+ * approved for backward compatibility.
+ *
+ * Shared by the rendered list and by the new-posts pill's count, so the pill
+ * can never promise items that would be filtered out on arrival.
+ */
+const isDisplayableFeedItem = (
+  item: FeedItem,
+  flairFilter: "all" | PostFlairId,
+) => {
+  if (!isGlobalFeedItem(item)) return false;
+
+  const status = String(item.moderationStatus ?? "approved").toLowerCase();
+  if (status !== "approved") return false;
+
+  if (flairFilter === "all") return true;
+
+  // Posts and polls share the same flair taxonomy. Legacy items with no
+  // flair are treated as Discussion by normalizePostFlair().
+  return normalizePostFlair(item.flair) === flairFilter;
+};
+
+// A post the signed-in user just wrote always goes straight in — nobody wants
+// to tap a pill to see their own post.
+const isOwnFeedItem = (item: FeedItem, uid: string | undefined) => {
+  if (!uid) return false;
+  if (item.userId === uid) return true;
+  // Anonymous posts keep the author on realUserId; polls have no such field.
+  return item.type === "post" && item.realUserId === uid;
+};
+
+// How close to the top counts as "reading the newest". Inside this, arrivals
+// merge silently the way X does; past it they wait behind the pill.
+const FEED_TOP_MERGE_OFFSET = 240;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -469,6 +600,65 @@ const HomeScreen = () => {
   const [user, setUser] = useState<User | null>(null);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [selectedFlairFilter, setSelectedFlairFilter] = useState<"all" | PostFlairId>("all");
+
+  // Live arrivals held back from the list while the reader is scrolled away
+  // from the top. Each listener owns its own half and rebuilds it from every
+  // snapshot, so an edit refreshes the staged copy and a deletion drops it
+  // without any extra bookkeeping.
+  const [stagedPosts, setStagedPosts] = useState<PostFeedItem[]>([]);
+  const [stagedPolls, setStagedPolls] = useState<PollFeedItem[]>([]);
+  // Staging must not swallow the very first page — there is nothing on screen
+  // yet for an arrival to disturb.
+  const hasHydratedPostsRef = useRef(false);
+  const hasHydratedPollsRef = useRef(false);
+  const isNearFeedTopRef = useRef(true);
+  // "Trending this week" — a bounded date-range query picks WHICH posts are
+  // trending (by engagement), then a live listener on just those doc ids keeps
+  // their like/comment/bookmark state current so interacting with a trending
+  // card updates it immediately, same as the main feed. Empty ids = hidden.
+  const [trendingPostIds, setTrendingPostIds] = useState<string[]>([]);
+  const [trendingPosts, setTrendingPosts] = useState<PostFeedItem[]>([]);
+
+  // Single dialog state used to render every alert on this screen through
+  // the app's branded ConfirmDialog instead of the bare native Alert.alert.
+  // showInfo() covers single-button "OK" messages; showConfirm() covers
+  // Cancel/Confirm pairs (deletes, leaving a server, etc.).
+  const [dialog, setDialog] = useState<{
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    singleAction?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
+  const showInfo = (title: string, description?: string, onConfirm?: () => void) =>
+    setDialog({
+      title,
+      description,
+      confirmText: "OK",
+      singleAction: true,
+      onConfirm: () => {
+        setDialog(null);
+        onConfirm?.();
+      },
+    });
+  const showConfirm = (options: {
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+    onConfirm: () => void;
+  }) =>
+    setDialog({
+      ...options,
+      onConfirm: () => {
+        setDialog(null);
+        options.onConfirm();
+      },
+    });
+
   // Mirrors feedItems for callbacks (handleLike, handlePollVote) that need to
   // read the current feed without depending on the array itself — feedItems
   // gets a new reference on every realtime Firestore update, and depending
@@ -531,6 +721,7 @@ const HomeScreen = () => {
   const [onlineUsersCount, setOnlineUsersCount] = useState(0);
   const [onlineUsersModalVisible, setOnlineUsersModalVisible] = useState(false);
   const [upcomingEventsCount, setUpcomingEventsCount] = useState(0);
+  const [totalUnreadMessages, setTotalUnreadMessages] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [highlightedPostId, setHighlightedPostId] = useState<string | null>(
     null,
@@ -549,7 +740,9 @@ const HomeScreen = () => {
   const [pendingNotificationTarget, setPendingNotificationTarget] =
     useState<NotificationTarget | null>(null);
   const notificationPostFetchesRef = useRef(new Set<string>());
+  const notificationPollFetchesRef = useRef(new Set<string>());
   const pendingNotificationPostIdRef = useRef<string | undefined>(undefined);
+  const pendingNotificationPollIdRef = useRef<string | undefined>(undefined);
   const [handledNotificationKey, setHandledNotificationKey] = useState<
     string | null
   >(null);
@@ -569,13 +762,137 @@ const HomeScreen = () => {
   const scrollY = useRef(0);
   const menuOpacity = useRef(new Animated.Value(0)).current;
   const menuTranslateY = useRef(new Animated.Value(0)).current;
+
+  // Welcome-card micro animations: a one-time entrance plus very subtle
+  // campus pulse / floating decoration loops. Only opacity and transforms
+  // are animated so the native driver can keep this lightweight.
+  const welcomeOpacity = useRef(new Animated.Value(0)).current;
+  const welcomeTranslateY = useRef(new Animated.Value(12)).current;
+  const welcomeCopyOpacity = useRef(new Animated.Value(0)).current;
+  const welcomeCopyTranslateY = useRef(new Animated.Value(6)).current;
+  const campusPulseScale = useRef(new Animated.Value(1)).current;
+  const campusPulseHaloOpacity = useRef(new Animated.Value(0.24)).current;
+  const welcomeFloat = useRef(new Animated.Value(0)).current;
+
   const feedListRef = useRef<FlatList<FeedItem>>(null);
   const searchInputRef = useRef<TextInput>(null);
   const router = useRouter();
 
+  // Part A: which feed cards are currently scrolled into view — drives
+  // X-style muted autoplay for feed videos (combined with screen focus
+  // inside PostCard). FlatList requires these two to be stable references.
+  const [visibleFeedIds, setVisibleFeedIds] = useState<Set<string>>(new Set());
+  const feedViewabilityConfig = useRef({
+    itemVisiblePercentThreshold: 50,
+    // Short so a video's audio cuts almost as soon as it scrolls past 50%
+    // (X-style), while still filtering out items that only flick through the
+    // viewport during a fast scroll.
+    minimumViewTime: 50,
+  }).current;
+  const onFeedViewableItemsChanged = useRef(
+    ({ viewableItems }: { viewableItems: { key: string }[] }) => {
+      setVisibleFeedIds(new Set(viewableItems.map((entry) => entry.key)));
+    },
+  ).current;
+
+  useEffect(() => {
+    const entrance = Animated.sequence([
+      Animated.parallel([
+        Animated.timing(welcomeOpacity, {
+          toValue: 1,
+          duration: 420,
+          useNativeDriver: true,
+        }),
+        Animated.spring(welcomeTranslateY, {
+          toValue: 0,
+          friction: 8,
+          tension: 55,
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.parallel([
+        Animated.timing(welcomeCopyOpacity, {
+          toValue: 1,
+          duration: 260,
+          useNativeDriver: true,
+        }),
+        Animated.timing(welcomeCopyTranslateY, {
+          toValue: 0,
+          duration: 260,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]);
+
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.delay(900),
+        Animated.parallel([
+          Animated.timing(campusPulseScale, {
+            toValue: 1.08,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+          Animated.timing(campusPulseHaloOpacity, {
+            toValue: 0.52,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+        ]),
+        Animated.parallel([
+          Animated.timing(campusPulseScale, {
+            toValue: 1,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+          Animated.timing(campusPulseHaloOpacity, {
+            toValue: 0.24,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+        ]),
+        Animated.delay(2200),
+      ]),
+    );
+
+    const floatingDecoration = Animated.loop(
+      Animated.sequence([
+        Animated.timing(welcomeFloat, {
+          toValue: 1,
+          duration: 2800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(welcomeFloat, {
+          toValue: 0,
+          duration: 2800,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    entrance.start();
+    pulse.start();
+    floatingDecoration.start();
+
+    return () => {
+      entrance.stop();
+      pulse.stop();
+      floatingDecoration.stop();
+    };
+  }, [
+    campusPulseHaloOpacity,
+    campusPulseScale,
+    welcomeCopyOpacity,
+    welcomeCopyTranslateY,
+    welcomeFloat,
+    welcomeOpacity,
+    welcomeTranslateY,
+  ]);
+
   const {
     notificationKey,
     notificationPostId,
+    notificationPollId,
     notificationCommentId,
     notificationReplyId,
     notificationOpenReply,
@@ -735,25 +1052,94 @@ const selectedChannel = useMemo(() => {
 
   const visibleFeedItems = useMemo(
     () =>
-      feedItems.filter((item) => {
-        if (!isGlobalFeedItem(item)) return false;
-
-        // IMPORTANT: Home is never the moderation-review surface.
-        // Pending and rejected content must stay out of Home even when the
-        // viewer is an admin/teacher/moderator. Staff review pending content
-        // from the Moderation Queue instead. Legacy documents without a
-        // moderationStatus are treated as approved for backward compatibility.
-        const status = String(item.moderationStatus ?? "approved").toLowerCase();
-        if (status !== "approved") return false;
-
-        if (selectedFlairFilter === "all") return true;
-
-        // Posts and polls share the same flair taxonomy. Legacy items with
-        // no flair are treated as Discussion by normalizePostFlair().
-        return normalizePostFlair(item.flair) === selectedFlairFilter;
-      }),
+      feedItems.filter((item) =>
+        isDisplayableFeedItem(item, selectedFlairFilter),
+      ),
     [feedItems, selectedFlairFilter],
   );
+
+  // Only the staged items the reader would actually get, so the pill's count
+  // matches what appears when they tap it.
+  const stagedFeedCount = useMemo(
+    () =>
+      [...stagedPosts, ...stagedPolls].filter((item) =>
+        isDisplayableFeedItem(item, selectedFlairFilter),
+      ).length,
+    [stagedPosts, stagedPolls, selectedFlairFilter],
+  );
+  const hasStagedFeedItems = stagedFeedCount > 0;
+
+  const newPostsPillAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!hasStagedFeedItems) return;
+    newPostsPillAnim.setValue(0);
+    Animated.spring(newPostsPillAnim, {
+      toValue: 1,
+      friction: 7,
+      tension: 60,
+      useNativeDriver: true,
+    }).start();
+  }, [hasStagedFeedItems, newPostsPillAnim]);
+
+  /**
+   * Release the staged arrivals and jump to the top — the pill's action, and
+   * also what the Home tab button and pull-to-refresh do implicitly.
+   *
+   * Merges against feedItemsRef rather than a setFeedItems updater so the
+   * mirror is advanced in the same tick: the listeners decide what to stage by
+   * reading that mirror, and a snapshot landing before the next render would
+   * otherwise re-stage everything just released.
+   */
+  const flushStagedFeedItems = useCallback(
+    (options?: { scrollToTop?: boolean }) => {
+      const staged: FeedItem[] = [...stagedPosts, ...stagedPolls];
+
+      if (staged.length > 0) {
+        const stagedKeys = new Set(
+          staged.map((item) => `${item.type}:${item.id}`),
+        );
+        const merged = sortFeedItems([
+          ...staged,
+          ...feedItemsRef.current.filter(
+            (item) => !stagedKeys.has(`${item.type}:${item.id}`),
+          ),
+        ]);
+        feedItemsRef.current = merged;
+        setFeedItems(merged);
+      }
+
+      setStagedPosts([]);
+      setStagedPolls([]);
+      isNearFeedTopRef.current = true;
+
+      if (options?.scrollToTop !== false) {
+        feedListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      }
+    },
+    [stagedPolls, stagedPosts],
+  );
+
+  const activeAnnouncements = useMemo(() => {
+    const nowMs = Date.now();
+    return feedItems
+      .filter((item): item is PostFeedItem => {
+        if (item.type !== "post") return false;
+        if (!isGlobalFeedItem(item)) return false;
+        const status = String(item.moderationStatus ?? "approved").toLowerCase();
+        if (status !== "approved") return false;
+        const isAnnouncement = normalizePostFlair(item.flair) === "announcement";
+        const isPinned = isPostPinActive(item, nowMs);
+        return isAnnouncement && isPinned;
+      })
+      .sort((a, b) => {
+        const aExpires = getTimestampValue(a.pinExpiresAt || a.targetDate);
+        const bExpires = getTimestampValue(b.pinExpiresAt || b.targetDate);
+        if (aExpires && bExpires) return aExpires - bExpires;
+        if (aExpires) return -1;
+        if (bExpires) return 1;
+        return getTimestampValue(b.createdAt) - getTimestampValue(a.createdAt);
+      });
+  }, [feedItems]);
 
   const selectedServerJoinRequests = useMemo(
     () =>
@@ -764,8 +1150,17 @@ const selectedChannel = useMemo(() => {
     [selectedServerId, serverJoinRequests],
   );
 
+  const searchableStudentsMap = useMemo(() => {
+    const map = new Map<string, SearchableStudent>();
+    for (const student of searchableStudents) {
+      if (student.userId) map.set(student.userId, student);
+      if (student.id) map.set(student.id, student);
+    }
+    return map;
+  }, [searchableStudents]);
+
   const selectedServerMembers = useMemo<ServerMemberPreview[]>(() => {
-    if (!selectedServerId) return [];
+    if (!serverDrawerVisible || !selectedServerId) return [];
 
     const membershipUserIds = serverMemberships
       .filter(
@@ -783,9 +1178,7 @@ const selectedChannel = useMemo(() => {
 
     return uniqueMembershipUserIds
       .map((memberId) => {
-        const matchedStudent = searchableStudents.find(
-          (student) => student.userId === memberId || student.id === memberId,
-        );
+        const matchedStudent = searchableStudentsMap.get(memberId);
 
         return {
           id: matchedStudent?.id || memberId,
@@ -802,7 +1195,7 @@ const selectedChannel = useMemo(() => {
         } satisfies ServerMemberPreview;
       })
       .sort((first, second) => first.name.localeCompare(second.name));
-  }, [searchableStudents, selectedServer?.ownerId, selectedServerId, serverMemberships]);
+  }, [searchableStudentsMap, selectedServer?.ownerId, selectedServerId, serverDrawerVisible, serverMemberships]);
 
   const trendingSuggestions = useMemo(() => {
     const threshold = getDateFilterThreshold(searchDateFilter);
@@ -871,7 +1264,7 @@ const selectedChannel = useMemo(() => {
       .slice(0, 12);
   }, [searchDateFilter, visibleFeedItems]);
 
-  const searchResults = useMemo(() => {
+  const searchResults = useMemo<SearchResult[]>(() => {
   if (!deferredSearchQuery.trim() && searchTab === "all") {
     return trendingSuggestions;
   }
@@ -960,7 +1353,13 @@ const selectedChannel = useMemo(() => {
     return {
       id: `person:${person.id}`,
       kind: "person" as const,
-      sourceId: person.id,
+      // sourceId is the content owner id when available. The previous code
+      // always used the students document id here, which could be a student
+      // number/email prefix instead of the Firebase Auth uid.
+      sourceId: person.userId || person.id,
+      userId: person.userId,
+      profileDocId: person.id,
+      avatarUri: person.profileImage || null,
       title: fullName || "Student",
       subtitle: person.course ? `${person.course} • ${person.role || "Member"}` : "BondED Member",
       meta: person.studentID,
@@ -1080,6 +1479,11 @@ const selectedChannel = useMemo(() => {
   const unsubscribePollsRef = useRef<(() => void) | null>(null);
   const lastPostDocRef = useRef<any>(null);
   const lastPollDocRef = useRef<any>(null);
+  // Set once loadMoreFeed has paged past a listener's window. From then on the
+  // listener must leave the cursor alone, or it would rewind to the window's
+  // last document and the next page would re-request what the feed already has.
+  const postsPaginatedRef = useRef(false);
+  const pollsPaginatedRef = useRef(false);
   const loadedPostIdsRef = useRef<Set<string>>(new Set());
   const loadedPollIdsRef = useRef<Set<string>>(new Set());
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -1108,35 +1512,46 @@ const selectedChannel = useMemo(() => {
   const handleEditPost = useCallback((postId: string) => {
     const target = feedItemsRef.current?.find((item: any) => item.type === "post" && item.id === postId) as any;
     if (target && (target.realUserId || target.userId) !== user?.uid) {
-      Alert.alert("Access Denied", "You can only edit your own posts.");
+      showInfo("Access Denied", "You can only edit your own posts.");
       return;
     }
     router.push({ pathname: "/CreatePostScreen", params: { editPostId: postId } });
   }, [router, user?.uid]);
 
+  const handleEditPoll = useCallback((pollId: string) => {
+    const target = feedItemsRef.current.find(
+      (item): item is PollFeedItem => item.type === "poll" && item.id === pollId,
+    );
+    if (target && target.userId !== user?.uid) {
+      showInfo("Access Denied", "You can only edit your own polls.");
+      return;
+    }
+    router.push({ pathname: "/CreatePollScreen", params: { editPollId: pollId } });
+  }, [router, user?.uid]);
+
   const handleDeletePost = useCallback(
     async (postId: string) => {
       if (isOffline) {
-        Alert.alert("No Connection", "Cannot delete posts while offline.");
+        showInfo("No Connection", "Cannot delete posts while offline.");
         return;
       }
 
-      Alert.alert("Delete Post", "This will permanently remove the post, comments, and replies.", [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await deleteCommentTree(postId);
-              await deleteDoc(doc(db, "posts", postId));
-            } catch (error) {
-              console.error("Error deleting post:", error);
-              Alert.alert("Error", "Failed to delete post.");
-            }
-          },
+      showConfirm({
+        title: "Delete Post",
+        description: "This will permanently remove the post, comments, and replies.",
+        confirmText: "Delete",
+        cancelText: "Cancel",
+        destructive: true,
+        onConfirm: async () => {
+          try {
+            await deleteCommentTree(postId);
+            await deleteDoc(doc(db, "posts", postId));
+          } catch (error) {
+            console.error("Error deleting post:", error);
+            showInfo("Error", "Failed to delete post.");
+          }
         },
-      ]);
+      });
     },
     [deleteCommentTree, isOffline],
   );
@@ -1144,26 +1559,20 @@ const selectedChannel = useMemo(() => {
   const handleDeletePoll = useCallback(
     async (pollId: string) => {
       if (isOffline) {
-        Alert.alert("No Connection", "Cannot delete polls while offline.");
+        showInfo("No Connection", "Cannot delete polls while offline.");
         return;
       }
 
-      Alert.alert("Delete Poll", "This will permanently remove the poll, comments, and replies.", [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await deleteCommentTree(pollId);
-              await deleteDoc(doc(db, "polls", pollId));
-            } catch (error) {
-              console.error("Error deleting poll:", error);
-              Alert.alert("Error", "Failed to delete poll.");
-            }
-          },
-        },
-      ]);
+      try {
+        await deleteCommentTree(pollId);
+        await deleteDoc(doc(db, "polls", pollId));
+        setFeedItems((current) =>
+          current.filter((item) => !(item.type === "poll" && item.id === pollId)),
+        );
+      } catch (error) {
+        console.error("Error deleting poll:", error);
+        showInfo("Error", "Failed to delete poll.");
+      }
     },
     [deleteCommentTree, isOffline],
   );
@@ -1174,6 +1583,56 @@ const selectedChannel = useMemo(() => {
     });
     return unsubscribe;
   }, []);
+
+  // ── Load cached feed items for instant cold-start & offline viewing
+  useEffect(() => {
+    let isMounted = true;
+    getCachedFeed<FeedItem>().then((cached) => {
+      if (isMounted && cached && cached.length > 0) {
+        setFeedItems((prev) => (prev.length === 0 ? cached : prev));
+        setIsLoading(false);
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // ── Automatically persist feed items to disk cache whenever updated
+  useEffect(() => {
+    if (feedItems.length > 0) {
+      saveCachedFeed(feedItems);
+    }
+  }, [feedItems]);
+
+  // ── Load cached servers for current user for instant offline viewing
+  useEffect(() => {
+    if (!user?.uid) return;
+    let isMounted = true;
+    getCachedServers<RemoteCommunityServerRecord, ServerMembershipRecord>(user.uid).then((cached) => {
+      if (isMounted && cached) {
+        if (cached.servers && cached.servers.length > 0) {
+          setRemoteServers((prev) => (prev.length === 0 ? cached.servers : prev));
+        }
+        if (cached.memberships && cached.memberships.length > 0) {
+          setServerMemberships((prev) => (prev.length === 0 ? cached.memberships : prev));
+        }
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.uid]);
+
+  // ── Automatically persist servers and memberships to disk cache whenever updated
+  useEffect(() => {
+    if (user?.uid && (remoteServers.length > 0 || serverMemberships.length > 0)) {
+      saveCachedServers(user.uid, {
+        servers: remoteServers,
+        memberships: serverMemberships,
+      });
+    }
+  }, [user?.uid, remoteServers, serverMemberships]);
 
   // ── Load persisted community preferences
   useEffect(() => {
@@ -1202,6 +1661,7 @@ const selectedChannel = useMemo(() => {
   // ── Persist admin servers
 
   // ── Persist selected server
+  // ── Persist selected server (debounced to eliminate storage I/O during rapid tapping)
   useEffect(() => {
     if (selectedServerId) {
       AsyncStorage.setItem(SELECTED_SERVER_KEY, selectedServerId).catch((error) =>
@@ -1209,10 +1669,22 @@ const selectedChannel = useMemo(() => {
       );
       return;
     }
+    const timer = setTimeout(() => {
+      if (selectedServerId) {
+        AsyncStorage.setItem(SELECTED_SERVER_KEY, selectedServerId).catch((error) =>
+          console.error("Error saving selected server:", error),
+        );
+      } else {
+        AsyncStorage.removeItem(SELECTED_SERVER_KEY).catch((error) =>
+          console.error("Error clearing selected server:", error),
+        );
+      }
+    }, 400);
 
     AsyncStorage.removeItem(SELECTED_SERVER_KEY).catch((error) =>
       console.error("Error clearing selected server:", error),
     );
+    return () => clearTimeout(timer);
   }, [selectedServerId]);
 
   // ── Sync selected server when server list changes
@@ -1263,6 +1735,7 @@ const selectedChannel = useMemo(() => {
 
   useEffect(() => {
     const subscription = subscribeHomeFeedScrollToTop(() => {
+      flushStagedFeedItems({ scrollToTop: false });
       feedListRef.current?.scrollToOffset({ offset: 0, animated: true });
       setHighlightedPostId(null);
       setHighlightedFeedKey(null);
@@ -1273,69 +1746,7 @@ const selectedChannel = useMemo(() => {
     });
 
     return () => subscription.remove();
-  }, [searchExpanded]);
-
-  // ── Online status heartbeat
-  useEffect(() => {
-    if (!user?.uid || !user?.email || isOffline) return;
-
-    const email = user.email;
-    const studentID = email.split("@")[0] || user.uid;
-    const userStatusRef = doc(db, "students", studentID);
-    let intervalId: ReturnType<typeof setInterval> | null = null;
-
-    const setOnline = async () => {
-      try {
-        if (!auth.currentUser) return;
-        await setDoc(
-          userStatusRef,
-          { isOnline: true, lastSeen: serverTimestamp() },
-          { merge: true },
-        );
-      } catch (error) {
-        console.error("Error setting online status:", error);
-      }
-    };
-
-    const setOffline = async () => {
-      try {
-        if (!auth.currentUser) return;
-        await setDoc(
-          userStatusRef,
-          { isOnline: false, lastSeen: serverTimestamp() },
-          { merge: true },
-        );
-      } catch (error) {
-        console.error("Error setting offline status:", error);
-      }
-    };
-
-    const handleAppStateChange = (nextAppState: AppStateStatus) => {
-      if (nextAppState === "active") {
-        void setOnline();
-        if (!intervalId) {
-          intervalId = setInterval(() => void setOnline(), 30000);
-        }
-        return;
-      }
-
-      if (intervalId) {
-        clearInterval(intervalId);
-        intervalId = null;
-      }
-      void setOffline();
-    };
-
-    handleAppStateChange(AppState.currentState);
-    const appStateSubscription = AppState.addEventListener("change", handleAppStateChange);
-    return () => {
-      appStateSubscription.remove();
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
-      void setOffline();
-    };
-  }, [user?.uid, user?.email, isOffline]);
+  }, [flushStagedFeedItems, searchExpanded]);
 
   // ── Online users count
   useEffect(() => {
@@ -1371,6 +1782,18 @@ const selectedChannel = useMemo(() => {
     return unsubscribe;
   }, [user, isOffline]);
 
+  // ── Direct messages unread badge listener
+  useEffect(() => {
+    if (!user?.uid || isOffline) {
+      setTotalUnreadMessages(0);
+      return;
+    }
+    const unsubscribe = subscribeToTotalUnreadMessages(user.uid, (unreadCount) => {
+      setTotalUnreadMessages(unreadCount);
+    });
+    return unsubscribe;
+  }, [user?.uid, isOffline]);
+
   // ── Fetch current user role
   useEffect(() => {
     const fetchCurrentUserRole = async () => {
@@ -1392,18 +1815,67 @@ const selectedChannel = useMemo(() => {
 
   useEffect(() => {
     if (!user?.uid || isOffline) return;
-    if (currentUserProfile?.userId === user.uid) return;
 
-    const fetchCurrentUserProfile = async () => {
-      try {
-        const profile = await getUserDataByAuthUser(user);
+    // Fast-path: read from persistent offline profile cache so avatar displays immediately on reload
+    getCachedMyProfile<any>(user.uid)
+      .then((cached) => {
+        if (cached && (cached.profileImage || cached.profilePic)) {
+          setCurrentUserProfile((prev: any) => ({
+            ...(prev || {}),
+            ...cached,
+            uid: user.uid,
+            userId: user.uid,
+            profileImage: cached.profileImage || cached.profilePic || prev?.profileImage || null,
+            profilePic: cached.profileImage || cached.profilePic || prev?.profilePic || null,
+          }));
+        }
+      })
+      .catch(() => {});
+
+    // Initial load
+    getUserDataByAuthUser(user)
+      .then((profile) => {
         if (profile) setCurrentUserProfile(profile);
-      } catch (error) {
+      })
+      .catch((error) => {
         console.error("Error fetching current user profile:", error);
+      });
+
+    // Real-time listener on student document so role changes and profile photo update live
+    const emailPrefix = user.email?.split("@")[0]?.trim();
+    const docIds = Array.from(new Set([emailPrefix, user.uid].filter(Boolean) as string[]));
+    const unsubs = docIds.map((docId) =>
+      onSnapshot(
+        doc(db, "students", docId),
+        (snap) => {
+          if (snap.exists()) {
+            const data = snap.data();
+            const incomingImg = data.profileImage || data.profilePic;
+            setCurrentUserProfile((prev: any) => ({
+              ...(prev || {}),
+              ...data,
+              uid: user.uid,
+              userId: user.uid,
+              profileImage: incomingImg || prev?.profileImage || null,
+              profilePic: incomingImg || prev?.profilePic || null,
+            }));
+          }
+        },
+        (err) => console.warn("Live user profile listener warning in HomeScreen:", err),
+      ),
+    );
+
+    const unsubscribeCache = subscribeToUserDataUpdates((updatedId, updatedData) => {
+      if (updatedId === user.uid) {
+        setCurrentUserProfile((prev: any) => (prev ? { ...prev, ...updatedData } : prev));
       }
+    });
+
+    return () => {
+      unsubs.forEach((unsub) => unsub());
+      unsubscribeCache();
     };
-    fetchCurrentUserProfile();
-  }, [user, isOffline, currentUserProfile?.userId]);
+  }, [user?.uid, isOffline]);
 
   useEffect(() => {
     if (!user || isOffline) {
@@ -1441,11 +1913,14 @@ const selectedChannel = useMemo(() => {
   }, [isOffline, user]);
 
   useEffect(() => {
-    if (!user?.uid || isOffline) {
+    if (!user?.uid) {
       setRemoteServers([]);
       setServerMemberships([]);
       setServerJoinRequests([]);
       setCommunityThreadMessages([]);
+      return;
+    }
+    if (isOffline) {
       return;
     }
 
@@ -1567,9 +2042,15 @@ const selectedChannel = useMemo(() => {
   useEffect(() => {
     const key = getSingleParam(notificationKey);
     if (!key) return;
+    const targetPostId = getSingleParam(notificationPostId);
+    const targetPollId = getSingleParam(notificationPollId);
+    if (targetPostId || targetPollId) {
+      setSelectedFlairFilter("all");
+    }
     setPendingNotificationTarget({
       key,
-      postId: getSingleParam(notificationPostId),
+      postId: targetPostId,
+      pollId: targetPollId,
       commentId: getSingleParam(notificationCommentId),
       replyId: getSingleParam(notificationReplyId),
       openReplyThread: getSingleParam(notificationOpenReply) === "1",
@@ -1578,6 +2059,7 @@ const selectedChannel = useMemo(() => {
     notificationCommentId,
     notificationKey,
     notificationOpenReply,
+    notificationPollId,
     notificationPostId,
     notificationReplyId,
   ]);
@@ -1585,6 +2067,10 @@ const selectedChannel = useMemo(() => {
   useEffect(() => {
     pendingNotificationPostIdRef.current = pendingNotificationTarget?.postId;
   }, [pendingNotificationTarget?.postId]);
+
+  useEffect(() => {
+    pendingNotificationPollIdRef.current = pendingNotificationTarget?.pollId;
+  }, [pendingNotificationTarget?.pollId]);
 
   // ── Resolve postId from commentId when missing
   useEffect(() => {
@@ -1670,6 +2156,51 @@ const selectedChannel = useMemo(() => {
     };
   }, [pendingNotificationTarget?.postId]);
 
+  // Keep an approved poll reachable even when it is older than the first
+  // realtime page loaded by Home.
+  useEffect(() => {
+    const pollId = pendingNotificationTarget?.pollId;
+    if (
+      !pollId ||
+      loadedPollIdsRef.current.has(pollId) ||
+      notificationPollFetchesRef.current.has(pollId)
+    ) {
+      return;
+    }
+
+    notificationPollFetchesRef.current.add(pollId);
+    let isCancelled = false;
+
+    getDoc(doc(db, "polls", pollId))
+      .then((pollSnapshot) => {
+        if (!pollSnapshot.exists() || isCancelled) return;
+        const fetchedPoll: PollFeedItem = {
+          type: "poll",
+          id: pollSnapshot.id,
+          ...(pollSnapshot.data() as Omit<Poll, "id">),
+        };
+        loadedPollIdsRef.current.add(fetchedPoll.id);
+        setFeedItems((current) =>
+          sortFeedItems(
+            mergeFeedItemsByIdentity(current, [
+              ...current.filter(
+                (item) => !(item.type === "poll" && item.id === fetchedPoll.id),
+              ),
+              fetchedPoll,
+            ]),
+          ),
+        );
+      })
+      .catch((error) => {
+        console.error("Error loading older notification poll:", error);
+        notificationPollFetchesRef.current.delete(pollId);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [pendingNotificationTarget?.pollId]);
+
   const fetchUserRole = useCallback(
     async (userId: string) => {
       if (!auth.currentUser || userRoles[userId] || isOffline) return;
@@ -1694,12 +2225,18 @@ const selectedChannel = useMemo(() => {
       return;
     }
 
-    console.log("🔥 Setting up feed listeners");
+    if (__DEV__) console.log("🔥 Setting up feed listeners");
     listenersSetup.current = true;
     setIsLoading(true);
 
     lastPostDocRef.current = null;
     lastPollDocRef.current = null;
+    postsPaginatedRef.current = false;
+    pollsPaginatedRef.current = false;
+    hasHydratedPostsRef.current = false;
+    hasHydratedPollsRef.current = false;
+    setStagedPosts([]);
+    setStagedPolls([]);
     loadedPostIdsRef.current.clear();
     loadedPollIdsRef.current.clear();
     setHasMorePosts(true);
@@ -1708,7 +2245,7 @@ const selectedChannel = useMemo(() => {
     const qPosts = query(
       collection(db, "posts"),
       orderBy("createdAt", "desc"),
-      limit(20),
+      limit(FEED_PAGE_SIZE),
     );
     unsubscribePostsRef.current = onSnapshot(
       qPosts,
@@ -1723,14 +2260,47 @@ const selectedChannel = useMemo(() => {
           ...d.data(),
         }));
         snapshot.docs.forEach((d) => loadedPostIdsRef.current.add(d.id));
-        lastPostDocRef.current = snapshot.docs[snapshot.docs.length - 1] ?? null;
-        setHasMorePosts(snapshot.size === 20);
+        if (!postsPaginatedRef.current) {
+          lastPostDocRef.current =
+            snapshot.docs[snapshot.docs.length - 1] ?? null;
+          setHasMorePosts(snapshot.size === FEED_PAGE_SIZE);
+        }
 
         fetchedPosts.forEach((post) => {
           if (post.type === "post" && !post.isAnonymous && post.userId) {
             fetchUserRole(post.userId);
           }
         });
+
+        // Hold back anything the reader has not seen while they are scrolled
+        // away from the top: injecting it would grow the list above the
+        // viewport and slide the post they are reading out from under them.
+        // Computed from feedItemsRef (not inside the updater below) so this
+        // stays a pure read — setFeedItems updaters must not have effects.
+        const visiblePostIds = new Set(
+          feedItemsRef.current
+            .filter((item) => item.type === "post")
+            .map((item) => item.id),
+        );
+        const shouldStagePosts =
+          hasHydratedPostsRef.current && !isNearFeedTopRef.current;
+        const livePosts: PostFeedItem[] = [];
+        const heldPosts: PostFeedItem[] = [];
+        fetchedPosts.forEach((post) => {
+          if (
+            shouldStagePosts &&
+            !visiblePostIds.has(post.id) &&
+            !isOwnFeedItem(post, auth.currentUser?.uid)
+          ) {
+            heldPosts.push(post);
+          } else {
+            livePosts.push(post);
+          }
+        });
+        setStagedPosts((current) =>
+          current.length === 0 && heldPosts.length === 0 ? current : heldPosts,
+        );
+        hasHydratedPostsRef.current = true;
 
         setFeedItems((prev) => {
           const polls = prev.filter((item) => item.type === "poll");
@@ -1741,11 +2311,19 @@ const selectedChannel = useMemo(() => {
                   item.type === "post" && item.id === notificationPostId,
               )
             : undefined;
+          // The snapshot is only the newest page; everything loadMoreFeed
+          // appended below it has to be carried across or the feed collapses
+          // back to one page under the reader. The floor is measured against
+          // the whole window (fetchedPosts), not just the part being shown,
+          // so staging cannot shift it.
+          const olderPosts = itemsBelowLiveWindow(prev, "post", fetchedPosts);
+          const knownPostIds = new Set(
+            [...livePosts, ...olderPosts].map((post) => post.id),
+          );
           const posts =
-            notificationPost &&
-            !fetchedPosts.some((post) => post.id === notificationPost.id)
-              ? [...fetchedPosts, notificationPost]
-              : fetchedPosts;
+            notificationPost && !knownPostIds.has(notificationPost.id)
+              ? [...livePosts, ...olderPosts, notificationPost]
+              : [...livePosts, ...olderPosts];
           return mergeFeedItemsByIdentity(
             prev,
             sortFeedItems([...posts, ...polls]),
@@ -1762,7 +2340,7 @@ const selectedChannel = useMemo(() => {
     const qPolls = query(
       collection(db, "polls"),
       orderBy("createdAt", "desc"),
-      limit(20),
+      limit(FEED_PAGE_SIZE),
     );
     unsubscribePollsRef.current = onSnapshot(
       qPolls,
@@ -1777,8 +2355,11 @@ const selectedChannel = useMemo(() => {
           };
         });
         snapshot.docs.forEach((d) => loadedPollIdsRef.current.add(d.id));
-        lastPollDocRef.current = snapshot.docs[snapshot.docs.length - 1] ?? null;
-        setHasMorePolls(snapshot.size === 20);
+        if (!pollsPaginatedRef.current) {
+          lastPollDocRef.current =
+            snapshot.docs[snapshot.docs.length - 1] ?? null;
+          setHasMorePolls(snapshot.size === FEED_PAGE_SIZE);
+        }
 
         fetchedPolls.forEach((poll) => {
           if (poll.type === "poll" && !poll.isAnonymous && poll.userId) {
@@ -1786,11 +2367,51 @@ const selectedChannel = useMemo(() => {
           }
         });
 
+        const visiblePollIds = new Set(
+          feedItemsRef.current
+            .filter((item) => item.type === "poll")
+            .map((item) => item.id),
+        );
+        const shouldStagePolls =
+          hasHydratedPollsRef.current && !isNearFeedTopRef.current;
+        const livePolls: PollFeedItem[] = [];
+        const heldPolls: PollFeedItem[] = [];
+        fetchedPolls.forEach((poll) => {
+          if (
+            shouldStagePolls &&
+            !visiblePollIds.has(poll.id) &&
+            !isOwnFeedItem(poll, auth.currentUser?.uid)
+          ) {
+            heldPolls.push(poll);
+          } else {
+            livePolls.push(poll);
+          }
+        });
+        setStagedPolls((current) =>
+          current.length === 0 && heldPolls.length === 0 ? current : heldPolls,
+        );
+        hasHydratedPollsRef.current = true;
+
         setFeedItems((prev) => {
           const posts = prev.filter((item) => item.type === "post");
+          const notificationPollId = pendingNotificationPollIdRef.current;
+          const notificationPoll = notificationPollId
+            ? prev.find(
+                (item): item is PollFeedItem =>
+                  item.type === "poll" && item.id === notificationPollId,
+              )
+            : undefined;
+          const olderPolls = itemsBelowLiveWindow(prev, "poll", fetchedPolls);
+          const knownPollIds = new Set(
+            [...livePolls, ...olderPolls].map((poll) => poll.id),
+          );
+          const polls =
+            notificationPoll && !knownPollIds.has(notificationPoll.id)
+              ? [...livePolls, ...olderPolls, notificationPoll]
+              : [...livePolls, ...olderPolls];
           return mergeFeedItemsByIdentity(
             prev,
-            sortFeedItems([...posts, ...fetchedPolls]),
+            sortFeedItems([...posts, ...polls]),
           );
         });
       },
@@ -1814,7 +2435,7 @@ const selectedChannel = useMemo(() => {
                 collection(db, "posts"),
                 orderBy("createdAt", "desc"),
                 startAfter(lastPostDocRef.current),
-                limit(20),
+                limit(FEED_PAGE_SIZE),
               ),
             )
           : Promise.resolve(null),
@@ -1824,7 +2445,7 @@ const selectedChannel = useMemo(() => {
                 collection(db, "polls"),
                 orderBy("createdAt", "desc"),
                 startAfter(lastPollDocRef.current),
-                limit(20),
+                limit(FEED_PAGE_SIZE),
               ),
             )
           : Promise.resolve(null),
@@ -1856,11 +2477,13 @@ const selectedChannel = useMemo(() => {
       pollsSnapshot?.docs.forEach((d) => loadedPollIdsRef.current.add(d.id));
       if (postsSnapshot) {
         lastPostDocRef.current = postsSnapshot.docs[postsSnapshot.docs.length - 1] ?? lastPostDocRef.current;
-        setHasMorePosts(postsSnapshot.size === 20);
+        setHasMorePosts(postsSnapshot.size === FEED_PAGE_SIZE);
+        postsPaginatedRef.current = true;
       }
       if (pollsSnapshot) {
         lastPollDocRef.current = pollsSnapshot.docs[pollsSnapshot.docs.length - 1] ?? lastPollDocRef.current;
-        setHasMorePolls(pollsSnapshot.size === 20);
+        setHasMorePolls(pollsSnapshot.size === FEED_PAGE_SIZE);
+        pollsPaginatedRef.current = true;
       }
 
       morePosts.forEach((post) => {
@@ -1885,12 +2508,18 @@ const selectedChannel = useMemo(() => {
   // ── Cleanup on logout
   useEffect(() => {
     if (!user && listenersSetup.current) {
-      console.log("🧹 Cleaning up feed listeners");
+      if (__DEV__) console.log("🧹 Cleaning up feed listeners");
       if (unsubscribePostsRef.current) unsubscribePostsRef.current();
       if (unsubscribePollsRef.current) unsubscribePollsRef.current();
       listenersSetup.current = false;
       lastPostDocRef.current = null;
       lastPollDocRef.current = null;
+      postsPaginatedRef.current = false;
+      pollsPaginatedRef.current = false;
+      hasHydratedPostsRef.current = false;
+      hasHydratedPollsRef.current = false;
+      setStagedPosts([]);
+      setStagedPolls([]);
       loadedPostIdsRef.current.clear();
       loadedPollIdsRef.current.clear();
       setHasMorePosts(true);
@@ -1901,25 +2530,82 @@ const selectedChannel = useMemo(() => {
 
   const onRefresh = useCallback(async () => {
     if (isOffline) {
-      Alert.alert(
+      showInfo(
         "No Connection",
         "Please check your internet connection and try again.",
       );
       return;
     }
     setRefreshing(true);
-    lastPostDocRef.current = null;
-    lastPollDocRef.current = null;
-    loadedPostIdsRef.current.clear();
-    loadedPollIdsRef.current.clear();
-    setHasMorePosts(true);
-    setHasMorePolls(true);
-    if (unsubscribePostsRef.current) unsubscribePostsRef.current();
-    if (unsubscribePollsRef.current) unsubscribePollsRef.current();
-    listenersSetup.current = false;
-    setFeedItems([]);
-    setRefreshing(false);
-  }, [isOffline]);
+    try {
+      const qPosts = query(
+        collection(db, "posts"),
+        orderBy("createdAt", "desc"),
+        limit(FEED_PAGE_SIZE),
+      );
+      const qPolls = query(
+        collection(db, "polls"),
+        orderBy("createdAt", "desc"),
+        limit(FEED_PAGE_SIZE),
+      );
+
+      const [postsSnapshot, pollsSnapshot] = await Promise.all([
+        getDocs(qPosts),
+        getDocs(qPolls),
+      ]);
+
+      const fetchedPosts: PostFeedItem[] = postsSnapshot.docs.map((d) => ({
+        type: "post" as const,
+        id: d.id,
+        likeCount: 0,
+        commentCount: 0,
+        likedBy: [],
+        ...d.data(),
+      }));
+
+      const fetchedPolls: PollFeedItem[] = pollsSnapshot.docs.map((d) => ({
+        type: "poll" as const,
+        id: d.id,
+        ...(d.data() as Omit<Poll, "id">),
+      }));
+
+      loadedPostIdsRef.current.clear();
+      postsSnapshot.docs.forEach((d) => loadedPostIdsRef.current.add(d.id));
+      lastPostDocRef.current =
+        postsSnapshot.docs[postsSnapshot.docs.length - 1] ?? null;
+      setHasMorePosts(postsSnapshot.size === FEED_PAGE_SIZE);
+      // Refresh drops back to a single window, so the cursor is the listener's
+      // again until the reader pages further down.
+      postsPaginatedRef.current = false;
+
+      loadedPollIdsRef.current.clear();
+      pollsSnapshot.docs.forEach((d) => loadedPollIdsRef.current.add(d.id));
+      lastPollDocRef.current =
+        pollsSnapshot.docs[pollsSnapshot.docs.length - 1] ?? null;
+      setHasMorePolls(pollsSnapshot.size === FEED_PAGE_SIZE);
+      pollsPaginatedRef.current = false;
+
+      fetchedPosts.forEach((post) => {
+        if (!post.isAnonymous && post.userId) fetchUserRole(post.userId);
+      });
+      fetchedPolls.forEach((poll) => {
+        if (!poll.isAnonymous && poll.userId) fetchUserRole(poll.userId);
+      });
+
+      setStagedPosts([]);
+      setStagedPolls([]);
+      isNearFeedTopRef.current = true;
+
+      setFeedItems((prev) => {
+        const sorted = sortFeedItems([...fetchedPosts, ...fetchedPolls]);
+        return mergeFeedItemsByIdentity(prev, sorted);
+      });
+    } catch (error) {
+      console.error("Error refreshing feed:", error);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchUserRole, isOffline]);
 
   const isPollExpired = useCallback((expiresAt: any) => {
     if (!expiresAt || !expiresAt.toDate) return false;
@@ -1930,7 +2616,7 @@ const selectedChannel = useMemo(() => {
     async (postId: string, currentLikedBy: string[] = []) => {
       if (!user) return;
       if (isOffline) {
-        Alert.alert("No Connection", "Cannot like posts while offline.");
+        showInfo("No Connection", "Cannot like posts while offline.");
         return;
       }
       if (likeInFlightRef.current.has(postId)) return;
@@ -1987,7 +2673,7 @@ const selectedChannel = useMemo(() => {
         }
       } catch (error) {
         console.error("Error updating like:", error);
-        Alert.alert("Error", "Failed to like post. Please try again.");
+        showInfo("Error", "Failed to like post. Please try again.");
       } finally {
         likeInFlightRef.current.delete(postId);
       }
@@ -1995,15 +2681,37 @@ const selectedChannel = useMemo(() => {
     [currentUserProfile, isOffline, user],
   );
 
-  // ── Scroll to post from notification
+  // ── Scroll to post or poll from notification
   useEffect(() => {
     if (!pendingNotificationTarget?.key) return;
-    if (
-      handledNotificationKey === pendingNotificationTarget.key ||
-      !pendingNotificationTarget.postId
-    ) {
+    if (handledNotificationKey === pendingNotificationTarget.key) {
       return;
     }
+
+    if (pendingNotificationTarget.pollId) {
+      const pollIndex = visibleFeedItems.findIndex(
+        (item) =>
+          item.type === "poll" && item.id === pendingNotificationTarget.pollId,
+      );
+      if (pollIndex < 0) return;
+
+      feedListRef.current?.scrollToIndex({
+        index: pollIndex,
+        animated: true,
+        viewPosition: 0.15,
+      });
+      const highlightedPollKey = `poll:${pendingNotificationTarget.pollId}`;
+      setHighlightedFeedKey(highlightedPollKey);
+      setTimeout(() => {
+        setHighlightedFeedKey((current) =>
+          current === highlightedPollKey ? null : current,
+        );
+      }, 3500);
+      setHandledNotificationKey(pendingNotificationTarget.key);
+      return;
+    }
+
+    if (!pendingNotificationTarget.postId) return;
 
     const targetPost = feedItems.find(
       (item) =>
@@ -2062,7 +2770,7 @@ const selectedChannel = useMemo(() => {
     async (pollId: string, optionIndex: number) => {
       if (!user) return;
       if (isOffline) {
-        Alert.alert("No Connection", "Cannot vote while offline.");
+        showInfo("No Connection", "Cannot vote while offline.");
         return;
       }
 
@@ -2099,7 +2807,7 @@ const selectedChannel = useMemo(() => {
         await updateDoc(pollRef, { options: updatedOptions, totalVotes });
       } catch (error) {
         console.error("Error voting on poll:", error);
-        Alert.alert("Error", "Failed to vote. Please try again.");
+        showInfo("Error", "Failed to vote. Please try again.");
       }
     },
     [isOffline, isPollExpired, user],
@@ -2109,7 +2817,7 @@ const selectedChannel = useMemo(() => {
     async (pollId: string, text: string) => {
       try {
         if (!text.trim()) {
-          Alert.alert("Error", "Option cannot be empty.");
+          showInfo("Error", "Option cannot be empty.");
           return;
         }
 
@@ -2117,13 +2825,13 @@ const selectedChannel = useMemo(() => {
         const pollSnap = await getDoc(pollRef);
 
         if (!pollSnap.exists()) {
-          Alert.alert("Error", "Poll not found.");
+          showInfo("Error", "Poll not found.");
           return;
         }
 
         const poll = pollSnap.data() as Poll;
         if (isPollExpired(poll.expiresAt)) {
-          Alert.alert("Error", "This poll has already expired.");
+          showInfo("Error", "This poll has already expired.");
           return;
         }
 
@@ -2138,10 +2846,10 @@ const selectedChannel = useMemo(() => {
           0,
         );
         await updateDoc(pollRef, { options: updatedOptions, totalVotes });
-        Alert.alert("Success", "Option added! You can vote for it manually.");
+        showInfo("Success", "Option added! You can vote for it manually.");
       } catch (error) {
         console.error("Error adding option:", error);
-        Alert.alert("Error", "Failed to add option. Please try again.");
+        showInfo("Error", "Failed to add option. Please try again.");
       }
     },
     [isPollExpired],
@@ -2245,6 +2953,9 @@ const selectedChannel = useMemo(() => {
       ]).start();
     }
 
+    // Drives the pill: inside FEED_TOP_MERGE_OFFSET the reader is looking at
+    // the newest posts, so arrivals can merge without disturbing anything.
+    isNearFeedTopRef.current = currentOffsetY <= FEED_TOP_MERGE_OFFSET;
     scrollY.current = currentOffsetY;
   };
 
@@ -2340,7 +3051,7 @@ const handleSelectChannel = useCallback(
 
       // Check access for non-public servers
       if (server.isPublic !== true && server.membershipState !== "joined") {
-        Alert.alert(
+        showInfo(
           "Access Denied",
           "This server requires approval or membership to access."
         );
@@ -2383,7 +3094,7 @@ const handleSelectChannel = useCallback(
     ) => {
       if (!user?.uid) return;
       if (isOffline) {
-        Alert.alert("No Connection", "You need internet access to create a server.");
+        showInfo("No Connection", "You need internet access to create a server.");
         return;
       }
 
@@ -2396,6 +3107,8 @@ const handleSelectChannel = useCallback(
 
       await setDoc(doc(db, "communityServers", nextServer.id), stripUndefined({
         ...nextServer,
+        // App-wide search: lowercased name for the prefix-range query.
+        nameLower: (name || nextServer.name || "").trim().toLowerCase(),
         description: description?.trim() || "",
         accent: accent || nextServer.accent,
         emoji: emoji || nextServer.emoji,
@@ -2436,7 +3149,7 @@ const handleSelectChannel = useCallback(
   const handleEditServer = useCallback(
     async (serverId: string, patch: Partial<ServerEditPatch>) => {
       if (isOffline) {
-        Alert.alert("No Connection", "You need internet access to update this server.");
+        showInfo("No Connection", "You need internet access to update this server.");
         return;
       }
 
@@ -2444,7 +3157,11 @@ const handleSelectChannel = useCallback(
         updatedAt: serverTimestamp(),
       };
 
-      if (patch.name !== undefined) updatePayload.name = patch.name.trim();
+      if (patch.name !== undefined) {
+        updatePayload.name = patch.name.trim();
+        // App-wide search: keep the lowercased name in step with edits.
+        updatePayload.nameLower = patch.name.trim().toLowerCase();
+      }
       if (patch.description !== undefined) {
         updatePayload.description = patch.description.trim();
       }
@@ -2484,7 +3201,7 @@ const handleSelectChannel = useCallback(
   const handleDeleteServer = useCallback(
     async (serverId: string) => {
       if (isOffline) {
-        Alert.alert("No Connection", "You need internet access to delete this server.");
+        showInfo("No Connection", "You need internet access to delete this server.");
         return;
       }
 
@@ -2502,15 +3219,68 @@ const handleSelectChannel = useCallback(
     [isOffline],
   );
 
+  // Task 6: a teacher/moderator managing a server asks an admin to delete it,
+  // instead of the unilateral soft-delete above. Mirrors handleRequestJoin's
+  // setDoc-merge shape; the server stays live until an admin approves.
+  const handleRequestServerDeletion = useCallback(
+    async (serverId: string, reason: string) => {
+      if (!user?.uid) return;
+      if (isOffline) {
+        showInfo("No Connection", "You need internet access to send this request.");
+        return;
+      }
+
+      const server = remoteServers.find((item) => item.id === serverId);
+      const requesterName =
+        currentUserProfile?.firstname && currentUserProfile?.lastname
+          ? `${currentUserProfile.firstname} ${currentUserProfile.lastname}`.trim()
+          : user.displayName || user.email?.split("@")[0] || "A teacher";
+
+      const requestRef = doc(
+        db,
+        "communityServerDeletionRequests",
+        `${serverId}_${user.uid}`,
+      );
+      // Re-submitting after a previous rejection: clear the old (resolved)
+      // request first so this is a clean create, not an update the rule
+      // deliberately doesn't allow the requester to make.
+      await deleteDoc(requestRef).catch(() => undefined);
+      await setDoc(requestRef, {
+        serverId,
+        serverName: server?.name || "this server",
+        requestedBy: user.uid,
+        requesterName,
+        reason: reason || null,
+        status: "pending",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      showInfo(
+        "Request Sent",
+        "An admin will review your request to delete this server. It stays active until then.",
+      );
+    },
+    [
+      currentUserProfile?.firstname,
+      currentUserProfile?.lastname,
+      isOffline,
+      remoteServers,
+      user?.displayName,
+      user?.uid,
+    ],
+  );
+
   const handleCreateThread = useCallback(
     async (
       serverId: string,
       label: string,
-      emoji?: string,
+      emoji = "💬",
       description?: string,
+      channelType: ChannelType = "text",
     ) => {
       if (isOffline) {
-        Alert.alert("No Connection", "You need internet access to create a channel.");
+        showInfo("No Connection", "You need internet access to create a channel.");
         return;
       }
 
@@ -2523,6 +3293,7 @@ const handleSelectChannel = useCallback(
         label,
         emoji,
         description,
+        channelType,
       );
 
       await setDoc(
@@ -2537,11 +3308,82 @@ const handleSelectChannel = useCallback(
     [isOffline, remoteServers],
   );
 
+  const handleEditChannel = useCallback(
+    async (
+      serverId: string,
+      channelId: string,
+      updates: {
+        label?: string;
+        emoji?: string;
+        hint?: string;
+        channelType?: ChannelType;
+      },
+    ) => {
+      if (isOffline) {
+        showInfo("No Connection", "You need internet access to edit a channel.");
+        return;
+      }
+
+      const server = remoteServers.find((item) => item.id === serverId);
+      if (!server) return;
+
+      const nextSections = updateChannelInSections(
+        server.sections,
+        serverId,
+        channelId,
+        updates,
+      );
+
+      await setDoc(
+        doc(db, "communityServers", serverId),
+        {
+          sections: nextSections,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+    },
+    [isOffline, remoteServers],
+  );
+
+  const handleDeleteChannel = useCallback(
+    async (serverId: string, channelId: string) => {
+      if (isOffline) {
+        showInfo("No Connection", "You need internet access to delete a channel.");
+        return;
+      }
+
+      const server = remoteServers.find((item) => item.id === serverId);
+      if (!server) return;
+
+      const nextSections = deleteChannelFromSections(
+        server.sections,
+        serverId,
+        channelId,
+      );
+
+      await setDoc(
+        doc(db, "communityServers", serverId),
+        {
+          sections: nextSections,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+      if (selectedChannelId === channelId) {
+        const remaining = nextSections.flatMap((s) => s.channels);
+        setSelectedChannelId(remaining[0]?.id || null);
+      }
+    },
+    [isOffline, remoteServers, selectedChannelId],
+  );
+
   const handleRequestJoin = useCallback(
     async (serverId: string) => {
       if (!user?.uid) return;
       if (isOffline) {
-        Alert.alert("No Connection", "You need internet access to request access.");
+        showInfo("No Connection", "You need internet access to request access.");
         return;
       }
 
@@ -2565,7 +3407,7 @@ const handleSelectChannel = useCallback(
         { merge: true },
       );
 
-      Alert.alert(
+      showInfo(
         "Request Sent",
         "A teacher, moderator, or admin can approve your request.",
       );
@@ -2589,6 +3431,12 @@ const handleSelectChannel = useCallback(
         return;
       }
 
+      const existingPost = feedItemsRef.current.find(
+        (item): item is PostFeedItem => item.type === "post" && item.id === postId,
+      );
+      const previousPinnedAt = existingPost?.pinnedAt ?? null;
+      const previousPinnedBy = existingPost?.pinnedBy ?? null;
+
       try {
         setFeedItems((currentItems) =>
           sortFeedItems(
@@ -2602,19 +3450,42 @@ const handleSelectChannel = useCallback(
                         }
                       : null,
                     pinnedBy: shouldPin ? user.uid : null,
+                    ...(!shouldPin
+                      ? { pinExpiresAt: null, targetDate: null, targetDateLabel: null }
+                      : {}),
                   }
                 : item,
             ),
           ),
         );
 
-        await updateDoc(doc(db, "posts", postId), {
+        const updatePayload: Record<string, any> = {
           pinnedAt: shouldPin ? serverTimestamp() : null,
           pinnedBy: shouldPin ? user.uid : null,
-        });
+        };
+        if (!shouldPin) {
+          updatePayload.pinExpiresAt = null;
+          updatePayload.targetDate = null;
+          updatePayload.targetDateLabel = null;
+        }
+
+        await updateDoc(doc(db, "posts", postId), updatePayload);
       } catch (error) {
         console.error("Error updating pinned post:", error);
-        Alert.alert("Error", "Failed to update the pinned post.");
+        setFeedItems((currentItems) =>
+          sortFeedItems(
+            currentItems.map((item) =>
+              item.type === "post" && item.id === postId
+                ? {
+                    ...item,
+                    pinnedAt: previousPinnedAt,
+                    pinnedBy: previousPinnedBy,
+                  }
+                : item,
+            ),
+          ),
+        );
+        showInfo("Error", "Failed to update the pinned post.");
       }
     },
     [currentUserRole, user?.uid],
@@ -2624,7 +3495,7 @@ const handleSelectChannel = useCallback(
     async (serverId: string, targetUserId: string) => {
       if (!user?.uid) return;
       if (isOffline) {
-        Alert.alert("No Connection", "You need internet access to approve requests.");
+        showInfo("No Connection", "You need internet access to approve requests.");
         return;
       }
 
@@ -2639,7 +3510,7 @@ const handleSelectChannel = useCallback(
         (["teacher", "moderator"].includes(currentUserRole || "") && approverJoined);
 
       if (!canApprove) {
-        Alert.alert(
+        showInfo(
           "Approval Restricted",
           "Join this server first before approving requests.",
         );
@@ -2687,7 +3558,7 @@ const handleSelectChannel = useCallback(
     async (serverId: string, targetUserId: string) => {
       if (!user?.uid) return;
       if (isOffline) {
-        Alert.alert("No Connection", "You need internet access to reject requests.");
+        showInfo("No Connection", "You need internet access to reject requests.");
         return;
       }
 
@@ -2702,7 +3573,7 @@ const handleSelectChannel = useCallback(
         (["teacher", "moderator"].includes(currentUserRole || "") && approverJoined);
 
       if (!canReject) {
-        Alert.alert(
+        showInfo(
           "Approval Restricted",
           "Join this server first before rejecting requests.",
         );
@@ -2729,59 +3600,59 @@ const handleSelectChannel = useCallback(
     async (serverId: string) => {
       if (!user?.uid) return;
       if (currentUserRole === "admin") {
-        Alert.alert("Unavailable", "Admins cannot leave servers.");
+        showInfo("Unavailable", "Admins cannot leave servers.");
         return;
       }
       if (isOffline) {
-        Alert.alert("No Connection", "You need internet access to leave this server.");
+        showInfo("No Connection", "You need internet access to leave this server.");
         return;
       }
 
-      Alert.alert("Leave Server", "You will lose access to this server until you join again.", [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Leave",
-          style: "destructive",
-          onPress: async () => {
-            const membershipRef = doc(
-              db,
-              "communityServerMemberships",
-              `${serverId}_${user.uid}`,
-            );
-            const membershipSnap = await getDoc(membershipRef);
+      showConfirm({
+        title: "Leave Server",
+        description: "You will lose access to this server until you join again.",
+        confirmText: "Leave",
+        cancelText: "Cancel",
+        destructive: true,
+        onConfirm: async () => {
+          const membershipRef = doc(
+            db,
+            "communityServerMemberships",
+            `${serverId}_${user.uid}`,
+          );
+          const membershipSnap = await getDoc(membershipRef);
 
-            if (membershipSnap.exists() && membershipSnap.data()?.status !== "removed") {
-              await setDoc(
-                membershipRef,
-                {
-                  serverId,
-                  userId: user.uid,
-                  status: "removed",
-                  removedAt: serverTimestamp(),
-                  updatedAt: serverTimestamp(),
-                },
-                { merge: true },
-              );
-
-              await updateDoc(doc(db, "communityServers", serverId), {
-                memberCount: increment(-1),
+          if (membershipSnap.exists() && membershipSnap.data()?.status !== "removed") {
+            await setDoc(
+              membershipRef,
+              {
+                serverId,
+                userId: user.uid,
+                status: "removed",
+                removedAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
-              });
-            }
+              },
+              { merge: true },
+            );
 
-            if (selectedServerId === serverId) {
-              exitServerView();
-            }
-          },
+            await updateDoc(doc(db, "communityServers", serverId), {
+              memberCount: increment(-1),
+              updatedAt: serverTimestamp(),
+            });
+          }
+
+          if (selectedServerId === serverId) {
+            exitServerView();
+          }
         },
-      ]);
+      });
     },
     [currentUserRole, exitServerView, isOffline, selectedServerId, user?.uid],
   );
 
   const handleMenuAction = (action: string) => {
     if (isOffline) {
-      Alert.alert("No Connection", "Cannot create posts while offline.");
+      showInfo("No Connection", "Cannot create posts while offline.");
       return;
     }
     toggleFabMenu();
@@ -2834,6 +3705,13 @@ const handleSelectChannel = useCallback(
     [currentUserProfile?.studentID, router, user],
   );
 
+  const handleOpenUserProfileFromDrawer = useCallback(
+    (userId?: string, profileDocId?: string) => {
+      handleProfileClick(userId, false, profileDocId);
+    },
+    [handleProfileClick],
+  );
+
   const openImageViewer = useCallback(
     (images: string[], startIndex: number, postId?: string) => {
       setCurrentImages(images);
@@ -2876,6 +3754,16 @@ const handleSelectChannel = useCallback(
     setNotificationModalOpenReply(false);
   }, [currentImageViewerPost]);
 
+  // Stable reference so PostCard's React.memo isn't defeated by a fresh
+  // inline closure on every renderFeedItem call (all useState setters are
+  // stable, so no deps are needed).
+  const handleFeedCommentPress = useCallback((postId: string) => {
+    setNotificationModalPostId(postId);
+    setNotificationModalCommentId(null);
+    setNotificationModalReplyId(null);
+    setNotificationModalOpenReply(false);
+  }, []);
+
   const handleFilePress = useCallback(
     (url: string, mimeType: string) => {
       if (mimeType.startsWith("image/")) {
@@ -2890,7 +3778,7 @@ const handleSelectChannel = useCallback(
             if (supported) {
               Linking.openURL(fileUrl);
             } else {
-              Alert.alert(
+              showInfo(
                 "Cannot Open File",
                 "Unable to open this file type on your device.",
               );
@@ -2898,7 +3786,7 @@ const handleSelectChannel = useCallback(
           })
           .catch((err) => {
             console.error("Error opening URL:", err);
-            Alert.alert("Error", "Failed to open file. Please try again.");
+            showInfo("Error", "Failed to open file. Please try again.");
           });
       }
     },
@@ -2943,12 +3831,29 @@ const handleSelectChannel = useCallback(
     (result: {
       kind: "post" | "poll" | "person";
       sourceId: string;
+      userId?: string;
+      profileDocId?: string;
       id: string;
       title: string;
     }) => {
       if (result.kind === "person") {
         closeSearchExperience();
-        if (result.sourceId === user?.uid) {
+
+        const ownProfileTargets = new Set(
+          [
+            user?.uid,
+            getStudentDocIdFromAuthUser(user),
+            currentUserProfile?.studentID,
+            currentUserProfile?.userId,
+          ].filter(Boolean) as string[],
+        );
+        const targetUserId = result.userId || result.sourceId;
+        const targetProfileDocId = result.profileDocId;
+
+        if (
+          ownProfileTargets.has(targetUserId) ||
+          (!!targetProfileDocId && ownProfileTargets.has(targetProfileDocId))
+        ) {
           router.push({
             pathname: "/(main)/(tabs)/ProfileScreen",
             params: { returnTo: HOME_RETURN_ROUTE },
@@ -2956,7 +3861,8 @@ const handleSelectChannel = useCallback(
         } else {
           router.push(
             buildUserProfileHref({
-              userId: result.sourceId,
+              userId: targetUserId,
+              profileDocId: targetProfileDocId,
               returnTo: HOME_RETURN_ROUTE,
             }) as any,
           );
@@ -2969,7 +3875,7 @@ const handleSelectChannel = useCallback(
         (item) => item.type === result.kind && item.id === result.sourceId,
       );
       if (index < 0) {
-        Alert.alert("Not Found", "That item is no longer available in Home.");
+        showInfo("Not Found", "That item is no longer available in Home.");
         return;
       }
 
@@ -2987,10 +3893,12 @@ const handleSelectChannel = useCallback(
     },
     [
       closeSearchExperience,
+      currentUserProfile?.studentID,
+      currentUserProfile?.userId,
       rememberSearch,
       router,
       searchQuery,
-      user?.uid,
+      user,
       visibleFeedItems,
     ],
   );
@@ -3085,30 +3993,308 @@ const handleSelectChannel = useCallback(
     [],
   );
 
+  // "Trending this week": the most engaged-with APPROVED posts from the last
+  // 7 days. One bounded date-range read (not the whole history), scored and
+  // sorted in memory — no denormalised score field or Cloud Function.
+  const fetchTrendingPosts = useCallback(async () => {
+    if (!auth.currentUser) return;
+    try {
+      const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const snapshot = await getDocs(
+        query(
+          collection(db, "posts"),
+          where("moderationStatus", "==", "approved"),
+          where("createdAt", ">=", since),
+          orderBy("createdAt", "desc"),
+          limit(60),
+        ),
+      );
+
+      const scored = snapshot.docs.map((d) => {
+        const data = d.data() as any;
+        const likeCount = data.likeCount ?? 0;
+        const commentCount = data.commentCount ?? 0;
+        // Weight a comment as 2x a like: commenting takes more effort than a
+        // tap, so it's the stronger signal that a post actually landed.
+        const score = likeCount + commentCount * 2;
+        return {
+          score,
+          post: {
+            type: "post" as const,
+            id: d.id,
+            likeCount: 0,
+            commentCount: 0,
+            likedBy: [],
+            ...data,
+          } as PostFeedItem,
+        };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      const top = scored
+        .filter((entry) => entry.score > 0)
+        .slice(0, 5)
+        .map((entry) => entry.post);
+
+      // Fewer than 3 recently-engaged posts isn't real "trending" signal —
+      // hide the section rather than pad it with flat content.
+      const nextTop = top.length >= 3 ? top : [];
+      const nextIds = nextTop.map((entry) => entry.id);
+
+      // Seed the cards immediately from this snapshot; the live listener below
+      // then takes over their like/comment/bookmark state.
+      setTrendingPosts(nextTop);
+      setTrendingPostIds((previous) =>
+        previous.length === nextIds.length &&
+        previous.every((id, index) => id === nextIds[index])
+          ? previous
+          : nextIds,
+      );
+    } catch (error) {
+      console.error("Error loading trending posts:", error);
+      setTrendingPosts([]);
+      setTrendingPostIds([]);
+    }
+  }, []);
+
+  // Live state for the currently-trending posts: interacting with a trending
+  // card (like / comment / bookmark) now updates it in place instead of
+  // staying frozen until the next screen focus.
+  useEffect(() => {
+    if (trendingPostIds.length === 0) {
+      setTrendingPosts([]);
+      return;
+    }
+
+    const unsubscribe = onSnapshot(
+      query(
+        collection(db, "posts"),
+        where(documentId(), "in", trendingPostIds.slice(0, 10)),
+      ),
+      (snapshot) => {
+        const byId = new Map(
+          snapshot.docs.map((docSnapshot) => [
+            docSnapshot.id,
+            {
+              type: "post" as const,
+              id: docSnapshot.id,
+              likeCount: 0,
+              commentCount: 0,
+              likedBy: [],
+              ...(docSnapshot.data() as any),
+            } as PostFeedItem,
+          ]),
+        );
+        setTrendingPosts(
+          trendingPostIds
+            .map((id) => byId.get(id))
+            .filter((post): post is PostFeedItem => {
+              if (!post) return false;
+              const status = String(
+                post.moderationStatus ?? "approved",
+              ).toLowerCase();
+              return status === "approved";
+            }),
+        );
+      },
+      (error) => {
+        console.error("Error watching trending posts:", error);
+      },
+    );
+
+    return unsubscribe;
+  }, [trendingPostIds]);
+
+  // Refresh on focus (fresh each time you land on Home) and once auth
+  // resolves on first launch.
+  useFocusEffect(
+    useCallback(() => {
+      fetchTrendingPosts();
+    }, [fetchTrendingPosts]),
+  );
+  useEffect(() => {
+    if (user) fetchTrendingPosts();
+  }, [user, fetchTrendingPosts]);
+
+  const renderTrendingPost = useCallback(
+    ({ item }: { item: PostFeedItem }) => {
+      const isLiked = item.likedBy?.includes(user?.uid || "") || false;
+      return (
+        <View style={styles.trendingCardWrap}>
+          <PostCard
+            compact
+            post={item as any}
+            isLiked={isLiked}
+            currentUserRole={currentUserRole}
+            currentUserId={user?.uid}
+            onLike={handleLike}
+            onDelete={handleDeletePost}
+            onEdit={handleEditPost}
+            canPin={["admin", "teacher", "moderator"].includes(currentUserRole || "")}
+            onTogglePin={handleTogglePinnedPost}
+            onProfileClick={handlePostCardProfileClick}
+            onTagClick={handlePostCardTagClick}
+            onImagePress={openImageViewer}
+            onFilePress={handleFilePress}
+            getTimeAgo={getTimeAgo}
+            onCommentPress={handleFeedCommentPress}
+          />
+        </View>
+      );
+    },
+    [
+      currentUserRole,
+      getTimeAgo,
+      handleDeletePost,
+      handleEditPost,
+      handleFeedCommentPress,
+      handleFilePress,
+      handleLike,
+      handlePostCardProfileClick,
+      handlePostCardTagClick,
+      handleTogglePinnedPost,
+      openImageViewer,
+      user?.uid,
+    ],
+  );
+
+  const handleAnnouncementCardPress = useCallback(
+    (announcement: AnnouncementItem) => {
+      const targetIndex = visibleFeedItems.findIndex(
+        (item) => item.type === "post" && item.id === announcement.id,
+      );
+      if (targetIndex >= 0 && feedListRef.current) {
+        try {
+          feedListRef.current.scrollToIndex({
+            index: targetIndex,
+            animated: true,
+            viewPosition: 0.1,
+          });
+        } catch {
+          feedListRef.current.scrollToOffset({ offset: 350, animated: true });
+        }
+      }
+    },
+    [visibleFeedItems],
+  );
+
   const renderFeedHeader = useCallback(() => {
-    const firstName =
-      currentUserProfile?.firstname?.trim() ||
-      user?.displayName?.trim()?.split(" ")[0] ||
+    const displayNameParts =
+      user?.displayName?.trim().split(/\s+/).filter(Boolean) || [];
+    const lastName =
+      currentUserProfile?.lastname?.trim() ||
+      displayNameParts[displayNameParts.length - 1] ||
       "there";
 
     return (
       <>
-      <View style={styles.feedWelcome}>
-        <View style={styles.feedWelcomeCopy}>
-          <Text style={styles.feedEyebrow}>YOUR CAMPUS COMMUNITY</Text>
-          <Text style={styles.feedWelcomeTitle}>Good day, {firstName} 👋</Text>
-          <Text style={styles.feedWelcomeSubtitle}>
-            See what&apos;s happening around BondED today.
-          </Text>
-        </View>
+      <Animated.View
+        style={[
+          styles.feedWelcome,
+          {
+            opacity: welcomeOpacity,
+            transform: [{ translateY: welcomeTranslateY }],
+          },
+        ]}
+      >
+        <View style={styles.feedWelcomeAccent} />
 
-        <View style={styles.feedWelcomeBadge}>
-          <Ionicons name="people" size={18} color={BONDED.colors.gold} />
-          <Text style={styles.feedWelcomeBadgeText}>
-            {onlineUsersCount} online
-          </Text>
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.feedWelcomeGlowGold,
+            {
+              transform: [
+                {
+                  translateY: welcomeFloat.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, -5],
+                  }),
+                },
+              ],
+            },
+          ]}
+        />
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.feedWelcomeGlowMaroon,
+            {
+              transform: [
+                {
+                  translateY: welcomeFloat.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, 4],
+                  }),
+                },
+              ],
+            },
+          ]}
+        />
+
+        <View style={styles.feedWelcomeCopy}>
+          <View style={styles.feedWelcomeTopline}>
+            <Animated.View
+              style={[
+                styles.feedWelcomeIcon,
+                { transform: [{ scale: campusPulseScale }] },
+              ]}
+            >
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.feedWelcomeIconHalo,
+                  { opacity: campusPulseHaloOpacity },
+                ]}
+              />
+              <Ionicons name="school-outline" size={15} color="#7d4e12" />
+            </Animated.View>
+            <View style={styles.feedEyebrowPill}>
+              <Text style={styles.feedEyebrow}>CAMPUS COMMUNITY</Text>
+            </View>
+          </View>
+
+          <Animated.View
+            style={{
+              opacity: welcomeCopyOpacity,
+              transform: [{ translateY: welcomeCopyTranslateY }],
+            }}
+          >
+            <Text style={styles.feedWelcomeTitle}>Good day, {lastName} 👋</Text>
+            <Text style={styles.feedWelcomeSubtitle}>
+              Stay connected with campus news, events, conversations, and student updates.
+            </Text>
+          </Animated.View>
         </View>
-      </View>
+      </Animated.View>
+
+      {activeAnnouncements.length > 0 && (
+        <AnnouncementCarousel
+          announcements={activeAnnouncements}
+          onPressAnnouncement={handleAnnouncementCardPress}
+        />
+      )}
+
+      {trendingPosts.length >= 3 && (
+        <View style={styles.trendingSection}>
+          <View style={styles.trendingHeaderRow}>
+            <Ionicons name="flame" size={16} color="#a61f1f" />
+            <Text style={styles.trendingTitle}>Trending this week</Text>
+          </View>
+          <FlatList
+            horizontal
+            data={trendingPosts}
+            keyExtractor={(item) => `trending-${item.id}`}
+            renderItem={renderTrendingPost}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.trendingListContent}
+            snapToInterval={TRENDING_CARD_WIDTH + 12}
+            snapToAlignment="start"
+            disableIntervalMomentum={true}
+            decelerationRate="fast"
+          />
+        </View>
+      )}
 
       <View style={styles.flairFilterSection}>
         <ScrollView
@@ -3162,10 +4348,14 @@ const handleSelectChannel = useCallback(
       </>
     );
   }, [
+    activeAnnouncements,
     currentUserProfile?.firstname,
+    handleAnnouncementCardPress,
     handleFlairFilterPress,
     onlineUsersCount,
+    renderTrendingPost,
     selectedFlairFilter,
+    trendingPosts,
     user?.displayName,
   ]);
 
@@ -3195,12 +4385,9 @@ const handleSelectChannel = useCallback(
             onFilePress={handleFilePress}
             getTimeAgo={getTimeAgo}
             // Ensure comment modal triggers directly from PostCard
-            onCommentPress={(postId) => {
-              setNotificationModalPostId(postId);
-              setNotificationModalCommentId(null);
-              setNotificationModalReplyId(null);
-              setNotificationModalOpenReply(false);
-            }}
+            onCommentPress={handleFeedCommentPress}
+            // Part A: X-style muted autoplay only for the card in view.
+            videoCardVisible={visibleFeedIds.has(post.id)}
           />
         );
       }
@@ -3218,6 +4405,7 @@ const handleSelectChannel = useCallback(
           onVote={handlePollVote}
           onAddOption={addOptionToPoll}
           onDelete={handleDeletePoll}
+          onEdit={handleEditPoll}
           onProfileClick={handleProfileClick}
           getTimeAgo={getTimeAgo}
           isPollExpired={isPollExpired}
@@ -3228,10 +4416,13 @@ const handleSelectChannel = useCallback(
       addOptionToPoll,
       currentUserRole,
       getTimeAgo,
+      handleFeedCommentPress,
       handleFilePress,
       handleLike,
       handleDeletePoll,
+      handleEditPoll,
       handleDeletePost,
+      handleEditPost,
       handleTogglePinnedPost,
       handlePollVote,
       handlePostCardProfileClick,
@@ -3243,6 +4434,7 @@ const handleSelectChannel = useCallback(
       openImageViewer,
       user?.uid,
       userRoles,
+      visibleFeedIds,
     ],
   );
 
@@ -3295,12 +4487,7 @@ const handleSelectChannel = useCallback(
           </View>
         </View>
 
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.quickFiltersRow}
-          style={styles.quickFiltersContainer}
-        >
+        <View style={[styles.quickFiltersRow, styles.quickFiltersContainer]}>
           {[
             { key: "all", label: "Everything" },
             { key: "posts", label: "Posts" },
@@ -3326,13 +4513,9 @@ const handleSelectChannel = useCallback(
               </Text>
             </TouchableOpacity>
           ))}
-        </ScrollView>
+        </View>
 
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.quickFiltersRow}
-        >
+        <View style={styles.quickFiltersRow}>
           {[
             { key: "all", label: "Any time" },
             { key: "today", label: "Today" },
@@ -3376,7 +4559,7 @@ const handleSelectChannel = useCallback(
                   : "Oldest first"}
             </Text>
           </TouchableOpacity>
-        </ScrollView>
+        </View>
 
         {searchResults.length === 0 ? (
           <View style={styles.emptySearchState}>
@@ -3410,9 +4593,16 @@ const handleSelectChannel = useCallback(
                     activeOpacity={0.88}
                   >
                     <View style={styles.personAvatar}>
-                      <Text style={styles.personAvatarText}>
-                        {result.avatarLabel}
-                      </Text>
+                      {result.avatarUri ? (
+                        <Image
+                          source={{ uri: avatarThumb(result.avatarUri, 96) }}
+                          style={styles.personAvatarImage}
+                        />
+                      ) : (
+                        <Text style={styles.personAvatarText}>
+                          {result.avatarLabel}
+                        </Text>
+                      )}
                     </View>
                     <View style={styles.personResultCopy}>
                       <Text style={styles.personResultTitle}>{result.title}</Text>
@@ -3490,12 +4680,7 @@ const handleSelectChannel = useCallback(
   ]);
 const renderEmptyState = () => {
   if (isLoading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#e0a53d" />
-        <Text style={styles.loadingText}>Loading feed...</Text>
-      </View>
-    );
+    return <FeedSkeleton count={5} />;
   }
 
   if (isOffline && feedItems.length === 0) {
@@ -3588,12 +4773,14 @@ return (
               >
                 <Ionicons name="menu" size={22} color="#f4e7df" />
               </TouchableOpacity>
+              {/* Search the feed — people, posts and polls in view. */}
               <TouchableOpacity
-                style={styles.headerIconButton}
+                style={styles.calendarButton}
                 activeOpacity={0.82}
                 onPress={openSearchExperience}
+                accessibilityLabel="Search"
               >
-                <Ionicons name="search" size={20} color="#f4e7df" />
+                <Ionicons name="search-circle-outline" size={24} color="#5f0909" />
               </TouchableOpacity>
             </View>
 
@@ -3608,7 +4795,20 @@ return (
                 <View style={styles.onlineDot} />
                 <Text style={styles.onlineUsersText}>{onlineUsersCount}</Text>
               </TouchableOpacity>
-
+               <TouchableOpacity
+                style={styles.calendarButton}
+                onPress={() => router.push("/(main)/MessagesScreen" as any)}
+                accessibilityLabel="Messages"
+              >
+                <Ionicons name="chatbubble-ellipses-outline" size={22} color="#5f0909" />
+                {totalUnreadMessages > 0 && (
+                  <View style={styles.eventBadge}>
+                    <Text style={styles.eventBadgeText}>
+                      {totalUnreadMessages > 99 ? "99+" : totalUnreadMessages}
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
               <TouchableOpacity
                 style={styles.calendarButton}
                 onPress={() => router.push("/EventCalendarScreen")}
@@ -3622,6 +4822,8 @@ return (
                   </View>
                 )}
               </TouchableOpacity>
+
+              
             </View>
           </>
         )}
@@ -3632,25 +4834,40 @@ return (
         {showSearchResultsScreen ? (
           renderSearchResultsScreen()
         ) : (
-          <FlatList
+          <View style={{ flex: 1 }}>
+            {isOffline && visibleFeedItems.length > 0 && (
+              <View style={styles.offlineStatusBar}>
+                <Ionicons name="cloud-offline-outline" size={15} color="#9a3412" />
+                <Text style={styles.offlineStatusText}>
+                  Offline mode • Viewing saved posts
+                </Text>
+              </View>
+            )}
+            <FlatList
             ref={feedListRef}
             data={visibleFeedItems}
             renderItem={renderFeedItem}
             keyExtractor={(item) => item.id}
             onScroll={handleScroll}
+            onViewableItemsChanged={onFeedViewableItemsChanged}
+            viewabilityConfig={feedViewabilityConfig}
             onEndReached={loadMoreFeed}
-            onEndReachedThreshold={0.65}
+            // Prefetch the next page well before the bottom (~1.5 viewport
+            // heights of content still below) so scrolling stays seamless —
+            // loadMoreFeed already guards against overlapping requests.
+            onEndReachedThreshold={1.5}
             scrollEventThrottle={16}
-            // Virtualization tuning: feed items are image-heavy, so keep the
-            // render window small rather than the RN defaults (which lean
-            // toward rendering ~21 screens' worth of items). Off-screen rows
-            // beyond this window get unmounted (removeClippedSubviews) so
-            // their images aren't held in memory while scrolled far away.
-            initialNumToRender={6}
-            maxToRenderPerBatch={6}
-            windowSize={7}
+            // Facebook-style scrolling: once a post is rendered it stays
+            // mounted, so scrolling back up never re-mounts a PostCard (which
+            // would re-fetch the author, reload images, and recreate video
+            // players — the "loading" flash on scroll-up). removeClippedSubviews
+            // is off for the same reason, and the window is wide enough that
+            // rows just outside the viewport are already rendered, not blank.
+            initialNumToRender={8}
+            maxToRenderPerBatch={10}
+            windowSize={21}
             updateCellsBatchingPeriod={50}
-            removeClippedSubviews={Platform.OS === "android"}
+            removeClippedSubviews={false}
             contentContainerStyle={
               visibleFeedItems.length === 0
                 ? styles.emptyListContent
@@ -3659,9 +4876,23 @@ return (
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={
               isLoadingMore ? (
-                <View style={{ paddingVertical: 20, alignItems: "center" }}>
-                  <ActivityIndicator size="small" />
-                  <Text style={{ marginTop: 6, opacity: 0.7 }}>Loading more…</Text>
+                <View style={styles.feedFooter}>
+                  <ActivityIndicator size="small" color="#e0a53d" />
+                </View>
+              ) : visibleFeedItems.length > 0 &&
+                !hasMorePosts &&
+                !hasMorePolls ? (
+                // Otherwise the list simply stops and the reader cannot tell
+                // "you have seen everything" from "still loading" or "broken".
+                <View style={styles.feedFooter}>
+                  <Ionicons
+                    name="checkmark-circle-outline"
+                    size={17}
+                    color="#b08243"
+                  />
+                  <Text style={styles.feedFooterText}>
+                    You&apos;re all caught up
+                  </Text>
                 </View>
               ) : null
             }
@@ -3690,6 +4921,43 @@ return (
               }, 250);
             }}
           />
+          {hasStagedFeedItems && (
+            <Animated.View
+              pointerEvents="box-none"
+              style={[
+                styles.newPostsPillWrap,
+                {
+                  opacity: newPostsPillAnim,
+                  transform: [
+                    {
+                      translateY: newPostsPillAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [-28, 0],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            >
+              <TouchableOpacity
+                style={styles.newPostsPill}
+                onPress={() => flushStagedFeedItems()}
+                activeOpacity={0.85}
+                accessibilityRole="button"
+                accessibilityLabel={`Show ${stagedFeedCount} new ${
+                  stagedFeedCount === 1 ? "post" : "posts"
+                }`}
+              >
+                <Ionicons name="arrow-up" size={14} color="#fffaf7" />
+                <Text style={styles.newPostsPillText}>
+                  {stagedFeedCount === 1
+                    ? "1 new post"
+                    : `${stagedFeedCount} new posts`}
+                </Text>
+              </TouchableOpacity>
+            </Animated.View>
+          )}
+          </View>
         )}
 
         {showSearchDropdown ? (
@@ -3831,6 +5099,31 @@ return (
                         {student.isOnline ? "Active now" : formatLastSeen(student.lastSeen)}
                       </Text>
                     </View>
+
+                    {user?.uid && (student.userId || student.id) !== user.uid && (
+                      <TouchableOpacity
+                        style={styles.onlineMessageButton}
+                        activeOpacity={0.7}
+                        onPress={() => {
+                          setOnlineUsersModalVisible(false);
+                          const targetUid = student.userId || student.id;
+                          try {
+                            router.push({
+                              pathname: "/(main)/DirectChatScreen" as any,
+                              params: getDirectChatParams(user.uid, {
+                                uid: targetUid, displayName: fullName,
+                                profileImage: student.profileImage || null, role: student.role,
+                              }),
+                            });
+                          } catch (err) {
+                            console.error("Failed to start chat from online modal:", err);
+                          }
+                        }}
+                        accessibilityLabel={`Message ${fullName}`}
+                      >
+                        <Ionicons name="chatbubble-ellipses-outline" size={18} color="#5f0909" />
+                      </TouchableOpacity>
+                    )}
                   </TouchableOpacity>
                 );
               })}
@@ -3856,13 +5149,14 @@ return (
         onCreateServer={handleCreateServer}
         onEditServer={handleEditServer}
         onDeleteServer={handleDeleteServer}
+        onRequestServerDeletion={handleRequestServerDeletion}
         onCreateThread={handleCreateThread}
+        onEditChannel={handleEditChannel}
+        onDeleteChannel={handleDeleteChannel}
         onRequestJoin={handleRequestJoin}
         onApproveJoinRequest={handleApproveJoinRequest}
         onRejectJoinRequest={handleRejectJoinRequest}
-        onOpenUserProfile={(userId, profileDocId) =>
-          handleProfileClick(userId, false, profileDocId)
-        }
+        onOpenUserProfile={handleOpenUserProfileFromDrawer}
         onLeaveServer={handleLeaveServer}
         pendingJoinRequests={selectedServerJoinRequests}
         serverMembers={selectedServerMembers}
@@ -3994,6 +5288,18 @@ return (
           autoOpenReplyThread={notificationModalOpenReply}
         />
       )}
+
+      <ConfirmDialog
+        visible={!!dialog}
+        title={dialog?.title ?? ""}
+        description={dialog?.description}
+        confirmText={dialog?.confirmText ?? "Confirm"}
+        cancelText={dialog?.cancelText}
+        destructive={dialog?.destructive ?? true}
+        singleAction={dialog?.singleAction ?? false}
+        onConfirm={() => dialog?.onConfirm()}
+        onCancel={() => setDialog(null)}
+      />
    </SafeAreaView>
     </GestureDetector>
   );
@@ -4011,57 +5317,148 @@ const styles = StyleSheet.create({
 
   /* ====================== FEED WELCOME ====================== */
   feedWelcome: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    position: "relative",
+    overflow: "hidden",
     marginHorizontal: 14,
     marginTop: 14,
     marginBottom: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 16,
-    borderRadius: 20,
-    backgroundColor: "#fff8f3",
+    paddingHorizontal: 18,
+    paddingVertical: 18,
+    borderRadius: 22,
+    backgroundColor: "#fffaf6",
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: "#ead3c7",
+    shadowColor: "#4d1b17",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+  feedWelcomeAccent: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 3,
+    backgroundColor: "#c9962f",
+    opacity: 0.9,
+  },
+  feedWelcomeGlowGold: {
+    position: "absolute",
+    width: 112,
+    height: 112,
+    borderRadius: 56,
+    right: -34,
+    top: -40,
+    backgroundColor: "#f3cf82",
+    opacity: 0.2,
+  },
+  feedWelcomeGlowMaroon: {
+    position: "absolute",
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    right: 26,
+    bottom: -40,
+    backgroundColor: "#7f2220",
+    opacity: 0.06,
   },
   feedWelcomeCopy: {
-    flex: 1,
-    paddingRight: 12,
+    width: "100%",
+    zIndex: 1,
+  },
+  feedWelcomeTopline: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 9,
+  },
+  feedWelcomeIcon: {
+    position: "relative",
+    width: 29,
+    height: 29,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#fff0cd",
+    borderWidth: 1,
+    borderColor: "#ebcf93",
+  },
+  feedWelcomeIconHalo: {
+    position: "absolute",
+    top: -4,
+    right: -4,
+    bottom: -4,
+    left: -4,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: "#d8a53d",
+  },
+  feedEyebrowPill: {
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "#fbedd5",
+    borderWidth: 1,
+    borderColor: "#ecd7b2",
   },
   feedEyebrow: {
-    color: "#a56d22",
-    fontSize: 10.5,
-    fontWeight: "800",
-    letterSpacing: 1.2,
-    marginBottom: 5,
+    color: "#8f5d1e",
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 1.05,
   },
   feedWelcomeTitle: {
-    color: "#4d1b17",
-    fontSize: 20,
-    fontWeight: "800",
-    lineHeight: 25,
+    color: "#541613",
+    fontSize: 22,
+    fontWeight: "900",
+    lineHeight: 28,
+    letterSpacing: -0.2,
   },
   feedWelcomeSubtitle: {
-    color: "#8b6b62",
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 4,
+    color: "#795e56",
+    fontSize: 13.25,
+    lineHeight: 19.5,
+    marginTop: 6,
+    maxWidth: 520,
   },
-  feedWelcomeBadge: {
+  // "Trending this week" band — visually distinct from the vertical feed:
+  // its own tinted strip with a header and a horizontal card scroller.
+  trendingSection: {
+    backgroundColor: "#fbeee9",
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: "#efd9cf",
+    paddingTop: 12,
+    paddingBottom: 14,
+    marginBottom: 10,
+  },
+  trendingHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 16,
-    backgroundColor: "#fff2d6",
-    borderWidth: 1,
-    borderColor: "#efd49b",
+    paddingHorizontal: 16,
+    marginBottom: 10,
   },
-  feedWelcomeBadgeText: {
-    color: "#6f4d18",
-    fontSize: 12,
+  trendingTitle: {
+    color: "#7a1d16",
+    fontSize: 13,
     fontWeight: "800",
+    letterSpacing: 0.3,
+    textTransform: "uppercase",
+  },
+  trendingListContent: { paddingHorizontal: 14, gap: 12 },
+  trendingCardWrap: {
+    width: TRENDING_CARD_WIDTH,
+    // Generous backstop so the strip height stays sane on an unusually tall
+    // card — the compact card's clamps keep normal cards well under this, so
+    // the like/comment row is never clipped.
+    maxHeight: 460,
+    backgroundColor: "#fffaf7",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#ecd8ce",
+    overflow: "hidden",
   },
   flairFilterSection: { marginBottom: 10 },
   flairFilterContent: { paddingHorizontal: 14, gap: 8, paddingRight: 22 },
@@ -4208,6 +5605,15 @@ const styles = StyleSheet.create({
   onlineStatusWrap: {
     alignItems: "flex-end",
     maxWidth: 110,
+  },
+  onlineMessageButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#f5e8e8",
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: 4,
   },
   onlineStatusPill: {
     borderRadius: 999,
@@ -4461,12 +5867,15 @@ const styles = StyleSheet.create({
   },
   quickFiltersRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
     paddingVertical: 4,
-    paddingRight: 8,
   },
   quickFilterChip: {
-    paddingHorizontal: 18,
+    flexGrow: 1,
+    minWidth: "22%",
+    alignItems: "center",
+    paddingHorizontal: 12,
     paddingVertical: 11,
     borderRadius: 999,
     backgroundColor: "#fff",
@@ -4498,7 +5907,7 @@ const styles = StyleSheet.create({
     borderColor: "#e8d9d0",
   },
   sortChip: {
-    marginLeft: 4,
+    marginLeft: 0,
   },
   timeChipActive: {
     backgroundColor: "#5f0909",
@@ -4607,6 +6016,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginRight: 14,
+  },
+  personAvatarImage: {
+    width: "100%",
+    height: "100%",
   },
   personAvatarText: {
     color: "#5f0909",
@@ -4754,9 +6167,13 @@ emptyStateText: {
     backgroundColor: "#f8f3ef",
   },
   emptyListContent: {
+    // Keep the same header geometry as the populated feed.
+    // Centering/padding the entire FlatList content caused the welcome card
+    // and flair row to resize or shift when refresh temporarily emptied the
+    // data or when a selected flair had no matching posts.
     flexGrow: 1,
-    justifyContent: "center",
-    paddingHorizontal: 30,
+    paddingTop: 12,
+    paddingBottom: 130,
     backgroundColor: "#f8f3ef",
   },
   loadingContainer: {
@@ -4796,5 +6213,64 @@ emptyStateText: {
   fullscreenImage: {
     width: SCREEN_WIDTH,
     height: "100%",
+  },
+  // Floats over the feed rather than sitting in it, so showing or hiding it
+  // never changes the list's layout or the reader's scroll position.
+  newPostsPillWrap: {
+    position: "absolute",
+    top: 10,
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    zIndex: 20,
+  },
+  newPostsPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: 999,
+    backgroundColor: "#5f0909",
+    borderWidth: 1,
+    borderColor: "#e0a53d",
+    shadowColor: "#3d0606",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.28,
+    shadowRadius: 6,
+    elevation: 5,
+  },
+  newPostsPillText: {
+    color: "#fffaf7",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  feedFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    paddingVertical: 18,
+  },
+  feedFooterText: {
+    color: "#b08243",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  offlineStatusBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#ffedd5",
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#fed7aa",
+    gap: 6,
+  },
+  offlineStatusText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#9a3412",
   },
 });

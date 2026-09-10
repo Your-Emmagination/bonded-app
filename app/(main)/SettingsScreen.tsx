@@ -12,6 +12,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { ListSkeleton } from "./components/Skeleton";
 import { auth } from "../../Firebase_configure";
 import {
   fetchNotificationSoundId,
@@ -138,10 +139,7 @@ const SettingsScreen = () => {
         </Text>
 
         {loading ? (
-          <ActivityIndicator
-            color="#5f0909"
-            style={{ marginTop: 24 }}
-          />
+          <ListSkeleton count={4} lines={1} contentStyle={styles.skeletonCard} />
         ) : (
           <View style={styles.goldCard}>
             {NOTIFICATION_SOUND_OPTIONS.map((option, index) => {
@@ -233,6 +231,14 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginBottom: 8,
     marginTop: -4,
+  },
+  skeletonCard: {
+    backgroundColor: "#fffaf7",
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: "#e0a53d",
+    paddingVertical: 6,
+    marginTop: 4,
   },
   goldCard: {
     backgroundColor: "#fffaf7",

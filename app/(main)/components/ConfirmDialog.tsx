@@ -15,14 +15,18 @@ import {
     View,
 } from "react-native";
 
+export type ConfirmDialogVariant = "success" | "info" | "warning" | "destructive";
+
 export type ConfirmDialogProps = {
   visible: boolean;
   title: string;
   description?: string;
   confirmText?: string;
   cancelText?: string;
-  /** Styles the confirm button as a destructive (red) action. Defaults to true. */
+  /** Styles the confirm button as a destructive (red) action. Defaults to true for backwards compatibility. */
   destructive?: boolean;
+  /** Optional semantic visual style. Takes precedence over `destructive` when provided. */
+  variant?: ConfirmDialogVariant;
   /** Shows a spinner on the confirm button and disables both buttons. */
   loading?: boolean;
   onConfirm: () => void;
@@ -44,13 +48,41 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   confirmText = "Confirm",
   cancelText = "Cancel",
   destructive = true,
+  variant,
   loading = false,
   onConfirm,
   onCancel,
   icon,
   singleAction = false,
 }) => {
-  const resolvedIcon = icon ?? (destructive ? "warning-outline" : "help-circle-outline");
+  const resolvedVariant: ConfirmDialogVariant = variant ?? (destructive ? "destructive" : "info");
+  const variantTheme: Record<
+    ConfirmDialogVariant,
+    { icon: keyof typeof Ionicons.glyphMap; accent: string; iconBackground: string }
+  > = {
+    success: {
+      icon: "checkmark-circle-outline",
+      accent: "#2e7d32",
+      iconBackground: "rgba(46,125,50,0.12)",
+    },
+    info: {
+      icon: "information-circle-outline",
+      accent: "#e0a53d",
+      iconBackground: "rgba(224,165,61,0.16)",
+    },
+    warning: {
+      icon: "warning-outline",
+      accent: "#b56a16",
+      iconBackground: "rgba(181,106,22,0.14)",
+    },
+    destructive: {
+      icon: "alert-circle-outline",
+      accent: "#b3261e",
+      iconBackground: "rgba(179,38,30,0.12)",
+    },
+  };
+  const theme = variantTheme[resolvedVariant];
+  const resolvedIcon = icon ?? theme.icon;
 
   return (
     <Modal
@@ -70,15 +102,12 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
       >
         <Pressable style={styles.card} onPress={(e) => e.stopPropagation()}>
           <View
-            style={[
-              styles.iconCircle,
-              destructive ? styles.iconCircleDestructive : styles.iconCircleNeutral,
-            ]}
+            style={[styles.iconCircle, { backgroundColor: theme.iconBackground }]}
           >
             <Ionicons
               name={resolvedIcon}
               size={26}
-              color={destructive ? "#b3261e" : "#e0a53d"}
+              color={theme.accent}
             />
           </View>
 
@@ -100,7 +129,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             <TouchableOpacity
               style={[
                 styles.button,
-                destructive ? styles.confirmButtonDestructive : styles.confirmButtonNeutral,
+                { backgroundColor: theme.accent },
                 loading && styles.buttonDisabled,
               ]}
               onPress={onConfirm}
@@ -148,8 +177,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 12,
   },
-  iconCircleDestructive: { backgroundColor: "rgba(179,38,30,0.12)" },
-  iconCircleNeutral: { backgroundColor: "rgba(224,165,61,0.16)" },
   title: {
     color: "#4d1b17",
     fontSize: 17,
@@ -182,8 +209,6 @@ const styles = StyleSheet.create({
     borderColor: "#f0e7e2",
   },
   cancelButtonText: { color: "#5f0909", fontSize: 15, fontWeight: "600" },
-  confirmButtonDestructive: { backgroundColor: "#b3261e" },
-  confirmButtonNeutral: { backgroundColor: "#e0a53d" },
   confirmButtonText: { color: "#fffaf7", fontSize: 15, fontWeight: "700" },
   buttonDisabled: { opacity: 0.7 },
 });
