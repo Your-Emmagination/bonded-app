@@ -69,11 +69,14 @@ import {
   where,
 } from "firebase/firestore";
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
+  type ComponentProps,
 } from "react";
 import {
   ActivityIndicator,
@@ -497,6 +500,55 @@ const isOwnFeedItem = (item: FeedItem, uid: string | undefined) => {
 // merge silently the way X does; past it they wait behind the pill.
 const FEED_TOP_MERGE_OFFSET = 240;
 
+// Which feed cards are scrolled into view, kept outside React state. When the
+// visible set changes, only the cards whose own visibility flipped re-render.
+// Holding it in HomeScreen state re-rendered the whole screen and every mounted
+// card on each viewability change, leaving the list no time to draw new rows
+// during a fast scroll.
+const createFeedVisibilityStore = () => {
+  let visibleIds = new Set<string>();
+  const listeners = new Set<() => void>();
+
+  return {
+    setVisibleIds(next: Set<string>) {
+      visibleIds = next;
+      listeners.forEach((listener) => listener());
+    },
+    isVisible(id: string) {
+      return visibleIds.has(id);
+    },
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+};
+
+type FeedVisibilityStore = ReturnType<typeof createFeedVisibilityStore>;
+
+type FeedPostCardProps = Omit<ComponentProps<typeof PostCard>, "videoCardVisible"> & {
+  visibilityStore: FeedVisibilityStore;
+  // True while search results cover the feed, so hidden videos stay paused.
+  videosPaused: boolean;
+};
+
+// PostCard with its own subscription to the visibility store, so a card
+// scrolling in or out of view re-renders by itself.
+const FeedPostCard = memo(function FeedPostCard({
+  visibilityStore,
+  videosPaused,
+  ...cardProps
+}: FeedPostCardProps) {
+  const postId = cardProps.post.id;
+  const isOnScreen = useSyncExternalStore(visibilityStore.subscribe, () =>
+    visibilityStore.isVisible(postId),
+  );
+
+  return <PostCard {...cardProps} videoCardVisible={!videosPaused && isOnScreen} />;
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HomeScreen = () => {
@@ -516,6 +568,11 @@ const HomeScreen = () => {
   const hasHydratedPostsRef = useRef(false);
   const hasHydratedPollsRef = useRef(false);
   const isNearFeedTopRef = useRef(true);
+  // Ids each listener put into the feed on its latest snapshot. feedItemsRef
+  // only catches up after the next render, so a snapshot that lands before
+  // then would otherwise mistake posts already on screen for new arrivals.
+  const lastLivePostIdsRef = useRef<Set<string>>(new Set());
+  const lastLivePollIdsRef = useRef<Set<string>>(new Set());
   // "Trending this week" — a bounded date-range query picks WHICH posts are
   // trending (by engagement), then a live listener on just those doc ids keeps
   // their like/comment/bookmark state current so interacting with a trending
@@ -658,6 +715,7 @@ const HomeScreen = () => {
   const fabRotation = useRef(new Animated.Value(0)).current;
   const menuScale = useRef(new Animated.Value(0)).current;
   const scrollY = useRef(0);
+  const scrollDirectionRef = useRef<"up" | "down">("up");
   const menuOpacity = useRef(new Animated.Value(0)).current;
   const menuTranslateY = useRef(new Animated.Value(0)).current;
 
@@ -678,7 +736,7 @@ const HomeScreen = () => {
   // Part A: which feed cards are currently scrolled into view — drives
   // X-style muted autoplay for feed videos (combined with screen focus
   // inside PostCard). FlatList requires these two to be stable references.
-  const [visibleFeedIds, setVisibleFeedIds] = useState<Set<string>>(new Set());
+  const [feedVisibilityStore] = useState(createFeedVisibilityStore);
   const feedViewabilityConfig = useRef({
     itemVisiblePercentThreshold: 50,
     // Short so a video's audio cuts almost as soon as it scrolls past 50%
@@ -688,7 +746,7 @@ const HomeScreen = () => {
   }).current;
   const onFeedViewableItemsChanged = useRef(
     ({ viewableItems }: { viewableItems: { key: string }[] }) => {
-      setVisibleFeedIds(new Set(viewableItems.map((entry) => entry.key)));
+      feedVisibilityStore.setVisibleIds(new Set(viewableItems.map((entry) => entry.key)));
     },
   ).current;
 
@@ -1844,6 +1902,8 @@ const selectedChannel = useMemo(() => {
     pollsPaginatedRef.current = false;
     hasHydratedPostsRef.current = false;
     hasHydratedPollsRef.current = false;
+    lastLivePostIdsRef.current.clear();
+    lastLivePollIdsRef.current.clear();
     setStagedPosts([]);
     setStagedPolls([]);
     loadedPostIdsRef.current.clear();
@@ -1886,11 +1946,12 @@ const selectedChannel = useMemo(() => {
         // viewport and slide the post they are reading out from under them.
         // Computed from feedItemsRef (not inside the updater below) so this
         // stays a pure read — setFeedItems updaters must not have effects.
-        const visiblePostIds = new Set(
-          feedItemsRef.current
+        const visiblePostIds = new Set([
+          ...feedItemsRef.current
             .filter((item) => item.type === "post")
             .map((item) => item.id),
-        );
+          ...lastLivePostIdsRef.current,
+        ]);
         const shouldStagePosts =
           hasHydratedPostsRef.current && !isNearFeedTopRef.current;
         const livePosts: PostFeedItem[] = [];
@@ -1906,6 +1967,7 @@ const selectedChannel = useMemo(() => {
             livePosts.push(post);
           }
         });
+        lastLivePostIdsRef.current = new Set(livePosts.map((post) => post.id));
         setStagedPosts((current) =>
           current.length === 0 && heldPosts.length === 0 ? current : heldPosts,
         );
@@ -1976,11 +2038,12 @@ const selectedChannel = useMemo(() => {
           }
         });
 
-        const visiblePollIds = new Set(
-          feedItemsRef.current
+        const visiblePollIds = new Set([
+          ...feedItemsRef.current
             .filter((item) => item.type === "poll")
             .map((item) => item.id),
-        );
+          ...lastLivePollIdsRef.current,
+        ]);
         const shouldStagePolls =
           hasHydratedPollsRef.current && !isNearFeedTopRef.current;
         const livePolls: PollFeedItem[] = [];
@@ -1996,6 +2059,7 @@ const selectedChannel = useMemo(() => {
             livePolls.push(poll);
           }
         });
+        lastLivePollIdsRef.current = new Set(livePolls.map((poll) => poll.id));
         setStagedPolls((current) =>
           current.length === 0 && heldPolls.length === 0 ? current : heldPolls,
         );
@@ -2127,6 +2191,10 @@ const selectedChannel = useMemo(() => {
       pollsPaginatedRef.current = false;
       hasHydratedPostsRef.current = false;
       hasHydratedPollsRef.current = false;
+      lastLivePostIdsRef.current.clear();
+      lastLivePollIdsRef.current.clear();
+      // The feed is emptied below, so the next account starts at the top.
+      isNearFeedTopRef.current = true;
       setStagedPosts([]);
       setStagedPolls([]);
       loadedPostIdsRef.current.clear();
@@ -2512,7 +2580,11 @@ const selectedChannel = useMemo(() => {
     const currentOffsetY = event.nativeEvent.contentOffset.y;
     const delta = currentOffsetY - scrollY.current;
 
-    if (delta > 5) {
+    // Animate only when the direction actually changes. `delta > 5` holds on
+    // nearly every event of a continuous scroll, so these timings used to be
+    // restarted many times a second while the list was trying to draw rows.
+    if (delta > 5 && scrollDirectionRef.current !== "down") {
+      scrollDirectionRef.current = "down";
       Animated.parallel([
         Animated.timing(fabTranslateY, {
           toValue: 150,
@@ -2537,7 +2609,8 @@ const selectedChannel = useMemo(() => {
       ]).start();
     }
 
-    if (delta < -5) {
+    if (delta < -5 && scrollDirectionRef.current !== "up") {
+      scrollDirectionRef.current = "up";
       Animated.parallel([
         Animated.timing(fabTranslateY, {
           toValue: 0,
@@ -3908,7 +3981,7 @@ const handleSelectChannel = useCallback(
         const isLiked = post.likedBy?.includes(user?.uid || "") || false;
         
         return (
-          <PostCard
+          <FeedPostCard
             post={post}
             isLiked={isLiked}
             isHighlighted={
@@ -3930,7 +4003,8 @@ const handleSelectChannel = useCallback(
             onCommentPress={handleFeedCommentPress}
             // Part A: X-style muted autoplay only for the card in view,
             // held off while search results cover the feed.
-            videoCardVisible={!searchResultsVisible && visibleFeedIds.has(post.id)}
+            visibilityStore={feedVisibilityStore}
+            videosPaused={searchResultsVisible}
           />
         );
       }
@@ -3958,6 +4032,7 @@ const handleSelectChannel = useCallback(
     [
       addOptionToPoll,
       currentUserRole,
+      feedVisibilityStore,
       getTimeAgo,
       handleFeedCommentPress,
       handleFilePress,
@@ -3978,7 +4053,6 @@ const handleSelectChannel = useCallback(
       searchResultsVisible,
       user?.uid,
       userRoles,
-      visibleFeedIds,
     ],
   );
 
