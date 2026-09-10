@@ -17,7 +17,6 @@ import {
     deleteDoc,
     doc,
     getDocs,
-    increment,
     limit,
     onSnapshot,
     orderBy,
@@ -37,6 +36,7 @@ import {
     removeLikeNotification,
     upsertLikeNotification,
 } from "@/utils/notifications";
+import { getPendingPostLike, savePostLike, withViewerLike } from "@/utils/postLikes";
 import {
     getCachedMyPosts,
     getCachedMyProfile,
@@ -270,7 +270,6 @@ const ProfileScreen = () => {
   const [postImages, setPostImages] = useState<string[]>([]);
   const [postImageIndex, setPostImageIndex] = useState(0);
   const [postImageViewerPostId, setPostImageViewerPostId] = useState<string | null>(null);
-  const likeInFlightRef = useRef<Set<string>>(new Set());
   const relativeTimeNow = useRelativeTimeNow();
 
   const imageUri = useMemo(
@@ -506,50 +505,59 @@ const ProfileScreen = () => {
   }, []);
 
   const handleLike = useCallback(
-    async (postId: string, currentLikedBy: string[] = []) => {
+    (postId: string, currentLikedBy: string[] = []) => {
       if (!user) return;
       if (isOffline) {
         showInfo("Offline", "You are currently offline. Liking posts is unavailable.");
         return;
       }
-      if (likeInFlightRef.current.has(postId)) return;
-      likeInFlightRef.current.add(postId);
+
+      const uid = user.uid;
+      const liked = !(getPendingPostLike(postId) ?? currentLikedBy.includes(uid));
+      const showLike = (value: boolean) =>
+        setMyPosts((previous) =>
+          previous.map((item) =>
+            item.id === postId ? withViewerLike(item, uid, value) : item,
+          ),
+        );
+
+      // Show the like right away; savePostLike writes it in the background.
+      showLike(liked);
 
       const post = myPosts.find((p) => p.id === postId);
-      const hasLiked = currentLikedBy.includes(user.uid);
-      const postRef = doc(db, "posts", postId);
       const postOwnerId = post?.realUserId || post?.userId;
       const actorName = user.displayName || user.email?.split("@")[0] || "Someone";
 
-      try {
-        await updateDoc(postRef, {
-          likedBy: hasLiked
-            ? currentLikedBy.filter((id) => id !== user.uid)
-            : [...currentLikedBy, user.uid],
-          likeCount: increment(hasLiked ? -1 : 1),
-        });
-
-        if (hasLiked) {
-          await removeLikeNotification({
-            recipientId: postOwnerId,
-            actorId: user.uid,
-            entityType: "post",
-            entityId: postId,
-          });
-        } else {
-          await upsertLikeNotification({
-            recipientId: postOwnerId,
-            actor: { id: user.uid, name: actorName, profileImage: null },
-            entityType: "post",
-            entityId: postId,
-            preview: post?.content,
-          });
-        }
-      } catch (error) {
-        console.error("Error liking post:", error);
-      } finally {
-        likeInFlightRef.current.delete(postId);
-      }
+      void savePostLike({
+        postId,
+        uid,
+        liked,
+        onChanged: (nowLiked) => {
+          const logError = (error: unknown) =>
+            console.error("Error syncing like notification:", error);
+          if (nowLiked) {
+            upsertLikeNotification({
+              recipientId: postOwnerId,
+              actor: { id: uid, name: actorName, profileImage: null },
+              entityType: "post",
+              entityId: postId,
+              preview: post?.content,
+            }).catch(logError);
+          } else {
+            removeLikeNotification({
+              recipientId: postOwnerId,
+              actorId: uid,
+              entityType: "post",
+              entityId: postId,
+            }).catch(logError);
+          }
+        },
+        onFailed: (savedLiked, error) => {
+          console.error("Error liking post:", error);
+          showLike(savedLiked);
+          showInfo("Error", "Failed to update the like.");
+        },
+      });
     },
     [isOffline, myPosts, user],
   );

@@ -19,6 +19,7 @@ import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { auth, db } from "../Firebase_configure";
+import AppToast from "./(main)/components/AppToast";
 
 export default function RootLayout() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
@@ -262,6 +263,8 @@ export default function RootLayout() {
         <Stack.Screen name="ForgotPasswordScreen" />
         <Stack.Screen name="(main)" />
       </Stack>
+
+      <AppToast />
 
       {isAuthChecking && (
         <View

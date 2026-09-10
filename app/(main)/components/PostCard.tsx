@@ -19,6 +19,7 @@ import {
     UserData,
     UserRole,
 } from "@/utils/rbac";
+import { showAppToast } from "@/utils/toastEvents";
 import {
     normalizeCaptions,
     type CaptionSegment,
@@ -28,7 +29,7 @@ import { Ionicons, MaterialIcons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
 import { useIsFocused } from "expo-router";
-import { addDoc, arrayRemove, arrayUnion, collection, doc, serverTimestamp, updateDoc } from "firebase/firestore";
+import { addDoc, arrayRemove, arrayUnion, collection, doc, getDoc, serverTimestamp, updateDoc, writeBatch } from "firebase/firestore";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
@@ -218,7 +219,7 @@ const ActionToggleIcon = React.memo(function ActionToggleIcon({
   // Cross-fade the solid glyph in/out whenever the toggle state changes
   // (driven by the parent's data, so it also covers changes made elsewhere).
   useEffect(() => {
-    fill.value = withTiming(active ? 1 : 0, { duration: 180 });
+    fill.value = withTiming(active ? 1 : 0, { duration: 90 });
   }, [active, fill]);
 
   const handlePress = () => {
@@ -303,14 +304,19 @@ const PostCard = React.memo<PostCardProps>(({
   const [isBookmarked, setIsBookmarked] = useState<boolean>(
     activeUserId ? post.bookmarkedBy?.includes(activeUserId) ?? false : false
   );
-  // Guards against rapid double-taps firing two toggle requests before the
-  // first one resolves (which could desync isBookmarked from Firestore).
+  // True while saveBookmark is running.
   const isBookmarkingRef = useRef(false);
+  // The bookmark state the reader tapped last; saveBookmark keeps saving until
+  // Firestore matches it.
+  const wantedBookmarkRef = useRef<boolean | null>(null);
 
   // Keep isBookmarked in sync when the post data refreshes (pull-to-refresh,
   // remount, bookmarking the same post from elsewhere, etc). Previously this
   // only ran once on mount, so bookmarkedBy changes after that were ignored.
   useEffect(() => {
+    // While a save is running the icon shows the reader's last tap; the post
+    // data catches up once the save lands.
+    if (isBookmarkingRef.current) return;
     setIsBookmarked(
       activeUserId ? post.bookmarkedBy?.includes(activeUserId) ?? false : false
     );
@@ -386,49 +392,68 @@ const PostCard = React.memo<PostCardProps>(({
     }
   };
 
-  const handleToggleBookmark = async () => {
-    if (!activeUserId) return;
-    // Ignore taps while a previous toggle is still in flight — otherwise a
-    // fast double-tap fires two requests before the first resolves, which
-    // can leave isBookmarked out of sync with what actually got saved.
-    if (isBookmarkingRef.current) return;
+  const saveBookmark = async (uid: string, stateBeforeTaps: boolean) => {
     isBookmarkingRef.current = true;
-
-    // This app keys profile documents by "students/{studentId}" (uid or
-    // email-prefix) — there is no "users" collection, so writing there was
-    // always rejected by security rules. Resolve the same doc id every
-    // other screen already uses for the signed-in user's own profile.
-    const studentDocId = getStudentDocIdFromAuthUser(auth.currentUser) || activeUserId;
-
-    const previousState = isBookmarked;
-    setIsBookmarked(!previousState);
+    // Profiles live at "students/{studentId}" (uid or email prefix), the same
+    // doc id every other screen uses for the signed-in user's own profile.
+    // Saved Posts reads bookmarkedPostIds there; this card reads the post's own
+    // bookmarkedBy, so both sides are written together.
+    const studentRef = doc(db, "students", getStudentDocIdFromAuthUser(auth.currentUser) || uid);
+    const postRef = doc(db, "posts", post.id);
+    let savedState = stateBeforeTaps;
 
     try {
-      const studentRef = doc(db, "students", studentDocId);
-      const postRef = doc(db, "posts", post.id);
-
-      // Write to BOTH sides: the owner's own bookmarkedPostIds (in case
-      // other screens, like "Saved Posts", read from there) and the post's
-      // own bookmarkedBy (which is what this component reads to decide the
-      // icon state). Previously only one side was written, so the field
-      // this component actually reads never updated.
-      await Promise.all([
-        updateDoc(studentRef, {
-          bookmarkedPostIds: previousState
-            ? arrayRemove(post.id)
-            : arrayUnion(post.id),
-        }),
-        updateDoc(postRef, {
-          bookmarkedBy: previousState
-            ? arrayRemove(activeUserId)
-            : arrayUnion(activeUserId),
-        }),
-      ]);
+      while (wantedBookmarkRef.current !== savedState) {
+        const want = wantedBookmarkRef.current === true;
+        const savedPostIds = {
+          bookmarkedPostIds: want ? arrayUnion(post.id) : arrayRemove(post.id),
+        };
+        try {
+          const batch = writeBatch(db);
+          batch.update(postRef, {
+            bookmarkedBy: want ? arrayUnion(uid) : arrayRemove(uid),
+          });
+          batch.update(studentRef, savedPostIds);
+          await batch.commit();
+        } catch (error) {
+          // The rules reject adding an id that's already in bookmarkedBy (or
+          // removing one that isn't), which is what an out-of-date icon sends.
+          // If the post already matches, only the Saved Posts list is left.
+          const postSnapshot = await getDoc(postRef);
+          const bookmarkedBy: string[] = postSnapshot.data()?.bookmarkedBy ?? [];
+          if (bookmarkedBy.includes(uid) !== want) throw error;
+          await updateDoc(studentRef, savedPostIds);
+        }
+        savedState = want;
+      }
     } catch (error) {
       console.error("Error updating bookmark:", error);
-      setIsBookmarked(previousState);
+      wantedBookmarkRef.current = savedState;
+      setIsBookmarked(savedState);
+      showAppToast({ message: "Couldn't update Saved Posts. Try again." });
     } finally {
       isBookmarkingRef.current = false;
+    }
+  };
+
+  const handleToggleBookmark = () => {
+    if (!activeUserId) return;
+    // Taps are never ignored: each one flips the icon now, and saveBookmark
+    // keeps saving until Firestore matches the last tap.
+    const shownState =
+      isBookmarkingRef.current && wantedBookmarkRef.current !== null
+        ? wantedBookmarkRef.current
+        : isBookmarked;
+    const nextState = !shownState;
+    wantedBookmarkRef.current = nextState;
+    setIsBookmarked(nextState);
+    showAppToast(
+      nextState
+        ? { message: "Post saved", actionLabel: "View", actionHref: "/(main)/BookmarksScreen" }
+        : { message: "Removed from Saved Posts" },
+    );
+    if (!isBookmarkingRef.current) {
+      void saveBookmark(activeUserId, shownState);
     }
   };
 
@@ -628,6 +653,7 @@ const PostCard = React.memo<PostCardProps>(({
               size={21}
               activeColor="#a61f1f"
               inactiveColor="#956a5f"
+              withHaptic
             />
           </View>
 

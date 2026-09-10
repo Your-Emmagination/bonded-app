@@ -36,6 +36,7 @@ import {
   saveCachedServers,
 } from "@/utils/offlineStorage";
 import { normalizePostFlair, POST_FLAIRS, type PostFlairId } from "@/utils/postFlairs";
+import { getPendingPostLike, savePostLike, withViewerLike } from "@/utils/postLikes";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import {
   getStudentDocIdFromAuthUser,
@@ -631,11 +632,6 @@ const HomeScreen = () => {
     feedItemsRef.current = feedItems;
   }, [feedItems]);
 
-  // Tracks post ids with a like toggle currently in flight, so a fast
-  // double-tap on the same post can't fire two requests before the first
-  // one resolves (which would desync the like count/likedBy from what's
-  // actually saved). Different posts can still be liked concurrently.
-  const likeInFlightRef = useRef<Set<string>>(new Set());
   const [fabMenuVisible, setFabMenuVisible] = useState(false);
   const [serverDrawerVisible, setServerDrawerVisible] = useState(false);
   const [searchExpanded, setSearchExpanded] = useState(false);
@@ -2290,70 +2286,85 @@ const selectedChannel = useMemo(() => {
   }, []);
 
   const handleLike = useCallback(
-    async (postId: string, currentLikedBy: string[] = []) => {
+    (postId: string, currentLikedBy: string[] = []) => {
       if (!user) return;
       if (isOffline) {
         showInfo("No Connection", "Cannot like posts while offline.");
         return;
       }
-      if (likeInFlightRef.current.has(postId)) return;
-      likeInFlightRef.current.add(postId);
 
-      const postRef = doc(db, "posts", postId);
-      const hasLiked = currentLikedBy.includes(user.uid);
-      let currentPost = feedItemsRef.current.find(
-        (item): item is PostFeedItem =>
-          item.type === "post" && item.id === postId,
-      );
+      const uid = user.uid;
+      const liked = !(getPendingPostLike(postId) ?? currentLikedBy.includes(uid));
+      const showLike = (value: boolean) => {
+        setFeedItems((previous) =>
+          previous.map((item) =>
+            item.type === "post" && item.id === postId
+              ? withViewerLike(item, uid, value)
+              : item,
+          ),
+        );
+        setTrendingPosts((previous) =>
+          previous.map((item) =>
+            item.id === postId ? withViewerLike(item, uid, value) : item,
+          ),
+        );
+      };
+
+      // Show the like right away; savePostLike writes it in the background.
+      showLike(liked);
 
       const actorName =
         currentUserProfile?.firstname && currentUserProfile?.lastname
           ? `${currentUserProfile.firstname} ${currentUserProfile.lastname}`.trim()
           : user.displayName || user.email?.split("@")[0] || "Someone";
 
-      try {
-        if (!currentPost) {
-          const postSnap = await getDoc(postRef);
-          currentPost = postSnap.exists()
-            ? ({ id: postSnap.id, type: "post", ...postSnap.data() } as PostFeedItem)
-            : undefined;
-        }
+      void savePostLike({
+        postId,
+        uid,
+        liked,
+        onChanged: (nowLiked) => {
+          const syncNotification = async () => {
+            let post: Partial<PostFeedItem> | undefined = feedItemsRef.current.find(
+              (item): item is PostFeedItem =>
+                item.type === "post" && item.id === postId,
+            );
+            if (!post) {
+              const postSnap = await getDoc(doc(db, "posts", postId));
+              post = postSnap.data() as Partial<PostFeedItem> | undefined;
+            }
+            const postOwnerId = post?.realUserId || post?.userId;
 
-        const postOwnerId = currentPost?.realUserId || currentPost?.userId;
-
-        await updateDoc(postRef, {
-          likedBy: hasLiked
-            ? currentLikedBy.filter((id) => id !== user.uid)
-            : [...currentLikedBy, user.uid],
-          likeCount: increment(hasLiked ? -1 : 1),
-        });
-
-        if (hasLiked) {
-          await removeLikeNotification({
-            recipientId: postOwnerId,
-            actorId: user.uid,
-            entityType: "post",
-            entityId: postId,
-          });
-        } else {
-          await upsertLikeNotification({
-            recipientId: postOwnerId,
-            actor: {
-              id: user.uid,
-              name: actorName,
-              profileImage: currentUserProfile?.profileImage || null,
-            },
-            entityType: "post",
-            entityId: postId,
-            preview: currentPost?.content,
-          });
-        }
-      } catch (error) {
-        console.error("Error updating like:", error);
-        showInfo("Error", "Failed to like post. Please try again.");
-      } finally {
-        likeInFlightRef.current.delete(postId);
-      }
+            if (nowLiked) {
+              await upsertLikeNotification({
+                recipientId: postOwnerId,
+                actor: {
+                  id: uid,
+                  name: actorName,
+                  profileImage: currentUserProfile?.profileImage || null,
+                },
+                entityType: "post",
+                entityId: postId,
+                preview: post?.content,
+              });
+            } else {
+              await removeLikeNotification({
+                recipientId: postOwnerId,
+                actorId: uid,
+                entityType: "post",
+                entityId: postId,
+              });
+            }
+          };
+          syncNotification().catch((error) =>
+            console.error("Error syncing like notification:", error),
+          );
+        },
+        onFailed: (savedLiked, error) => {
+          console.error("Error updating like:", error);
+          showLike(savedLiked);
+          showInfo("Error", "Failed to like post. Please try again.");
+        },
+      });
     },
     [currentUserProfile, isOffline, user],
   );
