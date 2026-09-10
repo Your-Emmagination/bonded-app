@@ -70,7 +70,6 @@ import {
 } from "firebase/firestore";
 import {
   useCallback,
-  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
@@ -87,7 +86,6 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View
 } from "react-native";
@@ -98,6 +96,11 @@ import { auth, db } from "../../../Firebase_configure";
 import AnnouncementCarousel, { AnnouncementItem } from "../components/AnnouncementCarousel";
 import CommentModal from "../components/CommentModal";
 import ConfirmDialog from "../components/ConfirmDialog";
+import HomeSearchProvider, {
+  HomeSearchBar,
+  HomeSearchPanel,
+  type SearchResult,
+} from "../components/HomeSearchOverlay";
 import ImageZoomViewer from "../components/ImageZoomViewer";
 import PollCard from "../components/PollCard";
 import PostCard from "../components/PostCard";
@@ -113,7 +116,6 @@ const { width: SCREEN_WIDTH } = Dimensions.get("window");
 // Width of one card in the horizontal "Trending this week" scroller.
 const TRENDING_CARD_WIDTH = Math.min(320, Math.round(SCREEN_WIDTH * 0.82));
 const SELECTED_SERVER_KEY = "bonded.selectedCommunityServer";
-const HOME_SEARCH_HISTORY_KEY = "bonded.homeSearchHistory";
 const DEFAULT_CHANNEL_KEY = "general";
 const HOME_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
 
@@ -198,42 +200,11 @@ type Poll = {
   flair?: string;
 };
 
-type PostFeedItem = Post & { type: "post" };
-type PollFeedItem = Poll & { type: "poll" };
-type FeedItem = PostFeedItem | PollFeedItem;
+export type PostFeedItem = Post & { type: "post" };
+export type PollFeedItem = Poll & { type: "poll" };
+export type FeedItem = PostFeedItem | PollFeedItem;
 
-type SearchTab = "all" | "posts" | "polls" | "people";
-type SearchDateFilter = "all" | "today" | "week" | "month" | "year";
-type SearchSort = "relevance" | "newest" | "oldest";
-
-type SearchResult = {
-  id: string;
-  kind: "post" | "poll" | "person";
-  sourceId: string;
-  // People results need both identities: the auth uid owns posts/polls, while
-  // profileDocId identifies the students/{docId} profile document.
-  userId?: string;
-  profileDocId?: string;
-  avatarUri?: string | null;
-  title: string;
-  subtitle: string;
-  meta?: string;
-  avatarLabel: string;
-  timestamp: number;
-  score: number;
-  haystack: string;
-  matchPositions?: number[]; 
-};
-
-type SearchSuggestion = {
-  id: string;
-  label: string;
-  hint: string;
-  query: string;
-  kind: SearchResult["kind"] | "recent" | "trending";
-};
-
-type SearchableStudent = {
+export type SearchableStudent = {
   id: string;
   userId?: string;
   firstname: string;
@@ -277,38 +248,6 @@ const getSingleParam = (value?: string | string[]) =>
 
 const getTimestampValue = (value: any) => value?.toMillis?.() || 0;
 
-const getDateFilterThreshold = (filter: SearchDateFilter) => {
-  const now = new Date();
-  if (filter === "today") {
-    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  }
-  if (filter === "week") {
-    return now.getTime() - 7 * 24 * 60 * 60 * 1000;
-  }
-  if (filter === "month") {
-    return now.getTime() - 30 * 24 * 60 * 60 * 1000;
-  }
-  if (filter === "year") {
-    return now.getTime() - 365 * 24 * 60 * 60 * 1000;
-  }
-  return 0;
-};
-
-const getSearchTokens = (value: string): string[] =>
-  value
-    .toLowerCase()
-    .trim()
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter(Boolean);
-
-const fuzzyMatchScore = (haystack: string, token: string): number => {
-  if (haystack.includes(token)) return 10;
-  if (haystack.startsWith(token)) return 8;
-  const index = haystack.indexOf(token);
-  if (index > -1) return Math.max(1, 6 - Math.floor(index / 3));
-  return 0;
-};
 const isSameCalendarDay = (timestamp: any, target: Date): boolean => {
   if (!timestamp || typeof timestamp.toDate !== "function") return false;
 
@@ -319,41 +258,6 @@ const isSameCalendarDay = (timestamp: any, target: Date): boolean => {
     date.getMonth() === target.getMonth() &&
     date.getDate() === target.getDate()
   );
-};
-const computeAdvancedScore = (
-  haystack: string,
-  tokens: string[],
-  timestamp = 0,
-  likeCount = 0,
-  voteCount = 0,
-) => {
-  let score = tokens.reduce((sum, token) => sum + fuzzyMatchScore(haystack, token), 0);
-
-  score += (likeCount || 0) * 0.015;
-  score += (voteCount || 0) * 0.01;
-
-  if (timestamp > 0) {
-    const daysOld = (Date.now() - timestamp) / (1000 * 60 * 60 * 24);
-    if (daysOld < 7) score += 3;
-    else if (daysOld < 30) score += 1.5;
-  }
-
-  return score;
-};
-
-const matchesAllTokens = (haystack: string, tokens: string[]) =>
-  tokens.every((token) => haystack.includes(token));
-
-const getSearchResultIconName = (kind: SearchResult["kind"]) => {
-  if (kind === "person") return "person";
-  if (kind === "poll") return "bar-chart";
-  return "document-text";
-};
-
-const getSearchSuggestionIconName = (kind: SearchSuggestion["kind"]) => {
-  if (kind === "recent") return "time-outline";
-  if (kind === "trending") return "sparkles-outline";
-  return getSearchResultIconName(kind);
 };
 
 const areStringArraysEqual = (first: string[] = [], second: string[] = []) =>
@@ -678,13 +582,8 @@ const HomeScreen = () => {
   const [fabMenuVisible, setFabMenuVisible] = useState(false);
   const [serverDrawerVisible, setServerDrawerVisible] = useState(false);
   const [searchExpanded, setSearchExpanded] = useState(false);
-  const [searchCommitted, setSearchCommitted] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [recentSearches, setRecentSearches] = useState<string[]>([]);
-  const [searchTab, setSearchTab] = useState<SearchTab>("all");
-  const [searchDateFilter, setSearchDateFilter] =
-    useState<SearchDateFilter>("all");
-  const [searchSort, setSearchSort] = useState<SearchSort>("relevance");
+  // Set by HomeSearchProvider while search results cover the feed.
+  const [searchResultsVisible, setSearchResultsVisible] = useState(false);
   const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>(
     undefined,
   );
@@ -749,7 +648,6 @@ const HomeScreen = () => {
   const [highlightedFeedKey, setHighlightedFeedKey] = useState<string | null>(
     null,
   );
-  const deferredSearchQuery = useDeferredValue(searchQuery);
   const stripUndefined = useCallback((value: Record<string, unknown>) => {
     return Object.fromEntries(
       Object.entries(value).filter(([, entry]) => entry !== undefined),
@@ -775,7 +673,6 @@ const HomeScreen = () => {
   const welcomeFloat = useRef(new Animated.Value(0)).current;
 
   const feedListRef = useRef<FlatList<FeedItem>>(null);
-  const searchInputRef = useRef<TextInput>(null);
   const router = useRouter();
 
   // Part A: which feed cards are currently scrolled into view — drives
@@ -1197,283 +1094,6 @@ const selectedChannel = useMemo(() => {
       .sort((first, second) => first.name.localeCompare(second.name));
   }, [searchableStudentsMap, selectedServer?.ownerId, selectedServerId, serverDrawerVisible, serverMemberships]);
 
-  const trendingSuggestions = useMemo(() => {
-    const threshold = getDateFilterThreshold(searchDateFilter);
-
-    return visibleFeedItems
-      .filter(
-        (item) =>
-          item.type !== "post" ||
-          getTimestampValue(item.createdAt) >= threshold,
-      )
-      .map((item) => {
-        if (item.type === "post") {
-          const timestamp = getTimestampValue(item.createdAt);
-          const haystack = [
-            item.content,
-            item.username,
-            item.link?.title,
-            item.link?.url,
-            ...(item.taggedUsers || []).map((tag) => `${tag.name} ${tag.studentID}`),
-          ]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase();
-
-          return {
-            id: `post:${item.id}`,
-            kind: "post" as const,
-            sourceId: item.id,
-            title: item.username || "Post",
-            subtitle:
-              item.content?.slice(0, 120) || item.link?.title || "Media content",
-            meta: `${item.likeCount || 0} likes • ${item.commentCount || 0} comments`,
-            avatarLabel: "P",
-            timestamp,
-            score: computeAdvancedScore(
-              haystack,
-              [],
-              timestamp,
-              item.likeCount || 0,
-              0,
-            ),
-            haystack,
-          };
-        }
-
-        const timestamp = getTimestampValue(item.createdAt);
-        const haystack = [item.question, item.username, ...item.options.map((option) => option.text)]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-
-        return {
-          id: `poll:${item.id}`,
-          kind: "poll" as const,
-          sourceId: item.id,
-          title: item.question,
-          subtitle: `${item.options.length} options • ${item.totalVotes} votes`,
-          meta: `${item.totalVotes} votes`,
-          avatarLabel: "V",
-          timestamp,
-          score: computeAdvancedScore(haystack, [], timestamp, 0, item.totalVotes || 0),
-          haystack,
-        };
-      })
-      .sort((a, b) => b.score - a.score || b.timestamp - a.timestamp)
-      .slice(0, 12);
-  }, [searchDateFilter, visibleFeedItems]);
-
-  const searchResults = useMemo<SearchResult[]>(() => {
-  if (!deferredSearchQuery.trim() && searchTab === "all") {
-    return trendingSuggestions;
-  }
-
-  const tokens = getSearchTokens(deferredSearchQuery);
-  const threshold = getDateFilterThreshold(searchDateFilter);
-
-  const postResults: SearchResult[] = visibleFeedItems
-    .filter((item): item is PostFeedItem => item.type === "post")
-    .map((post) => {
-      const haystack = [
-        post.content,
-        post.username,
-        post.link?.title,
-        post.link?.url,
-        ...(post.taggedUsers || []).map((t) => `${t.name} ${t.studentID}`),
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-
-      return {
-        id: `post:${post.id}`,
-        kind: "post" as const,
-        sourceId: post.id,
-        title: post.username || "Post",
-        subtitle: post.content?.slice(0, 120) || post.link?.title || "Media content",
-        meta: `${post.likeCount || 0} likes • ${post.commentCount || 0} comments`,
-        avatarLabel: "P",
-        timestamp: getTimestampValue(post.createdAt),
-        score: computeAdvancedScore(
-          haystack,
-          tokens,
-          getTimestampValue(post.createdAt),
-          post.likeCount || 0,
-          0,
-        ),
-        haystack,
-      };
-    })
-    .filter((item) => 
-      item.timestamp >= threshold &&
-      (tokens.length === 0 || matchesAllTokens(item.haystack, tokens))
-    );
-
-  const pollResults: SearchResult[] = visibleFeedItems
-    .filter((item): item is PollFeedItem => item.type === "poll")
-    .map((poll) => {
-      const haystack = [
-        poll.question,
-        poll.username,
-        ...poll.options.map((o) => o.text),
-      ].join(" ").toLowerCase();
-
-      return {
-        id: `poll:${poll.id}`,
-        kind: "poll" as const,
-        sourceId: poll.id,
-        title: poll.question,
-        subtitle: `${poll.options.length} options • ${poll.totalVotes} votes`,
-        meta: `${poll.totalVotes} votes`,
-        avatarLabel: "V",
-        timestamp: getTimestampValue(poll.createdAt),
-        score: computeAdvancedScore(
-          haystack,
-          tokens,
-          getTimestampValue(poll.createdAt),
-          0,
-          poll.totalVotes || 0,
-        ),
-        haystack,
-      };
-    })
-    .filter((item) => 
-      item.timestamp >= threshold &&
-      (tokens.length === 0 || matchesAllTokens(item.haystack, tokens))
-    );
-
-  const peopleResults: SearchResult[] = searchableStudents.map((person) => {
-    const fullName = `${person.firstname} ${person.lastname}`.trim();
-    const haystack = [fullName, person.studentID, person.course, person.role]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-
-    return {
-      id: `person:${person.id}`,
-      kind: "person" as const,
-      // sourceId is the content owner id when available. The previous code
-      // always used the students document id here, which could be a student
-      // number/email prefix instead of the Firebase Auth uid.
-      sourceId: person.userId || person.id,
-      userId: person.userId,
-      profileDocId: person.id,
-      avatarUri: person.profileImage || null,
-      title: fullName || "Student",
-      subtitle: person.course ? `${person.course} • ${person.role || "Member"}` : "BondED Member",
-      meta: person.studentID,
-      avatarLabel: `${person.firstname?.[0] || ""}${person.lastname?.[0] || ""}`.toUpperCase() || "U",
-      timestamp: 0,
-      score: computeAdvancedScore(haystack, tokens),
-      haystack,
-    };
-  }).filter((item) => tokens.length === 0 || matchesAllTokens(item.haystack, tokens));
-
-  let combined = [...postResults, ...pollResults, ...peopleResults];
-
-  // Apply tab filter
-  if (searchTab !== "all") {
-    const tabKind =
-      searchTab === "posts" ? "post" :
-      searchTab === "polls" ? "poll" :
-      searchTab === "people" ? "person" :
-      undefined;
-
-    if (tabKind) {
-      combined = combined.filter((r) => r.kind === tabKind);
-    }
-  }
-
-  // Sort
-  combined.sort((a, b) => {
-    if (searchSort === "newest") return b.timestamp - a.timestamp;
-    if (searchSort === "oldest") return a.timestamp - b.timestamp;
-    // Relevance + recency
-    if (Math.abs(b.score - a.score) > 0.5) return b.score - a.score;
-    return b.timestamp - a.timestamp;
-  });
-
-  return combined.slice(0, 40); // increased limit
-}, [
-  deferredSearchQuery,
-  searchTab,
-  searchDateFilter,
-  searchSort,
-  searchableStudents,
-  trendingSuggestions,
-  visibleFeedItems,
-]);
-
-  const trimmedSearchQuery = searchQuery.trim();
-  const isSearchFiltered =
-    searchTab !== "all" ||
-    searchDateFilter !== "all" ||
-    searchSort !== "relevance";
-  const showSearchResultsScreen =
-    searchExpanded && (searchCommitted || isSearchFiltered);
-  const showSearchDropdown = searchExpanded && !showSearchResultsScreen;
-
-  const searchSuggestions = useMemo<SearchSuggestion[]>(() => {
-    if (trimmedSearchQuery) {
-      return searchResults.slice(0, 5).map((result) => ({
-        id: `match-${result.id}`,
-        label: result.title,
-        hint: result.subtitle,
-        query: trimmedSearchQuery,
-        kind: result.kind,
-      }));
-    }
-
-    const recent = recentSearches.slice(0, 4).map((query) => ({
-      id: `recent-${query}`,
-      label: query,
-      hint: "Recent search",
-      query,
-      kind: "recent" as const,
-    }));
-
-    const trending = trendingSuggestions.slice(0, 3).map((result) => ({
-      id: `trending-${result.id}`,
-      label: result.title,
-      hint: result.meta || "Trending on Home",
-      query: result.title,
-      kind: "trending" as const,
-    }));
-
-    return [...recent, ...trending].slice(0, 6);
-  }, [recentSearches, searchResults, trendingSuggestions, trimmedSearchQuery]);
-
-  const peopleSearchResults = useMemo(
-    () => searchResults.filter((result) => result.kind === "person").slice(0, 4),
-    [searchResults],
-  );
-
-  const contentSearchResults = useMemo(
-    () => searchResults.filter((result) => result.kind !== "person"),
-    [searchResults],
-  );
-
-  const matchedFeedItems = useMemo(() => {
-    const orderLookup = new Map(
-      contentSearchResults.map((result, index) => [
-        `${result.kind}:${result.sourceId}`,
-        index,
-      ]),
-    );
-
-    return visibleFeedItems
-      .filter((item) => orderLookup.has(`${item.type}:${item.id}`))
-      .sort(
-        (first, second) =>
-          (orderLookup.get(`${first.type}:${first.id}`) ?? 0) -
-          (orderLookup.get(`${second.type}:${second.id}`) ?? 0),
-      )
-      .slice(0, 6);
-  }, [contentSearchResults, visibleFeedItems]);
-
-
-
   const listenersSetup = useRef(false);
   const unsubscribePostsRef = useRef<(() => void) | null>(null);
   const unsubscribePollsRef = useRef<(() => void) | null>(null);
@@ -1638,25 +1258,14 @@ const selectedChannel = useMemo(() => {
   useEffect(() => {
     const loadCommunityPreferences = async () => {
       try {
-        const [storedServerId, storedSearches] = await Promise.all([
-          AsyncStorage.getItem(SELECTED_SERVER_KEY),
-          AsyncStorage.getItem(HOME_SEARCH_HISTORY_KEY),
-        ]);
+        const storedServerId = await AsyncStorage.getItem(SELECTED_SERVER_KEY);
         if (storedServerId) setSelectedServerId(storedServerId);
-        if (storedSearches) setRecentSearches(JSON.parse(storedSearches));
       } catch (error) {
         console.error("Error loading community spaces:", error);
       }
     };
     loadCommunityPreferences();
   }, []);
-
-  useEffect(() => {
-    AsyncStorage.setItem(
-      HOME_SEARCH_HISTORY_KEY,
-      JSON.stringify(recentSearches.slice(0, 8)),
-    ).catch((error) => console.error("Error saving recent searches:", error));
-  }, [recentSearches]);
 
   // ── Persist admin servers
 
@@ -2961,76 +2570,17 @@ const selectedChannel = useMemo(() => {
 
   const openSearchExperience = useCallback(() => {
     setSearchExpanded(true);
-    setSearchCommitted(false);
-    setTimeout(() => searchInputRef.current?.focus(), 60);
   }, []);
 
+  // The search state itself lives in HomeSearchProvider, which clears it
+  // whenever search closes.
   const closeSearchExperience = useCallback(() => {
     setSearchExpanded(false);
-    setSearchCommitted(false);
-    setSearchQuery("");
-    setSearchTab("all");
-    setSearchDateFilter("all");
-    setSearchSort("relevance");
   }, []);
 
   const closeServerDrawer = useCallback(() => {
     setServerDrawerVisible(false);
   }, []);
-
-  const rememberSearch = useCallback((query: string) => {
-    const trimmed = query.trim();
-    if (!trimmed) return;
-    setRecentSearches((previous) => [
-      trimmed,
-      ...previous.filter((item) => item.toLowerCase() !== trimmed.toLowerCase()),
-    ].slice(0, 8));
-  }, []);
-
-  const handleSearchQueryChange = useCallback((value: string) => {
-    setSearchQuery(value);
-    if (!value.trim()) {
-      setSearchCommitted(false);
-    }
-  }, []);
-
-  const handleSearchSubmit = useCallback(() => {
-    rememberSearch(searchQuery);
-    setSearchCommitted(true);
-  }, [rememberSearch, searchQuery]);
-
-  const handleSearchSuggestionPress = useCallback(
-    (suggestion: SearchSuggestion) => {
-      setSearchQuery(suggestion.query);
-      rememberSearch(suggestion.query);
-      setSearchCommitted(true);
-    },
-    [rememberSearch],
-  );
-
-  const handleSearchTabPress = useCallback((tab: SearchTab) => {
-    setSearchTab(tab);
-    setSearchCommitted(true);
-  }, []);
-
-  const handleSearchDateFilterPress = useCallback(
-    (filter: SearchDateFilter) => {
-      setSearchDateFilter(filter);
-      setSearchCommitted(true);
-    },
-    [],
-  );
-
-  const handleSearchSortToggle = useCallback(() => {
-    const nextSort =
-      searchSort === "relevance"
-        ? "newest"
-        : searchSort === "newest"
-          ? "oldest"
-          : "relevance";
-    setSearchSort(nextSort);
-    setSearchCommitted(true);
-  }, [searchSort]);
 
   const handleSelectServer = useCallback((serverId: string) => {
     setSelectedServerId(serverId);
@@ -3827,15 +3377,10 @@ const handleSelectChannel = useCallback(
     [router, user?.uid],
   );
 
-  const jumpToSearchResult = useCallback(
-    (result: {
-      kind: "post" | "poll" | "person";
-      sourceId: string;
-      userId?: string;
-      profileDocId?: string;
-      id: string;
-      title: string;
-    }) => {
+  // Opens a result tapped in HomeSearchProvider. Returns false when the item
+  // is no longer in the feed, so search stays open and the query isn't saved.
+  const openSearchResult = useCallback(
+    (result: SearchResult) => {
       if (result.kind === "person") {
         closeSearchExperience();
 
@@ -3867,8 +3412,7 @@ const handleSelectChannel = useCallback(
             }) as any,
           );
         }
-        rememberSearch(searchQuery || result.title);
-        return;
+        return true;
       }
 
       const index = visibleFeedItems.findIndex(
@@ -3876,11 +3420,10 @@ const handleSelectChannel = useCallback(
       );
       if (index < 0) {
         showInfo("Not Found", "That item is no longer available in Home.");
-        return;
+        return false;
       }
 
       closeSearchExperience();
-      rememberSearch(searchQuery || result.title);
       setHighlightedFeedKey(result.id);
       setTimeout(() => setHighlightedFeedKey(null), 3500);
       setTimeout(() => {
@@ -3890,14 +3433,13 @@ const handleSelectChannel = useCallback(
           viewPosition: 0.18,
         });
       }, 150);
+      return true;
     },
     [
       closeSearchExperience,
       currentUserProfile?.studentID,
       currentUserProfile?.userId,
-      rememberSearch,
       router,
-      searchQuery,
       user,
       visibleFeedItems,
     ],
@@ -4386,8 +3928,9 @@ const handleSelectChannel = useCallback(
             getTimeAgo={getTimeAgo}
             // Ensure comment modal triggers directly from PostCard
             onCommentPress={handleFeedCommentPress}
-            // Part A: X-style muted autoplay only for the card in view.
-            videoCardVisible={visibleFeedIds.has(post.id)}
+            // Part A: X-style muted autoplay only for the card in view,
+            // held off while search results cover the feed.
+            videoCardVisible={!searchResultsVisible && visibleFeedIds.has(post.id)}
           />
         );
       }
@@ -4432,252 +3975,13 @@ const handleSelectChannel = useCallback(
       highlightedPostId,
       isPollExpired,
       openImageViewer,
+      searchResultsVisible,
       user?.uid,
       userRoles,
       visibleFeedIds,
     ],
   );
 
-  const renderSearchResultsScreen = useCallback(() => {
-    const showPeopleSection = searchTab === "all" || searchTab === "people";
-    const showContentSection =
-      searchTab === "all" || searchTab === "posts" || searchTab === "polls";
-    const resultSummary = trimmedSearchQuery
-      ? `Showing ${searchResults.length} matches${searchDateFilter === "all" ? "" : ` from ${searchDateFilter === "today" ? "today" : searchDateFilter === "week" ? "this week" : searchDateFilter === "month" ? "this month" : "this year"}`}.`
-      : "Browse people and recent community activity with simple filters.";
-
-    return (
-      <ScrollView
-        style={styles.searchScreen}
-        contentContainerStyle={styles.searchScreenContent}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={styles.searchOverviewCard}>
-          <View style={styles.searchOverviewIcon}>
-            <Ionicons
-              name={trimmedSearchQuery ? "sparkles" : "search"}
-              size={20}
-              color="#5f0909"
-            />
-          </View>
-          <View style={styles.searchOverviewCopy}>
-            <Text style={styles.searchOverviewTitle}>
-              {trimmedSearchQuery
-                ? `Results for "${trimmedSearchQuery}"`
-                : "Search Home"}
-            </Text>
-            <Text style={styles.searchOverviewSubtitle}>{resultSummary}</Text>
-          </View>
-        </View>
-
-        <View style={styles.searchMetricsRow}>
-          <View style={styles.searchMetricChip}>
-            <Text style={styles.searchMetricValue}>{peopleSearchResults.length}</Text>
-            <Text style={styles.searchMetricLabel}>People</Text>
-          </View>
-          <View style={styles.searchMetricChip}>
-            <Text style={styles.searchMetricValue}>{contentSearchResults.length}</Text>
-            <Text style={styles.searchMetricLabel}>Posts & polls</Text>
-          </View>
-          <View style={styles.searchMetricChip}>
-            <Text style={styles.searchMetricValue}>
-              {searchDateFilter === "all" ? "Any" : searchDateFilter}
-            </Text>
-            <Text style={styles.searchMetricLabel}>Date</Text>
-          </View>
-        </View>
-
-        <View style={[styles.quickFiltersRow, styles.quickFiltersContainer]}>
-          {[
-            { key: "all", label: "Everything" },
-            { key: "posts", label: "Posts" },
-            { key: "polls", label: "Polls" },
-            { key: "people", label: "People" },
-          ].map((tab) => (
-            <TouchableOpacity
-              key={tab.key}
-              style={[
-                styles.quickFilterChip,
-                searchTab === tab.key && styles.quickFilterChipActive,
-              ]}
-              onPress={() => handleSearchTabPress(tab.key as SearchTab)}
-              activeOpacity={0.9}
-            >
-              <Text
-                style={[
-                  styles.quickFilterText,
-                  searchTab === tab.key && styles.quickFilterTextActive,
-                ]}
-              >
-                {tab.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        <View style={styles.quickFiltersRow}>
-          {[
-            { key: "all", label: "Any time" },
-            { key: "today", label: "Today" },
-            { key: "week", label: "This week" },
-            { key: "month", label: "This month" },
-            { key: "year", label: "This year" },
-          ].map((item) => (
-            <TouchableOpacity
-              key={item.key}
-              style={[
-                styles.timeChip,
-                searchDateFilter === item.key && styles.timeChipActive,
-              ]}
-              onPress={() =>
-                handleSearchDateFilterPress(item.key as SearchDateFilter)
-              }
-              activeOpacity={0.9}
-            >
-              <Text
-                style={[
-                  styles.timeChipText,
-                  searchDateFilter === item.key && styles.timeChipTextActive,
-                ]}
-              >
-                {item.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-
-          <TouchableOpacity
-            style={[styles.timeChip, styles.sortChip]}
-            onPress={handleSearchSortToggle}
-            activeOpacity={0.9}
-          >
-            <Ionicons name="swap-vertical" size={14} color="#8f6a60" />
-            <Text style={styles.timeChipText}>
-              {searchSort === "relevance"
-                ? "Best match"
-                : searchSort === "newest"
-                  ? "Newest first"
-                  : "Oldest first"}
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {searchResults.length === 0 ? (
-          <View style={styles.emptySearchState}>
-            <Ionicons name="search-outline" size={58} color="#d4b8a8" />
-            <Text style={styles.emptyTitle}>No results found</Text>
-            <Text style={styles.emptySubtitle}>
-              Try a different keyword or widen the date filter.
-            </Text>
-          </View>
-        ) : (
-          <>
-            {showPeopleSection && peopleSearchResults.length > 0 && (
-              <View style={styles.searchSection}>
-                <View style={styles.searchSectionHeader}>
-                  <View style={styles.searchSectionIcon}>
-                    <Ionicons name="people" size={18} color="#5f0909" />
-                  </View>
-                  <View style={styles.searchSectionCopy}>
-                    <Text style={styles.searchSectionTitle}>People</Text>
-                    <Text style={styles.searchSectionSubtitle}>
-                      Profiles that closely match your search.
-                    </Text>
-                  </View>
-                </View>
-
-                {peopleSearchResults.map((result) => (
-                  <TouchableOpacity
-                    key={result.id}
-                    style={styles.personResultCard}
-                    onPress={() => jumpToSearchResult(result)}
-                    activeOpacity={0.88}
-                  >
-                    <View style={styles.personAvatar}>
-                      {result.avatarUri ? (
-                        <Image
-                          source={{ uri: avatarThumb(result.avatarUri, 96) }}
-                          style={styles.personAvatarImage}
-                        />
-                      ) : (
-                        <Text style={styles.personAvatarText}>
-                          {result.avatarLabel}
-                        </Text>
-                      )}
-                    </View>
-                    <View style={styles.personResultCopy}>
-                      <Text style={styles.personResultTitle}>{result.title}</Text>
-                      <Text
-                        style={styles.personResultSubtitle}
-                        numberOfLines={2}
-                      >
-                        {result.subtitle}
-                      </Text>
-                    </View>
-                    <Ionicons
-                      name="chevron-forward"
-                      size={18}
-                      color="#c47e6e"
-                    />
-                  </TouchableOpacity>
-                ))}
-              </View>
-            )}
-
-            {showContentSection && matchedFeedItems.length > 0 && (
-              <View style={styles.searchSection}>
-                <View style={styles.searchSectionHeader}>
-                  <View style={styles.searchSectionIcon}>
-                    <Ionicons name="newspaper" size={18} color="#5f0909" />
-                  </View>
-                  <View style={styles.searchSectionCopy}>
-                    <Text style={styles.searchSectionTitle}>Related Content</Text>
-                    <Text style={styles.searchSectionSubtitle}>
-                      Matching posts and polls from Home.
-                    </Text>
-                  </View>
-                </View>
-
-                {matchedFeedItems.map((item) => (
-                  <View
-                    key={`search-feed-${item.type}-${item.id}`}
-                    style={styles.searchFeedCardWrap}
-                  >
-                    {renderFeedItem({ item })}
-                  </View>
-                ))}
-              </View>
-            )}
-
-            {trimmedSearchQuery ? (
-              <View style={styles.searchTopicCard}>
-                <Text style={styles.searchTopicTitle}>
-                  Posts about {trimmedSearchQuery}
-                </Text>
-                <Text style={styles.searchTopicSubtitle}>
-                  {contentSearchResults.length} related item
-                  {contentSearchResults.length === 1 ? "" : "s"} found on Home.
-                </Text>
-              </View>
-            ) : null}
-          </>
-        )}
-      </ScrollView>
-    );
-  }, [
-    contentSearchResults.length,
-    handleSearchDateFilterPress,
-    handleSearchSortToggle,
-    handleSearchTabPress,
-    jumpToSearchResult,
-    matchedFeedItems,
-    peopleSearchResults,
-    renderFeedItem,
-    searchDateFilter,
-    searchResults.length,
-    searchSort,
-    searchTab,
-    trimmedSearchQuery,
-  ]);
 const renderEmptyState = () => {
   if (isLoading) {
     return <FeedSkeleton count={5} />;
@@ -4717,52 +4021,19 @@ const renderEmptyState = () => {
 return (
     <GestureDetector gesture={panGesture}>
       <SafeAreaView style={styles.container}>
+      <HomeSearchProvider
+        expanded={searchExpanded}
+        visibleFeedItems={visibleFeedItems}
+        searchableStudents={searchableStudents}
+        renderFeedItem={renderFeedItem}
+        onOpenResult={openSearchResult}
+        onClose={closeSearchExperience}
+        onResultsVisibleChange={setSearchResultsVisible}
+      >
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <View style={styles.header}>
         {searchExpanded ? (
-          <View style={styles.headerSearchRow}>
-            <TouchableOpacity
-              style={styles.headerIconButton}
-              activeOpacity={0.82}
-              onPress={openServerDrawer}
-            >
-              <Ionicons name="menu" size={22} color="#f4e7df" />
-            </TouchableOpacity>
-
-            <View style={styles.headerSearchBar}>
-              <Ionicons name="search" size={20} color="#7f4d44" />
-              <TextInput
-                ref={searchInputRef}
-                style={styles.headerSearchInput}
-                value={searchQuery}
-                onChangeText={handleSearchQueryChange}
-                placeholder="Search people, posts, or polls"
-                placeholderTextColor="#af8478"
-                returnKeyType="search"
-                autoFocus
-                onSubmitEditing={handleSearchSubmit}
-              />
-              {searchQuery.length > 0 ? (
-                <TouchableOpacity
-                  onPress={() => {
-                    setSearchQuery("");
-                    setSearchCommitted(false);
-                  }}
-                  activeOpacity={0.82}
-                >
-                  <Ionicons name="close-circle" size={20} color="#c47e6e" />
-                </TouchableOpacity>
-              ) : null}
-            </View>
-
-            <TouchableOpacity
-              onPress={closeSearchExperience}
-              style={styles.searchCancelButton}
-              activeOpacity={0.82}
-            >
-              <Text style={styles.searchCancelText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
+          <HomeSearchBar onOpenServerDrawer={openServerDrawer} />
         ) : (
           <>
             <View style={styles.headerLeft}>
@@ -4831,9 +4102,6 @@ return (
 
       {/* ── Feed ────────────────────────────────────────────────────────── */}
       <View style={styles.contentArea}>
-        {showSearchResultsScreen ? (
-          renderSearchResultsScreen()
-        ) : (
           <View style={{ flex: 1 }}>
             {isOffline && visibleFeedItems.length > 0 && (
               <View style={styles.offlineStatusBar}>
@@ -4958,71 +4226,10 @@ return (
             </Animated.View>
           )}
           </View>
-        )}
 
-        {showSearchDropdown ? (
-          <View style={styles.searchDropdownCard}>
-            <View style={styles.searchDropdownHeader}>
-              <Text style={styles.searchDropdownTitle}>
-                {trimmedSearchQuery ? "Quick matches" : "Recent and trending"}
-              </Text>
-              {trimmedSearchQuery ? (
-                <TouchableOpacity
-                  onPress={handleSearchSubmit}
-                  activeOpacity={0.82}
-                >
-                  <Text style={styles.searchDropdownAction}>See all</Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-
-            {searchSuggestions.length > 0 ? (
-              searchSuggestions.map((suggestion) => (
-                <TouchableOpacity
-                  key={suggestion.id}
-                  style={styles.searchSuggestionRow}
-                  onPress={() => handleSearchSuggestionPress(suggestion)}
-                  activeOpacity={0.86}
-                >
-                  <View style={styles.searchSuggestionIconWrap}>
-                    <Ionicons
-                      name={getSearchSuggestionIconName(suggestion.kind)}
-                      size={18}
-                      color="#7c2a22"
-                    />
-                  </View>
-                  <View style={styles.searchSuggestionCopy}>
-                    <Text
-                      style={styles.searchSuggestionTitle}
-                      numberOfLines={1}
-                    >
-                      {suggestion.label}
-                    </Text>
-                    <Text
-                      style={styles.searchSuggestionHint}
-                      numberOfLines={1}
-                    >
-                      {suggestion.hint}
-                    </Text>
-                  </View>
-                  <Ionicons
-                    name="chevron-forward"
-                    size={16}
-                    color="#c47e6e"
-                  />
-                </TouchableOpacity>
-              ))
-            ) : (
-              <View style={styles.searchDropdownEmpty}>
-                <Ionicons name="search-outline" size={22} color="#c9a89a" />
-                <Text style={styles.searchDropdownEmptyText}>
-                  Start typing to search Home.
-                </Text>
-              </View>
-            )}
-          </View>
-        ) : null}
+        {searchExpanded ? <HomeSearchPanel /> : null}
       </View>
+      </HomeSearchProvider>
 
       <Modal
         visible={onlineUsersModalVisible}
@@ -5677,250 +4884,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#f8f3ef",
   },
-  headerSearchRow: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  headerSearchBar: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#fff7f2",
-    borderRadius: 18,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderWidth: 1.5,
-    borderColor: "#e6c6b9",
-    shadowColor: "#280404",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 3,
-  },
-  headerSearchInput: {
-    flex: 1,
-    color: "#3f1e1a",
-    fontSize: 17,
-    fontWeight: "500",
-    marginLeft: 10,
-    paddingVertical: 0,
-  },
-  searchCancelButton: {
-    paddingHorizontal: 2,
-    paddingVertical: 10,
-  },
-  searchCancelText: {
-    color: "#f4dccc",
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  searchDropdownCard: {
-    position: "absolute",
-    top: 8,
-    left: 14,
-    right: 14,
-    backgroundColor: "#fffaf7",
-    borderRadius: 24,
-    padding: 14,
-    borderWidth: 1.5,
-    borderColor: "#ead8cd",
-    shadowColor: "#2d0905",
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.16,
-    shadowRadius: 18,
-    elevation: 14,
-    zIndex: 30,
-  },
-  searchDropdownHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 8,
-    paddingHorizontal: 4,
-  },
-  searchDropdownTitle: {
-    color: "#4d1b17",
-    fontSize: 15.5,
-    fontWeight: "800",
-  },
-  searchDropdownAction: {
-    color: "#b45c4b",
-    fontSize: 13.5,
-    fontWeight: "700",
-  },
-  searchSuggestionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 6,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "#f1e4dc",
-  },
-  searchSuggestionIconWrap: {
-    width: 38,
-    height: 38,
-    borderRadius: 14,
-    backgroundColor: "#f9e4d7",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  searchSuggestionCopy: {
-    flex: 1,
-  },
-  searchSuggestionTitle: {
-    color: "#3f1e1a",
-    fontSize: 15.5,
-    fontWeight: "700",
-  },
-  searchSuggestionHint: {
-    color: "#8d6a61",
-    fontSize: 13,
-    marginTop: 2,
-  },
-  searchDropdownEmpty: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 6,
-    paddingVertical: 12,
-  },
-  searchDropdownEmptyText: {
-    color: "#9c776d",
-    fontSize: 14,
-    fontWeight: "500",
-  },
-  searchScreen: {
-    flex: 1,
-  },
-  searchScreenContent: {
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 140,
-  },
-  searchOverviewCard: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 12,
-    backgroundColor: "#fff8f3",
-    borderRadius: 24,
-    padding: 16,
-    borderWidth: 1.5,
-    borderColor: "#efd9ca",
-    marginBottom: 14,
-  },
-  searchOverviewIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 15,
-    backgroundColor: "#f8ddbf",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  searchOverviewCopy: {
-    flex: 1,
-  },
-  searchOverviewTitle: {
-    color: "#4a1712",
-    fontSize: 18,
-    fontWeight: "800",
-    marginBottom: 3,
-  },
-  searchOverviewSubtitle: {
-    color: "#86645a",
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  searchMetricsRow: {
-    flexDirection: "row",
-    gap: 10,
-    marginBottom: 10,
-  },
-  searchMetricChip: {
-    flex: 1,
-    backgroundColor: "#fff",
-    borderRadius: 18,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderWidth: 1,
-    borderColor: "#ebddd4",
-    alignItems: "center",
-  },
-  searchMetricValue: {
-    color: "#5f0909",
-    fontSize: 16,
-    fontWeight: "800",
-    textTransform: "capitalize",
-  },
-  searchMetricLabel: {
-    color: "#9b766c",
-    fontSize: 12.5,
-    fontWeight: "600",
-    marginTop: 3,
-  },
-
-  /* Filters */
-  quickFiltersContainer: {
-    marginBottom: 6,
-  },
-  quickFiltersRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    paddingVertical: 4,
-  },
-  quickFilterChip: {
-    flexGrow: 1,
-    minWidth: "22%",
-    alignItems: "center",
-    paddingHorizontal: 12,
-    paddingVertical: 11,
-    borderRadius: 999,
-    backgroundColor: "#fff",
-    borderWidth: 1.5,
-    borderColor: "#e8d9d0",
-  },
-  quickFilterChipActive: {
-    backgroundColor: "#5f0909",
-    borderColor: "#5f0909",
-  },
-  quickFilterText: {
-    color: "#8c5f54",
-    fontSize: 14.5,
-    fontWeight: "600",
-  },
-  quickFilterTextActive: {
-    color: "#f4e7df",
-    fontWeight: "700",
-  },
-  timeChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: 20,
-    backgroundColor: "#fffaf7",
-    borderWidth: 1,
-    borderColor: "#e8d9d0",
-  },
-  sortChip: {
-    marginLeft: 0,
-  },
-  timeChipActive: {
-    backgroundColor: "#5f0909",
-    borderColor: "#5f0909",
-  },
-  timeChipText: {
-    color: "#8f6a60",
-    fontSize: 13.5,
-    fontWeight: "600",
-  },
-  timeChipTextActive: {
-    color: "#f4e7df",
-  },
 
   /* Recent Searches */
   recentSection: {
@@ -5966,103 +4929,6 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
 
-  /* Results */
-  searchSection: {
-    marginTop: 14,
-  },
-  searchSectionHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    marginBottom: 12,
-    paddingHorizontal: 4,
-  },
-  searchSectionIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 16,
-    backgroundColor: "#f9dfc8",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  searchSectionCopy: {
-    flex: 1,
-  },
-  searchSectionTitle: {
-    color: "#4d1b17",
-    fontSize: 16.5,
-    fontWeight: "800",
-  },
-  searchSectionSubtitle: {
-    color: "#967267",
-    fontSize: 13.5,
-    marginTop: 2,
-  },
-  personResultCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#fff",
-    borderRadius: 22,
-    padding: 14,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: "#efdfd6",
-  },
-  personAvatar: {
-    width: 50,
-    height: 50,
-    borderRadius: 18,
-    backgroundColor: "#f4d7b1",
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 14,
-  },
-  personAvatarImage: {
-    width: "100%",
-    height: "100%",
-  },
-  personAvatarText: {
-    color: "#5f0909",
-    fontSize: 17,
-    fontWeight: "800",
-  },
-  personResultCopy: {
-    flex: 1,
-    marginRight: 8,
-  },
-  personResultTitle: {
-    color: "#381713",
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  personResultSubtitle: {
-    color: "#77574f",
-    fontSize: 13.5,
-    lineHeight: 19,
-    marginTop: 3,
-  },
-  searchFeedCardWrap: {
-    marginBottom: 12,
-  },
-  searchTopicCard: {
-    backgroundColor: "#fffaf4",
-    borderRadius: 22,
-    padding: 18,
-    borderWidth: 1.5,
-    borderColor: "#edd7b5",
-    marginTop: 16,
-  },
-  searchTopicTitle: {
-    color: "#4c1b14",
-    fontSize: 18,
-    fontWeight: "800",
-    marginBottom: 6,
-  },
-  searchTopicSubtitle: {
-    color: "#87685f",
-    fontSize: 14,
-    lineHeight: 20,
-  },
   emptySearchState: {
     alignItems: "center",
     justifyContent: "center",
