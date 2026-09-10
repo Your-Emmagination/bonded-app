@@ -3975,7 +3975,7 @@ const handleSelectChannel = useCallback(
     );
   }, [
     activeAnnouncements,
-    currentUserProfile?.firstname,
+    currentUserProfile?.lastname,
     handleAnnouncementCardPress,
     handleFlairFilterPress,
     onlineUsersCount,
@@ -3984,6 +3984,12 @@ const handleSelectChannel = useCallback(
     trendingPosts,
     user?.displayName,
   ]);
+
+  // Built once and reused instead of calling renderFeedHeader() inline in the
+  // FlatList props, which rebuilt the welcome card, announcements, trending row
+  // and flair chips every time anything on Home re-rendered. Now it only
+  // rebuilds when one of renderFeedHeader's own inputs changes.
+  const feedHeader = useMemo(() => renderFeedHeader(), [renderFeedHeader]);
 
   const renderFeedItem = useCallback(
     ({ item }: { item: FeedItem }) => {
@@ -4249,7 +4255,7 @@ return (
                 </View>
               ) : null
             }
-            ListHeaderComponent={renderFeedHeader()}
+            ListHeaderComponent={feedHeader}
             refreshControl={
               <RefreshControl
                 refreshing={refreshing}
