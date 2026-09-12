@@ -9,24 +9,28 @@ import {
     playEmergencyAlertSound,
     registerDeviceForPushNotifications,
 } from "@/utils/pushNotifications";
+import { AccountSetupProvider, useAccountSetup } from "@/contexts/AccountSetupContext";
 import { resolveUserRoleForAuthUser } from "@/utils/rbac";
 import { Image } from "expo-image";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { onAuthStateChanged, User } from "firebase/auth";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { auth, db } from "../Firebase_configure";
+import { db } from "../Firebase_configure";
 import AppToast from "./(main)/components/AppToast";
 
 export default function RootLayout() {
-  const [user, setUser] = useState<User | null | undefined>(undefined);
-  const [isAuthChecking, setIsAuthChecking] = useState(true);
+  return <AccountSetupProvider><RootNavigator /></AccountSetupProvider>;
+}
+
+function RootNavigator() {
+  const { user: accountUser, status } = useAccountSetup();
+  const user = status === "ready" ? accountUser : null;
+  const isAuthChecking = status === "loading";
   const router = useRouter();
   const segments = useSegments();
-  const hasNavigated = useRef(false);
   const lastHandledNotificationId = useRef<string | null>(null);
   const appActive = useAppActive();
   usePresenceHeartbeat(user);
@@ -36,69 +40,21 @@ export default function RootLayout() {
   }, [user?.uid, appActive]);
 
   useEffect(() => {
-    let isMounted = true;
+    const route = segments[0] as string | undefined;
+    if (status === "loading") return;
+    if (status === "signed-out") {
+      if (route !== "LoginScreen" && route !== "ForgotPasswordScreen") router.replace("/LoginScreen");
+    } else if (status === "setup" || status === "error") {
+      if (route !== "ProfileSetupScreen") router.replace("/ProfileSetupScreen");
+    } else if (route !== "(main)") {
+      router.replace("/(main)/(tabs)/HomeScreen");
+    }
+  }, [router, segments, status]);
 
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      if (!isMounted) return;
-      setUser(currentUser);
-
-      if (!currentUser) {
-        hasNavigated.current = false;
-        const currentSegment = segments[0] as string | undefined;
-        if (
-          currentSegment !== "LoginScreen" &&
-          currentSegment !== "ForgotPasswordScreen"
-        ) {
-          router.replace("/LoginScreen");
-        }
-        setIsAuthChecking(false);
-        return;
-      }
-
-      // User is logged in
-      const inMainApp = segments[0] === "(main)";
-      if (inMainApp) {
-        setIsAuthChecking(false);
-        return;
-      }
-
-      if (
-        !hasNavigated.current ||
-        segments[0] === "LoginScreen" ||
-        segments[0] === undefined ||
-        (segments[0] as string) === "index"
-      ) {
-        hasNavigated.current = true;
-        try {
-          // Resolving the role still warms the role cache before the first
-          // screen mounts. Everyone now starts on Home — staff open the
-          // Dashboard from its own tab.
-          await resolveUserRoleForAuthUser(currentUser);
-          if (!isMounted) return;
-
-          router.replace("/(main)/(tabs)/HomeScreen");
-        } catch (error) {
-          console.error("Error resolving user role on startup:", error);
-          if (isMounted) {
-            router.replace("/(main)/(tabs)/HomeScreen");
-          }
-        } finally {
-          if (isMounted) {
-            setTimeout(() => {
-              if (isMounted) setIsAuthChecking(false);
-            }, 100);
-          }
-        }
-      } else {
-        setIsAuthChecking(false);
-      }
-    });
-
-    return () => {
-      isMounted = false;
-      unsubscribe();
-    };
-  }, [router, segments]);
+  useEffect(() => {
+    lastHandledNotificationId.current = null;
+    if (user) void resolveUserRoleForAuthUser(user);
+  }, [user]);
 
   useEffect(() => {
     if (!user) {
@@ -180,7 +136,7 @@ export default function RootLayout() {
   }, [user?.uid]);
 
   useEffect(() => {
-    if (!isPushNotificationsSupported()) {
+    if (!user || !isPushNotificationsSupported()) {
       return;
     }
 
@@ -242,7 +198,7 @@ export default function RootLayout() {
       isActive = false;
       subscription?.remove();
     };
-  }, [router]);
+  }, [router, user]);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -256,9 +212,16 @@ export default function RootLayout() {
         }}
       >
         <Stack.Screen name="index" />
-        <Stack.Screen name="LoginScreen" />
-        <Stack.Screen name="ForgotPasswordScreen" />
-        <Stack.Screen name="(main)" />
+        <Stack.Protected guard={status === "signed-out"}>
+          <Stack.Screen name="LoginScreen" />
+          <Stack.Screen name="ForgotPasswordScreen" />
+        </Stack.Protected>
+        <Stack.Protected guard={status === "setup" || status === "error"}>
+          <Stack.Screen name="ProfileSetupScreen" />
+        </Stack.Protected>
+        <Stack.Protected guard={status === "ready"}>
+          <Stack.Screen name="(main)" />
+        </Stack.Protected>
       </Stack>
 
       <AppToast />

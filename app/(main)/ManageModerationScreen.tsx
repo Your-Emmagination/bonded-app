@@ -686,17 +686,6 @@ export default function ManageModerationScreen() {
           <Text style={styles.topBarEyebrow}>STAFF WORKSPACE</Text>
           <Text style={styles.topBarTitle}>Manage Moderation</Text>
         </View>
-        <TouchableOpacity
-          style={[styles.selectModeButton, selectMode && styles.selectModeButtonActive]}
-          onPress={toggleSelectMode}
-          activeOpacity={0.8}
-        >
-          <Ionicons
-            name={selectMode ? "close" : "checkmark-done-outline"}
-            size={19}
-            color={selectMode ? "#5f0909" : "#fffaf6"}
-          />
-        </TouchableOpacity>
         <View style={styles.queueBadge}>
           <Text style={styles.queueBadgeText}>{items.length}</Text>
         </View>
@@ -790,7 +779,7 @@ export default function ManageModerationScreen() {
             </ScrollView>
 
             <View style={styles.sectionHeading}>
-              <View>
+              <View style={{ flex: 1, marginRight: 8 }}>
                 <Text style={styles.sectionTitle}>
                   {activeType === "all" ? "Pending content" : TYPE_META[activeType].label}
                 </Text>
@@ -799,7 +788,26 @@ export default function ManageModerationScreen() {
                   {selectMode ? " · tap a card to select" : ""}
                 </Text>
               </View>
-              <Ionicons name="funnel-outline" size={19} color="#8f6a60" />
+              <View style={styles.sectionActions}>
+                <TouchableOpacity
+                  style={[
+                    styles.sectionSelectButton,
+                    selectMode && styles.sectionSelectButtonActive,
+                  ]}
+                  onPress={toggleSelectMode}
+                  activeOpacity={0.8}
+                  accessibilityLabel={selectMode ? "Exit select mode" : "Select multiple items"}
+                >
+                  <Ionicons
+                    name={selectMode ? "close" : "checkmark-done-outline"}
+                    size={17}
+                    color={selectMode ? "#5f0909" : "#7a3b2e"}
+                  />
+                </TouchableOpacity>
+                <View style={styles.filterIconBox}>
+                  <Ionicons name="funnel-outline" size={17} color="#8f6a60" />
+                </View>
+              </View>
             </View>
           </>
         }
@@ -1284,6 +1292,35 @@ const styles = StyleSheet.create({
   },
   sectionTitle: { color: "#4c1b14", fontSize: 17, fontWeight: "900" },
   sectionSubtitle: { color: "#98766d", fontSize: 11.5, marginTop: 3 },
+  sectionActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  sectionSelectButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f0e3dc",
+    borderWidth: 1,
+    borderColor: "#e4d3c9",
+  },
+  sectionSelectButtonActive: {
+    backgroundColor: "#e2aa45",
+    borderColor: "#d49a35",
+  },
+  filterIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f8efe9",
+    borderWidth: 1,
+    borderColor: "#ebdcd3",
+  },
   reviewCard: {
     backgroundColor: "#fffaf6",
     borderRadius: 19,

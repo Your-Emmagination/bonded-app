@@ -5,6 +5,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
+  ScrollView,
   StyleSheet,
   Switch,
   Text,
@@ -112,6 +113,17 @@ const SettingsScreen = () => {
         <View style={{ width: 32 }} />
       </View>
 
+      <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>ACCOUNT</Text>
+        <View style={styles.goldCard}>
+          <TouchableOpacity accessibilityRole="button" style={styles.soundRow} onPress={() => router.push({ pathname: "/(main)/(tabs)/ProfileScreen", params: { editTab: "password" } })}>
+            <View style={styles.iconBox}><Ionicons name="lock-closed-outline" size={18} color="#5f0909" /></View>
+            <View style={{ marginLeft: 12, flex: 1 }}><Text style={styles.rowLabel}>Change Password</Text><Text style={styles.rowSubtext}>Update your password whenever you need to</Text></View>
+            <Ionicons name="chevron-forward" size={20} color="#9b766c" />
+          </TouchableOpacity>
+        </View>
+      </View>
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>PUSH NOTIFICATIONS</Text>
         <View style={styles.goldCard}>
@@ -202,6 +214,7 @@ const SettingsScreen = () => {
           </Text>
         )}
       </View>
+      </ScrollView>
     </SafeAreaView>
   );
 };

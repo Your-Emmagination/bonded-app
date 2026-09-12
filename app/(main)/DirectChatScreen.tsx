@@ -29,6 +29,7 @@ import {
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { DraftAttachment, insertEmojiInDraft, MESSAGE_MAX_LENGTH, prepareDraftAttachment, TextSelection } from "@/utils/messageComposer";
 import { replyPreviewMedia, replyPreviewText } from "@/utils/replyPreview";
+import { dismissConversationNotifications } from "@/utils/pushNotifications";
 import { getRoleColor, getRoleDisplayName, getUserDataByAuthUser, parseUserRole, type UserData } from "@/utils/rbac";
 import { getTimeAgo, useRelativeTimeNow } from "@/utils/relativeTime";
 import { getPresenceState, isMessageAfterDeletion, receiptCoversMessage, timestampMillis } from "@/utils/messengerState";
@@ -79,9 +80,29 @@ import ChatGifPicker from "./components/ChatGifPicker";
 import ChatTypingIndicator from "./components/ChatTypingIndicator";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 
-const { width: SCREEN_WIDTH } = Dimensions.get("window");
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
-const EMOJI_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+const EMOJI_REACTIONS = ["❤️", "😆", "😮", "😢", "😡", "👍"];
+
+function formatMessageDate(timestamp: any): string {
+  if (!timestamp) return "Today";
+  let date: Date;
+  if (typeof timestamp?.toDate === "function") date = timestamp.toDate();
+  else if (timestamp?.seconds) date = new Date(timestamp.seconds * 1000);
+  else date = new Date(timestamp);
+  if (isNaN(date.getTime())) return "Today";
+
+  const now = new Date();
+  const isToday = now.toDateString() === date.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday = yesterday.toDateString() === date.toDateString();
+
+  const timeStr = date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  if (isToday) return `Today · ${timeStr}`;
+  if (isYesterday) return `Yesterday · ${timeStr}`;
+  return `${date.toLocaleDateString("en-US", { month: "short", day: "numeric" })} · ${timeStr}`;
+}
 
 /* ==================== MESSAGE BUBBLE (MEMOIZED FOR 60-120 FPS) ==================== */
 interface DirectMessageBubbleProps {
@@ -98,7 +119,7 @@ interface DirectMessageBubbleProps {
   isHighlighted: boolean;
   revealedTimestamp: boolean;
   nowMs: number;
-  onLongPress: (message: DirectMessage) => void;
+  onLongPress: (message: DirectMessage, pageY?: number) => void;
   onReactionPress: (message: DirectMessage, emoji: string) => void;
   onOpenImage: (url: string) => void;
   onToggleReveal: (id: string) => void;
@@ -160,6 +181,10 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
     return Object.entries(item.reactions).filter(([, uids]) => uids && uids.length > 0);
   }, [item.reactions]);
 
+  const reactionCount = useMemo(() => {
+    return reactionEntries.reduce((sum, [, uids]) => sum + (uids?.length || 0), 0);
+  }, [reactionEntries]);
+
   const images = useMemo(() => {
     return (item.files || []).filter((f) => f.mimeType.startsWith("image/"));
   }, [item.files]);
@@ -169,7 +194,7 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
   }, [item.files]);
 
   return (
-    <View style={[styles.bubbleContainer, isOwn ? styles.bubbleContainerOwn : styles.bubbleContainerOther]}>
+    <View style={[styles.bubbleContainer, isOwn ? styles.bubbleContainerOwn : styles.bubbleContainerOther, reactionEntries.length > 0 && styles.bubbleContainerWithReactions]}>
       {!isOwn && showAvatar && <View style={styles.incomingAvatarWrap}>
         {recipientAvatar ? <Image source={{ uri: avatarThumb(recipientAvatar, 28) }} style={styles.incomingAvatar} />
           : <View style={[styles.incomingAvatar, styles.chatAvatarFallback]}><Text style={styles.chatAvatarInitial}>{recipientName[0]?.toUpperCase() || "?"}</Text></View>}
@@ -181,7 +206,12 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
       <GestureDetector gesture={panGesture}>
         <ReanimatedAnimated.View style={rowSwipeStyle}>
           <Pressable
-            onLongPress={() => { if (!item.deleted) onLongPress(item); }}
+            onLongPress={(event) => {
+              if (!item.deleted) {
+                const pageY = event.nativeEvent?.pageY;
+                onLongPress(item, pageY);
+              }
+            }}
             onPress={() => onToggleReveal(item.id)}
             delayLongPress={260}
             style={[
@@ -294,21 +324,30 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
         </ReanimatedAnimated.View>
       </GestureDetector>
 
-      {/* Reaction Badges */}
+      {/* Reaction Badges (Messenger corner pill) */}
       {!item.deleted && reactionEntries.length > 0 && (
         <View style={[styles.reactionsRow, isOwn ? styles.reactionsRowOwn : styles.reactionsRowOther]}>
-          {reactionEntries.map(([emoji, uids]) => (
-            <TouchableOpacity
-              key={emoji}
-              style={styles.reactionPill}
-              onPress={() => onReactionPress(item, emoji)}
-            >
-              <Text style={styles.reactionEmojiText}>{emoji}</Text>
-              {uids.length > 1 && (
-                <Text style={styles.reactionCountText}>{uids.length}</Text>
-              )}
-            </TouchableOpacity>
-          ))}
+          <TouchableOpacity
+            style={styles.reactionPill}
+            onPress={() => {
+              const currentUid = auth.currentUser?.uid || "";
+              const ownReaction = reactionEntries.find(([, uids]) => uids.includes(currentUid));
+              const emojiToToggle = ownReaction ? ownReaction[0] : reactionEntries[0][0];
+              onReactionPress(item, emojiToToggle);
+            }}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="Reactions"
+          >
+            <View style={styles.reactionEmojisStack}>
+              {reactionEntries.slice(0, 3).map(([emoji]) => (
+                <Text key={emoji} style={styles.reactionEmojiText}>{emoji}</Text>
+              ))}
+            </View>
+            {reactionCount > 1 && (
+              <Text style={styles.reactionCountText}>{reactionCount}</Text>
+            )}
+          </TouchableOpacity>
         </View>
       )}
 
@@ -496,6 +535,9 @@ function DirectChatContent() {
 
   // Long press / Action Menu State
   const [actionMenuTarget, setActionMenuTarget] = useState<DirectMessage | null>(null);
+  const [actionMenuY, setActionMenuY] = useState<number>(300);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [reactionPickerTarget, setReactionPickerTarget] = useState<DirectMessage | null>(null);
 
   // Forward Modal State
   const [forwardTarget, setForwardTarget] = useState<DirectMessage | null>(null);
@@ -723,6 +765,15 @@ function DirectChatContent() {
       unsubscribe();
     };
   }, [conversationId, hasConversation, historyCutoff, historyAnchor, messageLimit, retryCount]);
+
+  // Looking at the chat clears its tray notifications, so a conversation the
+  // user has just read stops showing rows for messages already seen. Runs
+  // regardless of connectivity: the tray is local.
+  const loadedCount = loadedMessages.length;
+  useEffect(() => {
+    if (!focused || !conversationId || loadedCount === 0) return;
+    void dismissConversationNotifications(conversationId);
+  }, [focused, conversationId, loadedCount]);
 
   useEffect(() => {
     if (!focused || !appActive || isOffline || !currentUserId || messageError || conversationError) return;
@@ -1277,14 +1328,90 @@ function DirectChatContent() {
                 }, 160);
               }
             }}
-            ListFooterComponent={messages.length >= messageLimit ? (
-              <TouchableOpacity disabled={loadingOlder} style={{ padding: 14, alignItems: "center" }} onPress={() => {
-                setLoadingOlder(true);
-                setMessageLimit((value) => value + DIRECT_MESSAGE_PAGE_SIZE);
-              }}>
-                <Text style={{ color: themeColor }}>{loadingOlder ? "Loading…" : "Load older messages"}</Text>
-              </TouchableOpacity>
-            ) : null}
+            ListFooterComponent={
+              <View style={styles.startHeaderWrapper}>
+                {messages.length >= messageLimit && (
+                  <TouchableOpacity disabled={loadingOlder} style={{ padding: 14, alignItems: "center" }} onPress={() => {
+                    setLoadingOlder(true);
+                    setMessageLimit((value) => value + DIRECT_MESSAGE_PAGE_SIZE);
+                  }}>
+                    <Text style={{ color: themeColor }}>{loadingOlder ? "Loading…" : "Load older messages"}</Text>
+                  </TouchableOpacity>
+                )}
+
+                {/* Messenger Conversation Start Header */}
+                <View style={styles.startHeaderContainer}>
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => {
+                      if (recipientId) {
+                        router.push({
+                          pathname: "/(main)/UserProfileScreen",
+                          params: { userId: recipientId },
+                        });
+                      }
+                    }}
+                    style={styles.startAvatarWrap}
+                  >
+                    {recipientAvatar ? (
+                      <Image
+                        source={{ uri: avatarThumb(recipientAvatar, 96) }}
+                        style={styles.startAvatar}
+                        contentFit="cover"
+                      />
+                    ) : (
+                      <View style={[styles.startAvatar, styles.startAvatarFallback, { backgroundColor: roleColor + "20" }]}>
+                        <Text style={[styles.startAvatarInitial, { color: roleColor }]}>
+                          {displayName[0]?.toUpperCase() || "?"}
+                        </Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+
+                  <Text style={styles.startDisplayName}>{displayName}</Text>
+                  {realName && realName !== displayName && (
+                    <Text style={styles.startRealName}>{realName}</Text>
+                  )}
+
+                  {/* Role Badge */}
+                  <View style={[styles.startRoleBadge, { backgroundColor: roleColor + "18", borderColor: roleColor + "35" }]}>
+                    <Text style={[styles.startRoleText, { color: roleColor }]}>
+                      {getRoleDisplayName(role || "student").toUpperCase()}
+                    </Text>
+                  </View>
+
+                  <Text style={styles.startSubtitle}>You’re connected on Bonded</Text>
+                  <Text style={styles.startCaption}>
+                    Direct messages between you and {displayName} are private.
+                  </Text>
+
+                  {/* Interactive Wave to say hi button (Messenger iconic feature) */}
+                  {messages.length <= 2 && (
+                    <TouchableOpacity
+                      style={[styles.waveBtn, { backgroundColor: themeColor + "15", borderColor: themeColor + "35" }]}
+                      onPress={() => void handleSend("👋")}
+                      activeOpacity={0.75}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Wave to ${displayName}`}
+                    >
+                      <Text style={styles.waveIcon}>👋</Text>
+                      <Text style={[styles.waveText, { color: themeColor }]}>
+                        Wave to {displayName.split(" ")[0] || "say hi"}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {/* Date separator pill for first message */}
+                  {messages.length > 0 && (
+                    <View style={styles.dateSeparator}>
+                      <Text style={styles.dateSeparatorText}>
+                        {formatMessageDate(messages[0].createdAt)}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+            }
             keyExtractor={(item) => item.id}
             contentContainerStyle={[styles.messagesList, { paddingBottom: 16 }]}
             windowSize={7}
@@ -1311,7 +1438,14 @@ function DirectChatContent() {
                   isHighlighted={item.id === activeHighlightedMessageId}
                   revealedTimestamp={revealedTimestampId === item.id}
                   nowMs={nowMs}
-                  onLongPress={setActionMenuTarget}
+                  onLongPress={(targetMsg, pageY) => {
+                    Keyboard.dismiss();
+                    setActionMenuTarget(targetMsg);
+                    setMoreMenuOpen(false);
+                    if (typeof pageY === "number") {
+                      setActionMenuY(pageY);
+                    }
+                  }}
                   onReactionPress={handleReactionPress}
                   onOpenImage={setViewerImage}
                   onToggleReveal={(id) => setRevealedTimestampId((prev) => (prev === id ? null : id))}
@@ -1470,109 +1604,313 @@ function DirectChatContent() {
         setGifPickerVisible(false);
       }} />}
 
-      {/* ==================== ACTION & REACTION MENU ==================== */}
+      {/* ==================== MESSENGER ACTION & REACTION MODAL ==================== */}
       <Modal
         visible={!!actionMenuTarget}
         transparent
         animationType="fade"
-        onRequestClose={() => setActionMenuTarget(null)}
+        onRequestClose={() => {
+          setActionMenuTarget(null);
+          setMoreMenuOpen(false);
+        }}
       >
-        <Pressable style={styles.actionModalOverlay} onPress={() => setActionMenuTarget(null)}>
-          <ScrollView style={[styles.actionModalCard, { maxHeight: "80%" }]} keyboardShouldPersistTaps="handled">
-            {/* Quick Emoji Reactions */}
-            <View style={styles.emojiPickerBar}>
-              {EMOJI_REACTIONS.map((emoji) => (
+        <Pressable
+          style={styles.actionModalOverlay}
+          onPress={() => {
+            setActionMenuTarget(null);
+            setMoreMenuOpen(false);
+          }}
+        >
+          {actionMenuTarget && (
+            <View
+              style={[
+                styles.actionFloatingArea,
+                {
+                  top: Math.max(
+                    insets.top + 24,
+                    Math.min(actionMenuY - 140, SCREEN_HEIGHT - 360)
+                  ),
+                },
+              ]}
+              onStartShouldSetResponder={() => true}
+            >
+              {/* Messenger Floating Reaction Pill */}
+              <View style={styles.floatingReactionPill}>
+                {EMOJI_REACTIONS.map((emoji) => {
+                  const hasReacted = (actionMenuTarget.reactions?.[emoji] || []).includes(currentUserId);
+                  return (
+                    <TouchableOpacity
+                      key={emoji}
+                      onPress={() => {
+                        handleReactionPress(actionMenuTarget, emoji);
+                        setActionMenuTarget(null);
+                        setMoreMenuOpen(false);
+                      }}
+                      activeOpacity={0.7}
+                      style={[
+                        styles.reactionPillEmojiBtn,
+                        hasReacted && styles.reactionPillEmojiBtnActive,
+                      ]}
+                    >
+                      <Text style={styles.floatingEmojiText}>{emoji}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+                {/* Plus button for full emoji reaction picker */}
                 <TouchableOpacity
-                  key={emoji}
+                  style={styles.reactionPillPlusBtn}
+                  activeOpacity={0.7}
                   onPress={() => {
-                    if (actionMenuTarget) {
-                      handleReactionPress(actionMenuTarget, emoji);
-                      setActionMenuTarget(null);
-                    }
+                    const target = actionMenuTarget;
+                    setActionMenuTarget(null);
+                    setMoreMenuOpen(false);
+                    setReactionPickerTarget(target);
                   }}
-                  style={styles.emojiPickerBtn}
                 >
-                  <Text style={{ fontSize: 26 }}>{emoji}</Text>
+                  <Ionicons name="add" size={20} color="#e4e6eb" />
                 </TouchableOpacity>
-              ))}
+              </View>
+
+              {/* Focused Message Bubble Preview */}
+              <View
+                style={[
+                  styles.focusedBubbleWrap,
+                  actionMenuTarget.senderId === currentUserId
+                    ? styles.focusedBubbleWrapOwn
+                    : styles.focusedBubbleWrapOther,
+                ]}
+              >
+                {actionMenuTarget.senderId !== currentUserId && (
+                  <View style={styles.focusedAvatarWrap}>
+                    {recipientAvatar ? (
+                      <Image
+                        source={{ uri: avatarThumb(recipientAvatar, 28) }}
+                        style={styles.incomingAvatar}
+                      />
+                    ) : (
+                      <View style={[styles.incomingAvatar, styles.chatAvatarFallback]}>
+                        <Text style={styles.chatAvatarInitial}>
+                          {displayName[0]?.toUpperCase() || "?"}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                )}
+                <View
+                  style={[
+                    styles.bubbleBox,
+                    actionMenuTarget.senderId === currentUserId
+                      ? [styles.bubbleBoxOwn, { backgroundColor: themeColor }]
+                      : styles.bubbleBoxOther,
+                  ]}
+                >
+                  {!!actionMenuTarget.replyTo && (
+                    <View style={[styles.replyQuoteWrap, actionMenuTarget.senderId === currentUserId && styles.replyQuoteWrapOwn]}>
+                      <View style={[styles.replyQuoteBar, { backgroundColor: actionMenuTarget.senderId === currentUserId ? "#fff" : themeColor }]} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.replyQuoteSender, actionMenuTarget.senderId === currentUserId && styles.replyQuoteTextOwn]} numberOfLines={1}>
+                          {actionMenuTarget.replyTo.senderName}
+                        </Text>
+                        <Text style={[styles.replyQuotePreview, actionMenuTarget.senderId === currentUserId && styles.replyQuoteTextOwn]} numberOfLines={1}>
+                          {actionMenuTarget.replyTo.preview}
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+                  {!!actionMenuTarget.text && (
+                    <Text
+                      style={[
+                        styles.messageText,
+                        actionMenuTarget.senderId === currentUserId && styles.messageTextOwn,
+                      ]}
+                    >
+                      {actionMenuTarget.text}
+                    </Text>
+                  )}
+                </View>
+              </View>
             </View>
+          )}
 
-            <View style={styles.actionMenuDivider} />
-
-            {/* Actions list */}
-            {actionMenuTarget && (
-              <>
-                <TouchableOpacity
-                  style={styles.actionRow}
-                  onPress={() => {
-                    handleSwipeReply(actionMenuTarget.id);
-                    setActionMenuTarget(null);
-                  }}
-                >
-                  <Ionicons name="arrow-undo-outline" size={20} color="#5f0909" />
-                  <Text style={styles.actionRowText}>Reply</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.actionRow}
-                  onPress={() => {
-                    void copyContent(actionMenuTarget.text, "Message");
-                  }}
-                >
-                  <Ionicons name="copy-outline" size={20} color="#5f0909" />
-                  <Text style={styles.actionRowText}>Copy text</Text>
-                </TouchableOpacity>
-
-                {messageLinks(actionMenuTarget).map((link) => <TouchableOpacity key={link} style={styles.actionRow}
-                  onPress={() => void copyContent(link, "Link")}>
-                  <Ionicons name="link-outline" size={20} color="#5f0909" />
-                  <View style={{ flex: 1 }}><Text style={styles.actionRowText}>Copy link</Text><Text style={styles.replyBannerText} numberOfLines={1}>{link}</Text></View>
-                </TouchableOpacity>)}
-                {actionMenuTarget.senderId === currentUserId && !!actionMenuTarget.text && !actionMenuTarget.deleted && <TouchableOpacity
-                  style={styles.actionRow} disabled={composerBusy} onPress={() => {
-                    setEditingMessage(actionMenuTarget); setEditText(actionMenuTarget.text); setEditError("");
-                    selectionRef.current = { start: actionMenuTarget.text.length, end: actionMenuTarget.text.length };
-                    setSelectionOverride(selectionRef.current); setActionMenuTarget(null); setEmojiPickerVisible(false);
-                    requestAnimationFrame(() => inputRef.current?.focus());
-                  }}>
-                  <Ionicons name="create-outline" size={20} color="#5f0909" /><Text style={styles.actionRowText}>Edit message</Text>
-                </TouchableOpacity>}
-
-                <TouchableOpacity
-                  style={styles.actionRow}
-                  onPress={() => handleTogglePin(actionMenuTarget)}
-                >
-                  <Ionicons name="pin-outline" size={20} color="#e0a53d" />
-                  <Text style={styles.actionRowText}>
-                    {actionMenuTarget.pinned ? "Unpin message" : "Pin message"}
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.actionRow}
-                  onPress={() => {
-                    setForwardTarget(actionMenuTarget);
-                    setActionMenuTarget(null);
-                  }}
-                >
-                  <Ionicons name="arrow-redo-outline" size={20} color="#2563eb" />
-                  <Text style={styles.actionRowText}>Forward message</Text>
-                </TouchableOpacity>
-
-                {actionMenuTarget.senderId === currentUserId && (
+          {/* Expanded "More" Menu Sheet if user tapped More */}
+          {moreMenuOpen && actionMenuTarget && (
+            <View
+              style={[styles.moreMenuSheet, { paddingBottom: Math.max(insets.bottom, 16) }]}
+              onStartShouldSetResponder={() => true}
+            >
+              <View style={styles.moreMenuHandle} />
+              {actionMenuTarget.senderId === currentUserId &&
+                !!actionMenuTarget.text &&
+                !actionMenuTarget.deleted && (
                   <TouchableOpacity
-                    style={[styles.actionRow, { borderTopWidth: 1, borderTopColor: "rgba(95,9,9,0.08)" }]}
-                    onPress={() => handleDeleteMessage(actionMenuTarget)}
+                    style={styles.moreMenuRow}
+                    disabled={composerBusy}
+                    onPress={() => {
+                      setEditingMessage(actionMenuTarget);
+                      setEditText(actionMenuTarget.text);
+                      setEditError("");
+                      selectionRef.current = {
+                        start: actionMenuTarget.text.length,
+                        end: actionMenuTarget.text.length,
+                      };
+                      setSelectionOverride(selectionRef.current);
+                      setActionMenuTarget(null);
+                      setMoreMenuOpen(false);
+                      setEmojiPickerVisible(false);
+                      requestAnimationFrame(() => inputRef.current?.focus());
+                    }}
                   >
-                    <Ionicons name="trash-outline" size={20} color="#dc2626" />
-                    <Text style={[styles.actionRowText, { color: "#dc2626" }]}>Delete message</Text>
+                    <Ionicons name="create-outline" size={20} color="#e4e6eb" />
+                    <Text style={styles.moreMenuRowText}>Edit message</Text>
                   </TouchableOpacity>
                 )}
-              </>
-            )}
-          </ScrollView>
+
+              <TouchableOpacity
+                style={styles.moreMenuRow}
+                onPress={() => {
+                  handleTogglePin(actionMenuTarget);
+                  setActionMenuTarget(null);
+                  setMoreMenuOpen(false);
+                }}
+              >
+                <Ionicons
+                  name={actionMenuTarget.pinned ? "pin" : "pin-outline"}
+                  size={20}
+                  color="#e0a53d"
+                />
+                <Text style={styles.moreMenuRowText}>
+                  {actionMenuTarget.pinned ? "Unpin message" : "Pin message"}
+                </Text>
+              </TouchableOpacity>
+
+              {messageLinks(actionMenuTarget).map((link) => (
+                <TouchableOpacity
+                  key={link}
+                  style={styles.moreMenuRow}
+                  onPress={() => {
+                    void copyContent(link, "Link");
+                    setActionMenuTarget(null);
+                    setMoreMenuOpen(false);
+                  }}
+                >
+                  <Ionicons name="link-outline" size={20} color="#3b82f6" />
+                  <Text style={styles.moreMenuRowText} numberOfLines={1}>
+                    Copy link
+                  </Text>
+                </TouchableOpacity>
+              ))}
+
+              {actionMenuTarget.senderId === currentUserId && (
+                <TouchableOpacity
+                  style={[styles.moreMenuRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "rgba(255,255,255,0.12)" }]}
+                  onPress={() => {
+                    const target = actionMenuTarget;
+                    setActionMenuTarget(null);
+                    setMoreMenuOpen(false);
+                    handleDeleteMessage(target);
+                  }}
+                >
+                  <Ionicons name="trash-outline" size={20} color="#ef4444" />
+                  <Text style={[styles.moreMenuRowText, { color: "#ef4444" }]}>
+                    Delete message
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+
+          {/* Messenger Bottom Action Bar (Reply / Copy / Forward / More) */}
+          {actionMenuTarget && !moreMenuOpen && (
+            <View
+              style={[
+                styles.messengerBottomBar,
+                { paddingBottom: Math.max(insets.bottom, 14) },
+              ]}
+              onStartShouldSetResponder={() => true}
+            >
+              <TouchableOpacity
+                style={styles.messengerActionBtn}
+                onPress={() => {
+                  handleSwipeReply(actionMenuTarget.id);
+                  setActionMenuTarget(null);
+                  setMoreMenuOpen(false);
+                }}
+              >
+                <Ionicons name="arrow-undo" size={22} color="#3b82f6" />
+                <Text style={styles.messengerActionLabel}>Reply</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.messengerActionBtn}
+                onPress={() => {
+                  void copyContent(actionMenuTarget.text, "Message");
+                  setActionMenuTarget(null);
+                  setMoreMenuOpen(false);
+                }}
+              >
+                <Ionicons name="copy-outline" size={22} color="#3b82f6" />
+                <Text style={styles.messengerActionLabel}>Copy</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.messengerActionBtn}
+                onPress={() => {
+                  setForwardTarget(actionMenuTarget);
+                  setActionMenuTarget(null);
+                  setMoreMenuOpen(false);
+                }}
+              >
+                <Ionicons name="arrow-redo-outline" size={22} color="#3b82f6" />
+                <Text style={styles.messengerActionLabel}>Forward</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.messengerActionBtn}
+                onPress={() => setMoreMenuOpen(true)}
+              >
+                <Ionicons name="ellipsis-horizontal" size={22} color="#3b82f6" />
+                <Text style={styles.messengerActionLabel}>More</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </Pressable>
       </Modal>
+
+      {/* Full Emoji Picker for Reactions */}
+      {!!reactionPickerTarget && (
+        <Modal
+          visible={true}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setReactionPickerTarget(null)}
+        >
+          <Pressable
+            style={styles.actionModalOverlay}
+            onPress={() => setReactionPickerTarget(null)}
+          >
+            <View
+              style={[
+                styles.reactionPickerSheet,
+                { paddingBottom: Math.max(insets.bottom, 12) },
+              ]}
+              onStartShouldSetResponder={() => true}
+            >
+              <ChatEmojiPicker
+                onSelect={(emoji) => {
+                  if (reactionPickerTarget) {
+                    handleReactionPress(reactionPickerTarget, emoji);
+                    setReactionPickerTarget(null);
+                  }
+                }}
+                onClose={() => setReactionPickerTarget(null)}
+                disabled={false}
+                color={themeColor}
+                bottomInset={insets.bottom}
+              />
+            </View>
+          </Pressable>
+        </Modal>
+      )}
 
       {/* ==================== CONVERSATION INFO & SETTINGS SHEET ==================== */}
       <Modal
@@ -2272,36 +2610,42 @@ const styles = StyleSheet.create({
     color: "#fff",
   },
 
-  /* Reactions */
+  /* Bubble Container spacing when reactions attached */
+  bubbleContainerWithReactions: {
+    marginBottom: 12,
+  },
+
+  /* Reactions (Messenger corner pill badge) */
   reactionsRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 4,
-    marginTop: -8,
-    zIndex: 2,
+    position: "absolute",
+    bottom: -9,
+    zIndex: 4,
   },
   reactionsRowOwn: {
-    justifyContent: "flex-end",
-    marginRight: 6,
+    right: 4,
   },
   reactionsRowOther: {
-    justifyContent: "flex-start",
-    marginLeft: 6,
+    left: 4,
   },
   reactionPill: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: "#ffffff",
     borderWidth: 1,
-    borderColor: "rgba(95,9,9,0.14)",
-    borderRadius: 12,
+    borderColor: "rgba(0,0,0,0.08)",
+    borderRadius: 14,
     paddingHorizontal: 6,
     paddingVertical: 2,
     gap: 3,
-    elevation: 1,
+    elevation: 2,
     shadowColor: "#000",
-    shadowOpacity: 0.08,
-    shadowRadius: 2,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.12,
+    shadowRadius: 2.5,
+  },
+  reactionEmojisStack: {
+    flexDirection: "row",
+    alignItems: "center",
   },
   reactionEmojiText: {
     fontSize: 13,
@@ -2309,7 +2653,8 @@ const styles = StyleSheet.create({
   reactionCountText: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#5f0909",
+    color: "#555555",
+    marginLeft: 1,
   },
 
   /* Pinned Marker */
@@ -2439,49 +2784,236 @@ const styles = StyleSheet.create({
   retakeButton: { alignSelf: "flex-start", paddingVertical: 7, paddingRight: 12 },
   removeAttachmentButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
 
-  /* Action Menu Modal */
+  /* ==================== MESSENGER ACTION MODAL & REACTION PILL ==================== */
   actionModalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(10, 2, 2, 0.65)",
+    backgroundColor: "rgba(0, 0, 0, 0.72)",
+  },
+  actionFloatingArea: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    paddingHorizontal: 16,
+    alignItems: "center",
+  },
+  floatingReactionPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#242526",
+    borderRadius: 30,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    gap: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255, 255, 255, 0.15)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    elevation: 8,
+    marginBottom: 10,
+  },
+  reactionPillEmojiBtn: {
+    padding: 6,
+    borderRadius: 20,
+  },
+  reactionPillEmojiBtnActive: {
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+  },
+  floatingEmojiText: {
+    fontSize: 26,
+  },
+  reactionPillPlusBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "rgba(255, 255, 255, 0.15)",
     justifyContent: "center",
     alignItems: "center",
-    padding: 24,
+    marginLeft: 2,
   },
-  actionModalCard: {
-    width: "100%",
-    maxWidth: 320,
-    backgroundColor: "#fffaf7",
-    borderRadius: 20,
-    padding: 16,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
+  focusedBubbleWrap: {
+    maxWidth: "85%",
   },
-  emojiPickerBar: {
+  focusedBubbleWrapOwn: {
+    alignSelf: "flex-end",
+  },
+  focusedBubbleWrapOther: {
+    alignSelf: "flex-start",
     flexDirection: "row",
-    justifyContent: "space-between",
-    paddingVertical: 8,
-    paddingHorizontal: 4,
+    alignItems: "flex-end",
+    gap: 6,
   },
-  emojiPickerBtn: {
-    padding: 4,
+  focusedAvatarWrap: {
+    marginBottom: 2,
   },
-  actionMenuDivider: {
-    height: 1,
-    backgroundColor: "rgba(95, 9, 9, 0.08)",
-    marginVertical: 8,
+  messengerBottomBar: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "#1e1e22",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(255, 255, 255, 0.12)",
+    flexDirection: "row",
+    justifyContent: "space-around",
+    alignItems: "center",
+    paddingTop: 10,
   },
-  actionRow: {
+  messengerActionBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 64,
+    gap: 3,
+  },
+  messengerActionLabel: {
+    fontSize: 12,
+    color: "#e4e6eb",
+    fontWeight: "500",
+  },
+  moreMenuSheet: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "#1e1e22",
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    paddingTop: 10,
+    paddingHorizontal: 16,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(255, 255, 255, 0.14)",
+  },
+  moreMenuHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255, 255, 255, 0.3)",
+    alignSelf: "center",
+    marginBottom: 10,
+  },
+  moreMenuRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 12,
-    gap: 12,
+    paddingVertical: 13,
+    gap: 14,
   },
-  actionRowText: {
+  moreMenuRowText: {
     fontSize: 15,
     fontWeight: "600",
+    color: "#e4e6eb",
+    flex: 1,
+  },
+  reactionPickerSheet: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "#fffaf7",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    overflow: "hidden",
+  },
+
+  /* ==================== MESSENGER CONVERSATION START HEADER ==================== */
+  startHeaderWrapper: {
+    paddingBottom: 16,
+  },
+  startHeaderContainer: {
+    alignItems: "center",
+    paddingVertical: 20,
+    paddingHorizontal: 20,
+  },
+  startAvatarWrap: {
+    marginBottom: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  startAvatar: {
+    width: 90,
+    height: 90,
+    borderRadius: 45,
+  },
+  startAvatarFallback: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  startAvatarInitial: {
+    fontSize: 34,
+    fontWeight: "700",
+  },
+  startDisplayName: {
+    fontSize: 20,
+    fontWeight: "800",
     color: "#2a0f0b",
+    textAlign: "center",
+    marginBottom: 2,
+  },
+  startRealName: {
+    fontSize: 13,
+    color: "#8f766e",
+    marginBottom: 6,
+  },
+  startRoleBadge: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 2,
+    marginTop: 4,
+    marginBottom: 10,
+  },
+  startRoleText: {
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
+  startSubtitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#3d1f19",
+    marginTop: 2,
+  },
+  startCaption: {
+    fontSize: 12,
+    color: "#8f766e",
+    textAlign: "center",
+    marginTop: 3,
+    maxWidth: 260,
+    lineHeight: 16,
+  },
+  waveBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    marginTop: 16,
+    gap: 8,
+  },
+  waveIcon: {
+    fontSize: 20,
+  },
+  waveText: {
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  dateSeparator: {
+    marginTop: 24,
+    marginBottom: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    backgroundColor: "rgba(0,0,0,0.05)",
+    borderRadius: 12,
+    alignSelf: "center",
+  },
+  dateSeparatorText: {
+    fontSize: 11.5,
+    fontWeight: "600",
+    color: "#8f766e",
   },
 
   /* Info / Settings Sheet */

@@ -276,6 +276,18 @@ const readSoundId = async (env, userId) => {
   return SOUND_IDS.has(value) ? value : "default";
 };
 
+// Unread count for one participant of a direct conversation, used to decide
+// whether a push would merely repeat one the recipient has not opened yet.
+const readConversationUnread = async (env, conversationId, userId) => {
+  const document = await firestoreGet(
+    env,
+    `directConversations/${encodeURIComponent(conversationId)}`,
+  );
+  const entry = firestoreFields(document)?.unreadCounts?.mapValue?.fields?.[userId];
+  const value = Number(entry?.integerValue ?? entry?.doubleValue ?? 0);
+  return Number.isFinite(value) ? value : 0;
+};
+
 const soundForNotification = (soundId) => {
   const options = {
     default: { file: "notif_default.wav", channel: "sound_default" },
@@ -323,6 +335,11 @@ const notificationKind = (notification) => {
   const type = String(notification.type || "");
   const entity = String(notification.entityType || "");
   if (entity === "direct_message") return "direct_message";
+  // A community-server channel message. Before this it was filed as a
+  // "comment", which made the push announce the wrong place entirely.
+  if (entity === "thread_message") {
+    return type === "mention" ? "mention_thread" : "thread_message";
+  }
   if (type === "like") {
     if (entity === "poll") return "poll_like";
     if (entity === "comment" || entity === "reply") return "comment_like";
@@ -368,6 +385,25 @@ const NOTIFICATION_TEMPLATES = {
   mention_comment: (n) => ({
     title: "You were mentioned 💬",
     body: `${n.actorName} mentioned you in a comment: "${truncateSnippet(n.preview, 80)}"`,
+  }),
+  // The client already words the location ("mentioned you in #general"), so
+  // that text is used verbatim instead of being overwritten with comment
+  // wording that named the wrong place.
+  mention_thread: (n) => {
+    const snippet = truncateSnippet(n.preview, 60);
+    return {
+      title: "You were mentioned 💬",
+      body: `${n.actorName} ${n.message || "mentioned you in a channel"}${
+        snippet ? `: "${snippet}"` : ""
+      }`,
+    };
+  },
+  // Ready for plain channel messages. Nothing creates this notification today:
+  // pushing every channel message needs a deliberate fan-out to members that
+  // respects channelMutes, which is a client-side change.
+  thread_message: (n) => ({
+    title: String(n.actorName || "New message"),
+    body: truncateSnippet(n.preview, 100) || "Sent a message",
   }),
   announcement: (n) => ({
     title: "📢 Announcement from Staff",
@@ -421,6 +457,25 @@ export const sendNotificationPush = async (env, notification) => {
       notificationId: notification?.id || null,
     });
     return { sent: 0 };
+  }
+
+  // One notification per conversation until it is opened, the way Messenger
+  // behaves. The unread count already includes this message, so a count above
+  // one means an earlier message was already announced and still has not been
+  // read — announcing again would just stack another row for the same chat.
+  if (notificationKind(notification) === "direct_message" && notification.parentId) {
+    const unread = await readConversationUnread(
+      env,
+      String(notification.parentId),
+      String(notification.recipientId),
+    );
+    if (unread > 1) {
+      console.log("Push skipped: conversation already has an unopened notification.", {
+        notificationId: notification.id,
+        unread,
+      });
+      return { sent: 0, skipped: "conversation-already-notified" };
+    }
   }
 
   const tokens = await readUserPushToken(env, notification.recipientId);

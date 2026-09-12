@@ -58,7 +58,7 @@ type FilterOption =
 type NotificationItem = {
   id: string;
   type: NotificationType;
-  entityType?: "post" | "poll" | "comment" | "reply" | "event" | "emergency" | "direct_message";
+  entityType?: "post" | "poll" | "comment" | "reply" | "event" | "emergency" | "direct_message" | "thread_message";
   entityId?: string;
   parentId?: string | null;
   actorName: string;

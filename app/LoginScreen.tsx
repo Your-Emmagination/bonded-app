@@ -1,5 +1,7 @@
 // app/LoginScreen.tsx
 import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
+import { beginLoginPreparation, findSetupProfile } from "@/contexts/AccountSetupContext";
+import { checkAccountPassword } from "@/utils/passwordReset";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
@@ -277,7 +279,7 @@ const handleTermsDecline = useCallback(() => {
     Keyboard.dismiss();
 
     const trimmedID = studentID.trim();
-    const trimmedPass = password.trim();
+    const trimmedPass = password;
 
     if (!trimmedID) {
       setError("ID is required");
@@ -293,6 +295,7 @@ const handleTermsDecline = useCallback(() => {
       return;
     }
 
+    const finishPreparation = beginLoginPreparation();
     try {
       let email = trimmedID.toLowerCase();
 
@@ -315,7 +318,16 @@ const handleTermsDecline = useCallback(() => {
         ["userProfileDocId", profile?.studentID || email.split("@")[0] || user.uid],
       ]);
 
-      // Role-based navigation
+      // The root gate owns navigation. Classify untracked legacy passwords
+      // using the credential already entered, without persisting it locally.
+      try {
+        const record = await findSetupProfile(user);
+        if (record.data().mustChangePassword !== false) {
+          await checkAccountPassword(record.id, trimmedPass);
+        }
+      } catch {
+        // Setup remains locked and offers a password-check retry there.
+      }
 
     } catch (err: any) {
       shakeAnimation();
@@ -332,6 +344,7 @@ const handleTermsDecline = useCallback(() => {
 
       setError(errorMessages[err.code] || "Login failed. Please try again.");
     } finally {
+      finishPreparation();
       setLoading(false);
     }
   }, [studentID, password, loading, shakeAnimation]);

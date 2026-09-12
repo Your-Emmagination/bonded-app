@@ -2941,7 +2941,10 @@ export default function ServerChannelScreen() {
                     : resolveAvatarUri(currentUserProfile),
                 isAnonymous: messageData.isAnonymous,
               },
-              entityType: "comment",
+              // Not "comment": this is a channel message, and filing it as a
+              // comment made the push read "mentioned you in a comment" while
+              // discarding the channel name written just below.
+              entityType: "thread_message",
               entityId: messageRef.id,
               parentId: resolvedServerId,
               message: `mentioned you in #${resolvedChannelLabel}`,

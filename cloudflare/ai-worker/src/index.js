@@ -3,6 +3,7 @@ import {
   handlePushNotificationRequest,
 } from "./push.js";
 import { checkKeywordFlags } from "./keywordModeration.js";
+import { checkAccountPassword } from "./accountSetup.js";
 
 const OPENMODERATION_API_URL = "https://api.openmoderation.com/v1/moderation";
 const DEFAULT_OPENMODERATION_PROVIDER = "openai";
@@ -854,7 +855,7 @@ async function firebaseAccessToken(env) {
   return firebaseTokenCache;
 }
 
-async function verifyFirebaseUser(env, idToken) {
+async function lookupFirebaseUser(env, idToken) {
   if (!env.FIREBASE_WEB_API_KEY) {
     throw new Error("Missing FIREBASE_WEB_API_KEY Worker secret.");
   }
@@ -872,7 +873,11 @@ async function verifyFirebaseUser(env, idToken) {
   if (!response.ok || !payload?.users?.[0]?.localId) {
     throw new Error("Invalid or expired Firebase ID token.");
   }
-  return payload.users[0].localId;
+  return payload.users[0];
+}
+
+async function verifyFirebaseUser(env, idToken) {
+  return (await lookupFirebaseUser(env, idToken)).localId;
 }
 
 const fsValue = (v) => {
@@ -2219,6 +2224,7 @@ async function handleRecoveryEmailConfirm(env, request, body) {
   }
 
   await patchFirestore(env, "students", studentID, {
+    email: String(record.email || ""),
     recoveryEmail: String(record.email || ""),
     recoveryEmailVerified: true,
   });
@@ -2317,6 +2323,10 @@ async function handlePasswordResetConfirm(env, request, body) {
 
   try {
     await adminSetPassword(env, student.uid, newPassword);
+    await patchFirestore(env, "students", student.studentID, {
+      mustChangePassword: false,
+      passwordCheckedAt: new Date().toISOString(),
+    });
   } catch (error) {
     console.error("[auth] adminSetPassword failed:", error?.message || error);
     return json({ error: "Could not update the password. Please try again." }, { status: 502 });
@@ -2368,6 +2378,14 @@ export default {
 
       if (body?.mode === "recovery-email-start") {
         return await handleRecoveryEmailStart(env, request, body);
+      }
+      if (body?.mode === "account-password-check") {
+        const result = await checkAccountPassword(env, request, body, {
+          lookupUser: lookupFirebaseUser,
+          readProfile: (environment, id) => readFirestoreDocSafe(environment, `/students/${encodeURIComponent(id)}`),
+          patchProfile: (environment, id, fields) => patchFirestore(environment, "students", id, fields),
+        });
+        return json(result.body, { status: result.status, headers: { "Access-Control-Allow-Origin": allowedOrigin } });
       }
       if (body?.mode === "recovery-email-confirm") {
         return await handleRecoveryEmailConfirm(env, request, body);

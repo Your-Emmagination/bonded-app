@@ -1,15 +1,15 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import { uploadProfileImage } from "@/utils/cloudinaryUpload";
+import { changeAccountPassword } from "@/utils/changeAccountPassword";
+import { useAccountSetup } from "@/contexts/AccountSetupContext";
+import { profileEmail } from "@/utils/profileSetup";
 import { endPresenceSession } from "@/utils/presence";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import * as ImagePicker from "expo-image-picker";
 import {
-    EmailAuthProvider,
     User as FirebaseUser,
-    reauthenticateWithCredential,
     signOut,
-    updatePassword,
     updateProfile,
 } from "firebase/auth";
 import {
@@ -183,7 +183,8 @@ const TABS: {
 ];
 
 const ProfileScreen = () => {
-  const { returnTo } = useLocalSearchParams<{ returnTo?: string | string[] }>();
+  const { profileId: accountProfileId } = useAccountSetup();
+  const { returnTo, editTab } = useLocalSearchParams<{ returnTo?: string | string[]; editTab?: string }>();
   const { isOffline } = useNetworkStatus();
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [student, setStudent] = useState<Student | null>(null);
@@ -452,7 +453,7 @@ const ProfileScreen = () => {
 
       if (currentUser) {
         const email = currentUser.email ?? "";
-        const studentID = email.split("@")[0] || currentUser.uid;
+        const studentID = accountProfileId || email.split("@")[0] || currentUser.uid;
 
         getCachedMyProfile<Student>(currentUser.uid).then((cached) => {
           if (cached) {
@@ -497,7 +498,7 @@ const ProfileScreen = () => {
       if (unsubscribeProfile) unsubscribeProfile();
       unsubscribeAuth();
     };
-  }, []);
+  }, [accountProfileId]);
 
   // ─── My Posts: handlers ─────────────────────────────────────────────
   const deleteCommentTree = useCallback(async (parentId: string) => {
@@ -740,11 +741,6 @@ const ProfileScreen = () => {
           payload.lastnameLower = payload.lastname.trim().toLowerCase();
         }
 
-        if (auth.currentUser?.uid) {
-          payload.userId = auth.currentUser.uid;
-          payload.uid = auth.currentUser.uid;
-        }
-
         await updateDoc(doc(db, "students", student.studentID), payload);
         if (auth.currentUser?.uid && auth.currentUser.uid !== student.studentID) {
           updateDoc(doc(db, "students", auth.currentUser.uid), payload).catch(() => {});
@@ -875,12 +871,7 @@ const ProfileScreen = () => {
     }
 
     try {
-      const credential = EmailAuthProvider.credential(
-        user.email || "",
-        currentPassword,
-      );
-      await reauthenticateWithCredential(user, credential);
-      await updatePassword(user, newPassword);
+      await changeAccountPassword(user, student?.studentID || user.email?.split("@")[0] || user.uid, currentPassword, newPassword);
       showInfo("Success", "Password changed successfully!");
       setEditedData((prev) => ({
         ...prev,
@@ -978,6 +969,13 @@ const ProfileScreen = () => {
     setEditedData((prev) => ({ ...prev, selectedTab: key }));
   }, []);
 
+  useFocusEffect(useCallback(() => {
+    if (editTab !== "password") return;
+    handleTabChange("password");
+    setEditModalVisible(true);
+    router.setParams({ editTab: undefined });
+  }, [editTab, handleTabChange, router]));
+
   const handleScreenBack = useCallback(() => {
     if (viewImageVisible) {
       setViewImageVisible(false);
@@ -1027,14 +1025,7 @@ const ProfileScreen = () => {
     }, [handleScreenBack]),
   );
 
-  const displayEmail =
-    student?.recoveryEmail?.trim() ||
-    (student?.email &&
-    !student.email.endsWith("@student.csap") &&
-    !student.email.endsWith("@teacher.csap") &&
-    !student.email.endsWith("@admin.csap")
-      ? student.email
-      : "No email added");
+  const displayEmail = profileEmail({ email: student?.email, recoveryEmail: student?.recoveryEmail }) || "No email added";
 
   return (
     <SafeAreaView style={styles.container}>
@@ -1437,7 +1428,7 @@ const ProfileScreen = () => {
         onTabChange={handleTabChange}
         onDataChange={updateEditedData}
         infoStudentID={student?.studentID ?? user?.email?.split("@")[0] ?? ""}
-        infoEmail={student?.recoveryEmail}
+        infoEmail={student?.recoveryEmail || profileEmail({ email: student?.email })}
         infoVerified={student?.recoveryEmailVerified}
         onChangePassword={handleChangePassword}
         onImagePick={handleImagePick}

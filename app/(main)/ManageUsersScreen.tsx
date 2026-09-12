@@ -14,10 +14,11 @@ import {
   updateDoc,
   where,
 } from "firebase/firestore";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -29,7 +30,7 @@ import {
   View,
 } from "react-native";
 import { Image } from "expo-image";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import ConfirmDialog from "./components/ConfirmDialog";
 import { ListSkeleton } from "./components/Skeleton";
 import { auth, db } from "../../Firebase_configure";
@@ -162,6 +163,7 @@ type UserRowProps = {
   expanded: boolean;
   busy: boolean;
   isSelf: boolean;
+  isRecentlyUpdated?: boolean;
   onToggleExpand: (id: string) => void;
   onOpenProfile: (user: ManagedUserRecord) => void;
   onOpenEdit: (user: ManagedUserRecord) => void;
@@ -174,6 +176,7 @@ function UserRowComponent({
   expanded,
   busy,
   isSelf,
+  isRecentlyUpdated,
   onToggleExpand,
   onOpenProfile,
   onOpenEdit,
@@ -183,7 +186,13 @@ function UserRowComponent({
   const normalizedRole = parseUserRole(user.role) || "student";
 
   return (
-    <View style={[styles.userCard, expanded && styles.userCardExpanded]}>
+    <View
+      style={[
+        styles.userCard,
+        expanded && styles.userCardExpanded,
+        isRecentlyUpdated && styles.userCardRecentlyUpdated,
+      ]}
+    >
       <TouchableOpacity
         style={styles.userHeader}
         onPress={() => onToggleExpand(user.id)}
@@ -215,6 +224,12 @@ function UserRowComponent({
               {isSelf && (
                 <View style={styles.youBadge}>
                   <Text style={styles.youBadgeText}>You</Text>
+                </View>
+              )}
+              {isRecentlyUpdated && (
+                <View style={styles.updatedBadge}>
+                  <Ionicons name="checkmark-circle" size={11} color="#8a5a10" />
+                  <Text style={styles.updatedBadgeText}>Updated</Text>
                 </View>
               )}
             </View>
@@ -373,6 +388,8 @@ const UserRow = React.memo(UserRowComponent);
 
 export default function ManageUsersScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const flatListRef = useRef<FlatList<ManagedUserRecord>>(null);
   const [loading, setLoading] = useState(true);
   const [role, setRole] = useState<UserRole | undefined>(undefined);
   const [users, setUsers] = useState<ManagedUserRecord[]>([]);
@@ -380,6 +397,7 @@ export default function ManageUsersScreen() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ManagedUserFilter>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [recentlyUpdatedId, setRecentlyUpdatedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   // Fix 2: bounded page that "Load more" grows.
   const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
@@ -409,9 +427,26 @@ export default function ManageUsersScreen() {
   const [editLastname, setEditLastname] = useState("");
   const [editEmail, setEditEmail] = useState("");
   const [editCourse, setEditCourse] = useState("");
+  const [editProgramSearch, setEditProgramSearch] = useState("");
   const [editProgramPickerOpen, setEditProgramPickerOpen] = useState(false);
   const [editError, setEditError] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      () => setKeyboardVisible(true),
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      () => setKeyboardVisible(false),
+    );
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   // Single dialog state used to render every alert on this screen through
   // the app's branded ConfirmDialog instead of the bare native Alert.alert.
@@ -603,10 +638,13 @@ export default function ManageUsersScreen() {
     return [...users]
       .filter((item) => {
         const normalizedRole = parseUserRole(item.role) || "student";
+        const isCurrentlyActive =
+          item.id === expandedId || item.id === recentlyUpdatedId;
         const matchesFilter =
           filter === "all" ||
           (filter === "online" && item.isOnline === true) ||
-          normalizedRole === filter;
+          normalizedRole === filter ||
+          isCurrentlyActive;
 
         if (!matchesFilter) return false;
         if (!queryValue) return true;
@@ -635,7 +673,38 @@ export default function ManageUsersScreen() {
         if (roleDiff !== 0) return roleDiff;
         return getName(first).localeCompare(getName(second));
       });
-  }, [filter, search, users]);
+  }, [expandedId, filter, recentlyUpdatedId, search, users]);
+
+  // Keep recently updated user in view by smoothly scrolling to their position
+  useEffect(() => {
+    if (!recentlyUpdatedId) return;
+
+    const targetIndex = filteredUsers.findIndex((u) => u.id === recentlyUpdatedId);
+    if (targetIndex >= 0 && flatListRef.current) {
+      const scrollTimer = setTimeout(() => {
+        try {
+          flatListRef.current?.scrollToIndex({
+            index: targetIndex,
+            animated: true,
+            viewPosition: 0.3,
+          });
+        } catch {
+          // Handled by onScrollToIndexFailed fallback
+        }
+      }, 150);
+
+      const clearTimer = setTimeout(() => {
+        setRecentlyUpdatedId((current) =>
+          current === recentlyUpdatedId ? null : current,
+        );
+      }, 4000);
+
+      return () => {
+        clearTimeout(scrollTimer);
+        clearTimeout(clearTimer);
+      };
+    }
+  }, [filteredUsers, recentlyUpdatedId]);
 
   const openProfile = useCallback(
     (managedUser: ManagedUserRecord) => {
@@ -683,6 +752,8 @@ export default function ManageUsersScreen() {
               yearlvl: nextYearLvl,
               updatedAt: serverTimestamp(),
             });
+            setRecentlyUpdatedId(managedUser.id);
+            setExpandedId(managedUser.id);
           } catch (error) {
             console.error("Error updating year level:", error);
             showInfo("Error", "Failed to update year level.");
@@ -731,6 +802,8 @@ export default function ManageUsersScreen() {
               roleUpdatedAt: serverTimestamp(),
               roleUpdatedBy: auth.currentUser?.uid || null,
             });
+            setRecentlyUpdatedId(managedUser.id);
+            setExpandedId(managedUser.id);
           } catch (error) {
             console.error("Error updating user role:", error);
             showInfo("Error", "Failed to update user role.");
@@ -760,6 +833,7 @@ export default function ManageUsersScreen() {
       setEditLastname(managedUser.lastname || "");
       setEditEmail(managedUser.email || "");
       setEditCourse(managedUser.course || "");
+      setEditProgramSearch("");
       setEditProgramPickerOpen(false);
       setEditError("");
     },
@@ -768,21 +842,30 @@ export default function ManageUsersScreen() {
 
   const closeEditProfile = useCallback(() => {
     if (savingEdit) return;
+    Keyboard.dismiss();
     setEditUser(null);
+    setEditProgramSearch("");
     setEditProgramPickerOpen(false);
     setEditError("");
   }, [savingEdit]);
 
   const filteredEditPrograms = useMemo(() => {
-    const value = editCourse.trim().toLowerCase();
-    if (!value) return programs;
-    return programs.filter((program) =>
-      `${program.name} ${program.code}`.toLowerCase().includes(value),
-    );
-  }, [editCourse, programs]);
+    const query = editProgramSearch.trim().toLowerCase();
+    if (!query) return programs;
+
+    // Split into individual word tokens so order doesn't matter and every word is matched
+    const searchTokens = query.split(/\s+/).filter(Boolean);
+
+    return programs.filter((program) => {
+      const targetText =
+        `${program.name} ${program.code} ${program.description || ""}`.toLowerCase();
+      return searchTokens.every((token) => targetText.includes(token));
+    });
+  }, [editProgramSearch, programs]);
 
   const selectEditProgram = useCallback((program: Program) => {
     setEditCourse(program.name);
+    setEditProgramSearch("");
     setEditProgramPickerOpen(false);
     setEditError("");
   }, []);
@@ -805,11 +888,8 @@ export default function ManageUsersScreen() {
       setEditError("First and last name are both required.");
       return;
     }
-    if (!email) {
-      setEditError("Email is required.");
-      return;
-    }
-    if (!EMAIL_PATTERN.test(email)) {
+    // Email is optional. Only validate format when provided:
+    if (email && !EMAIL_PATTERN.test(email)) {
       setEditError("Enter a valid email address.");
       return;
     }
@@ -862,6 +942,8 @@ export default function ManageUsersScreen() {
             course: normalizedCourse,
             updatedAt: serverTimestamp(),
           });
+          setRecentlyUpdatedId(target.id);
+          setExpandedId(target.id);
           setEditUser(null);
           setEditProgramPickerOpen(false);
         } catch (error) {
@@ -894,6 +976,7 @@ export default function ManageUsersScreen() {
           expanded={expandedId === item.id}
           busy={busyId === item.id}
           isSelf={isSelf}
+          isRecentlyUpdated={recentlyUpdatedId === item.id}
           onToggleExpand={toggleExpand}
           onOpenProfile={openProfile}
           onOpenEdit={openEditProfile}
@@ -910,6 +993,7 @@ export default function ManageUsersScreen() {
       expandedId,
       openEditProfile,
       openProfile,
+      recentlyUpdatedId,
       toggleExpand,
     ],
   );
@@ -948,6 +1032,13 @@ export default function ManageUsersScreen() {
       </View>
 
       <FlatList
+        ref={flatListRef}
+        onScrollToIndexFailed={(info) => {
+          flatListRef.current?.scrollToOffset({
+            offset: Math.max(0, info.highestMeasuredFrameIndex * 80),
+            animated: true,
+          });
+        }}
         style={styles.body}
         contentContainerStyle={styles.content}
         data={filteredUsers}
@@ -1020,10 +1111,33 @@ export default function ManageUsersScreen() {
         onRequestClose={closeEditProfile}
       >
         <KeyboardAvoidingView
-          style={styles.editModalBackdrop}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={Platform.OS === "ios" ? 10 : 0}
+          style={styles.editModalOverlay}
         >
-          <View style={styles.editModalCard}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => {
+              Keyboard.dismiss();
+              closeEditProfile();
+            }}
+            disabled={savingEdit}
+          />
+          <View
+            style={[
+              styles.editModalCard,
+              {
+                paddingBottom: keyboardVisible
+                  ? 14
+                  : Math.max(insets.bottom + 16, 24),
+              },
+            ]}
+          >
+            <View style={styles.sheetHandleContainer}>
+              <View style={styles.sheetHandle} />
+            </View>
+
             <View style={styles.editModalHeader}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.editModalTitle}>Edit profile details</Text>
@@ -1033,17 +1147,20 @@ export default function ManageUsersScreen() {
                 </Text>
               </View>
               <TouchableOpacity
+                style={styles.modalCloseButton}
                 onPress={closeEditProfile}
                 disabled={savingEdit}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
-                <Ionicons name="close" size={24} color="#7a3b2e" />
+                <Ionicons name="close" size={20} color="#7a3b2e" />
               </TouchableOpacity>
             </View>
 
             <ScrollView
               keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
               showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.editModalScrollContent}
             >
               <View style={styles.editFieldRow}>
                 <View style={styles.editFieldHalf}>
@@ -1074,41 +1191,47 @@ export default function ManageUsersScreen() {
                 </View>
               </View>
 
-              <Text style={styles.editLabel}>Email</Text>
+              <Text style={styles.editLabel}>
+                Email <Text style={styles.editLabelOptional}>(optional)</Text>
+              </Text>
               <TextInput
                 value={editEmail}
                 onChangeText={(value) => {
                   setEditEmail(value);
                   setEditError("");
                 }}
-                placeholder="name@student.csap"
+                placeholder="Optional email (e.g. name@student.csap)"
                 placeholderTextColor="#b88f87"
                 style={styles.editInput}
                 autoCapitalize="none"
                 keyboardType="email-address"
               />
               <Text style={styles.editHelp}>
-                Updates the profile email shown in the app. It does not change
+                Optional contact email shown in the app. It does not change
                 the account&apos;s login credential.
               </Text>
 
               <Text style={styles.editLabel}>Program</Text>
-              <View style={styles.editSearchShell}>
-                <Ionicons name="search-outline" size={17} color="#9b766c" />
-                <TextInput
-                  value={editCourse}
-                  onChangeText={(value) => {
-                    setEditCourse(value);
-                    setEditProgramPickerOpen(true);
-                    setEditError("");
-                  }}
-                  placeholder={
-                    programsLoading ? "Loading programs…" : "Search program or code"
+              <TouchableOpacity
+                style={styles.editSearchShell}
+                onPress={() => setEditProgramPickerOpen((open) => !open)}
+                activeOpacity={0.82}
+                accessibilityRole="button"
+                accessibilityLabel="Choose program"
+              >
+                <Ionicons name="school-outline" size={18} color="#9b766c" />
+                <Text
+                  style={
+                    editCourse
+                      ? styles.editCourseValueText
+                      : styles.editCoursePlaceholderText
                   }
-                  placeholderTextColor="#b88f87"
-                  style={styles.editSearchInput}
-                  editable={!programsLoading}
-                />
+                  numberOfLines={1}
+                >
+                  {programsLoading
+                    ? "Loading programs…"
+                    : editCourse || "Select a program"}
+                </Text>
                 {!!editCourse && (
                   <TouchableOpacity
                     onPress={() => {
@@ -1120,40 +1243,95 @@ export default function ManageUsersScreen() {
                     <Ionicons name="close-circle" size={17} color="#b89a91" />
                   </TouchableOpacity>
                 )}
-                <TouchableOpacity
-                  onPress={() => setEditProgramPickerOpen((value) => !value)}
-                >
-                  <Ionicons
-                    name={editProgramPickerOpen ? "chevron-up" : "chevron-down"}
-                    size={19}
-                    color="#7a3b2e"
-                  />
-                </TouchableOpacity>
-              </View>
+                <Ionicons
+                  name={editProgramPickerOpen ? "chevron-up" : "chevron-down"}
+                  size={19}
+                  color="#7a3b2e"
+                />
+              </TouchableOpacity>
+
               {editProgramPickerOpen && (
                 <View style={styles.editDropdown}>
+                  <View style={styles.dropdownSearchShell}>
+                    <Ionicons name="search-outline" size={15} color="#9b766c" />
+                    <TextInput
+                      value={editProgramSearch}
+                      onChangeText={setEditProgramSearch}
+                      placeholder="Search by program name or code…"
+                      placeholderTextColor="#b88f87"
+                      style={styles.dropdownSearchInput}
+                      autoCapitalize="none"
+                    />
+                    {!!editProgramSearch && (
+                      <TouchableOpacity
+                        onPress={() => setEditProgramSearch("")}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <Ionicons name="close-circle" size={15} color="#b89a91" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
                   {filteredEditPrograms.length === 0 ? (
                     <Text style={styles.editDropdownEmpty}>
-                      No matching programs. Add one in Manage Programs.
+                      No matching programs.
                     </Text>
                   ) : (
-                    filteredEditPrograms.map((program) => (
-                      <TouchableOpacity
-                        key={program.id}
-                        style={styles.editDropdownItem}
-                        onPress={() => selectEditProgram(program)}
-                      >
-                        <View style={styles.editProgramBadge}>
-                          <Text style={styles.editProgramBadgeText}>
-                            {program.code.slice(0, 5)}
-                          </Text>
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.editDropdownName}>{program.name}</Text>
-                          <Text style={styles.editDropdownCode}>{program.code}</Text>
-                        </View>
-                      </TouchableOpacity>
-                    ))
+                    <ScrollView
+                      style={styles.editDropdownScroll}
+                      nestedScrollEnabled={true}
+                      keyboardShouldPersistTaps="handled"
+                      showsVerticalScrollIndicator={true}
+                    >
+                      {filteredEditPrograms.map((program) => {
+                        const isSelected = program.name === editCourse;
+                        return (
+                          <TouchableOpacity
+                            key={program.id}
+                            style={[
+                              styles.editDropdownItem,
+                              isSelected && styles.editDropdownItemSelected,
+                            ]}
+                            onPress={() => selectEditProgram(program)}
+                            activeOpacity={0.82}
+                          >
+                            <View
+                              style={[
+                                styles.editProgramBadge,
+                                isSelected && styles.editProgramBadgeSelected,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.editProgramBadgeText,
+                                  isSelected && styles.editProgramBadgeTextSelected,
+                                ]}
+                              >
+                                {program.code.slice(0, 5)}
+                              </Text>
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <Text
+                                style={[
+                                  styles.editDropdownName,
+                                  isSelected && styles.editDropdownNameSelected,
+                                ]}
+                              >
+                                {program.name}
+                              </Text>
+                              <Text style={styles.editDropdownCode}>{program.code}</Text>
+                            </View>
+                            {isSelected && (
+                              <Ionicons
+                                name="checkmark-circle"
+                                size={19}
+                                color="#8a5a10"
+                              />
+                            )}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
                   )}
                 </View>
               )}
@@ -1710,23 +1888,78 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
   },
   editDetailsText: { color: "#8a5a10", fontSize: 11.5, fontWeight: "800" },
-  editModalBackdrop: {
+  userCardRecentlyUpdated: {
+    borderColor: "#d39a32",
+    borderWidth: 1.5,
+    backgroundColor: "#fffdf9",
+  },
+  updatedBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    backgroundColor: "#faeed6",
+    borderColor: "#e0bf80",
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    marginLeft: 6,
+  },
+  updatedBadgeText: {
+    color: "#8a5a10",
+    fontSize: 10,
+    fontWeight: "900",
+  },
+  editModalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: "rgba(0,0,0,0.58)",
+    justifyContent: "flex-end",
+  },
+  editModalKeyboardShell: {
+    width: "100%",
     justifyContent: "flex-end",
   },
   editModalCard: {
     backgroundColor: "#fffaf6",
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
     paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 26,
-    maxHeight: "88%",
+    paddingTop: 10,
+    maxHeight: "90%",
+    width: "100%",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    elevation: 20,
+  },
+  sheetHandleContainer: {
+    alignItems: "center",
+    paddingVertical: 8,
+    marginBottom: 4,
+  },
+  sheetHandle: {
+    width: 42,
+    height: 4.5,
+    borderRadius: 999,
+    backgroundColor: "#dfcbbe",
+  },
+  modalCloseButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "#f2e4dc",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  editModalScrollContent: {
+    paddingBottom: 16,
   },
   editModalHeader: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     gap: 12,
     marginBottom: 14,
   },
@@ -1741,6 +1974,11 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     marginTop: 12,
   },
+  editLabelOptional: {
+    color: "#a8857c",
+    fontSize: 11.5,
+    fontWeight: "600",
+  },
   editInput: {
     backgroundColor: "#fff",
     borderWidth: 1,
@@ -1753,7 +1991,7 @@ const styles = StyleSheet.create({
   },
   editHelp: { color: "#9a7970", fontSize: 10.75, lineHeight: 16, marginTop: 6 },
   editSearchShell: {
-    minHeight: 46,
+    minHeight: 48,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
@@ -1763,11 +2001,33 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 12,
   },
-  editSearchInput: {
+  editCourseValueText: {
     flex: 1,
     color: "#4c1b14",
-    fontSize: 14,
-    paddingVertical: 10,
+    fontSize: 13.5,
+    fontWeight: "700",
+  },
+  editCoursePlaceholderText: {
+    flex: 1,
+    color: "#b88f87",
+    fontSize: 13.5,
+    fontWeight: "500",
+  },
+  dropdownSearchShell: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#fdf8f5",
+    borderBottomWidth: 1,
+    borderBottomColor: "#ebdcd3",
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  dropdownSearchInput: {
+    flex: 1,
+    color: "#4c1b14",
+    fontSize: 13,
+    paddingVertical: 2,
   },
   editDropdown: {
     borderWidth: 1,
@@ -1777,6 +2037,9 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     marginTop: 8,
   },
+  editDropdownScroll: {
+    maxHeight: 240,
+  },
   editDropdownItem: {
     flexDirection: "row",
     alignItems: "center",
@@ -1785,8 +2048,12 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "#f1e5e0",
   },
+  editDropdownItemSelected: {
+    backgroundColor: "#fcf5ee",
+  },
   editDropdownEmpty: { padding: 14, color: "#8f6c63", fontSize: 12 },
   editDropdownName: { fontWeight: "800", color: "#4c1b14", fontSize: 13 },
+  editDropdownNameSelected: { color: "#5f0909", fontWeight: "900" },
   editDropdownCode: { marginTop: 2, color: "#9b766c", fontSize: 11.5 },
   editProgramBadge: {
     width: 42,
@@ -1796,7 +2063,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  editProgramBadgeSelected: {
+    backgroundColor: "#ebd1b7",
+  },
   editProgramBadgeText: { color: "#7a3b2e", fontWeight: "900", fontSize: 10.5 },
+  editProgramBadgeTextSelected: { color: "#5f0909" },
   editErrorText: {
     color: "#b3261e",
     fontSize: 12,

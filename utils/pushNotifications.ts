@@ -485,6 +485,38 @@ export const unregisterDeviceForPushNotifications = async (user: User) => {
   return true;
 };
 
+/**
+ * Clears the tray notifications belonging to one conversation, so a chat the
+ * user has just read stops showing rows for messages they have already seen.
+ * Messenger does the same on open.
+ */
+export const dismissConversationNotifications = async (conversationId: string) => {
+  if (!conversationId) {
+    return;
+  }
+
+  const notifications = await loadNotificationsModule();
+  if (!notifications) {
+    return;
+  }
+
+  try {
+    const presented = await notifications.getPresentedNotificationsAsync();
+    await Promise.all(
+      presented
+        .filter((item) => {
+          const data = item.request?.content?.data as
+            | Record<string, unknown>
+            | undefined;
+          return typeof data?.parentId === "string" && data.parentId === conversationId;
+        })
+        .map((item) => notifications.dismissNotificationAsync(item.request.identifier)),
+    );
+  } catch {
+    // A tray we cannot read is never worth failing a chat open over.
+  }
+};
+
 export const getLastPushNotificationResponse = async () => {
   const notifications = await loadNotificationsModule();
   if (!notifications) {

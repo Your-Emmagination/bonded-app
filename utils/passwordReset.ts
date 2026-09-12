@@ -74,3 +74,8 @@ export const confirmRecoveryEmailVerification = (studentID: string, code: string
     { studentID: studentID.trim(), code: code.trim() },
     { authed: true },
   );
+
+/** Verify the current credential and classify legacy/admin-issued passwords.
+ * The Worker, never a profile edit, controls mustChangePassword. */
+export const checkAccountPassword = (studentID: string, password: string) =>
+  callWorker("account-password-check", { studentID, password }, { authed: true }) as Promise<{ mustChangePassword: boolean }>;

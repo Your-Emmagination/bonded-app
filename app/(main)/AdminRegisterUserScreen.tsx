@@ -184,6 +184,7 @@ async function createManagedUser(input: RegistrationInput): Promise<Registration
       userId: createdUser.uid,
       bio: "",
       isOnline: false,
+      mustChangePassword: true,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     }, { merge: true });

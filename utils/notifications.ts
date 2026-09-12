@@ -30,6 +30,9 @@ export type NotificationType =
 
 export type NotificationEntityType =
   | "direct_message"
+  // A message in a community server channel. Kept distinct from "comment" so
+  // the push can name the channel instead of calling it a comment.
+  | "thread_message"
   | "post"
   | "poll"
   | "comment"
@@ -59,7 +62,7 @@ type CreateNotificationInput = {
 type LikeNotificationInput = {
   recipientId?: string | null;
   actor: NotificationActor;
-  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message">;
+  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message">;
   entityId: string;
   preview?: string | null;
   parentId?: string | null;
@@ -241,7 +244,7 @@ export const upsertLikeNotification = async ({
   }
 
   const likeMessages: Record<
-    Exclude<NotificationEntityType, "event" | "emergency" | "direct_message">,
+    Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message">,
     string
   > = {
     post: "liked your post",
@@ -457,7 +460,7 @@ export const createEmergencyNotifications = async ({
 export type ModerationNotificationInput = {
   recipientId?: string | null;
   moderator: NotificationActor;
-  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message">;
+  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message">;
   entityId: string;
   reasons?: string[];
   preview?: string | null;
@@ -465,7 +468,7 @@ export type ModerationNotificationInput = {
 };
 
 const MODERATION_ENTITY_LABEL: Record<
-  Exclude<NotificationEntityType, "event" | "emergency" | "direct_message">,
+  Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message">,
   string
 > = {
   post: "post",
