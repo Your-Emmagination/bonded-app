@@ -33,6 +33,7 @@ import { feedImage, videoThumb } from "@/utils/cloudinaryImages";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 import VideoPostMedia from "./components/VideoPostMedia";
 import ConfirmDialog from "./components/ConfirmDialog";
+import { friendlyModerationReasons } from "@/utils/moderationReasons";
 import { ListSkeleton } from "./components/Skeleton";
 import { createModerationNotification } from "@/utils/notifications";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
@@ -177,7 +178,9 @@ const mapDocToItem = (
   realUserId: data.realUserId ?? null,
   userId: data.userId ?? null,
   isAnonymous: data.isAnonymous === true,
-  reasons: Array.isArray(data.moderationReasons) ? data.moderationReasons : [],
+  // Cleaned once here so every reader (the queue card and the notification
+  // sent to the student) gets plain words instead of raw provider output.
+  reasons: friendlyModerationReasons(data.moderationReasons),
   categories: Array.isArray(data.moderationCategories) ? data.moderationCategories : [],
   priority: data.moderationPriority === "critical" ? "critical" : "normal",
   safetyType: data.moderationSafetyType ?? null,
@@ -1040,7 +1043,13 @@ const ModerationCard = React.memo(function ModerationCard({
       {!!item.reasons.length && (
         <View style={styles.reasonBox}>
           <Ionicons name="alert-circle-outline" size={15} color="#9a473c" />
-          <Text style={styles.reasonText}>{item.reasons.join(" • ")}</Text>
+          <View style={styles.reasonChips}>
+            {item.reasons.map((reason) => (
+              <View key={reason} style={styles.reasonChip}>
+                <Text style={styles.reasonText}>{reason}</Text>
+              </View>
+            ))}
+          </View>
         </View>
       )}
 
@@ -1390,7 +1399,14 @@ const styles = StyleSheet.create({
     padding: 10,
     marginTop: 11,
   },
-  reasonText: { flex: 1, color: "#9a473c", fontSize: 11, lineHeight: 16 },
+  reasonChips: { flex: 1, flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  reasonChip: {
+    backgroundColor: "#f6e2db",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  reasonText: { color: "#9a473c", fontSize: 11, lineHeight: 16 },
   actionRow: {
     flexDirection: "row",
     alignItems: "center",

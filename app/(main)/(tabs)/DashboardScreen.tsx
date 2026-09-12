@@ -1,4 +1,6 @@
 // app/(main)/(tabs)/DashboardScreen.tsx
+import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
+import { friendlyModerationReasons } from "@/utils/moderationReasons";
 const YEAR_LEVEL_OPTIONS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "Graduated"];
 import { avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import { useNetworkStatus } from "@/utils/networkUtils";
@@ -192,6 +194,14 @@ export default function DashboardScreen() {
     null,
   );
   const scrollViewRef = useRef<ScrollView>(null);
+
+  // Tapping the Dashboard tab while it's already open scrolls back to the top.
+  useEffect(() => {
+    const subscription = subscribeTabScrollToTop("DashboardScreen", () => {
+      scrollViewRef.current?.scrollTo({ y: 0, animated: true });
+    });
+    return () => subscription.remove();
+  }, []);
   const manageUsersSectionYRef = useRef(0);
   const router = useRouter();
   const normalizedUserRole = parseUserRole(userRole);
@@ -404,9 +414,9 @@ export default function DashboardScreen() {
               realUserId: item.realUserId ?? null,
               userId: item.userId ?? null,
               isAnonymous: item.isAnonymous === true,
-              reasons: Array.isArray(item.moderationReasons)
-                ? item.moderationReasons
-                : [],
+              // Plain words rather than raw provider output — the same
+              // cleanup the full moderation queue does.
+              reasons: friendlyModerationReasons(item.moderationReasons),
               categories: Array.isArray(item.moderationCategories)
                 ? item.moderationCategories
                 : [],
@@ -872,7 +882,7 @@ const handleYearLevelChange = useCallback(
           <View style={styles.offlineStatusBar}>
             <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
             <Text style={styles.offlineStatusText}>
-              Offline mode • Viewing saved dashboard metrics
+              Offline mode
             </Text>
           </View>
         )}

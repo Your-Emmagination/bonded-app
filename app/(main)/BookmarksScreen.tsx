@@ -573,7 +573,17 @@ export default function BookmarksScreen() {
         </TouchableOpacity>
       </View>
 
-      {loading ? (
+      {/* Above the branches, so it also shows when nothing was saved yet. */}
+      {isOffline && (
+        <View style={styles.offlineStatusBar}>
+          <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+          <Text style={styles.offlineStatusText}>Offline mode</Text>
+        </View>
+      )}
+
+      {/* Offline the listener never answers, so the skeleton must give way to
+          whatever was saved — otherwise this spins forever. */}
+      {loading && !isOffline ? (
         <FeedSkeleton count={4} />
       ) : bookmarkedPostIds.length === 0 ? (
         <View style={styles.centerState}>
@@ -603,15 +613,10 @@ export default function BookmarksScreen() {
         </View>
       ) : (
         <View style={{ flex: 1 }}>
-          {isOffline && savedPosts.length > 0 && (
-            <View style={styles.offlineStatusBar}>
-              <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
-              <Text style={styles.offlineStatusText}>
-                Offline mode • Viewing saved bookmarks
-              </Text>
-            </View>
-          )}
           <FlatList
+            initialNumToRender={6}
+            maxToRenderPerBatch={6}
+            windowSize={7}
             data={savedPosts}
             keyExtractor={(item) => item.id}
             renderItem={renderItem}

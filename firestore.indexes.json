@@ -96,6 +96,14 @@
         { "fieldPath": "moderationPriority", "order": "ASCENDING" },
         { "fieldPath": "moderatedAtMs", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "communityThreadMessages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "serverId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

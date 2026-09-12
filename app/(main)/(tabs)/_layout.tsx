@@ -2,6 +2,7 @@
 import { emitHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
 import { subscribeToUnreadNotificationCount } from "@/utils/notifications";
 import { resolveUserRoleForAuthUser } from "@/utils/rbac";
+import { emitTabScrollToTop } from "@/utils/tabScrollEvents";
 import { Ionicons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
@@ -173,7 +174,7 @@ export default function TabLayout() {
     <SafeAreaView style={{ flex: 1, backgroundColor: "#5f0909" }} edges={["bottom"]}>
       <Tabs
         screenOptions={{ headerShown: false, tabBarStyle: { display: "none" } }}
-        initialRouteName={isPrivileged ? "DashboardScreen" : "HomeScreen"}
+        initialRouteName="HomeScreen"
        tabBar={({ state, navigation }) => (
   <View
     style={{
@@ -218,6 +219,12 @@ export default function TabLayout() {
 
         if (route.name === "HomeScreen" && isFocused) {
           emitHomeFeedScrollToTop();
+          return;
+        }
+
+        // Tapping the tab you're already on sends that screen back to the top.
+        if (isFocused) {
+          emitTabScrollToTop(route.name);
           return;
         }
 

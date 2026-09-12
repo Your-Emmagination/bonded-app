@@ -131,6 +131,9 @@ export default function AnnouncementCarousel({
       </View>
 
       <FlatList
+        initialNumToRender={3}
+        maxToRenderPerBatch={3}
+        windowSize={5}
         horizontal
         data={announcements}
         keyExtractor={(item) => `announcement-banner-${item.id}`}

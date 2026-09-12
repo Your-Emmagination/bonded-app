@@ -9,6 +9,7 @@ import {
     saveCachedAiMessages,
 } from "@/utils/offlineStorage";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
 import { Ionicons } from "@expo/vector-icons";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
@@ -42,6 +43,12 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
+import ReanimatedAnimated, {
+    runOnJS,
+    useAnimatedStyle,
+    useSharedValue,
+    withTiming,
+} from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
 import ConfirmDialog from "../components/ConfirmDialog";
@@ -565,12 +572,15 @@ export default function AiChatScreen() {
   // would otherwise give every row a fresh `item` reference and force the
   // whole list to re-render.
   const messagesCacheRef = useRef<Map<string, ChatMessage>>(new Map());
-  // Animated composer lift while the keyboard is open — same
-  // Keyboard.addListener + Animated.Value pattern ServerChannelScreen uses.
-  // KeyboardAvoidingView was removed because its `behavior` is `undefined`
-  // on Android (no adjustment happens at all there), which is why the
-  // composer used to end up hidden behind the keyboard on Android.
-  const composerBottom = useRef(new Animated.Value(0)).current;
+  // Composer lift while the keyboard is open. KeyboardAvoidingView was
+  // removed because its `behavior` is `undefined` on Android (no adjustment
+  // happens at all there), which is why the composer used to end up hidden
+  // behind the keyboard. Reanimated runs the lift on the UI thread, so the
+  // keyboard no longer has to wait for JavaScript work to finish.
+  const composerBottom = useSharedValue(0);
+  const composerAnimatedStyle = useAnimatedStyle(() => ({
+    marginBottom: composerBottom.value,
+  }));
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, setUser);
@@ -578,6 +588,14 @@ export default function AiChatScreen() {
   }, []);
 
   useEffect(() => {
+    const scrollToEndIfNearBottom = () => {
+      if (isNearBottomRef.current || !userScrolledUpRef.current) {
+        requestAnimationFrame(() => {
+          listRef.current?.scrollToEnd({ animated: true });
+        });
+      }
+    };
+
     const showSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
       (event: KeyboardEvent) => {
@@ -587,28 +605,22 @@ export default function AiChatScreen() {
         // keyboard is closed) — subtract it here so the lift doesn't stack
         // on top of that and leave a gap above the keyboard.
         const lift = Math.max(0, keyboardHeight - COMPOSER_RESTING_BOTTOM_PADDING);
-        Animated.timing(composerBottom, {
-          toValue: lift,
-          duration: Platform.OS === "ios" ? event.duration || 250 : 220,
-          useNativeDriver: false,
-        }).start(() => {
-          if (isNearBottomRef.current || !userScrolledUpRef.current) {
-            requestAnimationFrame(() => {
-              listRef.current?.scrollToEnd({ animated: true });
-            });
-          }
-        });
+        composerBottom.value = withTiming(
+          lift,
+          { duration: Platform.OS === "ios" ? event.duration || 250 : 220 },
+          (finished) => {
+            if (finished) runOnJS(scrollToEndIfNearBottom)();
+          },
+        );
       },
     );
 
     const hideSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
       (event: KeyboardEvent) => {
-        Animated.timing(composerBottom, {
-          toValue: 0,
+        composerBottom.value = withTiming(0, {
           duration: Platform.OS === "ios" ? event.duration || 250 : 180,
-          useNativeDriver: false,
-        }).start();
+        });
       },
     );
 
@@ -617,6 +629,16 @@ export default function AiChatScreen() {
       hideSub.remove();
     };
   }, [composerBottom]);
+
+  // Tapping the B.E.A. tab while it's already open jumps to the newest
+  // message — a chat reads from the bottom, so "back to the top" would land
+  // on the oldest message instead.
+  useEffect(() => {
+    const subscription = subscribeTabScrollToTop("AiChatScreen", () => {
+      listRef.current?.scrollToEnd({ animated: true });
+    });
+    return () => subscription.remove();
+  }, []);
 
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -1259,7 +1281,7 @@ export default function AiChatScreen() {
       )}
 
       <View style={styles.flexFill}>
-        {!user || migrating || conversationsLoading || loading ? (
+        {!user || ((migrating || conversationsLoading || loading) && !isOffline) ? (
           <ChatSkeleton count={6} />
         ) : (
           <FlatList
@@ -1297,7 +1319,7 @@ export default function AiChatScreen() {
           </TouchableOpacity>
         )}
 
-        <Animated.View style={{ marginBottom: composerBottom }}>
+        <ReanimatedAnimated.View style={composerAnimatedStyle}>
           {suggestionsOpen && <SuggestionsBar onSelect={sendMessage} />}
 
           <View style={styles.composer}>
@@ -1340,7 +1362,7 @@ export default function AiChatScreen() {
             )}
           </TouchableOpacity>
           </View>
-        </Animated.View>
+        </ReanimatedAnimated.View>
       </View>
 
       <Modal

@@ -347,6 +347,11 @@ const ImageZoomViewer: React.FC<Props> = ({
     }
   };
 
+  // Closed is the normal state: screens keep this mounted all the time, so
+  // returning early here keeps a closed viewer out of their render work.
+  // Every hook above still runs, so the order never changes.
+  if (!visible) return null;
+
   return (
     <Modal
       visible={visible && hasImages}

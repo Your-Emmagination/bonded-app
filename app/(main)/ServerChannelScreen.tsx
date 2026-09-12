@@ -8,7 +8,7 @@ import {
     type AiContextMessage,
 } from "@/utils/aiWorker";
 import { resolveAvatarUri } from "@/utils/avatar";
-import { AVATAR_SIZE_SMALL, avatarThumb, FEED_IMAGE_WIDTH, feedImage } from "@/utils/cloudinaryImages";
+import { AVATAR_SIZE_SMALL, avatarThumb, FEED_IMAGE_WIDTH, feedImage, videoThumb } from "@/utils/cloudinaryImages";
 import { requestServerDrawerReopen } from "@/utils/communityNavigation";
 import {
     deleteChannelFromSections,
@@ -21,8 +21,8 @@ import { markCommunityChannelViewed } from "@/utils/communityUnread";
 import {
     canViewModeratedContent,
     requestFirestoreModerationDecision,
-    SELF_HARM_SAFETY_MESSAGE,
 } from "@/utils/contentModeration";
+import SafetyDialog from "./components/SafetyDialog";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import { createMentionNotifications, resolveMentionRecipientIds } from "@/utils/notifications";
@@ -35,7 +35,8 @@ import {
     saveCachedChannelMessages,
 } from "@/utils/offlineStorage";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
-import { getUserDataByAuthUser, isStaff, normalizeUserRole, peekUserData } from "@/utils/rbac";
+import { canReportContent, getUserDataByAuthUser, isStaff, normalizeUserRole, peekUserData } from "@/utils/rbac";
+import { replyPreviewMedia, replyPreviewText } from "@/utils/replyPreview";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
@@ -50,7 +51,6 @@ import {
     doc,
     FieldPath,
     onSnapshot,
-    orderBy,
     query,
     serverTimestamp,
     setDoc,
@@ -138,7 +138,7 @@ type ThreadMessage = {
   reactions?: Record<string, string[]>;
   // Feature 4: reference to the message this one is replying to, with a
   // snapshot of the original so the quoted preview renders without a lookup.
-  replyTo?: { id: string; senderName: string; preview: string };
+  replyTo?: { id: string; senderName: string; preview: string; mediaUrl?: string; mediaType?: "image" | "video" };
   // Task 3: pin state. `pinnedBy`/`pinnedByName` record who pinned it so the
   // pinned-messages view can show "by whom" without a profile lookup. Only a
   // server owner/creator or app-wide staff can write these (see firestore.rules).
@@ -179,19 +179,6 @@ const READ_WRITE_MIN_INTERVAL_MS = 4000;
 const MAX_READ_AVATARS = 3;
 // Stable empty array so bubbles with no readers keep bailing out of React.memo.
 const EMPTY_READERS: ChannelRead[] = [];
-
-// Short, single-line summary of a message for the "replying to …" bar and the
-// in-bubble quote — the text if there is any, otherwise an attachment label.
-const replyPreviewText = (message: Partial<ThreadMessage>) => {
-  const text = message.text?.trim();
-  if (text) return text;
-  const files = message.files || [];
-  if (files.some((file) => file.mimeType.includes("gif"))) return "GIF";
-  if (files.some((file) => file.mimeType.startsWith("image/"))) return "Photo";
-  if (files.length) return files[0].name || "Attachment";
-  if (message.link) return message.link.title || message.link.url;
-  return "Message";
-};
 
 // Messenger's small default reaction set — a quick row on long-press, not a
 // full emoji keyboard. ❤️ is also the default for a double-tap.
@@ -393,6 +380,11 @@ const isWithinEditWindow = (message?: ThreadMessage) => {
   // No resolved server timestamp yet == just sent, so still editable.
   return typeof ms === "number" ? Date.now() - ms < EDIT_WINDOW_MS : true;
 };
+
+// Sort key for the channel's messages. A message whose server timestamp hasn't
+// resolved yet was just sent, so it goes last.
+const getMessageSortMs = (message: ThreadMessage) =>
+  message.createdAt?.toMillis?.() ?? Number.POSITIVE_INFINITY;
 
 // Task 5: the single source of truth for how a message's attachments are
 // bucketed. MessageBubbleComponent's render and the Media/Files gallery both
@@ -715,7 +707,8 @@ function MessageBubbleComponent({
           if (dx > SWIPE_REPLY_DISTANCE || event.velocityX * swipeDir > SWIPE_REPLY_VELOCITY) {
             runOnJS(onSwipeReply)(messageId);
           }
-          swipeX.value = withSpring(0, { damping: 18, stiffness: 220 });
+          // Snap straight back, like Messenger — no spring overshoot.
+          swipeX.value = 0;
         }),
     [isOwnMessage, messageId, onSwipeReply, swipeDir, swipeX],
   );
@@ -757,7 +750,11 @@ function MessageBubbleComponent({
           >
             <View style={styles.avatar}>
               {avatarUri ? (
-                <Image source={{ uri: avatarThumb(avatarUri, AVATAR_SIZE_SMALL) }} style={styles.avatarImage} />
+                <Image
+                  source={{ uri: avatarThumb(avatarUri, AVATAR_SIZE_SMALL) }}
+                  style={styles.avatarImage}
+                  recyclingKey={item.id}
+                />
               ) : (
                 <Text style={styles.avatarText}>
                   {(item.username?.[0] || "A").toUpperCase()}
@@ -806,7 +803,7 @@ function MessageBubbleComponent({
                   { backgroundColor: isOwnMessage ? "#fffaf7" : accent },
                 ]}
               />
-              <View style={{ flex: 1 }}>
+              <View style={{ flex: 1, minWidth: 0 }}>
                 <Text
                   style={[styles.replyQuoteName, isOwnMessage && styles.replyQuoteTextOwn]}
                   numberOfLines={1}
@@ -820,6 +817,21 @@ function MessageBubbleComponent({
                   {item.replyTo.preview}
                 </Text>
               </View>
+              {/* Thumbnail of the photo/video being replied to, like
+                  Messenger. Older replies have none saved. */}
+              {!!item.replyTo.mediaUrl && (
+                <Image
+                  source={{
+                    uri:
+                      item.replyTo.mediaType === "video"
+                        ? videoThumb(item.replyTo.mediaUrl, 96)
+                        : feedImage(item.replyTo.mediaUrl, 96),
+                  }}
+                  style={styles.replyQuoteThumb}
+                  contentFit="cover"
+                  recyclingKey={`${item.id}:replyThumb`}
+                />
+              )}
             </View>
           )}
           {(item.forwarded || item.isForwarded) && (
@@ -886,6 +898,7 @@ function MessageBubbleComponent({
               style={({ pressed }) => (pressed ? styles.messageImagePressed : undefined)}
             >
               <Image
+                recyclingKey={`${item.id}:${file.url}`}
                 source={{ uri: feedImage(file.url, FEED_IMAGE_WIDTH) }}
                 style={styles.messageImage}
               />
@@ -1296,7 +1309,8 @@ export default function ServerChannelScreen() {
 
   // Single dialog state used to render alerts on this screen through the
   // app's branded ConfirmDialog instead of the bare native Alert.alert.
-  // (The self-harm safety notice deliberately stays a native Alert.alert.)
+  // (The self-harm safety notice has a dialog of its own — see
+  // components/SafetyDialog.)
   const [dialog, setDialog] = useState<{
     title: string;
     description?: string;
@@ -1306,6 +1320,9 @@ export default function ServerChannelScreen() {
     singleAction?: boolean;
     onConfirm: () => void;
   } | null>(null);
+  // Self-harm gets its own dialog instead of the generic one — see
+  // components/SafetyDialog.
+  const [safetyVisible, setSafetyVisible] = useState(false);
   const showInfo = (title: string, description?: string, onConfirm?: () => void) => {
     setDialog({
       title,
@@ -1339,7 +1356,12 @@ export default function ServerChannelScreen() {
   const isInitialLoadRef = useRef(true);
   const userScrolledUpRef = useRef(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const composerBottom = useRef(new Animated.Value(0)).current;
+  // Reanimated keeps the keyboard lift on the UI thread, so opening the
+  // keyboard doesn't wait for JavaScript work.
+  const composerBottom = useSharedValue(0);
+  const composerAnimatedStyle = useAnimatedStyle(() => ({
+    marginBottom: composerBottom.value,
+  }));
 
   const translateY = useSharedValue(SCREEN_HEIGHT);
   const overlayOpacity = useSharedValue(0);
@@ -1442,14 +1464,19 @@ export default function ServerChannelScreen() {
       }
     });
 
+    // Only this channel's messages instead of every community message in the
+    // app. Equality-only filters need no composite index, so there is nothing
+    // to deploy; the list is sorted by time on the phone below.
     const messagesQuery = query(
       collection(db, "communityThreadMessages"),
-      orderBy("createdAt", "asc"),
+      where("serverId", "==", resolvedServerId),
+      where("channelId", "==", resolvedChannelId),
     );
 
     const unsubscribe = onSnapshot(
       messagesQuery,
       (snapshot) => {
+        if (__DEV__) console.log(`[ServerChannel] messages loaded for this channel: ${snapshot.size}`);
         const nextMessages = snapshot.docs
           .map(
             (item) =>
@@ -1458,18 +1485,16 @@ export default function ServerChannelScreen() {
                 ...item.data(),
               }) as ThreadMessage,
           )
-          .filter(
-            (item) =>
-              item.serverId === resolvedServerId &&
-              item.channelId === resolvedChannelId &&
-              canViewModeratedContent({
-                moderationStatus: item.moderationStatus,
-                realUserId: item.realUserId,
-                userId: item.userId,
-                viewerUserId: user?.uid,
-                viewerRole: currentUserProfile?.role,
-              }),
-          );
+          .filter((item) =>
+            canViewModeratedContent({
+              moderationStatus: item.moderationStatus,
+              realUserId: item.realUserId,
+              userId: item.userId,
+              viewerUserId: user?.uid,
+              viewerRole: currentUserProfile?.role,
+            }),
+          )
+          .sort((a, b) => getMessageSortMs(a) - getMessageSortMs(b) || 0);
         setMessages(nextMessages);
         setLoading(false);
         saveCachedChannelMessages(resolvedServerId, resolvedChannelId, nextMessages);
@@ -1480,7 +1505,6 @@ export default function ServerChannelScreen() {
       },
     );
 
-    return unsubscribe;
     return () => {
       isMounted = false;
       unsubscribe();
@@ -2124,31 +2148,33 @@ export default function ServerChannelScreen() {
   }, [markRead, messages, resolvedChannelId, resolvedServerId]);
 
   useEffect(() => {
+    const scrollToEndIfNearBottom = () => {
+      if (isNearBottomRef.current || !userScrolledUpRef.current) {
+        requestAnimationFrame(() => {
+          listRef.current?.scrollToEnd({ animated: true });
+        });
+      }
+    };
+
     const showSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
       (event: KeyboardEvent) => {
-        Animated.timing(composerBottom, {
-          toValue: Math.max(0, event.endCoordinates.height),
-          duration: Platform.OS === "ios" ? event.duration || 250 : 220,
-          useNativeDriver: false,
-        }).start(({ finished }) => {
-          if (finished && (isNearBottomRef.current || !userScrolledUpRef.current)) {
-            requestAnimationFrame(() => {
-              listRef.current?.scrollToEnd({ animated: true });
-            });
-          }
-        });
+        composerBottom.value = withTiming(
+          Math.max(0, event.endCoordinates.height),
+          { duration: Platform.OS === "ios" ? event.duration || 250 : 220 },
+          (finished) => {
+            if (finished) runOnJS(scrollToEndIfNearBottom)();
+          },
+        );
       },
     );
 
     const hideSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
       (event: KeyboardEvent) => {
-        Animated.timing(composerBottom, {
-          toValue: 0,
+        composerBottom.value = withTiming(0, {
           duration: Platform.OS === "ios" ? event.duration || 250 : 180,
-          useNativeDriver: false,
-        }).start();
+        });
       },
     );
 
@@ -2273,6 +2299,55 @@ export default function ServerChannelScreen() {
       },
     });
   }, []);
+
+  // Reporting is a student-only tool: staff never report, and only a
+  // student's message or an anonymous one can be reported — the same rule
+  // posts, polls and replies use, and the one the Firestore rules enforce.
+  const canReportMessage = useCallback(
+    (message?: ThreadMessage) =>
+      !!message &&
+      canReportContent(
+        currentUserProfile?.role,
+        message.role,
+        message.isAnonymous === true,
+      ) &&
+      (message.realUserId || message.userId) !== user?.uid,
+    [currentUserProfile?.role, user?.uid],
+  );
+
+  const confirmReportMessage = useCallback(
+    (message: ThreadMessage) => {
+      showConfirm({
+        title: "Report message?",
+        description:
+          "This message will be sent to the moderation team for review.",
+        confirmText: "Send report",
+        cancelText: "Cancel",
+        destructive: true,
+        onConfirm: async () => {
+          if (!user?.uid || !canReportMessage(message)) return;
+          try {
+            await addDoc(collection(db, "reports"), {
+              contentType: "message",
+              contentId: message.id,
+              reportedBy: user.uid,
+              reason: "inappropriate",
+              createdAt: serverTimestamp(),
+              status: "pending",
+            });
+            showInfo("Reported", "Thank you for your report.");
+          } catch (error) {
+            console.error("Failed to report message:", error);
+            showInfo(
+              "Couldn't report",
+              "Something went wrong. Please try again.",
+            );
+          }
+        },
+      });
+    },
+    [canReportMessage, user?.uid],
+  );
 
   // Task 4B: mute / unmute this channel's notifications for yourself. Optimistic
   // so the header icon flips instantly; reverts if the write fails. Does not
@@ -2599,6 +2674,8 @@ export default function ServerChannelScreen() {
     id: string;
     senderName: string;
     preview: string;
+    mediaUrl?: string;
+    mediaType?: "image" | "video";
   } | null>(null);
   const handleSwipeReply = useCallback(
     (messageId: string) => {
@@ -2606,12 +2683,14 @@ export default function ServerChannelScreen() {
       if (!message) return;
       const isOwnMsg = (message.realUserId || message.userId) === user?.uid;
       const isStaffUser = isStaff(currentUserProfile?.role);
+      const media = replyPreviewMedia(message);
       setReplyingTo({
         id: message.id,
         senderName: message.isAnonymous
           ? (isOwnMsg && isStaffUser ? "Anonymous (You)" : "Anonymous")
           : message.username || "User",
         preview: replyPreviewText(message).slice(0, 140),
+        ...(media ? { mediaUrl: media.url, mediaType: media.type } : {}),
       });
     },
     [currentUserProfile?.role, messages, user?.uid],
@@ -2745,10 +2824,10 @@ export default function ServerChannelScreen() {
 
   const handleSend = useCallback(
     async (messageData: any) => {
-      if (!user?.uid || !resolvedServerId || !resolvedChannelId) return;
+      if (!user?.uid || !resolvedServerId || !resolvedChannelId) return false;
       if (isOffline) {
         showInfo("No Connection", "You need internet access to send a message.");
-        return;
+        return false;
       }
 
       const isAnon = messageData.isAnonymous === true;
@@ -2782,9 +2861,16 @@ export default function ServerChannelScreen() {
         isAiAssistantId(tag.id),
       );
 
-      const messageRef = await addDoc(collection(db, "communityThreadMessages"), payload);
-      // The message doc now carries the reply reference — drop the bar.
+      // Clear the reply bar now; it comes back if the message can't be saved.
+      const activeReplyingTo = replyingTo;
       setReplyingTo(null);
+
+      const messageRef = await addDoc(collection(db, "communityThreadMessages"), payload).catch(
+        (error) => {
+          setReplyingTo(activeReplyingTo);
+          throw error;
+        },
+      );
       // Feature 6: sending ends the current typing burst.
       stopTyping();
       userScrolledUpRef.current = false;
@@ -2794,146 +2880,156 @@ export default function ServerChannelScreen() {
         listRef.current?.scrollToEnd({ animated: true });
       });
 
-      let moderationDecision;
-      try {
-        moderationDecision = await requestFirestoreModerationDecision({
-          collectionName: "communityThreadMessages",
-          documentId: messageRef.id,
-          scope: "thread",
-        });
-      } catch (error) {
-        console.warn("[ServerChannel] OpenModeration unavailable; message remains pending:", error);
-        showInfo(
-          "Message Pending Review",
-          "Automatic moderation is temporarily unavailable. Your message will remain hidden until a reviewer checks it.",
-        );
-        return;
-      }
-
-      if (moderationDecision.selfHarm === true) {
-        Alert.alert("We’re concerned about your safety", SELF_HARM_SAFETY_MESSAGE);
-        return;
-      }
-      const mentionRecipientIds = (messageData.taggedUsers || [])
-        .map((tag: TaggedUser) => tag.id)
-        .filter((recipientId: string) => !isAiAssistantId(recipientId));
-
-      if (moderationDecision.status === "approved") {
-        // Mention notifications are a "nice to have" side effect of this send,
-        // not something the AI reply should depend on. If notifying a tagged
-        // student fails for any reason, we log it and move on — previously an
-        // error here would throw out of handleSend entirely, silently
-        // skipping the AI-trigger check below it whenever @ai was tagged
-        // alongside a real student.
+      // The message is saved, so the composer can clear and take the next one
+      // now. Moderation, mention notifications and the AI reply still run for
+      // every message, exactly as before; they just no longer hold up the text
+      // box.
+      void (async () => {
+        let moderationDecision;
         try {
-          const mentionTargets = await resolveMentionRecipientIds({
-            taggedUserIds: mentionRecipientIds,
-            actorId: user.uid,
-            serverId: resolvedServerId,
-          });
-          // Task 4B: drop anyone who has muted this channel — no notification
-          // doc is created for them, which stops both the in-app entry and
-          // the push it would trigger. Purely per-recipient; everyone else
-          // still gets notified normally.
-          const muterIds = await fetchChannelMuterIds(
-            resolvedChannelId,
-            mentionTargets,
-          );
-          await createMentionNotifications({
-            recipientIds: mentionTargets.filter((id) => !muterIds.has(id)),
-            actor: {
-              id: user.uid,
-              name: messageData.username || currentUserProfile?.firstname || "Someone",
-              profileImage:
-                messageData.isAnonymous === true
-                  ? null
-                  : resolveAvatarUri(currentUserProfile),
-              isAnonymous: messageData.isAnonymous,
-            },
-            entityType: "comment",
-            entityId: messageRef.id,
-            parentId: resolvedServerId,
-            message: `mentioned you in #${resolvedChannelLabel}`,
-            preview: messageData.text,
+          moderationDecision = await requestFirestoreModerationDecision({
+            collectionName: "communityThreadMessages",
+            documentId: messageRef.id,
+            scope: "thread",
           });
         } catch (error) {
-          console.error("Mention notification failed:", error);
-        }
-      }
-
-      if (!shouldTriggerAi || moderationDecision.status === "pending") {
-        if (moderationDecision.status === "pending") {
+          console.warn("[ServerChannel] OpenModeration unavailable; message remains pending:", error);
           showInfo(
             "Message Pending Review",
-            "This message was flagged and is waiting for reviewer approval.",
-          );
-        }
-        return;
-      }
-
-      const contextMessages = buildAiContextMessages(messages, {
-        ...payload,
-        username: messageData.username,
-      });
-      const aiPrompt = summarizeThreadMessage(payload);
-
-      void (async () => {
-        const cooldown = await reserveAiCooldown(
-          resolvedServerId,
-          resolvedChannelId,
-          AI_REQUEST_COOLDOWN_MS,
-        );
-
-        if (!cooldown.allowed) {
-          showInfo(
-            "AI Cooling Down",
-            `${AI_ASSISTANT_NAME} can be called again in ${formatCooldownLabel(cooldown.remainingMs)}.`,
+            "Automatic moderation is temporarily unavailable. Your message will remain hidden until a reviewer checks it.",
           );
           return;
         }
 
-        const pendingReplyRef = await addDoc(collection(db, "communityThreadMessages"), {
-          text: "",
-          userId: AI_ASSISTANT_ID,
-          realUserId: AI_ASSISTANT_ID,
-          username: AI_ASSISTANT_NAME,
-          role: "assistant",
-          profileImage: null,
-          profilePic: null,
-          isAnonymous: false,
-          taggedUsers: [],
-          files: [],
-          link: null,
-          serverId: resolvedServerId,
-          channelId: resolvedChannelId,
-          aiAssistant: true,
-          aiStatus: "processing",
-          aiSourceMessageId: messageRef.id,
-          moderationStatus: "approved",
-          moderationReasons: [],
-          createdAt: serverTimestamp(),
-        });
+        if (moderationDecision.selfHarm === true) {
+          setSafetyVisible(true);
+          return;
+        }
+        const mentionRecipientIds = (messageData.taggedUsers || [])
+          .map((tag: TaggedUser) => tag.id)
+          .filter((recipientId: string) => !isAiAssistantId(recipientId));
 
-        const { reply } = await requestAiReplyFromWorker({
-          serverId: resolvedServerId,
-          channelId: resolvedChannelId,
-          sourceMessageId: messageRef.id,
-          sourceUserId: user.uid,
-          prompt: aiPrompt,
-          contextMessages,
-        });
+        if (moderationDecision.status === "approved") {
+          // Mention notifications are a "nice to have" side effect of this send,
+          // not something the AI reply should depend on. If notifying a tagged
+          // student fails for any reason, we log it and move on — previously an
+          // error here would throw out of handleSend entirely, silently
+          // skipping the AI-trigger check below it whenever @ai was tagged
+          // alongside a real student.
+          try {
+            const mentionTargets = await resolveMentionRecipientIds({
+              taggedUserIds: mentionRecipientIds,
+              actorId: user.uid,
+              serverId: resolvedServerId,
+            });
+            // Task 4B: drop anyone who has muted this channel — no notification
+            // doc is created for them, which stops both the in-app entry and
+            // the push it would trigger. Purely per-recipient; everyone else
+            // still gets notified normally.
+            const muterIds = await fetchChannelMuterIds(
+              resolvedChannelId,
+              mentionTargets,
+            );
+            await createMentionNotifications({
+              recipientIds: mentionTargets.filter((id) => !muterIds.has(id)),
+              actor: {
+                id: user.uid,
+                name: messageData.username || currentUserProfile?.firstname || "Someone",
+                profileImage:
+                  messageData.isAnonymous === true
+                    ? null
+                    : resolveAvatarUri(currentUserProfile),
+                isAnonymous: messageData.isAnonymous,
+              },
+              entityType: "comment",
+              entityId: messageRef.id,
+              parentId: resolvedServerId,
+              message: `mentioned you in #${resolvedChannelLabel}`,
+              preview: messageData.text,
+            });
+          } catch (error) {
+            console.error("Mention notification failed:", error);
+          }
+        }
 
-        await updateDoc(doc(db, "communityThreadMessages", pendingReplyRef.id), {
-          text: reply,
-          aiStatus: "completed",
+        if (!shouldTriggerAi || moderationDecision.status === "pending") {
+          if (moderationDecision.status === "pending") {
+            showInfo(
+              "Message Pending Review",
+              "This message was flagged and is waiting for reviewer approval.",
+            );
+          }
+          return;
+        }
+
+        const contextMessages = buildAiContextMessages(messages, {
+          ...payload,
+          username: messageData.username,
+        });
+        const aiPrompt = summarizeThreadMessage(payload);
+
+        void (async () => {
+          const cooldown = await reserveAiCooldown(
+            resolvedServerId,
+            resolvedChannelId,
+            AI_REQUEST_COOLDOWN_MS,
+          );
+
+          if (!cooldown.allowed) {
+            showInfo(
+              "AI Cooling Down",
+              `${AI_ASSISTANT_NAME} can be called again in ${formatCooldownLabel(cooldown.remainingMs)}.`,
+            );
+            return;
+          }
+
+          const pendingReplyRef = await addDoc(collection(db, "communityThreadMessages"), {
+            text: "",
+            userId: AI_ASSISTANT_ID,
+            realUserId: AI_ASSISTANT_ID,
+            username: AI_ASSISTANT_NAME,
+            role: "assistant",
+            profileImage: null,
+            profilePic: null,
+            isAnonymous: false,
+            taggedUsers: [],
+            files: [],
+            link: null,
+            serverId: resolvedServerId,
+            channelId: resolvedChannelId,
+            aiAssistant: true,
+            aiStatus: "processing",
+            aiSourceMessageId: messageRef.id,
+            moderationStatus: "approved",
+            moderationReasons: [],
+            createdAt: serverTimestamp(),
+          });
+
+          const { reply } = await requestAiReplyFromWorker({
+            serverId: resolvedServerId,
+            channelId: resolvedChannelId,
+            sourceMessageId: messageRef.id,
+            sourceUserId: user.uid,
+            prompt: aiPrompt,
+            contextMessages,
+          });
+
+          await updateDoc(doc(db, "communityThreadMessages", pendingReplyRef.id), {
+            text: reply,
+            aiStatus: "completed",
+          });
+        })().catch((error) => {
+          console.error("AI assistant request failed:", error);
+          showInfo(
+            "AI Unavailable",
+            getAiErrorMessage(error),
+          );
         });
       })().catch((error) => {
-        console.error("AI assistant request failed:", error);
-        showInfo(
-          "AI Unavailable",
-          getAiErrorMessage(error),
-        );
+        console.error("[ServerChannel] After-send steps failed:", error);
       });
+
+      return true;
     },
     [
       currentUserProfile?.firstname,
@@ -3101,7 +3197,7 @@ export default function ServerChannelScreen() {
             <View style={styles.offlineStatusBar}>
               <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
               <Text style={styles.offlineStatusText}>
-                Offline mode • Viewing saved messages
+                Offline mode
               </Text>
             </View>
           )}
@@ -3123,10 +3219,10 @@ export default function ServerChannelScreen() {
               styles.listContent,
               // Center the real empty state ("Kick off #channel"), but let the
               // loading skeleton sit top-aligned like real messages would.
-              messages.length === 0 && !loading && styles.emptyListContent,
+              messages.length === 0 && (!loading || isOffline) && styles.emptyListContent,
             ]}
             ListEmptyComponent={
-              loading ? (
+              loading && !isOffline ? (
                 <ChatSkeleton count={7} />
               ) : (
                 <View style={styles.emptyState}>
@@ -3210,7 +3306,7 @@ export default function ServerChannelScreen() {
 
           {currentUserProfile && (
             canPostInChannel ? (
-              <Animated.View style={[styles.composerShell, { marginBottom: composerBottom }]}>
+              <ReanimatedAnimated.View style={[styles.composerShell, composerAnimatedStyle]}>
                 {replyingTo && (
                   // Feature 4: "replying to …" bar. X clears it.
                   <View style={styles.replyBar}>
@@ -3238,7 +3334,7 @@ export default function ServerChannelScreen() {
                   onTypingChange={handleTyping}
                   placeholder={`Message #${resolvedChannelLabel}`}
                 />
-              </Animated.View>
+              </ReanimatedAnimated.View>
             ) : (
               <View style={styles.readOnlyBanner}>
                 <View style={[styles.readOnlyIconWrap, { backgroundColor: `${resolvedServerAccent}18` }]}>
@@ -3263,6 +3359,12 @@ export default function ServerChannelScreen() {
         singleAction={dialog?.singleAction ?? false}
         onConfirm={() => dialog?.onConfirm()}
         onCancel={() => setDialog(null)}
+      />
+
+      <SafetyDialog
+        visible={safetyVisible}
+        onClose={() => setSafetyVisible(false)}
+        contentLabel="message"
       />
 
       {/* Feature 3: reaction picker — a small centred popover of the default
@@ -3338,6 +3440,27 @@ export default function ServerChannelScreen() {
               >
                 <Ionicons name="arrow-redo-outline" size={17} color="#5f0909" />
                 <Text style={styles.reactionPickerActionText}>Forward message</Text>
+              </Pressable>
+            )}
+
+            {canReportMessage(reactionTargetMessage) && (
+              <Pressable
+                style={styles.reactionPickerAction}
+                onPress={() => {
+                  const target = reactionTargetMessage;
+                  setReactionTargetId(null);
+                  // Let this modal dismiss before the confirm dialog opens.
+                  setTimeout(() => {
+                    if (target) confirmReportMessage(target);
+                  }, 180);
+                }}
+              >
+                <Ionicons name="flag-outline" size={17} color="#a12a1a" />
+                <Text
+                  style={[styles.reactionPickerActionText, styles.reactionPickerActionDanger]}
+                >
+                  Report message
+                </Text>
               </Pressable>
             )}
 
@@ -4321,6 +4444,15 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     paddingRight: 4,
     opacity: 0.95,
+    // Same reason as the message image width above: this bubble is sized by
+    // its content, so the quote needs a width of its own or it collapses.
+    minWidth: 150,
+  },
+  replyQuoteThumb: {
+    width: 38,
+    height: 38,
+    borderRadius: 6,
+    backgroundColor: "rgba(0,0,0,0.08)",
   },
   replyQuoteOwn: {
     opacity: 0.85,
@@ -4537,11 +4669,11 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   composerShell: {
-    borderTopWidth: 1,
+    borderTopWidth: 0,
     borderTopColor: "#ead7cf",
-    backgroundColor: "#fff4ee",
-    paddingHorizontal: 12,
-    paddingTop: 8,
+    backgroundColor: "#fffaf7",
+    paddingHorizontal: 8,
+    paddingTop: 0,
     paddingBottom: Platform.OS === "android" ? 8 : 0,
   },
   // Task 3: Pinned messages sheet.

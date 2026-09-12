@@ -32,7 +32,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import ConfirmDialog from "./components/ConfirmDialog";
+import ConfirmDialog, { type ConfirmDialogVariant } from "./components/ConfirmDialog";
 import { auth, db, firebaseConfig } from "../../Firebase_configure";
 import {
   getPermissionsForRole,
@@ -252,13 +252,15 @@ export default function AdminRegisterUserScreen() {
     confirmText?: string;
     cancelText?: string;
     destructive?: boolean;
+    variant?: ConfirmDialogVariant;
     singleAction?: boolean;
     onConfirm: () => void;
   } | null>(null);
-  const showInfo = (title: string, description?: string, onConfirm?: () => void) => {
+  const showInfo = (title: string, description?: string, onConfirm?: () => void, variant?: ConfirmDialogVariant) => {
     setDialog({
       title,
       description,
+      variant,
       confirmText: "OK",
       singleAction: true,
       onConfirm: () => {
@@ -388,7 +390,12 @@ export default function AdminRegisterUserScreen() {
       }
 
       setBulkSummary({ created, failed });
-      showInfo("Import Complete", `${created} account${created === 1 ? "" : "s"} created.\n${failed} failed or skipped.`);
+      showInfo(
+        "Import Complete",
+        `${created} account${created === 1 ? "" : "s"} created.\n${failed} failed or skipped.`,
+        undefined,
+        failed > 0 ? "warning" : "success",
+      );
     } catch (error: any) {
       showInfo("CSV Import Failed", error?.message || "Unable to import the CSV.");
     } finally {
@@ -523,6 +530,7 @@ export default function AdminRegisterUserScreen() {
         confirmText={dialog?.confirmText ?? "Confirm"}
         cancelText={dialog?.cancelText}
         destructive={dialog?.destructive ?? true}
+        variant={dialog?.variant}
         singleAction={dialog?.singleAction ?? false}
         onConfirm={() => dialog?.onConfirm()}
         onCancel={() => setDialog(null)}

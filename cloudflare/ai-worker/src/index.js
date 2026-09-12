@@ -36,6 +36,50 @@ const OPENMODERATION_CATEGORY_REVIEW_THRESHOLDS = Object.freeze({
   "violence/graphic": 0.15,
 });
 
+// Plain-language names for the categories the providers return. What the
+// model calls "sexual" at 0.734 confidence is, to a teacher reading the
+// moderation queue, simply "Sexual content" — the vendor's name, its score
+// and our internal threshold are ours to tune, not theirs to read. Items
+// moderated before this existed still have the raw text saved on them and
+// are cleaned up at display time (see utils/moderationReasons.ts).
+const MODERATION_CATEGORY_LABELS = Object.freeze({
+  sexual: "Sexual content",
+  "sexual/minors": "Sexual content involving a minor",
+  harassment: "Harassment",
+  "harassment/threatening": "Threatening harassment",
+  hate: "Hate speech",
+  "hate/threatening": "Threatening hate speech",
+  illicit: "Illicit activity",
+  "illicit/violent": "Violent illicit activity",
+  "self-harm": "Self-harm",
+  "self-harm/intent": "Self-harm intent",
+  "self-harm/instructions": "Self-harm instructions",
+  violence: "Violence",
+  "violence/graphic": "Graphic violence",
+  nudity: "Nudity",
+  weapon: "Weapon",
+  recreational_drug: "Drugs",
+  medical: "Medical or drug imagery",
+  gore: "Graphic content",
+  offensive: "Offensive symbol",
+});
+
+function moderationCategoryLabel(category) {
+  const raw = String(category || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^sightengine:/, "");
+  if (!raw) return "";
+  return (
+    MODERATION_CATEGORY_LABELS[raw] ||
+    raw.replace(/[_/]/g, " ").replace(/^./, (character) => character.toUpperCase())
+  );
+}
+
+// "image" -> "Image", for the front of a media reason.
+const capitalizeLabel = (value) =>
+  String(value || "").replace(/^./, (character) => character.toUpperCase());
+
 const REVIEWER_ROLES = new Set(["teacher", "moderator", "admin"]);
 const TEXT_MODERATION_BYPASS_ROLES = new Set(["teacher", "moderator", "admin"]);
 
@@ -332,15 +376,16 @@ async function moderateMediaWithOpenModeration(env, media, scope) {
         selfHarm = true;
       }
       reasons.push(
-        `${target.label} flagged: ${
-          res.flaggedCategories
-            .slice(0, 4)
-            .map(
-              (c) =>
-                `${c.category} (${c.score.toFixed(3)} >= ${c.reviewThreshold.toFixed(3)})`,
-            )
-            .join(", ") || "provider review"
-        }.`,
+        `${capitalizeLabel(target.label)}: ${
+          [
+            ...new Set(
+              res.flaggedCategories
+                .slice(0, 4)
+                .map((c) => moderationCategoryLabel(c.category))
+                .filter(Boolean),
+            ),
+          ].join(", ") || "Flagged for review"
+        }`,
       );
     }
   } catch (error) {
@@ -494,13 +539,14 @@ async function moderateMediaWithSightengine(env, media, scope) {
       }
       if (flags.length > 0) {
         reasons.push(
-          `${target.label} flagged by Sightengine: ${flags
-            .slice(0, 4)
-            .map(
-              (f) =>
-                `${f.signal} (${f.score.toFixed(3)} >= ${f.threshold.toFixed(3)})`,
-            )
-            .join(", ")}.`,
+          `${capitalizeLabel(target.label)}: ${[
+            ...new Set(
+              flags
+                .slice(0, 4)
+                .map((f) => moderationCategoryLabel(f.signal))
+                .filter(Boolean),
+            ),
+          ].join(", ")}`,
         );
       }
     }
@@ -669,27 +715,35 @@ async function moderateTextWithOpenModeration(env, text, scope) {
   const selfHarm = aiSelfHarm; // keyword list currently has no self-harm terms
   const priority = selfHarm || keywordResult.priority === "critical" ? "critical" : "normal";
 
+  // These strings are written to Firestore and read by teachers in the
+  // moderation queue, so they say what was found in plain words — no vendor
+  // name, no confidence score, no threshold.
   const reasons = [];
   if (flaggedCategories.length > 0) {
-    reasons.push(
-      `OpenModeration flagged: ${flaggedCategories
-        .slice(0, 5)
-        .map(
-          (result) =>
-            `${result.category} (${result.score.toFixed(3)} >= ${result.reviewThreshold.toFixed(3)})`,
-        )
-        .join(", ")}.`,
-    );
-  } else if (providerFlagged) {
-    reasons.push("OpenModeration flagged this content for human review.");
+    const labels = [
+      ...new Set(
+        flaggedCategories
+          .slice(0, 5)
+          .map((result) => moderationCategoryLabel(result.category))
+          .filter(Boolean),
+      ),
+    ];
+    if (labels.length > 0) reasons.push(labels.join(", "));
+  }
+  if (reasons.length === 0 && providerFlagged) {
+    reasons.push("Flagged for review");
   }
   if (keywordResult.matches.length > 0) {
-    const uniqueLabels = [...new Set(keywordResult.matches.map((match) => match.label))];
-    reasons.push(
-      `Keyword match: ${uniqueLabels.join(", ")} (${keywordResult.matches
-        .map((match) => `"${match.term}"`)
-        .join(", ")}).`,
-    );
+    // Grouped by category so a moderator reads one line per kind of match
+    // rather than one line per word.
+    const termsByLabel = new Map();
+    keywordResult.matches.forEach((match) => {
+      if (!termsByLabel.has(match.label)) termsByLabel.set(match.label, new Set());
+      termsByLabel.get(match.label).add(match.term);
+    });
+    termsByLabel.forEach((terms, label) => {
+      reasons.push(`${label}: ${[...terms].map((term) => `“${term}”`).join(", ")}`);
+    });
   }
 
   // Category scores come from OpenModeration; the keyword list is a

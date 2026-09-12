@@ -174,7 +174,10 @@ const ensureAndroidNotificationChannel = async (
     importance: notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 250, 250, 250],
     lightColor: "#e0a53d",
-    sound: "default",
+    // No `sound` here on purpose: Android then plays the phone's own
+    // default notification sound. Passing the string "default" makes
+    // expo-notifications look for a bundled sound FILE called "default",
+    // which doesn't exist, so it logs an error on every launch.
   });
 
   // One channel per sound option — Android locks a channel's sound at
@@ -200,7 +203,7 @@ const ensureAndroidNotificationChannel = async (
     lightColor: "#ff2d2d",
     lockscreenVisibility: notifications.AndroidNotificationVisibility.PUBLIC,
     bypassDnd: true,
-    sound: "default",
+    // Same as the default channel above: no sound name, so Android uses its own.
   });
 };
 
@@ -531,7 +534,9 @@ export const playEmergencyAlertSound = async ({
     content: {
       title,
       body,
-      sound: "default",
+      // `true` means the default sound; a string here is treated as a custom
+      // sound file name.
+      sound: true,
       priority: notifications.AndroidNotificationPriority.MAX,
       data: {
         screen: "emergency-alert",

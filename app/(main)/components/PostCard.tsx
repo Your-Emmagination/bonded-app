@@ -533,6 +533,7 @@ const PostCard = React.memo<PostCardProps>(({
           {gifFiles.length > 0 && (
             <View style={styles.mediaContainer}>
               <Image
+                recyclingKey={`${post.id}:gif`}
                 source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }}
                 style={[
                   styles.gif,
@@ -585,6 +586,7 @@ const PostCard = React.memo<PostCardProps>(({
                     }}
                   >
                     <Image
+                      recyclingKey={`${post.id}:${item.url}`}
                       source={{ uri: feedImage(item.url, FEED_IMAGE_WIDTH) }}
                       style={[
                         styles.carouselImage,
@@ -873,7 +875,11 @@ const PostAvatar: React.FC<{
         {authorLoading ? (
           <ActivityIndicator size="small" color="#956a5f" />
         ) : isIdentityVisible && resolveAvatarUri(authorData) ? (
-           <Image source={{ uri: avatarThumb(resolveAvatarUri(authorData), AVATAR_SIZE_SMALL) }} style={styles.avatarImage} />
+           <Image
+             source={{ uri: avatarThumb(resolveAvatarUri(authorData), AVATAR_SIZE_SMALL) }}
+             style={styles.avatarImage}
+             recyclingKey={post.id}
+           />
         ) : isIdentityVisible ? (
           <Text style={[styles.avatarText, { color: roleColor }]}>
             {(

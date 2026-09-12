@@ -247,6 +247,18 @@ service cloud.firestore {
         ).data.status == 'joined';
     }
 
+    // A public server's channels are open to any signed-in user (Home lets
+    // anyone open them). A private server's messages stay readable only by
+    // its joined members and by staff.
+    function isPublicServer(serverId) {
+      return exists(
+          /databases/$(database)/documents/communityServers/$(serverId)
+        ) &&
+        get(
+          /databases/$(database)/documents/communityServers/$(serverId)
+        ).data.get('isPublic', false) == true;
+    }
+
     // Task 3: who may pin/unpin messages in a server's channels — the server's
     // creator/owner or any app-wide staff member. Same authority shape as the
     // communityServers update/delete rule; identical get()s in one evaluation
@@ -418,7 +430,14 @@ service cloud.firestore {
 
    match /communityThreadMessages/{messageId} {
 
-  allow read, list: if signedIn();
+  // Reading a channel's messages requires actually having access to that
+  // server: a joined member, a public server, or staff. Before this, any
+  // signed-in user could read every message in every private server.
+  allow read, list: if signedIn() && (
+    isServerMember(resource.data.serverId) ||
+    isPublicServer(resource.data.serverId) ||
+    isStaff()
+  );
 
   allow create: if signedIn() &&
     request.resource.data.createdAt is timestamp &&
@@ -573,6 +592,21 @@ service cloud.firestore {
     // DIRECT CONVERSATIONS & MESSAGES (MESSENGER)
     // =========================================================
 
+    // Private, expiring UI status; deliberately independent of inbox membership.
+    match /directTyping/{conversationId}/users/{userId} {
+      allow get: if signedIn() && (resource == null || request.auth.uid in resource.data.participants);
+      allow create, update: if signedIn() && request.auth.uid == userId &&
+        request.resource.data.keys().hasOnly(['userId', 'participants', 'active', 'updatedAt']) &&
+        request.resource.data.userId == userId && request.resource.data.active is bool &&
+        request.resource.data.updatedAt == request.time &&
+        request.resource.data.participants is list && request.resource.data.participants.size() == 2 &&
+        request.resource.data.participants[0] is string && request.resource.data.participants[1] is string &&
+        request.resource.data.participants[0] != request.resource.data.participants[1] &&
+        userId in request.resource.data.participants &&
+        conversationId == request.resource.data.participants[0] + '_' + request.resource.data.participants[1] &&
+        (resource == null || request.resource.data.participants == resource.data.participants);
+    }
+
     match /directConversations/{conversationId} {
       function ownMapChange(field) {
         return request.resource.data.get(field, {}).diff(resource.data.get(field, {}))
@@ -632,6 +666,14 @@ service cloud.firestore {
           request.resource.data.unreadCounts[request.auth.uid] == 0;
       }
 
+      function validArchiveForMe() {
+        let archived = request.resource.data.get('archivedThrough', {}).get(request.auth.uid, null);
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['archivedThrough']) &&
+          ownMapChange('archivedThrough') &&
+          resource.data.lastMessage.createdAt > resource.data.get('deletedThrough', {}).get(request.auth.uid, timestamp.value(0)) &&
+          (archived == null || archived == resource.data.lastMessage.createdAt);
+      }
+
       function validDeletedPreview() {
         let before = resource.data.lastMessage;
         let after = request.resource.data.lastMessage;
@@ -639,6 +681,17 @@ service cloud.firestore {
           before.senderId == request.auth.uid &&
           after.diff(before).affectedKeys().hasOnly(['text', 'isImage', 'isFile']) &&
           after.text == 'Message deleted' && after.isImage == false && after.isFile == false;
+      }
+
+      function validEditUpdate() {
+        let after = request.resource.data;
+        let message = getAfter(/databases/$(database)/documents/directConversations/$(conversationId)/messages/$(after.lastEditedMessageId)).data;
+        return after.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'lastEditedMessageId', 'contentUpdatedAt']) &&
+          after.contentUpdatedAt == request.time && message.editedAt == request.time &&
+          message.senderId == request.auth.uid && message.get('deleted', false) == false &&
+          (resource.data.lastMessage.id == after.lastEditedMessageId
+            ? (after.lastMessage.diff(resource.data.lastMessage).affectedKeys().hasOnly(['text']) && after.lastMessage.text == message.text)
+            : after.lastMessage == resource.data.lastMessage);
       }
 
       // Participant can read the conversation; allow get when doc does not exist yet
@@ -661,6 +714,7 @@ service cloud.firestore {
         request.resource.data.get('lastReadAt', {}) == {} &&
         request.resource.data.get('lastDeliveredAt', {}) == {} &&
         request.resource.data.get('deletedThrough', {}) == {} &&
+        request.resource.data.get('archivedThrough', {}) == {} &&
         request.resource.data.unreadCounts.keys().hasOnly(request.resource.data.participants) &&
         request.resource.data.unreadCounts[request.auth.uid] == 0 &&
         request.resource.data.unreadCounts[
@@ -670,7 +724,7 @@ service cloud.firestore {
 
       // Participants can update conversation metadata (lastMessage, unreadCounts, nicknames, themes, pins, mutes)
       allow update: if signedIn() && request.auth.uid in resource.data.participants &&
-        (validMetadataUpdate() || validSendUpdate() || validDeletedPreview() || validDeleteForMe());
+        (validMetadataUpdate() || validSendUpdate() || validDeletedPreview() || validDeleteForMe() || validEditUpdate() || validArchiveForMe());
 
       // Normal users delete their own view through deletedThrough, never the shared thread.
       allow delete: if signedIn() && isStaff();
@@ -687,6 +741,17 @@ service cloud.firestore {
               .affectedKeys().hasOnly(['👍', '❤️', '😂', '😮', '😢', '🙏']) &&
             validReaction('👍') && validReaction('❤️') && validReaction('😂') &&
             validReaction('😮') && validReaction('😢') && validReaction('🙏');
+        }
+
+        function validTextEdit() {
+          let parent = getAfter(/databases/$(database)/documents/directConversations/$(conversationId)).data;
+          return resource.data.senderId == request.auth.uid && resource.data.get('deleted', false) == false &&
+            resource.data.text.size() > 0 &&
+            resource.data.createdAt > parent.get('deletedThrough', {}).get(request.auth.uid, timestamp.value(0)) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'edited', 'editedAt']) &&
+            request.resource.data.text is string && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 2000 &&
+            request.resource.data.edited == true && request.resource.data.editedAt == request.time &&
+            parent.lastEditedMessageId == messageId && parent.contentUpdatedAt == request.time;
         }
 
         // Participants of the parent conversation can read/list messages
@@ -713,6 +778,7 @@ service cloud.firestore {
       allow update: if signedIn() &&
           request.auth.uid in get(/databases/$(database)/documents/directConversations/$(conversationId)).data.participants &&
           (
+            validTextEdit() ||
             (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions']) && validReactions()) ||
             (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pinned', 'pinnedAt', 'pinnedBy']) &&
               request.resource.data.pinned is bool &&
@@ -1278,7 +1344,7 @@ match /userNotificationSettings/{userId} {
       allow create: if signedIn() &&
         !isStaff() &&
         request.resource.data.reportedBy == request.auth.uid &&
-        request.resource.data.contentType in ['post', 'poll', 'comment', 'reply'] &&
+        request.resource.data.contentType in ['post', 'poll', 'comment', 'reply', 'message'] &&
         request.resource.data.contentId is string &&
         request.resource.data.reason is string &&
         request.resource.data.status == 'pending' &&
@@ -1300,10 +1366,25 @@ match /userNotificationSettings/{userId} {
             )) ||
           (request.resource.data.contentType == 'comment' &&
             exists(/databases/$(database)/documents/comments/$(request.resource.data.contentId)) &&
-            !isContentOwner(get(/databases/$(database)/documents/comments/$(request.resource.data.contentId)).data)) ||
+            !isContentOwner(get(/databases/$(database)/documents/comments/$(request.resource.data.contentId)).data) &&
+            (
+              isAnonymousContent(get(/databases/$(database)/documents/comments/$(request.resource.data.contentId)).data) ||
+              isStudentAuthoredContent(get(/databases/$(database)/documents/comments/$(request.resource.data.contentId)).data)
+            )) ||
           (request.resource.data.contentType == 'reply' &&
             exists(/databases/$(database)/documents/replies/$(request.resource.data.contentId)) &&
-            !isContentOwner(get(/databases/$(database)/documents/replies/$(request.resource.data.contentId)).data))
+            !isContentOwner(get(/databases/$(database)/documents/replies/$(request.resource.data.contentId)).data) &&
+            (
+              isAnonymousContent(get(/databases/$(database)/documents/replies/$(request.resource.data.contentId)).data) ||
+              isStudentAuthoredContent(get(/databases/$(database)/documents/replies/$(request.resource.data.contentId)).data)
+            )) ||
+          (request.resource.data.contentType == 'message' &&
+            exists(/databases/$(database)/documents/communityThreadMessages/$(request.resource.data.contentId)) &&
+            !isContentOwner(get(/databases/$(database)/documents/communityThreadMessages/$(request.resource.data.contentId)).data) &&
+            (
+              isAnonymousContent(get(/databases/$(database)/documents/communityThreadMessages/$(request.resource.data.contentId)).data) ||
+              isStudentAuthoredContent(get(/databases/$(database)/documents/communityThreadMessages/$(request.resource.data.contentId)).data)
+            ))
         );
 
       allow read, list: if isStaff();

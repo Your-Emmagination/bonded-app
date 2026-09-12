@@ -59,6 +59,8 @@ const MY_POSTS_PREFIX = "@bonded_offline_my_posts_";
 const USER_PROFILE_PREFIX = "@bonded_offline_user_profile_";
 const CALENDAR_EVENTS_KEY = "@bonded_offline_cal_events";
 const DASHBOARD_DATA_PREFIX = "@bonded_offline_dashboard_";
+const CONVERSATIONS_PREFIX = "@bonded_offline_conversations_";
+const DIRECT_MSGS_PREFIX = "@bonded_offline_dms_";
 
 // Maximum items to keep in disk cache per category to prevent unbounded storage growth
 const MAX_FEED_ITEMS = 100;
@@ -70,6 +72,8 @@ const MAX_NOTIFICATIONS = 100;
 const MAX_MY_POSTS = 100;
 const MAX_USER_POSTS = 50;
 const MAX_CALENDAR_EVENTS = 100;
+const MAX_CONVERSATIONS = 50;
+const MAX_DIRECT_MESSAGES = 100;
 
 // ─── 1. Feed (Posts, Announcements, Events, Polls) ───────────────────────────
 
@@ -462,3 +466,63 @@ export async function getCachedDashboardData<T>(userId: string): Promise<T | nul
   }
 }
 
+
+// ─── Messenger: conversation list + each chat's recent messages ──────────────
+// Messenger was the only area with nothing saved, so it was always blank
+// offline. Both are written whenever live data arrives.
+
+export async function saveCachedConversations<T>(
+  userId: string,
+  conversations: T[],
+): Promise<void> {
+  try {
+    if (!userId || !Array.isArray(conversations)) return;
+    const trimmed = conversations.slice(0, MAX_CONVERSATIONS);
+    await AsyncStorage.setItem(
+      `${CONVERSATIONS_PREFIX}${userId}`,
+      JSON.stringify(trimmed),
+    );
+  } catch (error) {
+    if (__DEV__) console.warn("[offlineStorage] saveCachedConversations error:", error);
+  }
+}
+
+export async function getCachedConversations<T>(userId: string): Promise<T[]> {
+  try {
+    if (!userId) return [];
+    const raw = await AsyncStorage.getItem(`${CONVERSATIONS_PREFIX}${userId}`);
+    return parseJsonSafely<T[]>(raw, []);
+  } catch (error) {
+    if (__DEV__) console.warn("[offlineStorage] getCachedConversations error:", error);
+    return [];
+  }
+}
+
+export async function saveCachedDirectMessages<T>(
+  conversationId: string,
+  messages: T[],
+): Promise<void> {
+  try {
+    if (!conversationId || !Array.isArray(messages)) return;
+    const trimmed = messages.slice(-MAX_DIRECT_MESSAGES);
+    await AsyncStorage.setItem(
+      `${DIRECT_MSGS_PREFIX}${conversationId}`,
+      JSON.stringify(trimmed),
+    );
+  } catch (error) {
+    if (__DEV__) console.warn("[offlineStorage] saveCachedDirectMessages error:", error);
+  }
+}
+
+export async function getCachedDirectMessages<T>(
+  conversationId: string,
+): Promise<T[]> {
+  try {
+    if (!conversationId) return [];
+    const raw = await AsyncStorage.getItem(`${DIRECT_MSGS_PREFIX}${conversationId}`);
+    return parseJsonSafely<T[]>(raw, []);
+  } catch (error) {
+    if (__DEV__) console.warn("[offlineStorage] getCachedDirectMessages error:", error);
+    return [];
+  }
+}

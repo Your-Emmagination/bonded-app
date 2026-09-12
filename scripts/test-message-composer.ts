@@ -59,6 +59,14 @@ test("a retry after message failure reuses the photo already uploaded", async ()
   assert.equal(uploads, 1);
 });
 
+test("GIF sends preserve the original animation URL without uploading or converting", async () => {
+  const uploaded = { url: "https://media.giphy.com/media/example/giphy.gif?cid=original", name: "Hello GIF", mimeType: "image/gif" };
+  const attachment = await prepareDraftAttachment({ uri: uploaded.url, name: uploaded.name, mimeType: uploaded.mimeType, source: "gif", uploaded }, async () => {
+    throw new Error("A selected GIF must not be re-uploaded");
+  });
+  assert.deepEqual(attachment, uploaded);
+});
+
 test("a failed upload keeps the draft usable and an empty upload URL fails", async () => {
   const draft: DraftAttachment = { uri: "file:///photo.jpg", name: "Photo", mimeType: "image/jpeg", source: "camera" };
   await assert.rejects(prepareDraftAttachment(draft, async () => { throw new Error("Offline"); }), /Offline/);

@@ -1,5 +1,0 @@
-
-> bonded-app@1.0.0 web
-> expo start --web --port 8085 --no-open
-
-unknown or unexpected option: --no-open

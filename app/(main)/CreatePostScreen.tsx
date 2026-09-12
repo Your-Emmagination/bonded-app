@@ -16,10 +16,9 @@ import {
     Timestamp,
     updateDoc,
 } from "firebase/firestore";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
     ActivityIndicator,
-    Alert,
     Animated,
     BackHandler,
     FlatList,
@@ -69,9 +68,7 @@ import {
     uploadPostImage,
     uploadPostVideo,
 } from "@/utils/cloudinaryUpload";
-import {
-    SELF_HARM_SAFETY_MESSAGE,
-} from "@/utils/contentModeration";
+import SafetyDialog from "./components/SafetyDialog";
 import {
     detectAnnouncementTargetDate,
     formatTargetDateLabel,
@@ -162,6 +159,435 @@ type CreatePostRouteParams = {
 const getSingleParam = (value?: string | string[]) =>
   Array.isArray(value) ? value[0] : value;
 
+// Returns a function that keeps the same identity for the whole screen but
+// always runs the latest `callback`, so a memoized section can take a handler
+// that reads current state without redrawing on every key press.
+function useStableCallback<Args extends unknown[], Result>(
+  callback: (...args: Args) => Result,
+) {
+  const callbackRef = useRef(callback);
+  useLayoutEffect(() => {
+    callbackRef.current = callback;
+  });
+  return useCallback((...args: Args) => callbackRef.current(...args), []);
+}
+
+// The sections below don't depend on the post text. Each one is memoized so
+// typing only redraws the text box and what reacts to it (mentions, flair and
+// date suggestions, the Post button) instead of the whole screen.
+
+const AnonymousToggle = memo(function AnonymousToggle({
+  isAnonymous,
+  progress,
+  onToggle,
+}: {
+  isAnonymous: boolean;
+  progress: Animated.Value;
+  onToggle: () => void;
+}) {
+  // Built once instead of on every render, so the toggle's animation isn't
+  // re-attached each time the screen redraws.
+  const trackColor = useMemo(
+    () =>
+      progress.interpolate({
+        inputRange: [0, 1],
+        outputRange: ["#d6c9c2", "#e0a53d"],
+      }),
+    [progress],
+  );
+  const thumbTranslateX = useMemo(
+    () =>
+      progress.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0, 20],
+      }),
+    [progress],
+  );
+
+  return (
+    <>
+      <View style={styles.anonymousContainer}>
+        <Text style={styles.anonymousLabel}>Post Anonymously</Text>
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onPress={onToggle}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: isAnonymous }}
+        >
+          <Animated.View style={[styles.toggle, { backgroundColor: trackColor }]}>
+            <Animated.View
+              style={[
+                styles.toggleThumb,
+                { transform: [{ translateX: thumbTranslateX }] },
+              ]}
+            />
+          </Animated.View>
+        </TouchableOpacity>
+      </View>
+
+      {isAnonymous && (
+        <Text style={styles.anonymousNote}>
+          Note: Admins and moderators can still see your identity. Only
+          students will see this as anonymous.
+        </Text>
+      )}
+    </>
+  );
+});
+
+const FlairPicker = memo(function FlairPicker({
+  pickerRef,
+  selectedFlair,
+  authorRole,
+  onSelect,
+  onPickerLayout,
+  onPickerScroll,
+  onChipLayout,
+}: {
+  pickerRef: RefObject<ScrollView | null>;
+  selectedFlair: PostFlairId;
+  authorRole: string;
+  onSelect: (flairId: PostFlairId) => void;
+  onPickerLayout: (width: number) => void;
+  onPickerScroll: (x: number) => void;
+  onChipLayout: (flairId: string, x: number, width: number) => void;
+}) {
+  const flairs = useMemo(
+    () => POST_FLAIRS.filter((flair) => !flair.staffOnly || canUsePostFlair(flair.id, authorRole)),
+    [authorRole],
+  );
+
+  return (
+    <ScrollView
+      ref={pickerRef}
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      contentContainerStyle={styles.flairPickerContent}
+      scrollEventThrottle={16}
+      onLayout={(event) => onPickerLayout(event.nativeEvent.layout.width)}
+      onScroll={(event) => onPickerScroll(event.nativeEvent.contentOffset.x)}
+    >
+      {flairs.map((flair) => {
+        const selected = selectedFlair === flair.id;
+        return (
+          <TouchableOpacity
+            key={flair.id}
+            style={[styles.flairChoice, selected && styles.flairChoiceSelected]}
+            activeOpacity={0.82}
+            onLayout={(event) => {
+              const { x, width } = event.nativeEvent.layout;
+              onChipLayout(flair.id, x, width);
+            }}
+            onPress={() => onSelect(flair.id)}
+          >
+            <Text style={styles.flairChoiceEmoji}>{flair.emoji}</Text>
+            <Text style={[styles.flairChoiceText, selected && styles.flairChoiceTextSelected]}>{flair.label}</Text>
+            {selected && (
+              <Ionicons
+                name="checkmark-circle"
+                size={14}
+                color="#ffffff"
+                style={styles.flairChoiceCheck}
+              />
+            )}
+          </TouchableOpacity>
+        );
+      })}
+    </ScrollView>
+  );
+});
+
+const PinSection = memo(function PinSection({
+  selectedFlair,
+  shouldPin,
+  targetDate,
+  onTogglePin,
+  onOpenDatePicker,
+  onOpenTimePicker,
+  onPinIndefinitely,
+}: {
+  selectedFlair: PostFlairId;
+  shouldPin: boolean;
+  targetDate: Date | null;
+  onTogglePin: () => void;
+  onOpenDatePicker: () => void;
+  onOpenTimePicker: () => void;
+  onPinIndefinitely: () => void;
+}) {
+  return (
+    <View style={styles.pinSection}>
+      <View style={styles.pinRow}>
+        <View style={styles.pinLabelContainer}>
+          <Ionicons name="pin" size={18} color="#7a0020" style={{ marginRight: 8 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.pinTitle}>Pin to Top of Feed</Text>
+            <Text style={styles.pinSubtitle}>
+              {selectedFlair === "announcement"
+                ? "Feature in active announcements carousel at top of feed"
+                : "Keep at the top of the campus feed"}
+            </Text>
+          </View>
+        </View>
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={onTogglePin}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: shouldPin }}
+        >
+          <View style={[styles.miniToggle, shouldPin && styles.miniToggleActive]}>
+            <View style={[styles.miniToggleThumb, shouldPin && styles.miniToggleThumbActive]} />
+          </View>
+        </TouchableOpacity>
+      </View>
+
+      {shouldPin && (
+        <View style={styles.pinDetailsCard}>
+          <Text style={styles.pinDetailsInfo}>
+            📅 Auto-unpin & expiration schedule:
+          </Text>
+          <View style={styles.pinDateControls}>
+            <TouchableOpacity
+              style={styles.pinDateButton}
+              onPress={onOpenDatePicker}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="calendar-outline" size={16} color="#7a0020" />
+              <Text style={styles.pinDateButtonText}>
+                {targetDate
+                  ? targetDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+                  : "Pick Date"}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.pinDateButton}
+              onPress={onOpenTimePicker}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="time-outline" size={16} color="#7a0020" />
+              <Text style={styles.pinDateButtonText}>
+                {targetDate
+                  ? targetDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+                  : "Pick Time"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {targetDate ? (
+            <View style={styles.pinExpiryRow}>
+              <Text style={styles.pinExpiryBadge}>
+                ⏳ Ends: {formatTargetDateLabel(targetDate)}
+              </Text>
+              <TouchableOpacity
+                onPress={onPinIndefinitely}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text style={styles.pinRemoveDateText}>Pin indefinitely</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <Text style={styles.pinIndefiniteNote}>
+              Pinned indefinitely until manually unpinned.
+            </Text>
+          )}
+        </View>
+      )}
+    </View>
+  );
+});
+
+const AttachmentPreviews = memo(function AttachmentPreviews({
+  selectedGif,
+  attachedLink,
+  existingFiles,
+  files,
+  onRemoveGif,
+  onRemoveLink,
+  onRemoveExistingFile,
+  onRemoveFile,
+}: {
+  selectedGif: string | null;
+  attachedLink: { url: string; title: string } | null;
+  existingFiles: { url: string; mimeType: string; name?: string }[];
+  files: { uri: string; mimeType: string; name: string }[];
+  onRemoveGif: () => void;
+  onRemoveLink: () => void;
+  onRemoveExistingFile: (index: number) => void;
+  onRemoveFile: (index: number) => void;
+}) {
+  return (
+    <>
+      {selectedGif && (
+        <View style={styles.gifPreview}>
+          <Image source={{ uri: selectedGif }} style={styles.gifImage} />
+          <TouchableOpacity
+            activeOpacity={0.7}
+            style={styles.removeFile}
+            onPress={onRemoveGif}
+          >
+            <Ionicons name="close-circle" size={22} color="#e0a53d" />
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {attachedLink && (
+        <View style={styles.linkPreview}>
+          <Ionicons name="link" size={20} color="#4f9cff" />
+          <View style={{ flex: 1, marginLeft: 10 }}>
+            <Text style={styles.linkTitle} numberOfLines={1}>
+              {attachedLink.title}
+            </Text>
+            <Text style={styles.linkUrl} numberOfLines={1}>
+              {attachedLink.url}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.linkRemoveButton}
+            onPress={onRemoveLink}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Remove link"
+          >
+            <Ionicons name="close-circle" size={22} color="#e0a53d" />
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {existingFiles.length > 0 && (
+        <View style={styles.filePreviewContainer}>
+          {existingFiles.map((f, i) => (
+            <View key={`existing-${i}`} style={styles.filePreview}>
+              {f.mimeType?.startsWith("image/") ? (
+                <Image source={{ uri: f.url }} style={styles.imagePreview} />
+              ) : (
+                <View style={styles.documentPreview}>
+                  <Ionicons
+                    name={f.mimeType?.startsWith("video/") ? "videocam" : getFileIconDetails(f.mimeType, f.name).icon}
+                    size={40}
+                    color={f.mimeType?.startsWith("video/") ? "#4f9cff" : getFileIconDetails(f.mimeType, f.name).color}
+                  />
+                  <Text style={styles.documentName} numberOfLines={1}>{f.name || "Attached file"}</Text>
+                </View>
+              )}
+              <TouchableOpacity activeOpacity={0.7} style={styles.removeFile} onPress={() => onRemoveExistingFile(i)}>
+                <Ionicons name="close-circle" size={22} color="#e0a53d" />
+              </TouchableOpacity>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {files.length > 0 && (
+        <View style={styles.filePreviewContainer}>
+          {files.map((f, i) => (
+            <View key={i} style={styles.filePreview}>
+              {f.mimeType.startsWith("image/") ? (
+                <Image
+                  source={{ uri: f.uri }}
+                  style={styles.imagePreview}
+                />
+              ) : f.mimeType.startsWith("video/") ? (
+                <View style={styles.videoPreview}>
+                  <Ionicons name="videocam" size={40} color="#4f9cff" />
+                  <Text style={styles.documentName} numberOfLines={1}>
+                    {f.name}
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.documentPreview}>
+                  <Ionicons
+                    name={getFileIconDetails(f.mimeType, f.name).icon}
+                    size={40}
+                    color={getFileIconDetails(f.mimeType, f.name).color}
+                  />
+                  <Text style={styles.documentName} numberOfLines={1}>
+                    {f.name}
+                  </Text>
+                </View>
+              )}
+              <TouchableOpacity
+                activeOpacity={0.7}
+                style={styles.removeFile}
+                onPress={() => onRemoveFile(i)}
+              >
+                <Ionicons name="close-circle" size={22} color="#e0a53d" />
+              </TouchableOpacity>
+            </View>
+          ))}
+        </View>
+      )}
+    </>
+  );
+});
+
+const AddToPostToolbar = memo(function AddToPostToolbar({
+  filesCount,
+  onTakePhoto,
+  onPickPhotos,
+  onPickDocuments,
+  onPickVideos,
+  onOpenLink,
+  onOpenGif,
+}: {
+  filesCount: number;
+  onTakePhoto: () => void;
+  onPickPhotos: () => void;
+  onPickDocuments: () => void;
+  onPickVideos: () => void;
+  onOpenLink: () => void;
+  onOpenGif: () => void;
+}) {
+  const filesFull = filesCount >= MAX_FILES;
+  return (
+    <View style={styles.addToPostContainer}>
+      <Text style={styles.addToPostLabel}>Add to your post</Text>
+      <View style={styles.iconRow}>
+        <TouchableOpacity
+          activeOpacity={0.7}
+          style={[styles.iconButton, filesFull && styles.iconButtonDisabled]}
+          onPress={onTakePhoto}
+          disabled={filesFull}
+          accessibilityLabel="Take a photo"
+        >
+          <Ionicons name="camera" size={24} color={filesFull ? "#5a6380" : "#a61f1f"} />
+        </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={0.7}
+          style={[styles.iconButton, filesFull && styles.iconButtonDisabled]}
+          onPress={onPickPhotos}
+          disabled={filesFull}
+          accessibilityLabel="Choose photos"
+        >
+          <Ionicons name="images" size={24} color={filesFull ? "#5a6380" : "#4f9cff"} />
+        </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={0.7}
+          style={[styles.iconButton, filesFull && styles.iconButtonDisabled]}
+          onPress={onPickDocuments}
+          disabled={filesFull}
+          accessibilityLabel="Attach files"
+        >
+          <Ionicons name="attach" size={24} color={filesFull ? "#5a6380" : "#e0a53d"} />
+        </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={0.7}
+          style={[styles.iconButton, filesFull && styles.iconButtonDisabled]}
+          onPress={onPickVideos}
+          disabled={filesFull}
+        >
+          <Ionicons name="videocam" size={24} color={filesFull ? "#5a6380" : "#7a0020"} />
+        </TouchableOpacity>
+        <TouchableOpacity activeOpacity={0.7} style={styles.iconButton} onPress={onOpenLink}>
+          <Ionicons name="link" size={24} color="#4f9cff" />
+        </TouchableOpacity>
+        <TouchableOpacity activeOpacity={0.7} style={styles.iconButton} onPress={onOpenGif}>
+          <Ionicons name="gift" size={24} color="#ff9f43" />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+});
+
 const CreatePostScreen = () => {
   const [content, setContent] = useState("");
   const [selectedFlair, setSelectedFlair] = useState<PostFlairId>(DEFAULT_POST_FLAIR);
@@ -180,11 +606,10 @@ const CreatePostScreen = () => {
     variant: ConfirmDialogVariant;
     onConfirm?: () => void;
   } | null>(null);
-  // Small helper so the many single-button "OK" Alert.alert() info messages
-  // throughout this screen render as the app's branded ConfirmDialog instead
-  // of the bare OS alert. Multi-branch / safety-critical alerts (the
-  // self-harm safety notice) intentionally do NOT use this and are left as
-  // native Alert.alert calls, untouched.
+  // Small helper so the many single-button "OK" info messages throughout this
+  // screen render as the app's branded ConfirmDialog instead of the bare OS
+  // alert. The self-harm safety notice doesn't go through this either — it
+  // has a dialog of its own, see components/SafetyDialog.
   const getDialogVariant = (title: string): ConfirmDialogVariant => {
     const normalizedTitle = title.trim().toLowerCase();
     if (normalizedTitle.includes("success")) return "success";
@@ -205,6 +630,11 @@ const CreatePostScreen = () => {
     }
     return "warning";
   };
+
+  // Self-harm gets its own dialog instead of the generic one — see
+  // components/SafetyDialog. Closing it leaves the screen, the way the old
+  // alert's OK button did.
+  const [safetyVisible, setSafetyVisible] = useState(false);
 
   const showInfo = (title: string, description: string, onConfirm?: () => void) => {
     setBlockedDialog({ title, description, variant: getDialogVariant(title), onConfirm });
@@ -811,9 +1241,7 @@ try {
         }
 
         if (serverDecision.selfHarm === true) {
-          Alert.alert("We’re concerned about your safety", SELF_HARM_SAFETY_MESSAGE, [
-            { text: "OK", onPress: () => router.back() },
-          ]);
+          setSafetyVisible(true);
           return;
         }
 
@@ -859,9 +1287,7 @@ try {
       }
 
       if (serverDecision.selfHarm === true) {
-        Alert.alert("We’re concerned about your safety", SELF_HARM_SAFETY_MESSAGE, [
-          { text: "OK", onPress: () => router.back() },
-        ]);
+        setSafetyVisible(true);
         return;
       }
 
@@ -939,27 +1365,31 @@ try {
     }
   };
 
-  const allMentionables: MentionDraft[] = [
-    {
-      ...AI_ASSISTANT_STUDENT,
-      mentionToken: AI_MENTION_TOKEN,
-      label: AI_ASSISTANT_NAME,
-    },
-    {
-      ...EVERYONE_MENTION_STUDENT,
-      mentionToken: EVERYONE_MENTION_TOKEN,
-      label: EVERYONE_MENTION_NAME,
-    },
-    ...students.map((student) => ({
-      ...student,
-      mentionToken: getMentionTokenForStudent(
-        student.studentID,
-        student.firstname,
-        student.lastname,
-      ),
-      label: `${student.firstname} ${student.lastname}`,
-    })),
-  ];
+  // Rebuilt when the student list loads, not on every key press.
+  const allMentionables = useMemo<MentionDraft[]>(
+    () => [
+      {
+        ...AI_ASSISTANT_STUDENT,
+        mentionToken: AI_MENTION_TOKEN,
+        label: AI_ASSISTANT_NAME,
+      },
+      {
+        ...EVERYONE_MENTION_STUDENT,
+        mentionToken: EVERYONE_MENTION_TOKEN,
+        label: EVERYONE_MENTION_NAME,
+      },
+      ...students.map((student) => ({
+        ...student,
+        mentionToken: getMentionTokenForStudent(
+          student.studentID,
+          student.firstname,
+          student.lastname,
+        ),
+        label: `${student.firstname} ${student.lastname}`,
+      })),
+    ],
+    [students],
+  );
 
   const activeMentionMatch = content
     .slice(0, contentSelection.start)
@@ -970,21 +1400,25 @@ try {
       ? activeMentionMatch.index + activeMentionMatch[1].length
       : -1;
 
-  const mentionSuggestions =
-    activeMentionIndex > -1
-      ? allMentionables.filter((person) => {
-          if (!activeMentionQuery) return true;
-          return (
-            person.label.toLowerCase().includes(activeMentionQuery) ||
-            person.studentID.toLowerCase().includes(activeMentionQuery) ||
-            person.mentionToken.slice(1).toLowerCase().includes(activeMentionQuery)
-          );
-        })
-      : [];
+  const mentionSuggestions = useMemo(
+    () =>
+      activeMentionIndex > -1
+        ? allMentionables.filter((person) => {
+            if (!activeMentionQuery) return true;
+            return (
+              person.label.toLowerCase().includes(activeMentionQuery) ||
+              person.studentID.toLowerCase().includes(activeMentionQuery) ||
+              person.mentionToken.slice(1).toLowerCase().includes(activeMentionQuery)
+            );
+          })
+        : [],
+    [activeMentionIndex, activeMentionQuery, allMentionables],
+  );
 
   const syncTaggedUsersFromText = (nextText: string) => {
-    setTaggedUsers((current) =>
-      current.filter((taggedUser) => {
+    setTaggedUsers((current) => {
+      if (current.length === 0) return current;
+      const next = current.filter((taggedUser) => {
         const token = isAiAssistantId(taggedUser.id)
           ? AI_MENTION_TOKEN
           : isEveryoneMentionId(taggedUser.id)
@@ -999,8 +1433,11 @@ try {
           "i",
         );
         return tokenPattern.test(nextText);
-      }),
-    );
+      });
+      // Keep the same list when nothing was removed, so ordinary typing isn't
+      // treated as a tag change.
+      return next.length === current.length ? current : next;
+    });
   };
 
   // Scrolls the horizontal flair picker so the given flair's chip is fully
@@ -1087,12 +1524,12 @@ try {
     setLinkTitle("");
   };
 
-  const handleRemoveLink = () => {
+  const handleRemoveLink = useCallback(() => {
     easeLayout();
     setAttachedLink(null);
     setLinkUrl("");
     setLinkTitle("");
-  };
+  }, []);
 
   const handleCloseLinkModal = () => {
     setShowLinkModal(false);
@@ -1154,18 +1591,6 @@ try {
     setGifResults([]);
   };
 
-  const filteredStudents = students.filter((s) => {
-    const firstname = (s.firstname || "").toLowerCase();
-    const lastname = (s.lastname || "").toLowerCase();
-    const studentID = (s.studentID || "").toLowerCase();
-    const search = searchQuery.toLowerCase();
-
-    return (
-      firstname.includes(search) ||
-      lastname.includes(search) ||
-      studentID.includes(search)
-    );
-  });
   const autoTaggedUsers = hasAiAssistantMention(content)
     ? taggedUsers.some((entry) => isAiAssistantId(entry.id))
       ? taggedUsers
@@ -1176,15 +1601,32 @@ try {
       ? autoTaggedUsers
       : [...autoTaggedUsers, EVERYONE_MENTION_STUDENT]
     : autoTaggedUsers.filter((entry) => !isEveryoneMentionId(entry.id));
-  const everyoneMatchesSearch =
-    !searchQuery.trim() ||
-    EVERYONE_MENTION_NAME.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    EVERYONE_MENTION_TOKEN.slice(1).includes(searchQuery.toLowerCase()) ||
-    "all".includes(searchQuery.toLowerCase());
-  const filteredTagOptions = [
-    ...(everyoneMatchesSearch ? [EVERYONE_MENTION_STUDENT] : []),
-    ...filteredStudents.filter((student) => !isEveryoneMentionId(student.id)),
-  ];
+  // Filtering every student is only needed while the tag picker is open, not
+  // on every key press in the post box.
+  const filteredTagOptions = useMemo<Student[]>(() => {
+    if (!showTagModal) return [];
+    const search = searchQuery.toLowerCase();
+    const filteredStudents = students.filter((s) => {
+      const firstname = (s.firstname || "").toLowerCase();
+      const lastname = (s.lastname || "").toLowerCase();
+      const studentID = (s.studentID || "").toLowerCase();
+
+      return (
+        firstname.includes(search) ||
+        lastname.includes(search) ||
+        studentID.includes(search)
+      );
+    });
+    const everyoneMatchesSearch =
+      !searchQuery.trim() ||
+      EVERYONE_MENTION_NAME.toLowerCase().includes(search) ||
+      EVERYONE_MENTION_TOKEN.slice(1).includes(search) ||
+      "all".includes(search);
+    return [
+      ...(everyoneMatchesSearch ? [EVERYONE_MENTION_STUDENT] : []),
+      ...filteredStudents.filter((student) => !isEveryoneMentionId(student.id)),
+    ];
+  }, [searchQuery, showTagModal, students]);
 
   // Require a bit of real content before suggesting anything — avoids
   // firing on a half-typed word every keystroke.
@@ -1218,6 +1660,63 @@ try {
     }
     return detectAnnouncementTargetDate(content);
   }, [content, dismissedDetectedDate, hasEnoughContentForSuggestion, isStaff, shouldPin]);
+
+  // Stable handlers for the memoized sections, so typing in the post box only
+  // redraws the parts of the screen that depend on the text.
+  const handleToggleAnonymous = useCallback(() => {
+    easeLayout();
+    setIsAnonymous((current) => !current);
+  }, []);
+  const handleSelectFlair = useCallback((flairId: PostFlairId) => {
+    easeLayout();
+    setSelectedFlair(flairId);
+  }, []);
+  const handleFlairPickerLayout = useCallback((width: number) => {
+    flairPickerWidthRef.current = width;
+  }, []);
+  const handleFlairPickerScroll = useCallback((x: number) => {
+    flairPickerScrollXRef.current = x;
+  }, []);
+  const handleFlairChipLayout = useCallback((flairId: string, x: number, width: number) => {
+    flairChipLayoutsRef.current[flairId] = { x, width };
+  }, []);
+  const handleTogglePin = useCallback(() => {
+    easeLayout();
+    const next = !shouldPin;
+    setShouldPin(next);
+    if (next && !targetDate) {
+      const d = new Date();
+      d.setDate(d.getDate() + 3);
+      d.setHours(23, 59, 0, 0);
+      setTargetDate(d);
+      setTargetDateLabel(formatTargetDateLabel(d));
+    }
+  }, [shouldPin, targetDate]);
+  const handleOpenDatePicker = useCallback(() => setShowDatePicker(true), []);
+  const handleOpenTimePicker = useCallback(() => setShowTimePicker(true), []);
+  const handlePinIndefinitely = useCallback(() => {
+    easeLayout();
+    setTargetDate(null);
+    setTargetDateLabel(null);
+  }, []);
+  const handleRemoveGif = useCallback(() => {
+    easeLayout();
+    setSelectedGif(null);
+  }, []);
+  const handleRemoveExistingFile = useCallback((index: number) => {
+    easeLayout();
+    setExistingFiles((current) => current.filter((_, idx) => idx !== index));
+  }, []);
+  const handleRemoveFile = useCallback((index: number) => {
+    easeLayout();
+    setFiles((current) => current.filter((_, idx) => idx !== index));
+  }, []);
+  const handleTakePhoto = useStableCallback(takePhoto);
+  const handlePickPhotos = useStableCallback(pickPhotos);
+  const handlePickDocuments = useStableCallback(pickDocuments);
+  const handlePickVideos = useStableCallback(pickVideos);
+  const handleOpenLinkModal = useCallback(() => setShowLinkModal(true), []);
+  const handleOpenGifModal = useCallback(() => setShowGifModal(true), []);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -1273,53 +1772,11 @@ try {
             </View>
           )}
 
-          <View style={styles.anonymousContainer}>
-            <Text style={styles.anonymousLabel}>Post Anonymously</Text>
-            <TouchableOpacity
-              activeOpacity={0.9}
-              onPress={() => {
-                easeLayout();
-                setIsAnonymous(!isAnonymous);
-              }}
-              accessibilityRole="switch"
-              accessibilityState={{ checked: isAnonymous }}
-            >
-              <Animated.View
-                style={[
-                  styles.toggle,
-                  {
-                    backgroundColor: anonymousProgress.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: ["#d6c9c2", "#e0a53d"],
-                    }),
-                  },
-                ]}
-              >
-                <Animated.View
-                  style={[
-                    styles.toggleThumb,
-                    {
-                      transform: [
-                        {
-                          translateX: anonymousProgress.interpolate({
-                            inputRange: [0, 1],
-                            outputRange: [0, 20],
-                          }),
-                        },
-                      ],
-                    },
-                  ]}
-                />
-              </Animated.View>
-            </TouchableOpacity>
-          </View>
-
-          {isAnonymous && (
-            <Text style={styles.anonymousNote}>
-              Note: Admins and moderators can still see your identity. Only
-              students will see this as anonymous.
-            </Text>
-          )}
+          <AnonymousToggle
+            isAnonymous={isAnonymous}
+            progress={anonymousProgress}
+            onToggle={handleToggleAnonymous}
+          />
 
           <View style={styles.flairSection}>
             <View style={styles.flairSectionHeader}>
@@ -1356,145 +1813,27 @@ try {
                 }}
               />
             )}
-            <ScrollView
-              ref={flairPickerRef}
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.flairPickerContent}
-              scrollEventThrottle={16}
-              onLayout={(event) => {
-                flairPickerWidthRef.current = event.nativeEvent.layout.width;
-              }}
-              onScroll={(event) => {
-                flairPickerScrollXRef.current = event.nativeEvent.contentOffset.x;
-              }}
-            >
-              {POST_FLAIRS.filter((flair) => !flair.staffOnly || canUsePostFlair(flair.id, authorRole)).map((flair) => {
-                const selected = selectedFlair === flair.id;
-                return (
-                  <TouchableOpacity
-                    key={flair.id}
-                    style={[styles.flairChoice, selected && styles.flairChoiceSelected]}
-                    activeOpacity={0.82}
-                    onLayout={(event) => {
-                      const { x, width } = event.nativeEvent.layout;
-                      flairChipLayoutsRef.current[flair.id] = { x, width };
-                    }}
-                    onPress={() => {
-                      easeLayout();
-                      setSelectedFlair(flair.id);
-                    }}
-                  >
-                    <Text style={styles.flairChoiceEmoji}>{flair.emoji}</Text>
-                    <Text style={[styles.flairChoiceText, selected && styles.flairChoiceTextSelected]}>{flair.label}</Text>
-                    {selected && (
-                      <Ionicons
-                        name="checkmark-circle"
-                        size={14}
-                        color="#ffffff"
-                        style={styles.flairChoiceCheck}
-                      />
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
+            <FlairPicker
+              pickerRef={flairPickerRef}
+              selectedFlair={selectedFlair}
+              authorRole={authorRole}
+              onSelect={handleSelectFlair}
+              onPickerLayout={handleFlairPickerLayout}
+              onPickerScroll={handleFlairPickerScroll}
+              onChipLayout={handleFlairChipLayout}
+            />
           </View>
 
           {isStaff && (
-            <View style={styles.pinSection}>
-              <View style={styles.pinRow}>
-                <View style={styles.pinLabelContainer}>
-                  <Ionicons name="pin" size={18} color="#7a0020" style={{ marginRight: 8 }} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.pinTitle}>Pin to Top of Feed</Text>
-                    <Text style={styles.pinSubtitle}>
-                      {selectedFlair === "announcement"
-                        ? "Feature in active announcements carousel at top of feed"
-                        : "Keep at the top of the campus feed"}
-                    </Text>
-                  </View>
-                </View>
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={() => {
-                    easeLayout();
-                    const next = !shouldPin;
-                    setShouldPin(next);
-                    if (next && !targetDate) {
-                      const d = new Date();
-                      d.setDate(d.getDate() + 3);
-                      d.setHours(23, 59, 0, 0);
-                      setTargetDate(d);
-                      setTargetDateLabel(formatTargetDateLabel(d));
-                    }
-                  }}
-                  accessibilityRole="switch"
-                  accessibilityState={{ checked: shouldPin }}
-                >
-                  <View style={[styles.miniToggle, shouldPin && styles.miniToggleActive]}>
-                    <View style={[styles.miniToggleThumb, shouldPin && styles.miniToggleThumbActive]} />
-                  </View>
-                </TouchableOpacity>
-              </View>
-
-              {shouldPin && (
-                <View style={styles.pinDetailsCard}>
-                  <Text style={styles.pinDetailsInfo}>
-                    📅 Auto-unpin & expiration schedule:
-                  </Text>
-                  <View style={styles.pinDateControls}>
-                    <TouchableOpacity
-                      style={styles.pinDateButton}
-                      onPress={() => setShowDatePicker(true)}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="calendar-outline" size={16} color="#7a0020" />
-                      <Text style={styles.pinDateButtonText}>
-                        {targetDate
-                          ? targetDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
-                          : "Pick Date"}
-                      </Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={styles.pinDateButton}
-                      onPress={() => setShowTimePicker(true)}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="time-outline" size={16} color="#7a0020" />
-                      <Text style={styles.pinDateButtonText}>
-                        {targetDate
-                          ? targetDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
-                          : "Pick Time"}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  {targetDate ? (
-                    <View style={styles.pinExpiryRow}>
-                      <Text style={styles.pinExpiryBadge}>
-                        ⏳ Ends: {formatTargetDateLabel(targetDate)}
-                      </Text>
-                      <TouchableOpacity
-                        onPress={() => {
-                          easeLayout();
-                          setTargetDate(null);
-                          setTargetDateLabel(null);
-                        }}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      >
-                        <Text style={styles.pinRemoveDateText}>Pin indefinitely</Text>
-                      </TouchableOpacity>
-                    </View>
-                  ) : (
-                    <Text style={styles.pinIndefiniteNote}>
-                      Pinned indefinitely until manually unpinned.
-                    </Text>
-                  )}
-                </View>
-              )}
-            </View>
+            <PinSection
+              selectedFlair={selectedFlair}
+              shouldPin={shouldPin}
+              targetDate={targetDate}
+              onTogglePin={handleTogglePin}
+              onOpenDatePicker={handleOpenDatePicker}
+              onOpenTimePicker={handleOpenTimePicker}
+              onPinIndefinitely={handlePinIndefinitely}
+            />
           )}
 
           {showDatePicker && (
@@ -1587,9 +1926,12 @@ try {
               onChangeText={handleContentChange}
               onFocus={() => setIsContentFocused(true)}
               onBlur={() => setIsContentFocused(false)}
-              onSelectionChange={(event) =>
-                setContentSelection(event.nativeEvent.selection)
-              }
+              onSelectionChange={(event) => {
+                const { start, end } = event.nativeEvent.selection;
+                setContentSelection((current) =>
+                  current.start === start && current.end === end ? current : { start, end },
+                );
+              }}
             />
           </View>
 
@@ -1636,111 +1978,16 @@ try {
             </View>
           )}
 
-          {selectedGif && (
-            <View style={styles.gifPreview}>
-              <Image source={{ uri: selectedGif }} style={styles.gifImage} />
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={styles.removeFile}
-                onPress={() => {
-                  easeLayout();
-                  setSelectedGif(null);
-                }}
-              >
-                <Ionicons name="close-circle" size={22} color="#e0a53d" />
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {attachedLink && (
-            <View style={styles.linkPreview}>
-              <Ionicons name="link" size={20} color="#4f9cff" />
-              <View style={{ flex: 1, marginLeft: 10 }}>
-                <Text style={styles.linkTitle} numberOfLines={1}>
-                  {attachedLink.title}
-                </Text>
-                <Text style={styles.linkUrl} numberOfLines={1}>
-                  {attachedLink.url}
-                </Text>
-              </View>
-              <TouchableOpacity
-                style={styles.linkRemoveButton}
-                onPress={handleRemoveLink}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                accessibilityRole="button"
-                accessibilityLabel="Remove link"
-              >
-                <Ionicons name="close-circle" size={22} color="#e0a53d" />
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {existingFiles.length > 0 && (
-            <View style={styles.filePreviewContainer}>
-              {existingFiles.map((f, i) => (
-                <View key={`existing-${i}`} style={styles.filePreview}>
-                  {f.mimeType?.startsWith("image/") ? (
-                    <Image source={{ uri: f.url }} style={styles.imagePreview} />
-                  ) : (
-                    <View style={styles.documentPreview}>
-                      <Ionicons
-                        name={f.mimeType?.startsWith("video/") ? "videocam" : getFileIconDetails(f.mimeType, f.name).icon}
-                        size={40}
-                        color={f.mimeType?.startsWith("video/") ? "#4f9cff" : getFileIconDetails(f.mimeType, f.name).color}
-                      />
-                      <Text style={styles.documentName} numberOfLines={1}>{f.name || "Attached file"}</Text>
-                    </View>
-                  )}
-                  <TouchableOpacity activeOpacity={0.7} style={styles.removeFile} onPress={() => { easeLayout(); setExistingFiles((current) => current.filter((_, idx) => idx !== i)); }}>
-                    <Ionicons name="close-circle" size={22} color="#e0a53d" />
-                  </TouchableOpacity>
-                </View>
-              ))}
-            </View>
-          )}
-
-          {files.length > 0 && (
-            <View style={styles.filePreviewContainer}>
-              {files.map((f, i) => (
-                <View key={i} style={styles.filePreview}>
-                  {f.mimeType.startsWith("image/") ? (
-                    <Image
-                      source={{ uri: f.uri }}
-                      style={styles.imagePreview}
-                    />
-                  ) : f.mimeType.startsWith("video/") ? (
-                    <View style={styles.videoPreview}>
-                      <Ionicons name="videocam" size={40} color="#4f9cff" />
-                      <Text style={styles.documentName} numberOfLines={1}>
-                        {f.name}
-                      </Text>
-                    </View>
-                  ) : (
-                    <View style={styles.documentPreview}>
-                      <Ionicons
-                        name={getFileIconDetails(f.mimeType, f.name).icon}
-                        size={40}
-                        color={getFileIconDetails(f.mimeType, f.name).color}
-                      />
-                      <Text style={styles.documentName} numberOfLines={1}>
-                        {f.name}
-                      </Text>
-                    </View>
-                  )}
-                  <TouchableOpacity
-                    activeOpacity={0.7}
-                    style={styles.removeFile}
-                    onPress={() => {
-                      easeLayout();
-                      setFiles(files.filter((_, idx) => idx !== i));
-                    }}
-                  >
-                    <Ionicons name="close-circle" size={22} color="#e0a53d" />
-                  </TouchableOpacity>
-                </View>
-              ))}
-            </View>
-          )}
+          <AttachmentPreviews
+            selectedGif={selectedGif}
+            attachedLink={attachedLink}
+            existingFiles={existingFiles}
+            files={files}
+            onRemoveGif={handleRemoveGif}
+            onRemoveLink={handleRemoveLink}
+            onRemoveExistingFile={handleRemoveExistingFile}
+            onRemoveFile={handleRemoveFile}
+          />
 
           {effectiveTaggedUsers.length > 0 && (
             <View style={styles.taggedPreview}>
@@ -1752,88 +1999,15 @@ try {
             </View>
           )}
 
-          <View style={styles.addToPostContainer}>
-            <Text style={styles.addToPostLabel}>Add to your post</Text>
-            <View style={styles.iconRow}>
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={[
-                  styles.iconButton,
-                  files.length >= MAX_FILES && styles.iconButtonDisabled,
-                ]}
-                onPress={takePhoto}
-                disabled={files.length >= MAX_FILES}
-                accessibilityLabel="Take a photo"
-              >
-                <Ionicons
-                  name="camera"
-                  size={24}
-                  color={files.length >= MAX_FILES ? "#5a6380" : "#a61f1f"}
-                />
-              </TouchableOpacity>
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={[
-                  styles.iconButton,
-                  files.length >= MAX_FILES && styles.iconButtonDisabled,
-                ]}
-                onPress={pickPhotos}
-                disabled={files.length >= MAX_FILES}
-                accessibilityLabel="Choose photos"
-              >
-                <Ionicons
-                  name="images"
-                  size={24}
-                  color={files.length >= MAX_FILES ? "#5a6380" : "#4f9cff"}
-                />
-              </TouchableOpacity>
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={[
-                  styles.iconButton,
-                  files.length >= MAX_FILES && styles.iconButtonDisabled,
-                ]}
-                onPress={pickDocuments}
-                disabled={files.length >= MAX_FILES}
-                accessibilityLabel="Attach files"
-              >
-                <Ionicons
-                  name="attach"
-                  size={24}
-                  color={files.length >= MAX_FILES ? "#5a6380" : "#e0a53d"}
-                />
-              </TouchableOpacity>
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={[
-                  styles.iconButton,
-                  files.length >= MAX_FILES && styles.iconButtonDisabled,
-                ]}
-                onPress={pickVideos}
-                disabled={files.length >= MAX_FILES}
-              >
-                <Ionicons
-                  name="videocam"
-                  size={24}
-                  color={files.length >= MAX_FILES ? "#5a6380" : "#7a0020"}
-                />
-              </TouchableOpacity>
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={styles.iconButton}
-                onPress={() => setShowLinkModal(true)}
-              >
-                <Ionicons name="link" size={24} color="#4f9cff" />
-              </TouchableOpacity>
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={styles.iconButton}
-                onPress={() => setShowGifModal(true)}
-              >
-                <Ionicons name="gift" size={24} color="#ff9f43" />
-              </TouchableOpacity>
-            </View>
-          </View>
+          <AddToPostToolbar
+            filesCount={files.length}
+            onTakePhoto={handleTakePhoto}
+            onPickPhotos={handlePickPhotos}
+            onPickDocuments={handlePickDocuments}
+            onPickVideos={handlePickVideos}
+            onOpenLink={handleOpenLinkModal}
+            onOpenGif={handleOpenGifModal}
+          />
         </ScrollView>
 
         <View
@@ -1931,6 +2105,9 @@ try {
               />
 
               <FlatList
+                initialNumToRender={10}
+                maxToRenderPerBatch={10}
+                windowSize={7}
                 data={filteredTagOptions}
                 keyExtractor={(item) => item.id}
                 renderItem={({ item }) => {
@@ -2103,6 +2280,9 @@ try {
                 </View>
               ) : gifResults.length > 0 ? (
                <FlatList
+  initialNumToRender={8}
+  maxToRenderPerBatch={8}
+  windowSize={5}
   data={gifResults}
   numColumns={2}
   keyExtractor={(item, index) => item.id || index.toString()}
@@ -2157,6 +2337,15 @@ try {
           onConfirmCallback?.();
         }}
         onCancel={() => setBlockedDialog(null)}
+      />
+
+      <SafetyDialog
+        visible={safetyVisible}
+        onClose={() => {
+          setSafetyVisible(false);
+          router.back();
+        }}
+        contentLabel="post"
       />
     </SafeAreaView>
   );

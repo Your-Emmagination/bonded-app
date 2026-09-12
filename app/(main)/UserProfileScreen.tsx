@@ -20,10 +20,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     BackHandler,
+    FlatList,
     Linking,
     NativeScrollEvent,
     NativeSyntheticEvent,
-    ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
@@ -407,14 +407,20 @@ const UserProfileScreen = () => {
       return candidates[0];
     };
 
-    setLoading(!initialStudentPreview);
+    // A cached profile is already on screen at this point; don't drop back
+    // into a spinner for it.
+    setLoading(!initialStudentPreview && !studentRef.current);
 
     void resolveProfile()
       .then((candidate) => {
         if (!active) return;
         if (!candidate) {
-          setStudent(null);
-          setContentOwnerId(null);
+          // Offline this lookup can't reach anyone, so keep whatever the
+          // cache gave us instead of replacing it with "User not found".
+          if (!isOffline || !studentRef.current) {
+            setStudent(null);
+            setContentOwnerId(null);
+          }
           setLoading(false);
           return;
         }
@@ -463,7 +469,7 @@ const UserProfileScreen = () => {
       active = false;
       unsubscribeProfile?.();
     };
-  }, [getStudentScore, navigateBack, profileDocId, userId]);
+  }, [getStudentScore, isOffline, navigateBack, profileDocId, userId]);
 
   const fetchUserContent = useCallback(async (uid: string) => {
     if (postsRef.current.length === 0) {
@@ -1035,6 +1041,98 @@ const UserProfileScreen = () => {
   );
   const ownerRole = (student?.role?.toLowerCase() || "student") as UserRole;
 
+  const handlePostCommentCountUpdate = useCallback((postId: string, newCount: number) => {
+    setPosts((previous) =>
+      previous.map((item) =>
+        item.id === postId ? { ...item, commentCount: newCount } : item,
+      ),
+    );
+  }, [setPosts]);
+
+  const handlePollCommentCountUpdate = useCallback((pollId: string, newCount: number) => {
+    setPolls((previous) =>
+      previous.map((item) =>
+        item.id === pollId ? { ...item, commentCount: newCount } : item,
+      ),
+    );
+  }, []);
+
+  const handlePollProfileClick = useCallback(
+    (targetId?: string) => handleProfileClick(targetId),
+    [handleProfileClick],
+  );
+
+  // The activity list only draws the posts and polls near the screen.
+  const profileFeedListData = useMemo<ProfileFeedItem[]>(
+    () => (contentLoading ? [] : filteredProfileFeedItems),
+    [contentLoading, filteredProfileFeedItems],
+  );
+  const lastProfileFeedIndex = profileFeedListData.length - 1;
+
+  const renderProfileFeedItem = useCallback(
+    ({ item: entry, index }: { item: ProfileFeedItem; index: number }) => (
+      <View
+        style={[
+          styles.feedCardGroupItem,
+          index === 0 && styles.feedCardGroupItemFirst,
+          index === lastProfileFeedIndex && styles.feedCardGroupItemLast,
+        ]}
+      >
+        {entry.type === "post" ? (
+          <PostCard
+            post={entry.item as any}
+            isLiked={entry.item.likedBy?.includes(viewer?.uid || "") || false}
+            currentUserRole={viewerRole}
+            currentUserId={viewer?.uid}
+            onLike={handleLike}
+            onProfileClick={handleProfileClick}
+            onTagClick={handleTagClick}
+            onImagePress={openImageViewer}
+            onFilePress={handleFilePress}
+            getTimeAgo={getTimeAgo}
+            onCommentCountUpdate={handlePostCommentCountUpdate}
+          />
+        ) : (
+          <PollCard
+            poll={entry.item as any}
+            currentUserId={viewer?.uid}
+            userRole={ownerRole}
+            currentUserRole={viewerRole}
+            onVote={handlePollVote}
+            onAddOption={addOptionToPoll}
+            onEdit={handleEditPoll}
+            onDelete={handleDeletePoll}
+            onProfileClick={handlePollProfileClick}
+            onImagePress={openImageViewer}
+            getTimeAgo={getTimeAgo}
+            isPollExpired={isPollExpired}
+            onCommentCountUpdate={handlePollCommentCountUpdate}
+          />
+        )}
+      </View>
+    ),
+    [
+      addOptionToPoll,
+      getTimeAgo,
+      handleDeletePoll,
+      handleEditPoll,
+      handleFilePress,
+      handleLike,
+      handlePollCommentCountUpdate,
+      handlePollProfileClick,
+      handlePollVote,
+      handlePostCommentCountUpdate,
+      handleProfileClick,
+      handleTagClick,
+      isPollExpired,
+      lastProfileFeedIndex,
+      openImageViewer,
+      ownerRole,
+      viewer?.uid,
+      viewerRole,
+    ],
+  );
+
   if (loading && !student) {
     return (
       <SafeAreaView style={styles.container}>
@@ -1100,361 +1198,319 @@ const UserProfileScreen = () => {
           <View style={styles.offlineStatusBar}>
             <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
             <Text style={styles.offlineStatusText}>
-              Offline mode • Viewing saved profile and posts
+              Offline mode
             </Text>
           </View>
         )}
 
-        <ScrollView
+        {/* Only the posts and polls near the screen are drawn. */}
+        <FlatList
+          data={profileFeedListData}
+          keyExtractor={(entry) => `${entry.type}:${entry.item.id}`}
+          renderItem={renderProfileFeedItem}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scrollContent}
           onScroll={handleScroll}
           scrollEventThrottle={150}
-        >
-          <View style={styles.profileCard}>
-            <TouchableOpacity
-              activeOpacity={0.88}
-              disabled={!profileImageUri}
-              onPress={() => profileImageUri && openImageViewer([profileImageUri], 0)}
-              style={styles.avatarWrapper}
-            >
-              {profileImageUri ? (
-                <Image
-                  source={{ uri: avatarThumb(profileImageUri, AVATAR_SIZE_LARGE) }}
-                  style={styles.profileImage}
-                />
-              ) : (
-                <View style={styles.placeholder}>
-                  <Ionicons name="person" size={48} color="#e0a53d" />
-                </View>
-              )}
-              <View
-                style={[
-                  styles.statusBadge,
-                  { backgroundColor: student.isOnline ? "#2e9d63" : "#a58e87" },
-                ]}
-              />
-            </TouchableOpacity>
-
-            <Text style={styles.profileName}>{fullName}</Text>
-            <View style={styles.statusPill}>
-              <View
-                style={[
-                  styles.statusDot,
-                  { backgroundColor: student.isOnline ? "#2e9d63" : "#a58e87" },
-                ]}
-              />
-              <Text
-                style={[
-                  styles.statusText,
-                  { color: student.isOnline ? "#2e9d63" : "#8f746c" },
-                ]}
-              >
-                {student.isOnline ? "Online" : "Offline"}
-              </Text>
-            </View>
-
-            {viewer?.uid && contentOwnerId && viewer.uid !== contentOwnerId && (
-              <TouchableOpacity
-                style={styles.messageButton}
-                activeOpacity={0.82}
-                onPress={() => {
-                  if (!viewer?.uid || !contentOwnerId) return;
-                  try {
-                    router.push({
-                      pathname: "/(main)/DirectChatScreen" as any,
-                      params: getDirectChatParams(viewer.uid, {
-                        uid: contentOwnerId, displayName: fullName,
-                        profileImage: student?.profileImage || student?.profilePic || null,
-                        role: student?.role, studentID: student?.studentID,
-                      }),
-                    });
-                  } catch (err) {
-                    console.error("Failed to start chat from profile:", err);
-                  }
-                }}
-              >
-                <Ionicons name="chatbubble-ellipses-outline" size={18} color="#ffffff" />
-                <Text style={styles.messageButtonText}>Message</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-
-          <View style={styles.section}>
-            <View style={styles.sectionTitleRow}>
-              <Ionicons name="person" size={18} color="#5f0909" />
-              <Text style={styles.sectionTitle}>Personal Information</Text>
-            </View>
-            <View style={styles.goldCard}>
-              <InfoRow icon="person-outline" label="Full Name" value={fullName} />
-              <View style={styles.rowDivider} />
-              <InfoRow
-                icon="shield-checkmark-outline"
-                label="Role"
-                value={student.role ? student.role.charAt(0).toUpperCase() + student.role.slice(1) : "Member"}
-              />
-            </View>
-          </View>
-
-          <View style={styles.section}>
-            <View style={styles.sectionTitleRow}>
-              <Ionicons name="school" size={18} color="#5f0909" />
-              <Text style={styles.sectionTitle}>Academic Information</Text>
-            </View>
-            <View style={styles.goldCard}>
-              <InfoRow
-                icon="school-outline"
-                label="Course / Program"
-                value={student.course || "—"}
-              />
-              <View style={styles.rowDivider} />
-              <InfoRow
-                icon="trending-up-outline"
-                label="Year Level"
-                value={student.yearlvl || "—"}
-              />
-            </View>
-          </View>
-
-          <View style={[styles.section, styles.activitySection]}>
-            <View style={styles.activityHeader}>
-              <View style={styles.activityTitleGroup}>
-                <View style={styles.activityIconBox}>
-                  <Ionicons name="newspaper-outline" size={18} color="#5f0909" />
-                </View>
-                <View>
-                  <View style={styles.activityTitleRow}>
-                    <Text style={styles.activityTitle}>Activity</Text>
-                    <View style={styles.countBadge}>
-                      <Text style={styles.countBadgeText}>{posts.length + polls.length}</Text>
-                    </View>
-                  </View>
-                  <Text style={styles.activitySubtitle}>
-                    Posts and polls shared on campus
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.filterControl}>
+          initialNumToRender={4}
+          maxToRenderPerBatch={4}
+          windowSize={7}
+          removeClippedSubviews={false}
+          ListHeaderComponentStyle={styles.activityListHeader}
+          ListHeaderComponent={
+            <>
+              <View style={styles.profileCard}>
                 <TouchableOpacity
-                  style={[styles.filterButton, contentFilterOpen && styles.filterButtonOpen]}
-                  activeOpacity={0.82}
-                  onPress={() => setContentFilterOpen((current) => !current)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Filter profile activity"
+                  activeOpacity={0.88}
+                  disabled={!profileImageUri}
+                  onPress={() => profileImageUri && openImageViewer([profileImageUri], 0)}
+                  style={styles.avatarWrapper}
                 >
-                  <Ionicons
-                    name={
-                      contentFilter === "posts"
-                        ? "document-text-outline"
-                        : contentFilter === "polls"
-                          ? "stats-chart-outline"
-                          : "layers-outline"
-                    }
-                    size={15}
-                    color="#5f0909"
-                  />
-                  <Text style={styles.filterButtonText}>
-                    {contentFilter === "all"
-                      ? "All"
-                      : contentFilter === "posts"
-                        ? "Posts"
-                        : "Polls"}
-                  </Text>
-                  <Ionicons
-                    name={contentFilterOpen ? "chevron-up" : "chevron-down"}
-                    size={14}
-                    color="#8a6258"
+                  {profileImageUri ? (
+                    <Image
+                      source={{ uri: avatarThumb(profileImageUri, AVATAR_SIZE_LARGE) }}
+                      style={styles.profileImage}
+                    />
+                  ) : (
+                    <View style={styles.placeholder}>
+                      <Ionicons name="person" size={48} color="#e0a53d" />
+                    </View>
+                  )}
+                  <View
+                    style={[
+                      styles.statusBadge,
+                      { backgroundColor: student.isOnline ? "#2e9d63" : "#a58e87" },
+                    ]}
                   />
                 </TouchableOpacity>
 
-                {contentFilterOpen && (
-                  <View style={styles.filterMenu}>
-                    {(
-                      [
-                        {
-                          id: "all",
-                          label: "All activity",
-                          icon: "layers-outline",
-                          count: posts.length + polls.length,
-                        },
-                        {
-                          id: "posts",
-                          label: "Posts",
-                          icon: "document-text-outline",
-                          count: posts.length,
-                        },
-                        {
-                          id: "polls",
-                          label: "Polls",
-                          icon: "stats-chart-outline",
-                          count: polls.length,
-                        },
-                      ] as const
-                    ).map((option) => {
-                      const selected = contentFilter === option.id;
-                      return (
-                        <TouchableOpacity
-                          key={option.id}
-                          style={[
-                            styles.filterMenuItem,
-                            selected && styles.filterMenuItemActive,
-                          ]}
-                          onPress={() => {
-                            setContentFilter(option.id);
-                            setContentFilterOpen(false);
-                          }}
-                        >
-                          <View style={styles.filterMenuItemCopy}>
-                            <Ionicons
-                              name={option.icon}
-                              size={16}
-                              color={selected ? "#5f0909" : "#8a6258"}
-                            />
-                            <Text
-                              style={[
-                                styles.filterMenuItemText,
-                                selected && styles.filterMenuItemTextActive,
-                              ]}
-                            >
-                              {option.label}
-                            </Text>
-                          </View>
-                          <View
-                            style={[
-                              styles.filterMenuCount,
-                              selected && styles.filterMenuCountActive,
-                            ]}
-                          >
-                            <Text
-                              style={[
-                                styles.filterMenuCountText,
-                                selected && styles.filterMenuCountTextActive,
-                              ]}
-                            >
-                              {option.count}
-                            </Text>
-                          </View>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
+                <Text style={styles.profileName}>{fullName}</Text>
+                <View style={styles.statusPill}>
+                  <View
+                    style={[
+                      styles.statusDot,
+                      { backgroundColor: student.isOnline ? "#2e9d63" : "#a58e87" },
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.statusText,
+                      { color: student.isOnline ? "#2e9d63" : "#8f746c" },
+                    ]}
+                  >
+                    {student.isOnline ? "Online" : "Offline"}
+                  </Text>
+                </View>
+
+                {viewer?.uid && contentOwnerId && viewer.uid !== contentOwnerId && (
+                  <TouchableOpacity
+                    style={styles.messageButton}
+                    activeOpacity={0.82}
+                    onPress={() => {
+                      if (!viewer?.uid || !contentOwnerId) return;
+                      try {
+                        router.push({
+                          pathname: "/(main)/DirectChatScreen" as any,
+                          params: getDirectChatParams(viewer.uid, {
+                            uid: contentOwnerId, displayName: fullName,
+                            profileImage: student?.profileImage || student?.profilePic || null,
+                            role: student?.role, studentID: student?.studentID,
+                          }),
+                        });
+                      } catch (err) {
+                        console.error("Failed to start chat from profile:", err);
+                      }
+                    }}
+                  >
+                    <Ionicons name="chatbubble-ellipses-outline" size={18} color="#ffffff" />
+                    <Text style={styles.messageButtonText}>Message</Text>
+                  </TouchableOpacity>
                 )}
               </View>
-            </View>
 
-            {contentLoading ? (
-              <FeedSkeleton count={3} />
-            ) : filteredProfileFeedItems.length === 0 ? (
-              <View style={styles.emptyState}>
-                <View style={styles.emptyIconCircle}>
-                  <Ionicons
-                    name={
-                      contentFilter === "posts"
-                        ? "document-text-outline"
-                        : contentFilter === "polls"
-                          ? "stats-chart-outline"
-                          : "newspaper-outline"
-                    }
-                    size={28}
-                    color="#b58a7c"
+              <View style={styles.section}>
+                <View style={styles.sectionTitleRow}>
+                  <Ionicons name="person" size={18} color="#5f0909" />
+                  <Text style={styles.sectionTitle}>Personal Information</Text>
+                </View>
+                <View style={styles.goldCard}>
+                  <InfoRow icon="person-outline" label="Full Name" value={fullName} />
+                  <View style={styles.rowDivider} />
+                  <InfoRow
+                    icon="shield-checkmark-outline"
+                    label="Role"
+                    value={student.role ? student.role.charAt(0).toUpperCase() + student.role.slice(1) : "Member"}
                   />
                 </View>
-                <Text style={styles.emptyStateTitle}>
-                  {contentFilter === "all"
-                    ? "No activity yet"
-                    : contentFilter === "posts"
-                      ? "No approved posts yet"
-                      : "No approved polls yet"}
-                </Text>
-                <Text style={styles.emptyText}>
-                  {contentFilter === "all"
-                    ? "Approved posts and polls will appear here."
-                    : `Switch to All to see other campus activity.`}
-                </Text>
               </View>
-            ) : (
-              <View style={styles.feedCardGroup}>
-                {filteredProfileFeedItems.map((entry) => {
-                  if (entry.type === "post") {
-                    const post = entry.item;
-                    return (
-                      <PostCard
-                        key={`post:${post.id}`}
-                        post={post as any}
-                        isLiked={post.likedBy?.includes(viewer?.uid || "") || false}
-                        currentUserRole={viewerRole}
-                        currentUserId={viewer?.uid}
-                        onLike={handleLike}
-                        onProfileClick={handleProfileClick}
-                        onTagClick={handleTagClick}
-                        onImagePress={openImageViewer}
-                        onFilePress={handleFilePress}
-                        getTimeAgo={getTimeAgo}
-                        onCommentCountUpdate={(postId, newCount) => {
-                          setPosts((previous) =>
-                            previous.map((item) =>
-                              item.id === postId
-                                ? { ...item, commentCount: newCount }
-                                : item,
-                            ),
-                          );
-                        }}
+
+              <View style={styles.section}>
+                <View style={styles.sectionTitleRow}>
+                  <Ionicons name="school" size={18} color="#5f0909" />
+                  <Text style={styles.sectionTitle}>Academic Information</Text>
+                </View>
+                <View style={styles.goldCard}>
+                  <InfoRow
+                    icon="school-outline"
+                    label="Course / Program"
+                    value={student.course || "—"}
+                  />
+                  <View style={styles.rowDivider} />
+                  <InfoRow
+                    icon="trending-up-outline"
+                    label="Year Level"
+                    value={student.yearlvl || "—"}
+                  />
+                </View>
+              </View>
+
+              <View style={[styles.section, styles.activitySection]}>
+                <View style={styles.activityHeader}>
+                  <View style={styles.activityTitleGroup}>
+                    <View style={styles.activityIconBox}>
+                      <Ionicons name="newspaper-outline" size={18} color="#5f0909" />
+                    </View>
+                    <View>
+                      <View style={styles.activityTitleRow}>
+                        <Text style={styles.activityTitle}>Activity</Text>
+                        <View style={styles.countBadge}>
+                          <Text style={styles.countBadgeText}>{posts.length + polls.length}</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.activitySubtitle}>
+                        Posts and polls shared on campus
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.filterControl}>
+                    <TouchableOpacity
+                      style={[styles.filterButton, contentFilterOpen && styles.filterButtonOpen]}
+                      activeOpacity={0.82}
+                      onPress={() => setContentFilterOpen((current) => !current)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Filter profile activity"
+                    >
+                      <Ionicons
+                        name={
+                          contentFilter === "posts"
+                            ? "document-text-outline"
+                            : contentFilter === "polls"
+                              ? "stats-chart-outline"
+                              : "layers-outline"
+                        }
+                        size={15}
+                        color="#5f0909"
                       />
-                    );
-                  }
+                      <Text style={styles.filterButtonText}>
+                        {contentFilter === "all"
+                          ? "All"
+                          : contentFilter === "posts"
+                            ? "Posts"
+                            : "Polls"}
+                      </Text>
+                      <Ionicons
+                        name={contentFilterOpen ? "chevron-up" : "chevron-down"}
+                        size={14}
+                        color="#8a6258"
+                      />
+                    </TouchableOpacity>
 
-                  const poll = entry.item;
-                  return (
-                    <PollCard
-                      key={`poll:${poll.id}`}
-                      poll={poll as any}
-                      currentUserId={viewer?.uid}
-                      userRole={ownerRole}
-                      currentUserRole={viewerRole}
-                      onVote={handlePollVote}
-                      onAddOption={addOptionToPoll}
-                      onEdit={handleEditPoll}
-                      onDelete={handleDeletePoll}
-                      onProfileClick={(targetId) => handleProfileClick(targetId)}
-                      onImagePress={openImageViewer}
-                      getTimeAgo={getTimeAgo}
-                      isPollExpired={isPollExpired}
-                      onCommentCountUpdate={(pollId, newCount) => {
-                        setPolls((previous) =>
-                          previous.map((item) =>
-                            item.id === pollId
-                              ? { ...item, commentCount: newCount }
-                              : item,
-                          ),
-                        );
-                      }}
-                    />
-                  );
-                })}
+                    {contentFilterOpen && (
+                      <View style={styles.filterMenu}>
+                        {(
+                          [
+                            {
+                              id: "all",
+                              label: "All activity",
+                              icon: "layers-outline",
+                              count: posts.length + polls.length,
+                            },
+                            {
+                              id: "posts",
+                              label: "Posts",
+                              icon: "document-text-outline",
+                              count: posts.length,
+                            },
+                            {
+                              id: "polls",
+                              label: "Polls",
+                              icon: "stats-chart-outline",
+                              count: polls.length,
+                            },
+                          ] as const
+                        ).map((option) => {
+                          const selected = contentFilter === option.id;
+                          return (
+                            <TouchableOpacity
+                              key={option.id}
+                              style={[
+                                styles.filterMenuItem,
+                                selected && styles.filterMenuItemActive,
+                              ]}
+                              onPress={() => {
+                                setContentFilter(option.id);
+                                setContentFilterOpen(false);
+                              }}
+                            >
+                              <View style={styles.filterMenuItemCopy}>
+                                <Ionicons
+                                  name={option.icon}
+                                  size={16}
+                                  color={selected ? "#5f0909" : "#8a6258"}
+                                />
+                                <Text
+                                  style={[
+                                    styles.filterMenuItemText,
+                                    selected && styles.filterMenuItemTextActive,
+                                  ]}
+                                >
+                                  {option.label}
+                                </Text>
+                              </View>
+                              <View
+                                style={[
+                                  styles.filterMenuCount,
+                                  selected && styles.filterMenuCountActive,
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    styles.filterMenuCountText,
+                                    selected && styles.filterMenuCountTextActive,
+                                  ]}
+                                >
+                                  {option.count}
+                                </Text>
+                              </View>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+                </View>
               </View>
-            )}
-
-            {hasMoreFilteredContent && filteredProfileFeedItems.length > 0 && (
-              <TouchableOpacity
-                style={styles.loadMoreButton}
-                onPress={() => void handleLoadMoreContent()}
-                disabled={isLoadingMoreContent}
-              >
-                {isLoadingMoreContent ? (
-                  <ActivityIndicator size="small" color="#5f0909" />
-                ) : (
-                  <>
-                    <Ionicons name="chevron-down-circle-outline" size={17} color="#5f0909" />
-                    <Text style={styles.loadMoreText}>
-                      Load more {contentFilter === "all" ? "activity" : contentFilter}
-                    </Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            )}
-          </View>
-        </ScrollView>
+            </>
+          }
+          ListEmptyComponent={
+            <View style={styles.feedListInset}>
+              {contentLoading ? (
+                <FeedSkeleton count={3} />
+              ) : (
+                <View style={styles.emptyState}>
+                  <View style={styles.emptyIconCircle}>
+                    <Ionicons
+                      name={
+                        contentFilter === "posts"
+                          ? "document-text-outline"
+                          : contentFilter === "polls"
+                            ? "stats-chart-outline"
+                            : "newspaper-outline"
+                      }
+                      size={28}
+                      color="#b58a7c"
+                    />
+                  </View>
+                  <Text style={styles.emptyStateTitle}>
+                    {contentFilter === "all"
+                      ? "No activity yet"
+                      : contentFilter === "posts"
+                        ? "No approved posts yet"
+                        : "No approved polls yet"}
+                  </Text>
+                  <Text style={styles.emptyText}>
+                    {contentFilter === "all"
+                      ? "Approved posts and polls will appear here."
+                      : `Switch to All to see other campus activity.`}
+                  </Text>
+                </View>
+              )}
+            </View>
+          }
+          ListFooterComponent={
+            hasMoreFilteredContent && filteredProfileFeedItems.length > 0 ? (
+              <View style={styles.feedListInset}>
+                <TouchableOpacity
+                  style={styles.loadMoreButton}
+                  onPress={() => void handleLoadMoreContent()}
+                  disabled={isLoadingMoreContent}
+                >
+                  {isLoadingMoreContent ? (
+                    <ActivityIndicator size="small" color="#5f0909" />
+                  ) : (
+                    <>
+                      <Ionicons name="chevron-down-circle-outline" size={17} color="#5f0909" />
+                      <Text style={styles.loadMoreText}>
+                        Load more {contentFilter === "all" ? "activity" : contentFilter}
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            ) : null
+          }
+        />
 
         <ImageZoomViewer
           images={currentImages}
@@ -1839,12 +1895,32 @@ const styles = StyleSheet.create({
   filterMenuCountTextActive: {
     color: "#5f0909",
   },
-  feedCardGroup: {
+  // Keeps the header (and its activity filter menu) drawn above the list.
+  activityListHeader: {
+    zIndex: 20,
+  },
+  feedListInset: {
+    marginHorizontal: 16,
+  },
+  // Each post or poll draws its own part of the rounded card that groups the
+  // activity list, since the list draws items one at a time.
+  feedCardGroupItem: {
+    marginHorizontal: 16,
     overflow: "hidden",
-    borderRadius: 16,
-    borderWidth: 1,
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
     borderColor: "#ead8cf",
     backgroundColor: "#fffaf7",
+  },
+  feedCardGroupItemFirst: {
+    borderTopWidth: 1,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+  },
+  feedCardGroupItemLast: {
+    borderBottomWidth: 1,
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
   },
   emptyState: {
     minHeight: 138,

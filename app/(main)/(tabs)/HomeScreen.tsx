@@ -66,6 +66,7 @@ import {
   serverTimestamp,
   setDoc,
   startAfter,
+  Timestamp,
   updateDoc,
   where,
 } from "firebase/firestore";
@@ -99,7 +100,7 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { auth, db } from "../../../Firebase_configure";
 import AnnouncementCarousel, { AnnouncementItem } from "../components/AnnouncementCarousel";
 import CommentModal from "../components/CommentModal";
-import ConfirmDialog from "../components/ConfirmDialog";
+import ConfirmDialog, { type ConfirmDialogVariant } from "../components/ConfirmDialog";
 import HomeSearchProvider, {
   HomeSearchBar,
   HomeSearchPanel,
@@ -114,14 +115,15 @@ import ServerDrawer, {
 } from "../components/ServerDrawer";
 import { FeedSkeleton } from "../components/Skeleton";
 
-export const tabBarTranslateY = new Animated.Value(0);
-
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 // Width of one card in the horizontal "Trending this week" scroller.
 const TRENDING_CARD_WIDTH = Math.min(320, Math.round(SCREEN_WIDTH * 0.82));
 const SELECTED_SERVER_KEY = "bonded.selectedCommunityServer";
 const DEFAULT_CHANNEL_KEY = "general";
 const HOME_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
+// Unread channel badges only count messages from this many recent days, so
+// Home doesn't download a community's whole message history on every connect.
+const COMMUNITY_UNREAD_WINDOW_DAYS = 14;
 
 const BONDED = {
   colors: {
@@ -591,13 +593,15 @@ const HomeScreen = () => {
     confirmText?: string;
     cancelText?: string;
     destructive?: boolean;
+    variant?: ConfirmDialogVariant;
     singleAction?: boolean;
     onConfirm: () => void;
   } | null>(null);
-  const showInfo = (title: string, description?: string, onConfirm?: () => void) =>
+  const showInfo = (title: string, description?: string, onConfirm?: () => void, variant?: ConfirmDialogVariant) =>
     setDialog({
       title,
       description,
+      variant,
       confirmText: "OK",
       singleAction: true,
       onConfirm: () => {
@@ -1440,7 +1444,16 @@ const selectedChannel = useMemo(() => {
       orderBy("date", "asc"),
     );
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setUpcomingEventsCount(snapshot.size);
+      // Drafts and archived events aren't on anyone's calendar, so they must
+      // not inflate this badge. Filtered here rather than in the query: an
+      // equality filter on status alongside the date range would need a
+      // composite index, and these documents are already fetched. Events
+      // written before `status` existed count as published.
+      setUpcomingEventsCount(
+        snapshot.docs.filter(
+          (eventDoc) => (eventDoc.data().status ?? "published") === "published",
+        ).length,
+      );
     });
     return unsubscribe;
   }, [user, isOffline]);
@@ -1652,34 +1665,112 @@ const selectedChannel = useMemo(() => {
       },
     );
 
-    const unsubscribeThreadMessages = onSnapshot(
-      query(collection(db, "communityThreadMessages"), orderBy("createdAt", "asc")),
-      (snapshot) => {
-        setCommunityThreadMessages(
-          snapshot.docs.map(
-            (item) =>
-              ({
-                id: item.id,
-                serverId: item.data()?.serverId ? String(item.data()?.serverId) : null,
-                channelId: item.data()?.channelId ? String(item.data()?.channelId) : null,
-                userId: item.data()?.userId ? String(item.data()?.userId) : null,
-                createdAt: item.data()?.createdAt,
-              }) as CommunityThreadMessageLite,
-          ),
-        );
-      },
-      (error) => {
-        console.error("Error loading community thread messages:", error);
-      },
-    );
-
     return () => {
       unsubscribeServers();
       unsubscribeMemberships();
       unsubscribeJoinRequests();
-      unsubscribeThreadMessages();
     };
   }, [isOffline, user?.uid]);
+
+  // Unread badges only need messages from servers this user is allowed to
+  // read — the ones they joined plus public servers — which is exactly what
+  // the Firestore rules allow. Staff can read every server, so they keep one
+  // unscoped listener. The key is a string so the listeners are only rebuilt
+  // when the set of servers actually changes.
+  const unreadMessageServerKey = useMemo(() => {
+    const isStaffViewer = ["admin", "teacher", "moderator"].includes(
+      currentUserRole || "",
+    );
+    if (isStaffViewer) return "*";
+    const joinedServerIds = new Set(
+      serverMemberships
+        .filter(
+          (membership) =>
+            membership.userId === user?.uid && membership.status === "joined",
+        )
+        .map((membership) => membership.serverId),
+    );
+    return remoteServers
+      .filter(
+        (server) =>
+          server.isDeleted !== true &&
+          (server.isPublic === true || joinedServerIds.has(server.id)),
+      )
+      .map((server) => server.id)
+      .sort()
+      .join(",");
+  }, [currentUserRole, remoteServers, serverMemberships, user?.uid]);
+
+  useEffect(() => {
+    if (!user?.uid || isOffline) return;
+
+    const readableServerIds =
+      unreadMessageServerKey === "*"
+        ? null
+        : unreadMessageServerKey.split(",").filter(Boolean);
+    if (readableServerIds && readableServerIds.length === 0) {
+      setCommunityThreadMessages([]);
+      return;
+    }
+
+    const since = Timestamp.fromMillis(
+      Date.now() - COMMUNITY_UNREAD_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+    );
+    // Firestore allows at most 30 values in an "in" filter.
+    const serverIdChunks: (string[] | null)[] = readableServerIds
+      ? Array.from(
+          { length: Math.ceil(readableServerIds.length / 30) },
+          (_, index) => readableServerIds.slice(index * 30, index * 30 + 30),
+        )
+      : [null];
+    const messagesByChunk = new Map<number, CommunityThreadMessageLite[]>();
+
+    const unsubscribers = serverIdChunks.map((chunkIds, chunkIndex) =>
+      onSnapshot(
+        chunkIds
+          ? query(
+              collection(db, "communityThreadMessages"),
+              where("serverId", "in", chunkIds),
+              where("createdAt", ">", since),
+              orderBy("createdAt", "asc"),
+            )
+          : query(
+              collection(db, "communityThreadMessages"),
+              where("createdAt", ">", since),
+              orderBy("createdAt", "asc"),
+            ),
+        (snapshot) => {
+          if (__DEV__)
+            console.log(
+              `[Home] community messages loaded: ${snapshot.size}`,
+            );
+          messagesByChunk.set(
+            chunkIndex,
+            snapshot.docs.map(
+              (item) =>
+                ({
+                  id: item.id,
+                  serverId: item.data()?.serverId ? String(item.data()?.serverId) : null,
+                  channelId: item.data()?.channelId ? String(item.data()?.channelId) : null,
+                  userId: item.data()?.userId ? String(item.data()?.userId) : null,
+                  createdAt: item.data()?.createdAt,
+                }) as CommunityThreadMessageLite,
+            ),
+          );
+          setCommunityThreadMessages(
+            Array.from(messagesByChunk.values()).flat(),
+          );
+        },
+        (error) => {
+          console.error("Error loading community thread messages:", error);
+        },
+      ),
+    );
+
+    return () => {
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+    };
+  }, [isOffline, unreadMessageServerKey, user?.uid]);
 
   useFocusEffect(
     useCallback(() => {
@@ -1942,9 +2033,16 @@ const selectedChannel = useMemo(() => {
         // viewport and slide the post they are reading out from under them.
         // Computed from feedItemsRef (not inside the updater below) so this
         // stays a pure read — setFeedItems updaters must not have effects.
+        // "Already seen" has to mean already VISIBLE, not merely present.
+        // This query returns pending posts too, and they sit in the list
+        // unrendered; counting those as seen is why a post approved while
+        // the reader was scrolled down used to slip in with no pill.
         const visiblePostIds = new Set([
           ...feedItemsRef.current
-            .filter((item) => item.type === "post")
+            .filter(
+              (item) =>
+                item.type === "post" && isDisplayableFeedItem(item, "all"),
+            )
             .map((item) => item.id),
           ...lastLivePostIdsRef.current,
         ]);
@@ -1955,6 +2053,7 @@ const selectedChannel = useMemo(() => {
         fetchedPosts.forEach((post) => {
           if (
             shouldStagePosts &&
+            isDisplayableFeedItem(post, "all") &&
             !visiblePostIds.has(post.id) &&
             !isOwnFeedItem(post, auth.currentUser?.uid)
           ) {
@@ -1963,7 +2062,13 @@ const selectedChannel = useMemo(() => {
             livePosts.push(post);
           }
         });
-        lastLivePostIdsRef.current = new Set(livePosts.map((post) => post.id));
+        // Same reason: a pending post merged into the list quietly must not
+        // be remembered as seen, or its approval would go unannounced.
+        lastLivePostIdsRef.current = new Set(
+          livePosts
+            .filter((post) => isDisplayableFeedItem(post, "all"))
+            .map((post) => post.id),
+        );
         setStagedPosts((current) =>
           current.length === 0 && heldPosts.length === 0 ? current : heldPosts,
         );
@@ -2034,9 +2139,14 @@ const selectedChannel = useMemo(() => {
           }
         });
 
+        // Same rule as posts above: only what the reader can actually see
+        // counts as already seen.
         const visiblePollIds = new Set([
           ...feedItemsRef.current
-            .filter((item) => item.type === "poll")
+            .filter(
+              (item) =>
+                item.type === "poll" && isDisplayableFeedItem(item, "all"),
+            )
             .map((item) => item.id),
           ...lastLivePollIdsRef.current,
         ]);
@@ -2047,6 +2157,7 @@ const selectedChannel = useMemo(() => {
         fetchedPolls.forEach((poll) => {
           if (
             shouldStagePolls &&
+            isDisplayableFeedItem(poll, "all") &&
             !visiblePollIds.has(poll.id) &&
             !isOwnFeedItem(poll, auth.currentUser?.uid)
           ) {
@@ -2055,7 +2166,11 @@ const selectedChannel = useMemo(() => {
             livePolls.push(poll);
           }
         });
-        lastLivePollIdsRef.current = new Set(livePolls.map((poll) => poll.id));
+        lastLivePollIdsRef.current = new Set(
+          livePolls
+            .filter((poll) => isDisplayableFeedItem(poll, "all"))
+            .map((poll) => poll.id),
+        );
         setStagedPolls((current) =>
           current.length === 0 && heldPolls.length === 0 ? current : heldPolls,
         );
@@ -2534,7 +2649,7 @@ const selectedChannel = useMemo(() => {
           0,
         );
         await updateDoc(pollRef, { options: updatedOptions, totalVotes });
-        showInfo("Success", "Option added! You can vote for it manually.");
+        showInfo("Success", "Option added! You can vote for it manually.", undefined, "success");
       } catch (error) {
         console.error("Error adding option:", error);
         showInfo("Error", "Failed to add option. Please try again.");
@@ -2612,11 +2727,6 @@ const selectedChannel = useMemo(() => {
           duration: 200,
           useNativeDriver: true,
         }),
-        Animated.timing(tabBarTranslateY, {
-          toValue: 100,
-          duration: 300,
-          useNativeDriver: true,
-        }),
       ]).start();
     }
 
@@ -2636,11 +2746,6 @@ const selectedChannel = useMemo(() => {
         Animated.timing(menuOpacity, {
           toValue: 1,
           duration: 200,
-          useNativeDriver: true,
-        }),
-        Animated.timing(tabBarTranslateY, {
-          toValue: 0,
-          duration: 300,
           useNativeDriver: true,
         }),
       ]).start();
@@ -2893,6 +2998,8 @@ const handleSelectChannel = useCallback(
       showInfo(
         "Request Sent",
         "An admin will review your request to delete this server. It stays active until then.",
+        undefined,
+        "success",
       );
     },
     [
@@ -3044,6 +3151,8 @@ const handleSelectChannel = useCallback(
       showInfo(
         "Request Sent",
         "A teacher, moderator, or admin can approve your request.",
+        undefined,
+        "success",
       );
     },
     [
@@ -4074,7 +4183,7 @@ const handleSelectChannel = useCallback(
   );
 
 const renderEmptyState = () => {
-  if (isLoading) {
+  if (isLoading && !isOffline) {
     return <FeedSkeleton count={5} />;
   }
 
@@ -4198,7 +4307,7 @@ return (
               <View style={styles.offlineStatusBar}>
                 <Ionicons name="cloud-offline-outline" size={15} color="#9a3412" />
                 <Text style={styles.offlineStatusText}>
-                  Offline mode • Viewing saved posts
+                  Offline mode
                 </Text>
               </View>
             )}
@@ -4594,6 +4703,7 @@ return (
         confirmText={dialog?.confirmText ?? "Confirm"}
         cancelText={dialog?.cancelText}
         destructive={dialog?.destructive ?? true}
+        variant={dialog?.variant}
         singleAction={dialog?.singleAction ?? false}
         onConfirm={() => dialog?.onConfirm()}
         onCancel={() => setDialog(null)}

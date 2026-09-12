@@ -4,6 +4,11 @@ import {
     arrayUnion,
     collection,
     doc,
+    getDocFromServer,
+    getDocsFromServer,
+    limit,
+    startAfter,
+    startAt,
     increment,
     limitToLast,
     onSnapshot,
@@ -13,11 +18,12 @@ import {
     runTransaction,
     updateDoc,
     where,
+    type QueryDocumentSnapshot,
     type Unsubscribe
 } from "firebase/firestore";
 import { db } from "../Firebase_configure";
 import { createNotification } from "./notifications";
-import { isConversationVisible, receiptCoversMessage, timestampMillis } from "./messengerState";
+import { isConversationArchived, isConversationVisible, receiptCoversMessage, timestampMillis } from "./messengerState";
 
 export const DIRECT_MESSAGE_PAGE_SIZE = 50;
 
@@ -69,10 +75,13 @@ export type DirectConversation = {
   lastReadAt?: Record<string, any>;
   lastDeliveredAt?: Record<string, any>;
   deletedThrough?: Record<string, any>;
+  archivedThrough?: Record<string, any>;
   mutedBy?: string[];
   pinnedMessageIds?: string[];
   createdAt?: any;
   updatedAt?: any;
+  contentUpdatedAt?: any;
+  lastEditedMessageId?: string;
 };
 
 export type DirectFileAttachment = {
@@ -92,7 +101,7 @@ export type DirectMessage = {
   text: string;
   files?: DirectFileAttachment[];
   link?: { url: string; title: string };
-  replyTo?: { id: string; senderName: string; preview: string };
+  replyTo?: { id: string; senderName: string; preview: string; mediaUrl?: string; mediaType?: "image" | "video" };
   reactions?: Record<string, string[]>;
   pinned?: boolean;
   pinnedAt?: any;
@@ -103,6 +112,7 @@ export type DirectMessage = {
   seenBy?: Record<string, any>;
   createdAt: any;
   editedAt?: any;
+  edited?: boolean;
   deleted?: boolean;
 };
 
@@ -152,11 +162,12 @@ function newConversation(conversationId: string, sender: ParticipantInfo, recipi
 }
 
 /**
- * Real-time listener for all active conversations the user participates in.
+ * Live inbox by default; archive, search and forwarding views can include archived chats.
  */
 export function subscribeToUserConversations(
   userId: string,
-  onUpdate: (conversations: DirectConversation[]) => void,
+  onUpdate: (conversations: DirectConversation[], fromCache?: boolean) => void,
+  options: { includeArchived?: boolean; onError?: (error: Error) => void } = {},
 ): Unsubscribe {
   if (!userId) {
     onUpdate([]);
@@ -170,13 +181,15 @@ export function subscribeToUserConversations(
 
   return onSnapshot(
     q,
+    { includeMetadataChanges: true },
     (snapshot) => {
       const convs: DirectConversation[] = snapshot.docs.map((docSnap) => {
         return {
           id: docSnap.id,
           ...(docSnap.data() as Omit<DirectConversation, "id">),
         };
-      }).filter((conversation) => isConversationVisible(conversation, userId));
+      }).filter((conversation) => isConversationVisible(conversation, userId) &&
+        (options.includeArchived || !isConversationArchived(conversation, userId)));
 
       // Sort newest updated first
       convs.sort((a, b) => {
@@ -185,11 +198,11 @@ export function subscribeToUserConversations(
         return timeB - timeA;
       });
 
-      onUpdate(convs);
+      onUpdate(convs, snapshot.metadata.fromCache);
     },
     (err) => {
       console.warn("[directMessages] subscribeToUserConversations error:", err);
-      onUpdate([]);
+      if (options.onError) options.onError(err); else onUpdate([]);
     },
   );
 }
@@ -219,6 +232,7 @@ export function subscribeToDirectMessages(
   pageSize = DIRECT_MESSAGE_PAGE_SIZE,
   onError?: (error: Error) => void,
   deletedThrough?: any,
+  through?: any,
 ): Unsubscribe {
   if (!conversationId) {
     onUpdate([]);
@@ -228,6 +242,7 @@ export function subscribeToDirectMessages(
   const q = query(
     collection(db, "directConversations", conversationId, "messages"),
     ...(deletedThrough ? [where("createdAt", ">", deletedThrough)] : []),
+    ...(through ? [where("createdAt", "<=", through)] : []),
     orderBy("createdAt", "asc"),
     limitToLast(pageSize),
   );
@@ -246,6 +261,70 @@ export function subscribeToDirectMessages(
       onError?.(err);
     },
   );
+}
+
+/**
+ * Search every page of visible history, without retaining a listener to the entire chat.
+ */
+export async function searchDirectMessageHistory(
+  conversationId: string, text: string, deletedThrough?: any, signal?: AbortSignal,
+): Promise<DirectMessage[]> {
+  const needle = text.trim().toLocaleLowerCase();
+  if (!needle) return [];
+  const found: DirectMessage[] = [];
+  let cursor: QueryDocumentSnapshot | undefined;
+  for (;;) {
+    if (signal?.aborted) return [];
+    const page = await getDocsFromServer(query(
+      collection(db, "directConversations", conversationId, "messages"),
+      ...(deletedThrough ? [where("createdAt", ">", deletedThrough)] : []),
+      orderBy("createdAt", "desc"), ...(cursor ? [startAfter(cursor)] : []), limit(200),
+    ));
+    if (signal?.aborted) return [];
+    page.docs.forEach((snapshot) => {
+      const message = { ...snapshot.data(), id: snapshot.id } as DirectMessage;
+      const searchable = [message.text, message.link?.url, message.link?.title,
+        ...(message.files || []).map((file) => file.name)].filter(Boolean).join("\n");
+      if (!message.deleted && searchable.toLocaleLowerCase().includes(needle)) found.push(message);
+    });
+    if (page.size < 200) return found;
+    cursor = page.docs[page.docs.length - 1];
+  }
+}
+
+/** Load a bounded window around a search result or quoted reply. */
+export async function getDirectMessageContext(conversationId: string, messageId: string, deletedThrough?: any) {
+  const target = await getDocFromServer(doc(db, "directConversations", conversationId, "messages", messageId));
+  if (!target.exists() || timestampMillis(target.data().createdAt) <= timestampMillis(deletedThrough)) {
+    throw new Error("This message is no longer in your conversation history.");
+  }
+  const newer = await getDocsFromServer(query(collection(db, "directConversations", conversationId, "messages"),
+    orderBy("createdAt", "asc"), startAt(target), limit(20)));
+  return { through: newer.docs[newer.docs.length - 1]?.data().createdAt || target.data().createdAt };
+}
+
+/** Editing preserves ordering, unread counts and receipts; the preview changes atomically. */
+export async function editDirectMessage(conversationId: string, messageId: string, userId: string, text: string) {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 2000) throw new Error("Enter between 1 and 2,000 characters.");
+  const parent = doc(db, "directConversations", conversationId);
+  const reference = doc(parent, "messages", messageId);
+  await runTransaction(db, async (transaction) => {
+    const [conversation, message] = await Promise.all([transaction.get(parent), transaction.get(reference)]);
+    const original = message.data();
+    if (!conversation.exists() || !original || original.senderId !== userId || original.deleted || !original.text) {
+      throw new Error("This message cannot be edited.");
+    }
+    if (timestampMillis(original.createdAt) <= timestampMillis(conversation.data().deletedThrough?.[userId])) {
+      throw new Error("This message is no longer in your conversation history.");
+    }
+    transaction.update(reference, { text: trimmed, edited: true, editedAt: serverTimestamp() });
+    transaction.update(parent, {
+      lastEditedMessageId: messageId, contentUpdatedAt: serverTimestamp(),
+      ...(conversation.data().lastMessage?.id === messageId
+        ? { lastMessage: { ...conversation.data().lastMessage, text: trimmed } } : {}),
+    });
+  });
 }
 
 /**
@@ -269,7 +348,7 @@ export async function sendDirectMessage({
   text: string;
   files?: DirectFileAttachment[];
   link?: { url: string; title: string };
-  replyTo?: { id: string; senderName: string; preview: string };
+  replyTo?: { id: string; senderName: string; preview: string; mediaUrl?: string; mediaType?: "image" | "video" };
   forwarded?: boolean;
   forwardedFrom?: { senderName?: string; preview?: string };
   recipients: string[];
@@ -375,6 +454,19 @@ export async function sendDirectMessage({
 
 export function createDirectMessageId(conversationId: string) {
   return doc(collection(db, "directConversations", conversationId, "messages")).id;
+}
+
+/** Archive only this participant's inbox entry. History, receipts, mute and ordering are preserved. */
+export async function setDirectConversationArchived(conversationId: string, userId: string, archived: boolean): Promise<void> {
+  const ref = doc(db, "directConversations", conversationId);
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    if (!snapshot.exists()) throw new Error("This conversation is unavailable.");
+    const conversation = snapshot.data() as DirectConversation;
+    if (!conversation.participants.includes(userId)) throw new Error("Not a conversation participant.");
+    if (!isConversationVisible(conversation, userId)) throw new Error("There are no messages to archive or restore.");
+    transaction.update(ref, { [`archivedThrough.${userId}`]: archived ? conversation.lastMessage!.createdAt : null });
+  });
 }
 
 /** Delete only this participant's view, keeping the shared history for the other person.

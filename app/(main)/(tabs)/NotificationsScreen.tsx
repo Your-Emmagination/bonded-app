@@ -5,6 +5,7 @@ import {
     saveCachedNotifications,
 } from "@/utils/offlineStorage";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -107,6 +108,26 @@ const NotificationsScreen = () => {
   const [refreshing, setRefreshing] = useState(false);
   const { isOffline } = useNetworkStatus();
   const scaleAnim = useRef(new Animated.Value(0)).current;
+  const sectionListRef = useRef<SectionList<NotificationItem>>(null);
+
+  // Tapping the Notifications tab while it's already open scrolls back to
+  // the top of the list.
+  useEffect(() => {
+    const subscription = subscribeTabScrollToTop("NotificationsScreen", () => {
+      try {
+        sectionListRef.current?.scrollToLocation({
+          sectionIndex: 0,
+          itemIndex: 0,
+          animated: true,
+          viewOffset: 0,
+        });
+      } catch {
+        // Nothing to scroll to while the list is empty.
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
   const router = useRouter();
   const { unavailable } = useLocalSearchParams<{
     unavailable?: string | string[];
@@ -641,7 +662,7 @@ const onRefresh = useCallback(() => {
           </View>
         </View>
 
-        {loading ? (
+        {loading && !isOffline ? (
           <ListSkeleton
             count={6}
             contentStyle={styles.skeletonContent}
@@ -655,11 +676,12 @@ const onRefresh = useCallback(() => {
               <View style={styles.offlineStatusBar}>
                 <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
                 <Text style={styles.offlineStatusText}>
-                  Offline mode • Viewing saved notifications
+                  Offline mode
                 </Text>
               </View>
             )}
             <SectionList
+  ref={sectionListRef}
   sections={groupedNotifications}
   keyExtractor={(item) => item.id}
   renderItem={renderNotificationItem}

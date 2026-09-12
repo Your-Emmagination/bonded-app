@@ -17,13 +17,14 @@ import {
     feedImage,
 } from "@/utils/cloudinaryImages";
 import {
-    SELF_HARM_SAFETY_MESSAGE,
     canViewModeratedContent,
     requestFirestoreModerationDecision,
     type ModerationDecision
 } from "@/utils/contentModeration";
+import SafetyDialog from "./SafetyDialog";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { flagPotentialResolution } from "@/utils/lostAndFoundResolution";
+import { useNetworkStatus } from "@/utils/networkUtils";
 import {
     createMentionNotifications,
     createNotification,
@@ -39,6 +40,7 @@ import { buildUserProfileHref } from "@/utils/profileNavigation";
 import {
     UserRole,
     canDeleteContent,
+    canReportContent,
     canViewAnonymousIdentity,
     getRoleColor,
     getRoleDisplayName,
@@ -91,6 +93,12 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
+import ReanimatedAnimated, {
+    runOnJS,
+    useAnimatedStyle,
+    useSharedValue,
+    withTiming,
+} from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { db } from "../../../Firebase_configure";
 import AiReplyCard from "./AiReplyCard";
@@ -160,11 +168,18 @@ function getAuthorRole(authorData: any, itemRole?: string) {
   return authorData?.role || itemRole || "student";
 }
 
-const ReplyBubble: React.FC<{
+// Consecutive replies from the same sender (and the same anonymous state) are
+// grouped under one header.
+const isSameReplySender = (reply: Reply, other?: Reply) =>
+  !!other &&
+  (other.realUserId || other.userId) === (reply.realUserId || reply.userId) &&
+  other.isAnonymous === reply.isAnonymous;
+
+const ReplyBubbleComponent: React.FC<{
   item: Reply;
   currentUser: any;
-  prevItem?: Reply;
-  nextItem?: Reply;
+  isSameSenderAsPrev: boolean;
+  isSameSenderAsNext: boolean;
   onLike: (id: string, likedBy: string[]) => void;
   onReplyClick: (id: string, name: string, text: string) => void;
   onReplyReferencePress: (replyId?: string | null) => void;
@@ -185,8 +200,8 @@ const ReplyBubble: React.FC<{
 }> = ({
   item,
   currentUser,
-  prevItem,
-  nextItem,
+  isSameSenderAsPrev,
+  isSameSenderAsNext,
   onLike,
   onReplyClick,
   onReplyReferencePress,
@@ -211,18 +226,6 @@ const ReplyBubble: React.FC<{
     item.userId === currentUser?.uid;
 
   const isAnon = item.isAnonymous ?? false;
-
-  const isSameSenderAsPrev =
-    !!prevItem &&
-    (prevItem.realUserId || prevItem.userId) ===
-      (item.realUserId || item.userId) &&
-    prevItem.isAnonymous === item.isAnonymous;
-
-  const isSameSenderAsNext =
-    !!nextItem &&
-    (nextItem.realUserId || nextItem.userId) ===
-      (item.realUserId || item.userId) &&
-    nextItem.isAnonymous === item.isAnonymous;
 
   useEffect(() => {
     Animated.timing(fadeAnim, {
@@ -872,6 +875,10 @@ const ReplyBubble: React.FC<{
   );
 };
 
+// Memoized so a thread update only redraws the bubbles whose reply or grouping
+// actually changed.
+const ReplyBubble = React.memo(ReplyBubbleComponent);
+
 const ReplyThread: React.FC<ReplyThreadProps> = ({
   visible,
   onClose,
@@ -881,6 +888,12 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   initialReplyId,
 }) => {
   const [replies, setReplies] = useState<Reply[]>([]);
+  // Mirrors replies for callbacks (like, jump to reply) so they keep the same
+  // identity across thread updates instead of redrawing every ReplyBubble.
+  const repliesRef = useRef<Reply[]>([]);
+  useEffect(() => {
+    repliesRef.current = replies;
+  }, [replies]);
   const [confirmDialog, setConfirmDialog] =
     useState<{
       title: string;
@@ -892,8 +905,13 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       onConfirm: () => void;
     } | null>(null);
 
+  // Self-harm gets its own dialog instead of the generic confirm one — see
+  // components/SafetyDialog.
+  const [safetyVisible, setSafetyVisible] = useState(false);
+
   const [loading, setLoading] =
     useState(true);
+  const { isOffline } = useNetworkStatus();
 
   // Reply pagination state
   const [loadingMore, setLoadingMore] = useState(false);
@@ -960,8 +978,13 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       typeof setTimeout
     > | null>(null);
 
-  const composerBottom =
-    useRef(new Animated.Value(0)).current;
+  // Reanimated keeps the keyboard lift on the UI thread.
+  const composerBottom = useSharedValue(0);
+  const composerAnimatedStyle =
+    useAnimatedStyle(() => ({
+      marginBottom:
+        composerBottom.value,
+    }));
 
   const replyActionsTranslateY =
     useRef(new Animated.Value(0)).current;
@@ -1015,7 +1038,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         if (!replyId) return;
 
         const replyIndex =
-          replies.findIndex(
+          repliesRef.current.findIndex(
             (reply) =>
               reply.id === replyId,
           );
@@ -1034,8 +1057,15 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
           );
         }, 100);
       },
-      [highlightReply, replies],
+      [highlightReply],
     );
+
+  const handleReplyClick = useCallback(
+    (id: string, name: string, text: string) => {
+      setReplyingTo({ id, name, text });
+    },
+    [],
+  );
 
   useEffect(() => {
     const backHandler =
@@ -1072,23 +1102,24 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             nextHeight,
           );
 
-          Animated.timing(
-            composerBottom,
-            {
-              toValue:
-                nextHeight +
+          composerBottom.value =
+            withTiming(
+              nextHeight +
                 KEYBOARD_COMPOSER_LIFT,
-              duration:
-                Platform.OS === "ios"
-                  ? e.duration || 250
-                  : 220,
-              useNativeDriver: false,
-            },
-          ).start(({ finished }) => {
-            if (finished) {
-              scrollToBottom();
-            }
-          });
+              {
+                duration:
+                  Platform.OS === "ios"
+                    ? e.duration || 250
+                    : 220,
+              },
+              (finished) => {
+                if (finished) {
+                  runOnJS(
+                    scrollToBottom,
+                  )();
+                }
+              },
+            );
         },
       );
 
@@ -1100,17 +1131,13 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         (e: KeyboardEvent) => {
           setKeyboardHeight(0);
 
-          Animated.timing(
-            composerBottom,
-            {
-              toValue: 0,
+          composerBottom.value =
+            withTiming(0, {
               duration:
                 Platform.OS === "ios"
                   ? e.duration || 250
                   : 180,
-              useNativeDriver: false,
-            },
-          ).start();
+            });
         },
       );
 
@@ -1175,11 +1202,12 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
 
         lastReplyDocRef.current = snapshot.docs[snapshot.docs.length - 1] || null;
         setHasMoreReplies(snapshot.size === 20);
-        setReplies(fetched.reverse());
-        const reversed = fetched.reverse();
-        setReplies(reversed);
+        // The query returns newest first; the thread shows the oldest reply at
+        // the top and the newest at the bottom.
+        const ordered = [...fetched].reverse();
+        setReplies(ordered);
         setLoading(false);
-        saveCachedReplies(commentId, reversed);
+        saveCachedReplies(commentId, ordered);
 
         if (currentUser?.uid) {
           const unseenReplies =
@@ -1212,7 +1240,6 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       },
     );
 
-    return unsubscribe;
     return () => {
       isMounted = false;
       unsubscribe();
@@ -1452,14 +1479,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         }
 
         if (moderationDecision.selfHarm === true) {
-          setConfirmDialog({
-            title: "We’re concerned about your safety",
-            description: SELF_HARM_SAFETY_MESSAGE,
-            confirmText: "OK",
-            singleAction: true,
-            destructive: false,
-            onConfirm: () => setConfirmDialog(null),
-          });
+          setSafetyVisible(true);
           setReplyingTo(null);
           return;
         }
@@ -1806,7 +1826,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       scrollToBottom();
     };
 
-  const handleLikeReply =
+  const handleLikeReply = useCallback(
     async (
       replyId: string,
       likedBy: string[],
@@ -1826,7 +1846,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         );
 
       const replyData =
-        replies.find(
+        repliesRef.current.find(
           (reply) =>
             reply.id === replyId,
         );
@@ -1919,7 +1939,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
           error,
         );
       }
-    };
+    },
+    [commentId, currentUser],
+  );
 
   const handleDeleteReply =
     async (replyId: string) => {
@@ -1982,6 +2004,19 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       });
     };
 
+  // Reporting is a student-only tool: staff never report, and only a
+  // student's reply or an anonymous one can be reported. Posts and polls
+  // already work this way, and the Firestore rules enforce the same thing —
+  // this keeps the button from appearing when the report would be rejected.
+  const canReportReply = (reply: Reply) =>
+    canReportContent(
+      currentUser?.role,
+      reply.role,
+      reply.isAnonymous === true,
+    ) &&
+    (reply.realUserId || reply.userId) !==
+      currentUser?.uid;
+
   const submitReport =
     async (
       replyId: string,
@@ -1996,6 +2031,23 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         setConfirmDialog({
           title: "Report unavailable",
           description: "You cannot report your own reply.",
+          confirmText: "Done",
+          singleAction: true,
+          destructive: true,
+          onConfirm: () => setConfirmDialog(null),
+        });
+        return;
+      }
+
+      // Re-checked here so an action sheet left open (or a role change
+      // mid-session) can't slip a report past the button's own check.
+      if (
+        !targetReply ||
+        !canReportReply(targetReply)
+      ) {
+        setConfirmDialog({
+          title: "Report unavailable",
+          description: "This reply can't be reported.",
           confirmText: "Done",
           singleAction: true,
           destructive: true,
@@ -2097,7 +2149,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       });
     };
 
-  const openReplyActions =
+  const openReplyActions = useCallback(
     (
       reply: Reply,
       authorRole?: ReturnType<
@@ -2118,7 +2170,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       setShowReplyActions(
         true,
       );
-    };
+    },
+    [replyActionsTranslateY],
+  );
 
   const startEditReply =
     (reply: Reply) => {
@@ -2218,14 +2272,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         );
 
         if (moderationDecision.selfHarm === true) {
-          setConfirmDialog({
-            title: "We’re concerned about your safety",
-            description: SELF_HARM_SAFETY_MESSAGE,
-            confirmText: "OK",
-            singleAction: true,
-            destructive: false,
-            onConfirm: () => setConfirmDialog(null),
-          });
+          setSafetyVisible(true);
         } else if (moderationDecision.status === "pending") {
           setConfirmDialog({
             title: "Reply Pending Review",
@@ -2234,23 +2281,6 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             singleAction: true,
             destructive: false,
             onConfirm: () => setConfirmDialog(null),
-          });
-        } else {
-          setConfirmDialog({
-            title:
-              "Reply Updated",
-            description:
-              "Your reply has been updated successfully.",
-            confirmText:
-              "Done",
-            singleAction:
-              true,
-            destructive:
-              false,
-            onConfirm: () =>
-              setConfirmDialog(
-                null,
-              ),
           });
         }
       } catch (error) {
@@ -2280,7 +2310,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       }
     };
 
-  const handleLongPress =
+  const handleLongPress = useCallback(
     (
       reply: Reply,
       authorRole?: ReturnType<
@@ -2291,7 +2321,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         reply,
         authorRole,
       );
-    };
+    },
+    [openReplyActions],
+  );
 
   const handleProfileClick =
     useCallback(
@@ -2379,7 +2411,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       [currentUser, router],
     );
 
-  const handleLinkPress =
+  const handleLinkPress = useCallback(
     (url: string) => {
       if (!url.trim()) {
         setConfirmDialog({
@@ -2447,9 +2479,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               ),
           }),
         );
-    };
+    },
+    [],
+  );
 
-  const handleFilePress =
+  const handleFilePress = useCallback(
     async (url: string) => {
       try {
         const ok =
@@ -2497,9 +2531,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             ),
         });
       }
-    };
+    },
+    [],
+  );
 
-  const handleImagePress =
+  const handleImagePress = useCallback(
     (
       images: string[],
       startIndex: number,
@@ -2515,9 +2551,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       setImageViewerVisible(
         true,
       );
-    };
+    },
+    [],
+  );
 
-  const getFileDisplayName =
+  const getFileDisplayName = useCallback(
     (file: {
       url: string;
       mimeType: string;
@@ -2541,9 +2579,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       return name.length > 28
         ? `${name.slice(0, 25)}...`
         : name;
-    };
+    },
+    [],
+  );
 
-  const getTimeAgo =
+  const getTimeAgo = useCallback(
     (timestamp: any) => {
       if (!timestamp) {
         return "";
@@ -2584,9 +2624,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       return `${Math.floor(
         diffSec / 86400,
       )}d ago`;
-    };
+    },
+    [relativeTimeNow],
+  );
 
-  const shouldShowDateSeparator =
+  const shouldShowDateSeparator = useCallback(
     (
       item: Reply,
       prev?: Reply,
@@ -2620,9 +2662,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         dateA.toDateString() !==
         dateB.toDateString()
       );
-    };
+    },
+    [],
+  );
 
-  const formatDateHeader =
+  const formatDateHeader = useCallback(
     (timestamp: any) => {
       if (!timestamp) {
         return "";
@@ -2664,7 +2708,70 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               : undefined,
         },
       );
-    };
+    },
+    [relativeTimeNow],
+  );
+
+  // Stable across renders that don't change the thread (keyboard, dialogs,
+  // edits), so FlatList doesn't redraw every row for them.
+  const renderReplyItem = useCallback(
+    ({ item, index }: { item: Reply; index: number }) => {
+      const prev = index > 0 ? replies[index - 1] : undefined;
+      const next = index < replies.length - 1 ? replies[index + 1] : undefined;
+      const showDate = shouldShowDateSeparator(item, prev);
+
+      return (
+        <React.Fragment key={item.id}>
+          {showDate && (
+            <View style={styles.dateSeparator}>
+              <View style={styles.dateLine} />
+              <Text style={styles.dateLabel}>{formatDateHeader(item.createdAt)}</Text>
+              <View style={styles.dateLine} />
+            </View>
+          )}
+
+          <ReplyBubble
+            item={item}
+            currentUser={currentUser}
+            isSameSenderAsPrev={isSameReplySender(item, prev)}
+            isSameSenderAsNext={isSameReplySender(item, next)}
+            onLike={handleLikeReply}
+            onReplyClick={handleReplyClick}
+            onReplyReferencePress={navigateToReply}
+            onLongPress={handleLongPress}
+            onOptionsPress={openReplyActions}
+            onProfileClick={handleProfileClick}
+            onTagClick={handleTagClick}
+            onLinkPress={handleLinkPress}
+            onFilePress={handleFilePress}
+            onImagePress={handleImagePress}
+            getTimeAgo={getTimeAgo}
+            getFileDisplayName={getFileDisplayName}
+            isHighlighted={item.id === highlightedReplyId}
+          />
+        </React.Fragment>
+      );
+    },
+    [
+      currentUser,
+      formatDateHeader,
+      getFileDisplayName,
+      getTimeAgo,
+      handleFilePress,
+      handleImagePress,
+      handleLikeReply,
+      handleLinkPress,
+      handleLongPress,
+      handleProfileClick,
+      handleReplyClick,
+      handleTagClick,
+      highlightedReplyId,
+      navigateToReply,
+      openReplyActions,
+      replies,
+      shouldShowDateSeparator,
+    ],
+  );
 
   return (
     <>
@@ -2750,7 +2857,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             />
           </View>
 
-          {loading ? (
+          {loading && !isOffline ? (
             <View
               style={styles.centered}
             >
@@ -2803,130 +2910,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               keyExtractor={(item) =>
                 item.id
               }
-              renderItem={({
-                item,
-                index,
-              }) => {
-                const prev =
-                  index > 0
-                    ? replies[
-                        index - 1
-                      ]
-                    : undefined;
-
-                const next =
-                  index <
-                  replies.length - 1
-                    ? replies[
-                        index + 1
-                      ]
-                    : undefined;
-
-                const showDate =
-                  shouldShowDateSeparator(
-                    item,
-                    prev,
-                  );
-
-                return (
-                  <React.Fragment
-                    key={item.id}
-                  >
-                    {showDate && (
-                      <View
-                        style={
-                          styles.dateSeparator
-                        }
-                      >
-                        <View
-                          style={
-                            styles.dateLine
-                          }
-                        />
-
-                        <Text
-                          style={
-                            styles.dateLabel
-                          }
-                        >
-                          {formatDateHeader(
-                            item.createdAt,
-                          )}
-                        </Text>
-
-                        <View
-                          style={
-                            styles.dateLine
-                          }
-                        />
-                      </View>
-                    )}
-
-                    <ReplyBubble
-                      item={item}
-                      currentUser={
-                        currentUser
-                      }
-                      prevItem={
-                        prev
-                      }
-                      nextItem={
-                        next
-                      }
-                      onLike={
-                        handleLikeReply
-                      }
-                      onReplyClick={(
-                        id,
-                        name,
-                        text,
-                      ) =>
-                        setReplyingTo(
-                          {
-                            id,
-                            name,
-                            text,
-                          },
-                        )
-                      }
-                      onReplyReferencePress={
-                        navigateToReply
-                      }
-                      onLongPress={
-                        handleLongPress
-                      }
-                      onOptionsPress={
-                        openReplyActions
-                      }
-                      onProfileClick={
-                        handleProfileClick
-                      }
-                      onTagClick={
-                        handleTagClick
-                      }
-                      onLinkPress={
-                        handleLinkPress
-                      }
-                      onFilePress={
-                        handleFilePress
-                      }
-                      onImagePress={
-                        handleImagePress
-                      }
-                      getTimeAgo={
-                        getTimeAgo
-                      }
-                      getFileDisplayName={
-                        getFileDisplayName
-                      }
-                      isHighlighted={
-                        item.id ===
-                        highlightedReplyId
-                      }
-                    />
-                  </React.Fragment>
-                );
-              }}
+              renderItem={renderReplyItem}
               contentContainerStyle={
                 styles.listContent
               }
@@ -2975,18 +2959,17 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
           )}
 
           {currentUser && (
-            <Animated.View
+            <ReanimatedAnimated.View
               style={[
                 styles.composerWrapper,
                 {
-                  marginBottom:
-                    composerBottom,
                   paddingBottom:
                     keyboardHeight >
                     0
                       ? 8
                       : hiddenComposerPadding,
                 },
+                composerAnimatedStyle,
               ]}
             >
               <CommentComposer
@@ -3006,7 +2989,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                   )
                 }
               />
-            </Animated.View>
+            </ReanimatedAnimated.View>
           )}
         </View>
       </Modal>
@@ -3157,11 +3140,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                   </TouchableOpacity>
                 )}
 
-                {(
-                  selectedActionReply.realUserId ||
-                  selectedActionReply.userId
-                ) !==
-                  currentUser?.uid && (
+                {canReportReply(
+                  selectedActionReply,
+                ) && (
                   <TouchableOpacity
                     style={
                       styles.actionMenuItem
@@ -3627,6 +3608,14 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
           )
         }
       />
+
+      <SafetyDialog
+        visible={safetyVisible}
+        onClose={() =>
+          setSafetyVisible(false)
+        }
+        contentLabel="reply"
+      />
     </>
   );
 };
@@ -4046,11 +4035,11 @@ const styles = StyleSheet.create({
   },
 
   composerWrapper: {
-    borderTopWidth: 1,
+    borderTopWidth: 0,
     borderTopColor: "#e8d3b2",
-    backgroundColor: "#fff4ee",
-    paddingHorizontal: 12,
-    paddingTop: 8,
+    backgroundColor: "#fffaf7",
+    paddingHorizontal: 8,
+    paddingTop: 0,
   },
 
   actionOverlay: {

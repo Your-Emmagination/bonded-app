@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
+  FlatList,
   Modal,
   Pressable,
   RefreshControl,
@@ -117,6 +118,79 @@ function getStatusMeta(status: ReportStatus) {
   }
   return { label: "Pending", icon: "time" as const, color: "#c27b16", bg: "#fff4dc" };
 }
+
+// One report in the list. Memoized so a report whose details finish loading
+// (or that becomes busy) redraws on its own instead of every visible report.
+const ReportCard = memo(function ReportCard({
+  report,
+  isBusy,
+  onOpen,
+  onChangeStatus,
+}: {
+  report: ReportRecord;
+  isBusy: boolean;
+  onOpen: (report: ReportRecord) => void;
+  onChangeStatus: (report: ReportRecord, nextStatus: "resolved" | "dismissed" | "pending") => void;
+}) {
+  const status = getStatusMeta(report.status);
+  return (
+    <TouchableOpacity
+      style={styles.reportCard}
+      activeOpacity={0.88}
+      onPress={() => onOpen(report)}
+    >
+      <View style={styles.reportTopRow}>
+        <View style={styles.typeBadge}>
+          <Ionicons name="flag-outline" size={14} color="#7b2a21" />
+          <Text style={styles.typeBadgeText}>{getContentTypeLabel(report.contentType)}</Text>
+        </View>
+        <View style={[styles.statusBadge, { backgroundColor: status.bg }]}>
+          <Ionicons name={status.icon} size={14} color={status.color} />
+          <Text style={[styles.statusText, { color: status.color }]}>{status.label}</Text>
+        </View>
+      </View>
+
+      <Text style={styles.reportReason}>{normalizeReason(report.reason)}</Text>
+      <Text style={styles.reportPreview} numberOfLines={3}>
+        {report.contentText || "Loading content preview..."}
+      </Text>
+
+      <View style={styles.metaRow}>
+        <Text style={styles.metaText}>
+          Reported by {report.reporterName || report.reportedBy || "Unknown user"}
+        </Text>
+        <Text style={styles.metaText}>{formatDate(report.createdAt)}</Text>
+      </View>
+
+      {report.status === "pending" && (
+        <View style={styles.quickActions}>
+          <TouchableOpacity
+            style={styles.dismissButton}
+            disabled={isBusy}
+            onPress={(event) => {
+              event.stopPropagation();
+              onChangeStatus(report, "dismissed");
+            }}
+          >
+            <Ionicons name="close-circle-outline" size={17} color="#7d5c53" />
+            <Text style={styles.dismissButtonText}>Dismiss</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.resolveButton}
+            disabled={isBusy}
+            onPress={(event) => {
+              event.stopPropagation();
+              onChangeStatus(report, "resolved");
+            }}
+          >
+            <Ionicons name="checkmark-circle-outline" size={17} color="#fffaf7" />
+            <Text style={styles.resolveButtonText}>Resolve</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+    </TouchableOpacity>
+  );
+});
 
 export default function ReportManagementScreen() {
   const router = useRouter();
@@ -396,7 +470,7 @@ export default function ReportManagementScreen() {
     }
   };
 
-  const openStatusConfirm = (report: ReportRecord, nextStatus: "resolved" | "dismissed" | "pending") => {
+  const openStatusConfirm = useCallback((report: ReportRecord, nextStatus: "resolved" | "dismissed" | "pending") => {
     if (nextStatus === "resolved") {
       setConfirm({
         reportId: report.id,
@@ -429,7 +503,19 @@ export default function ReportManagementScreen() {
       destructive: false,
       nextStatus,
     });
-  };
+  }, []);
+
+  const renderReport = useCallback(
+    ({ item }: { item: ReportRecord }) => (
+      <ReportCard
+        report={item}
+        isBusy={busyReportId === item.id}
+        onOpen={setSelectedReport}
+        onChangeStatus={openStatusConfirm}
+      />
+    ),
+    [busyReportId, openStatusConfirm],
+  );
 
   const refresh = async () => {
     setRefreshing(true);
@@ -468,60 +554,70 @@ export default function ReportManagementScreen() {
         </View>
       </View>
 
-      <ScrollView
+      {/* Only the reports near the screen are drawn, so a long report history
+          doesn't slow this screen down. */}
+      <FlatList
         style={styles.content}
         contentContainerStyle={styles.contentContainer}
+        data={filteredReports}
+        keyExtractor={(report) => report.id}
+        renderItem={renderReport}
+        initialNumToRender={6}
+        maxToRenderPerBatch={6}
+        windowSize={7}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor="#e0a53d" />}
         keyboardShouldPersistTaps="handled"
-      >
-        <View style={styles.summaryCard}>
-          <View style={styles.summaryIcon}>
-            <Ionicons name="flag" size={24} color="#e0a53d" />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.summaryTitle}>Moderation Queue</Text>
-            <Text style={styles.summaryText}>
-              {counts.pending} pending report{counts.pending === 1 ? "" : "s"} require staff review.
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.filterRow}>
-          {FILTERS.map((item) => {
-            const active = filter === item.value;
-            return (
-              <TouchableOpacity
-                key={item.value}
-                style={[styles.filterChip, active && styles.filterChipActive]}
-                onPress={() => setFilter(item.value)}
-                activeOpacity={0.8}
-              >
-                <Ionicons name={item.icon} size={16} color={active ? "#fffaf7" : "#7d5c53"} />
-                <Text style={[styles.filterText, active && styles.filterTextActive]}>
-                  {item.label} {counts[item.value]}
+        ListHeaderComponent={
+          <>
+            <View style={styles.summaryCard}>
+              <View style={styles.summaryIcon}>
+                <Ionicons name="flag" size={24} color="#e0a53d" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.summaryTitle}>Moderation Queue</Text>
+                <Text style={styles.summaryText}>
+                  {counts.pending} pending report{counts.pending === 1 ? "" : "s"} require staff review.
                 </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+              </View>
+            </View>
 
-        <View style={styles.searchBox}>
-          <Ionicons name="search-outline" size={20} color="#9b766c" />
-          <TextInput
-            value={search}
-            onChangeText={setSearch}
-            placeholder="Search reports, users, reasons..."
-            placeholderTextColor="#b99c93"
-            style={styles.searchInput}
-          />
-          {!!search && (
-            <TouchableOpacity onPress={() => setSearch("")}> 
-              <Ionicons name="close-circle" size={19} color="#9b766c" />
-            </TouchableOpacity>
-          )}
-        </View>
+            <View style={styles.filterRow}>
+              {FILTERS.map((item) => {
+                const active = filter === item.value;
+                return (
+                  <TouchableOpacity
+                    key={item.value}
+                    style={[styles.filterChip, active && styles.filterChipActive]}
+                    onPress={() => setFilter(item.value)}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons name={item.icon} size={16} color={active ? "#fffaf7" : "#7d5c53"} />
+                    <Text style={[styles.filterText, active && styles.filterTextActive]}>
+                      {item.label} {counts[item.value]}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
 
-        {filteredReports.length === 0 ? (
+            <View style={styles.searchBox}>
+              <Ionicons name="search-outline" size={20} color="#9b766c" />
+              <TextInput
+                value={search}
+                onChangeText={setSearch}
+                placeholder="Search reports, users, reasons..."
+                placeholderTextColor="#b99c93"
+                style={styles.searchInput}
+              />
+              {!!search && (
+                <TouchableOpacity onPress={() => setSearch("")}>
+                  <Ionicons name="close-circle" size={19} color="#9b766c" />
+                </TouchableOpacity>
+              )}
+            </View>
+          </>
+        }
+        ListEmptyComponent={
           <View style={styles.emptyCard}>
             <View style={styles.emptyIcon}>
               <Ionicons name="checkmark-done-outline" size={34} color="#e0a53d" />
@@ -531,71 +627,8 @@ export default function ReportManagementScreen() {
               {filter === "pending" ? "There are no pending reports right now." : "Try another filter or search term."}
             </Text>
           </View>
-        ) : (
-          filteredReports.map((report) => {
-            const status = getStatusMeta(report.status);
-            const isBusy = busyReportId === report.id;
-            return (
-              <TouchableOpacity
-                key={report.id}
-                style={styles.reportCard}
-                activeOpacity={0.88}
-                onPress={() => setSelectedReport(report)}
-              >
-                <View style={styles.reportTopRow}>
-                  <View style={styles.typeBadge}>
-                    <Ionicons name="flag-outline" size={14} color="#7b2a21" />
-                    <Text style={styles.typeBadgeText}>{getContentTypeLabel(report.contentType)}</Text>
-                  </View>
-                  <View style={[styles.statusBadge, { backgroundColor: status.bg }]}>
-                    <Ionicons name={status.icon} size={14} color={status.color} />
-                    <Text style={[styles.statusText, { color: status.color }]}>{status.label}</Text>
-                  </View>
-                </View>
-
-                <Text style={styles.reportReason}>{normalizeReason(report.reason)}</Text>
-                <Text style={styles.reportPreview} numberOfLines={3}>
-                  {report.contentText || "Loading content preview..."}
-                </Text>
-
-                <View style={styles.metaRow}>
-                  <Text style={styles.metaText}>
-                    Reported by {report.reporterName || report.reportedBy || "Unknown user"}
-                  </Text>
-                  <Text style={styles.metaText}>{formatDate(report.createdAt)}</Text>
-                </View>
-
-                {report.status === "pending" && (
-                  <View style={styles.quickActions}>
-                    <TouchableOpacity
-                      style={styles.dismissButton}
-                      disabled={isBusy}
-                      onPress={(event) => {
-                        event.stopPropagation();
-                        openStatusConfirm(report, "dismissed");
-                      }}
-                    >
-                      <Ionicons name="close-circle-outline" size={17} color="#7d5c53" />
-                      <Text style={styles.dismissButtonText}>Dismiss</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.resolveButton}
-                      disabled={isBusy}
-                      onPress={(event) => {
-                        event.stopPropagation();
-                        openStatusConfirm(report, "resolved");
-                      }}
-                    >
-                      <Ionicons name="checkmark-circle-outline" size={17} color="#fffaf7" />
-                      <Text style={styles.resolveButtonText}>Resolve</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-              </TouchableOpacity>
-            );
-          })
-        )}
-      </ScrollView>
+        }
+      />
 
       <Modal
         visible={!!selectedReport}

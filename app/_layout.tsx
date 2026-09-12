@@ -70,16 +70,13 @@ export default function RootLayout() {
       ) {
         hasNavigated.current = true;
         try {
-          const role = await resolveUserRoleForAuthUser(currentUser);
+          // Resolving the role still warms the role cache before the first
+          // screen mounts. Everyone now starts on Home — staff open the
+          // Dashboard from its own tab.
+          await resolveUserRoleForAuthUser(currentUser);
           if (!isMounted) return;
-          const normalizedRole = role?.toLowerCase() || "student";
-          const isPrivileged = ["moderator", "teacher", "admin"].includes(normalizedRole);
 
-          if (isPrivileged) {
-            router.replace("/(main)/(tabs)/DashboardScreen");
-          } else {
-            router.replace("/(main)/(tabs)/HomeScreen");
-          }
+          router.replace("/(main)/(tabs)/HomeScreen");
         } catch (error) {
           console.error("Error resolving user role on startup:", error);
           if (isMounted) {

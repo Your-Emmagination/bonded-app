@@ -16,7 +16,7 @@ export type DraftAttachment = {
   uri: string;
   name: string;
   mimeType: string;
-  source: "camera" | "gallery" | "file";
+  source: "camera" | "gallery" | "file" | "gif";
   uploaded?: { url: string; name: string; mimeType: string };
 };
 

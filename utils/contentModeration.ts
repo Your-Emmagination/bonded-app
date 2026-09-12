@@ -12,8 +12,15 @@ import { auth } from "../Firebase_configure";
  */
 export const AI_TRIGGER_BYPASSES_MODERATION = false;
 
+// The line that matters most. SafetyDialog sets this as the loudest text in
+// the dialog, above the moderation outcome.
+export const SELF_HARM_TRUSTED_ADULT_MESSAGE =
+  "Please reach out to someone you trust — a parent, a teacher, or another trusted adult.";
+
+// Follows "Your post wasn't posted." inside SafetyDialog, so it reads as a
+// continuation rather than a standalone paragraph.
 export const SELF_HARM_SAFETY_MESSAGE =
-  "We're concerned about your safety. Your message won't be published right now. Please reach out to someone you trust, a school counselor, or a mental health professional. If you're in immediate danger, contact local emergency services.";
+  "A school counselor or mental health professional can help too. If you're in immediate danger, contact local emergency services.";
 
 export type ModerationStatus = "approved" | "pending";
 export type ModerationScope = "post" | "poll" | "comment" | "reply" | "thread" | "profile" | "dm";

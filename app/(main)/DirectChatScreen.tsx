@@ -1,13 +1,16 @@
 // app/(main)/DirectChatScreen.tsx
 import { auth, db } from "@/Firebase_configure";
 import { resolveAvatarUri } from "@/utils/avatar";
-import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
+import { AVATAR_SIZE_SMALL, avatarThumb, feedImage, videoThumb } from "@/utils/cloudinaryImages";
 import { uploadToCloudinary } from "@/utils/cloudinaryUpload";
 import {
     DEFAULT_THEME_COLOR,
     DIRECT_MESSAGE_PAGE_SIZE,
     createDirectMessageId,
     deleteDirectMessage,
+    editDirectMessage,
+    getDirectMessageContext,
+    searchDirectMessageHistory,
     DirectConversation,
     DirectFileAttachment,
     DirectMessage,
@@ -25,11 +28,18 @@ import {
 } from "@/utils/directMessages";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { DraftAttachment, insertEmojiInDraft, MESSAGE_MAX_LENGTH, prepareDraftAttachment, TextSelection } from "@/utils/messageComposer";
-import { getRoleColor, getRoleDisplayName, getUserDataByAuthUser, parseUserRole } from "@/utils/rbac";
+import { replyPreviewMedia, replyPreviewText } from "@/utils/replyPreview";
+import { getRoleColor, getRoleDisplayName, getUserDataByAuthUser, parseUserRole, type UserData } from "@/utils/rbac";
 import { getTimeAgo, useRelativeTimeNow } from "@/utils/relativeTime";
-import { getPresenceState, isMessageAfterDeletion, receiptCoversMessage } from "@/utils/messengerState";
+import { getPresenceState, isMessageAfterDeletion, receiptCoversMessage, timestampMillis } from "@/utils/messengerState";
+import { messageLinks, splitMessageLinks } from "@/utils/chatLinks";
+import { useDirectTyping } from "@/utils/directTyping";
 import { useAppActive, useUserPresence } from "@/utils/presence";
 import { useNetworkStatus } from "@/utils/networkUtils";
+import {
+    getCachedDirectMessages,
+    saveCachedDirectMessages,
+} from "@/utils/offlineStorage";
 import { Ionicons } from "@expo/vector-icons";
 import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
@@ -62,10 +72,11 @@ import ReanimatedAnimated, {
     runOnJS,
     useAnimatedStyle,
     useSharedValue,
-    withSpring,
 } from "react-native-reanimated";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import ChatEmojiPicker from "./components/ChatEmojiPicker";
+import ChatGifPicker from "./components/ChatGifPicker";
+import ChatTypingIndicator from "./components/ChatTypingIndicator";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -78,9 +89,12 @@ interface DirectMessageBubbleProps {
   isOwn: boolean;
   themeColor: string;
   recipientAvatar?: string | null;
+  recipientName: string;
+  showAvatar: boolean;
   isLastOwnMessage: boolean;
   isSeenByRecipient: boolean;
   isDelivered: boolean;
+  isPending: boolean;
   isHighlighted: boolean;
   revealedTimestamp: boolean;
   nowMs: number;
@@ -89,6 +103,7 @@ interface DirectMessageBubbleProps {
   onOpenImage: (url: string) => void;
   onToggleReveal: (id: string) => void;
   onSwipeReply: (messageId: string) => void;
+  onJumpToMessage: (messageId: string) => void;
 }
 
 const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
@@ -96,9 +111,12 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
   isOwn,
   themeColor,
   recipientAvatar,
+  recipientName,
+  showAvatar,
   isLastOwnMessage,
   isSeenByRecipient,
   isDelivered,
+  isPending,
   isHighlighted,
   revealedTimestamp,
   nowMs,
@@ -107,6 +125,7 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
   onOpenImage,
   onToggleReveal,
   onSwipeReply,
+  onJumpToMessage,
 }) => {
   const messageId = item.id;
   const swipeX = useSharedValue(0);
@@ -115,6 +134,7 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
 
   const panGesture = useMemo(() => {
     return Gesture.Pan()
+      .enabled(!item.deleted)
       .activeOffsetX(isOwn ? [-14, 9999] : [-9999, 14])
       .failOffsetY([-12, 12])
       .onUpdate((e) => {
@@ -126,9 +146,10 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
         if (dx > SWIPE_REPLY_THRESHOLD) {
           runOnJS(onSwipeReply)(messageId);
         }
-        swipeX.set(withSpring(0, { damping: 18, stiffness: 220 }));
-      });
-  }, [isOwn, messageId, onSwipeReply, swipeDir, swipeX]);
+        swipeX.set(0);
+      })
+      .onFinalize(() => { swipeX.set(0); });
+  }, [isOwn, item.deleted, messageId, onSwipeReply, swipeDir, swipeX]);
 
   const rowSwipeStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: swipeX.value * swipeDir }],
@@ -149,6 +170,10 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
 
   return (
     <View style={[styles.bubbleContainer, isOwn ? styles.bubbleContainerOwn : styles.bubbleContainerOther]}>
+      {!isOwn && showAvatar && <View style={styles.incomingAvatarWrap}>
+        {recipientAvatar ? <Image source={{ uri: avatarThumb(recipientAvatar, 28) }} style={styles.incomingAvatar} />
+          : <View style={[styles.incomingAvatar, styles.chatAvatarFallback]}><Text style={styles.chatAvatarInitial}>{recipientName[0]?.toUpperCase() || "?"}</Text></View>}
+      </View>}
       {revealedTimestamp && (
         <Text style={styles.revealedTimeText}>{getTimeAgo(item.createdAt, nowMs)}</Text>
       )}
@@ -179,9 +204,11 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
 
             {/* Quoted Reply */}
             {item.replyTo && !item.deleted && (
-              <View style={[styles.replyQuoteWrap, isOwn && styles.replyQuoteWrapOwn]}>
+              <Pressable style={[styles.replyQuoteWrap, isOwn && styles.replyQuoteWrapOwn]}
+                accessibilityRole="button" accessibilityLabel="Go to original message"
+                onPress={(event) => { event.stopPropagation(); onJumpToMessage(item.replyTo!.id); }}>
                 <View style={[styles.replyQuoteBar, { backgroundColor: isOwn ? "#fff" : themeColor }]} />
-                <View style={{ flex: 1 }}>
+                <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={[styles.replyQuoteSender, isOwn && styles.replyQuoteTextOwn]} numberOfLines={1}>
                     {item.replyTo.senderName}
                   </Text>
@@ -189,7 +216,23 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
                     {item.replyTo.preview}
                   </Text>
                 </View>
-              </View>
+                {/* Thumbnail of the photo/video being replied to, like
+                    Messenger. Replies sent before this have none saved, so
+                    they just show the words. */}
+                {!!item.replyTo.mediaUrl && (
+                  <Image
+                    source={{
+                      uri:
+                        item.replyTo.mediaType === "video"
+                          ? videoThumb(item.replyTo.mediaUrl, 96)
+                          : feedImage(item.replyTo.mediaUrl, 96),
+                    }}
+                    style={styles.replyQuoteThumb}
+                    contentFit="cover"
+                    recyclingKey={`${item.id}:replyThumb`}
+                  />
+                )}
+              </Pressable>
             )}
 
             {/* Attached Images */}
@@ -227,9 +270,13 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
             {/* Message Text */}
             {!!item.text && (
               <Text style={[styles.messageText, isOwn && styles.messageTextOwn]}>
-                {item.text}
+                {item.deleted ? item.text : splitMessageLinks(item.text).map((part, index) => part.url
+                  ? <Text key={index} style={{ textDecorationLine: "underline", fontWeight: "600" }} accessibilityRole="link"
+                    onPress={(event) => { event.stopPropagation(); void Linking.openURL(part.url!).catch(() => Alert.alert("Unable to open link", "Please copy the link and open it in your browser.")); }}>{part.text}</Text>
+                  : part.text)}
               </Text>
             )}
+            {item.edited && !item.deleted && <Text style={[styles.editedLabel, isOwn && { color: "rgba(255,255,255,0.75)" }]}>Edited</Text>}
 
             {/* Shared link snapshot */}
             {item.link && !item.deleted && (
@@ -275,10 +322,13 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
 
       {/* Messenger Sent / Delivered / Seen Status under latest own message */}
       {isOwn && isLastOwnMessage && (
-        <View style={styles.statusRow}>
-          {isSeenByRecipient ? (
+        <View style={styles.statusRow} accessible accessibilityLabel={isPending ? "Sending" : isSeenByRecipient ? `Seen by ${recipientName}` : isDelivered ? "Delivered" : "Sent"}>
+          {isPending ? (
             <View style={styles.seenContainer}>
-              <Text style={styles.statusText}>Seen</Text>
+              <Ionicons name="time-outline" size={15} color="#9b766c" />
+            </View>
+          ) : isSeenByRecipient ? (
+            <View style={styles.seenContainer}>
               {recipientAvatar ? (
                 <Image
                   source={{ uri: avatarThumb(recipientAvatar, 16) }}
@@ -286,18 +336,16 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
                   contentFit="cover"
                 />
               ) : (
-                <Ionicons name="checkmark-done" size={14} color="#8f2117" />
+                <View style={[styles.seenMiniAvatar, styles.chatAvatarFallback]}><Text style={{ fontSize: 10, color: "#8f2117" }}>{recipientName[0]?.toUpperCase() || "?"}</Text></View>
               )}
             </View>
           ) : isDelivered ? (
             <View style={styles.seenContainer}>
-              <Text style={styles.statusText}>Delivered</Text>
-              <Ionicons name="checkmark-done" size={14} color="#9b766c" />
+              <Ionicons name="checkmark-circle" size={16} color="#9b766c" />
             </View>
           ) : (
             <View style={styles.seenContainer}>
-              <Text style={styles.statusText}>Sent</Text>
-              <Ionicons name="checkmark" size={14} color="#9b766c" />
+              <Ionicons name="checkmark-circle-outline" size={16} color="#9b766c" />
             </View>
           )}
         </View>
@@ -339,15 +387,43 @@ function DirectChatContent() {
 
   const [conversation, setConversation] = useState<DirectConversation | null>(null);
   const [loadedMessages, setMessages] = useState<DirectMessage[]>([]);
+  // Messages painted locally the instant Send is tapped, before the server
+  // has them. Each carries the id its real row will be written under.
+  const [pendingMessages, setPendingMessages] = useState<DirectMessage[]>([]);
   const hasConversation = !!conversation;
   const cutoffSeconds = conversation?.deletedThrough?.[currentUserId]?.seconds || 0;
   const cutoffNanoseconds = conversation?.deletedThrough?.[currentUserId]?.nanoseconds || 0;
   const historyCutoff = useMemo(() => cutoffSeconds ? new Timestamp(cutoffSeconds, cutoffNanoseconds) : undefined,
     [cutoffSeconds, cutoffNanoseconds]);
-  const messages = useMemo(() => loadedMessages.filter((message) =>
-    isMessageAfterDeletion(message.createdAt, historyCutoff)), [loadedMessages, historyCutoff]);
+  const messages = useMemo(() => {
+    const visible = loadedMessages.filter((message) =>
+      isMessageAfterDeletion(message.createdAt, historyCutoff));
+    if (pendingMessages.length === 0) return visible;
+    // The optimistic copy vanishes the moment the real row arrives under the
+    // same id, so a sent message is never drawn twice.
+    const known = new Set(visible.map((message) => message.id));
+    const stillPending = pendingMessages.filter((message) => !known.has(message.id));
+    return stillPending.length ? [...visible, ...stillPending] : visible;
+  }, [loadedMessages, historyCutoff, pendingMessages]);
+  const pendingIds = useMemo(
+    () => new Set(pendingMessages.map((message) => message.id)),
+    [pendingMessages],
+  );
+
+  // Optimistic copies are dropped in the message subscription below, where
+  // the server rows actually arrive. Doing it in an effect that watches the
+  // list instead would cost an extra render pass on every snapshot.
   const [loading, setLoading] = useState(true);
   const [messageLimit, setMessageLimit] = useState(DIRECT_MESSAGE_PAGE_SIZE);
+  const [historyAnchor, setHistoryAnchor] = useState<Timestamp | undefined>();
+  const [pendingJump, setPendingJump] = useState<string | null>(null);
+  const [jumpHighlight, setJumpHighlight] = useState<string | null>(null);
+  const [jumping, setJumping] = useState(false);
+  const jumpVersion = useRef(0);
+  const scrollRetry = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const scrollAttempts = useRef(0);
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const [messageError, setMessageError] = useState<string | null>(null);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
@@ -360,13 +436,44 @@ function DirectChatContent() {
   const sendInFlight = useRef(false);
   const viewabilityConfig = useMemo(() => ({ itemVisiblePercentThreshold: 50, minimumViewTime: 500 }), []);
   const pendingSend = useRef<{ key: string; id: string } | null>(null);
+  // The sender's own profile was re-fetched on every single send, putting a
+  // storage round-trip in front of each write. It changes rarely, so it is
+  // resolved once and reused.
+  const myProfileRef = useRef<UserData | null>(null);
   const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: { item: DirectMessage }[] }) => {
     setVisibleMessageIds(viewableItems.map(({ item }) => item.id));
   }, []);
 
+  // Warm the profile before the first send so even that one skips the fetch.
+  useEffect(() => {
+    let active = true;
+    void getUserDataByAuthUser(auth.currentUser)
+      .then((profile) => {
+        if (active && profile) myProfileRef.current = profile;
+      })
+      .catch(() => {
+        // A failure here costs nothing: handleSend falls back to fetching.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const [inputText, setInputText] = useState("");
+  const [editingMessage, setEditingMessage] = useState<DirectMessage | null>(null);
+  const [editText, setEditText] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState("");
+  const editInFlight = useRef(false);
+  const [gifPickerVisible, setGifPickerVisible] = useState(false);
+  const [notice, setNotice] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const composerBusy = isSending || isPicking;
+  // A send in flight must NOT disable the composer. Disabling a focused
+  // TextInput on Android blurs it and drops the keyboard, which is why the
+  // keyboard closed after every message. sendInFlight already blocks double
+  // sends, so only the send button itself needs to go inert.
+  const composerBusy = isPicking || savingEdit;
+  const sendDisabled = composerBusy || isSending;
   const inputRef = useRef<TextInput>(null);
   const selectionRef = useRef<TextSelection>({ start: 0, end: 0 });
   const [selectionOverride, setSelectionOverride] = useState<TextSelection | undefined>();
@@ -379,6 +486,9 @@ function DirectChatContent() {
   const [isSearching, setIsSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const [searchMatches, setSearchMatches] = useState<DirectMessage[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
 
   // Settings / Info Sheet State
   const [infoSheetVisible, setInfoSheetVisible] = useState(false);
@@ -431,14 +541,6 @@ function DirectChatContent() {
     }
   }, [emojiPickerVisible]);
 
-  const handleInsertEmoji = useCallback((emoji: string) => {
-    const next = insertEmojiInDraft(inputText, emoji, selectionRef.current);
-    if (!next) return;
-    selectionRef.current = next.selection;
-    setInputText(next.text);
-    setSelectionOverride(next.selection);
-  }, [inputText]);
-
   // Recipient info
   const recipientId = useMemo(() => {
     if (params.recipientId) return params.recipientId;
@@ -460,6 +562,88 @@ function DirectChatContent() {
   const themeColor = conversation?.themeColor || DEFAULT_THEME_COLOR;
   const quickEmoji = conversation?.quickEmoji || "👍";
   const isMuted = (conversation?.mutedBy || []).includes(currentUserId);
+  const { isTyping, onTextChanged, stopTyping } = useDirectTyping(conversationId, currentUserId, recipientId,
+    focused && appActive && !isOffline && !conversationError);
+  const handleInsertEmoji = useCallback((emoji: string) => {
+    const next = insertEmojiInDraft(editingMessage ? editText : inputText, emoji, selectionRef.current);
+    if (!next) return;
+    selectionRef.current = next.selection;
+    if (editingMessage) setEditText(next.text); else setInputText(next.text);
+    onTextChanged(next.text);
+    setSelectionOverride(next.selection);
+  }, [inputText, editingMessage, editText, onTextChanged]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(""), 3000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+  useEffect(() => () => { jumpVersion.current++; clearTimeout(scrollRetry.current); }, []);
+  useEffect(() => {
+    if (!jumpHighlight) return;
+    const timer = setTimeout(() => setJumpHighlight(null), 2200);
+    return () => clearTimeout(timer);
+  }, [jumpHighlight]);
+  const copyContent = useCallback(async (text: string, label: string) => {
+    setActionMenuTarget(null);
+    try { await Clipboard.setStringAsync(text); setNotice(`${label} copied`); }
+    catch { setNotice("Could not copy. Please try again."); }
+  }, []);
+  const handleJumpToMessage = useCallback(async (messageId: string) => {
+    const version = ++jumpVersion.current;
+    setJumping(true);
+    setPendingJump(null);
+    clearTimeout(scrollRetry.current);
+    try {
+      if (!messagesRef.current.some((message) => message.id === messageId)) {
+        const context = await getDirectMessageContext(conversationId, messageId, historyCutoff);
+        if (version !== jumpVersion.current) return;
+        setHistoryAnchor(context.through);
+        setMessageLimit(DIRECT_MESSAGE_PAGE_SIZE);
+      }
+      if (version === jumpVersion.current) setPendingJump(messageId);
+    } catch (error) {
+      if (version === jumpVersion.current) {
+        setNotice(error instanceof Error ? error.message : "Could not load this message.");
+        setJumping(false);
+      }
+    }
+  }, [conversationId, historyCutoff]);
+  useEffect(() => {
+    if (!pendingJump) return;
+    const timer = setTimeout(() => {
+      setPendingJump(null); setJumping(false);
+      setNotice("This message could not be shown. Please try again.");
+    }, 15000);
+    return () => clearTimeout(timer);
+  }, [pendingJump]);
+  useEffect(() => {
+    if (!pendingJump) return;
+    const index = messages.findIndex((message) => message.id === pendingJump);
+    if (index < 0) return;
+    const frame = requestAnimationFrame(() => {
+      scrollAttempts.current = 0;
+      listRef.current?.scrollToIndex({ index: messages.length - 1 - index, animated: false, viewPosition: 0.5 });
+      setJumpHighlight(pendingJump); setPendingJump(null); setJumping(false);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [messages, pendingJump]);
+  const backToLatest = useCallback(() => {
+    jumpVersion.current++;
+    setPendingJump(null); setJumping(false); setHistoryAnchor(undefined);
+    setMessageLimit(DIRECT_MESSAGE_PAGE_SIZE);
+    requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 0, animated: false }));
+  }, []);
+  const saveEdit = useCallback(async () => {
+    if (!editingMessage || editInFlight.current || !editText.trim()) return;
+    if (isOffline) { setEditError("Reconnect to save your edit."); return; }
+    editInFlight.current = true; setSavingEdit(true); setEditError(""); stopTyping();
+    try {
+      await editDirectMessage(conversationId, editingMessage.id, currentUserId, editText);
+      setEditingMessage(null); setSelectionOverride(undefined); setNotice("Message updated");
+    } catch (error) { setEditError(error instanceof Error ? error.message : "Could not save. Please try again."); }
+    finally { editInFlight.current = false; setSavingEdit(false); }
+  }, [conversationId, currentUserId, editText, editingMessage, isOffline, stopTyping]);
 
   // Subscribe to conversation doc
   useEffect(() => {
@@ -473,6 +657,12 @@ function DirectChatContent() {
         deletionVersion.current = nextDeletionVersion;
         // Deletion on another device also closes any currently displayed old content.
         setReplyingTo(null);
+        setEditingMessage(null);
+        setHistoryAnchor(undefined);
+        setSearchMatches([]);
+        jumpVersion.current++;
+        setPendingJump(null);
+        setJumping(false);
         setActionMenuTarget(null);
         setForwardTarget(null);
         setViewerImage(null);
@@ -500,72 +690,100 @@ function DirectChatContent() {
   // Subscribe to messages
   useEffect(() => {
     if (!conversationId || !hasConversation) return;
+
+    // Saved messages first, so an already-opened chat isn't blank offline.
+    let active = true;
+    getCachedDirectMessages<DirectMessage>(conversationId).then((cached) => {
+      if (!active || cached.length === 0) return;
+      setMessages((prev) => (prev.length === 0 ? cached : prev));
+      setLoading(false);
+    });
+
     const unsubscribe = subscribeToDirectMessages(conversationId, (msgList) => {
       setMessages(msgList);
+      // The real row has landed, so its optimistic twin can go.
+      setPendingMessages((prev) => {
+        if (prev.length === 0) return prev;
+        const known = new Set(msgList.map((message) => message.id));
+        const next = prev.filter((message) => !known.has(message.id));
+        return next.length === prev.length ? prev : next;
+      });
       setMessageError(null);
       setLoading(false);
       setLoadingOlder(false);
+      void saveCachedDirectMessages(conversationId, msgList);
     }, messageLimit, () => {
       setLoading(false);
       setLoadingOlder(false);
       setMessageError("Messages could not be loaded. Check your connection and retry.");
-    }, historyCutoff);
-    return () => unsubscribe();
-  }, [conversationId, hasConversation, historyCutoff, messageLimit, retryCount]);
+      setJumping(false); setPendingJump(null);
+    }, historyCutoff, historyAnchor);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [conversationId, hasConversation, historyCutoff, historyAnchor, messageLimit, retryCount]);
 
   useEffect(() => {
     if (!focused || !appActive || isOffline || !currentUserId || messageError || conversationError) return;
-    const visible = messages.filter((message) => visibleMessageIds.includes(message.id));
+    // A pending bubble has a client-side date and no server row yet, so it
+    // must never drive a read receipt.
+    const visible = messages.filter(
+      (message) => visibleMessageIds.includes(message.id) && !pendingIds.has(message.id),
+    );
     if (!visible.length) return;
     void markConversationAsSeen(conversationId, currentUserId, visible)
       .catch((error) => console.warn("[DirectChatScreen] Read receipt failed:", error));
-  }, [focused, appActive, isOffline, currentUserId, conversationId, messages, visibleMessageIds, messageError, conversationError]);
+  }, [focused, appActive, isOffline, currentUserId, conversationId, messages, visibleMessageIds, messageError, conversationError, pendingIds]);
 
-  // In-chat search matches
-  const searchMatches = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return [];
-    return messages.filter((m) => m.text && m.text.toLowerCase().includes(q));
-  }, [messages, searchQuery]);
+  // Search all visible history, including pages that have never been loaded in the list.
+  const historyVersion = `${timestampMillis(conversation?.lastMessage?.createdAt)}:${timestampMillis(conversation?.contentUpdatedAt)}:${conversation?.lastMessage?.text || ""}`;
+  useEffect(() => {
+    const controller = new AbortController();
+    // Reset results when replacing the external history query; this effect never depends on those results.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSearchMatches([]); setCurrentMatchIndex(0); setSearchError("");
+    if (!isSearching || !searchQuery.trim() || !hasConversation) { setSearchLoading(false); return; }
+    setSearchLoading(true);
+    const timer = setTimeout(() => {
+      void searchDirectMessageHistory(conversationId, searchQuery, historyCutoff, controller.signal).then((matches) => {
+        if (controller.signal.aborted) return;
+        setSearchMatches(matches);
+        if (matches[0]) void handleJumpToMessage(matches[0].id);
+      }).catch(() => { if (!controller.signal.aborted) setSearchError("Search failed. Check your connection and tap to retry."); })
+        .finally(() => { if (!controller.signal.aborted) setSearchLoading(false); });
+    }, 350);
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [conversationId, hasConversation, historyCutoff, historyVersion, isSearching, searchQuery, retryCount, handleJumpToMessage]);
 
   const activeHighlightedMessageId = useMemo(() => {
-    if (searchMatches.length === 0) return null;
+    if (!isSearching || searchMatches.length === 0) return jumpHighlight;
     const match = searchMatches[currentMatchIndex];
     return match ? match.id : null;
-  }, [searchMatches, currentMatchIndex]);
+  }, [searchMatches, currentMatchIndex, isSearching, jumpHighlight]);
 
   const handleNextSearchMatch = useCallback(() => {
     if (searchMatches.length === 0) return;
     const next = (currentMatchIndex + 1) % searchMatches.length;
     setCurrentMatchIndex(next);
     const targetMsg = searchMatches[next];
-    if (targetMsg) {
-      const idx = messages.findIndex((m) => m.id === targetMsg.id);
-      if (idx >= 0) {
-        listRef.current?.scrollToIndex({ index: messages.length - 1 - idx, animated: true, viewPosition: 0.5 });
-      }
-    }
-  }, [searchMatches, currentMatchIndex, messages]);
+    if (targetMsg) void handleJumpToMessage(targetMsg.id);
+  }, [searchMatches, currentMatchIndex, handleJumpToMessage]);
 
   const handlePrevSearchMatch = useCallback(() => {
     if (searchMatches.length === 0) return;
     const prev = (currentMatchIndex - 1 + searchMatches.length) % searchMatches.length;
     setCurrentMatchIndex(prev);
     const targetMsg = searchMatches[prev];
-    if (targetMsg) {
-      const idx = messages.findIndex((m) => m.id === targetMsg.id);
-      if (idx >= 0) {
-        listRef.current?.scrollToIndex({ index: messages.length - 1 - idx, animated: true, viewPosition: 0.5 });
-      }
-    }
-  }, [searchMatches, currentMatchIndex, messages]);
+    if (targetMsg) void handleJumpToMessage(targetMsg.id);
+  }, [searchMatches, currentMatchIndex, handleJumpToMessage]);
 
   // Subscribe to user conversations when forward modal is open
   useEffect(() => {
     if (!forwardTarget || !currentUserId) return;
     const unsub = subscribeToUserConversations(currentUserId, (convs) => {
       setOtherConversations(convs);
-    });
+    }, { includeArchived: true });
     return () => unsub();
   }, [forwardTarget, currentUserId]);
 
@@ -583,6 +801,7 @@ function DirectChatContent() {
       }
 
       sendInFlight.current = true;
+      stopTyping();
       setIsSending(true);
       const key = JSON.stringify([conversationId, textToSend, attachment?.uri, replyingTo?.id]);
       if (pendingSend.current?.key !== key) pendingSend.current = { key, id: createDirectMessageId(conversationId) };
@@ -598,8 +817,63 @@ function DirectChatContent() {
         setInputText("");
         selectionRef.current = { start: 0, end: 0 };
         setSelectionOverride(undefined);
+        // Messenger keeps the keyboard up after sending, so focus goes
+        // straight back to the composer the user just emptied.
+        requestAnimationFrame(() => inputRef.current?.focus());
       }
       setReplyingTo(null);
+
+      // Paint the bubble now rather than after the round-trip, the way
+      // Messenger does. It uses the id the real message will be written
+      // under, so the echo replaces it instead of duplicating it.
+      const optimisticId = pendingSend.current.id;
+      const replyPreviewForBubble = activeReplyingTo
+        ? replyPreviewMedia(activeReplyingTo)
+        : undefined;
+      setPendingMessages((prev) => [
+        ...prev.filter((message) => message.id !== optimisticId),
+        {
+          id: optimisticId,
+          conversationId,
+          senderId: currentUserId,
+          senderName:
+            `${myProfileRef.current?.firstname || ""} ${myProfileRef.current?.lastname || ""}`.trim() ||
+            auth.currentUser?.displayName ||
+            "You",
+          senderAvatar: resolveAvatarUri(myProfileRef.current),
+          senderRole: myProfileRef.current?.role || "student",
+          text: textToSend.trim(),
+          // The local file shows immediately; the uploaded URL replaces it
+          // when the real row arrives.
+          files: attachment
+            ? [{
+                url: attachment.uploaded?.url ?? attachment.uri,
+                mimeType: attachment.mimeType,
+                name: attachment.name,
+              }]
+            : [],
+          ...(activeReplyingTo
+            ? {
+                replyTo: {
+                  id: activeReplyingTo.id,
+                  senderName: activeReplyingTo.senderName,
+                  preview: replyPreviewText(activeReplyingTo).slice(0, 100),
+                  ...(replyPreviewForBubble
+                    ? {
+                        mediaUrl: replyPreviewForBubble.url,
+                        mediaType: replyPreviewForBubble.type,
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+          status: "sent",
+          seenBy: {},
+          reactions: {},
+          pinned: false,
+          createdAt: new Date(),
+        },
+      ]);
 
       let uploading = false;
       let restorableAttachment = attachment;
@@ -616,17 +890,25 @@ function DirectChatContent() {
           uploading = false;
           setIsUploading(false);
         }
-        const currentUserProfile = await getUserDataByAuthUser(auth.currentUser);
+        const currentUserProfile =
+          myProfileRef.current ?? (await getUserDataByAuthUser(auth.currentUser));
+        myProfileRef.current = currentUserProfile;
         const myDisplayName =
           currentUserProfile?.firstname && currentUserProfile?.lastname
             ? `${currentUserProfile.firstname} ${currentUserProfile.lastname}`.trim()
             : auth.currentUser?.displayName || "User";
 
+        const replyMedia = activeReplyingTo
+          ? replyPreviewMedia(activeReplyingTo)
+          : undefined;
         const replyPayload = activeReplyingTo
           ? {
               id: activeReplyingTo.id,
               senderName: activeReplyingTo.senderName,
-              preview: activeReplyingTo.text.slice(0, 100),
+              preview: replyPreviewText(activeReplyingTo).slice(0, 100),
+              ...(replyMedia
+                ? { mediaUrl: replyMedia.url, mediaType: replyMedia.type }
+                : {}),
             }
           : undefined;
 
@@ -650,6 +932,7 @@ function DirectChatContent() {
           messageId: pendingSend.current.id,
         });
         pendingSend.current = null;
+        backToLatest();
 
         // Scroll to bottom
         requestAnimationFrame(() => {
@@ -657,6 +940,9 @@ function DirectChatContent() {
         });
       } catch (err) {
         console.error("[DirectChatScreen] sendDirectMessage failed:", err);
+        // The send failed, so the optimistic bubble has to go — the draft is
+        // restored below and the user sends again.
+        setPendingMessages((prev) => prev.filter((message) => message.id !== optimisticId));
         // Put the composer back exactly as the user left it.
         if (customText === undefined) {
           setInputText(textToSend);
@@ -673,7 +959,7 @@ function DirectChatContent() {
       }
     },
     [conversationId, currentUserId, inputText, draftAttachment, isOffline, replyingTo, conversation,
-      recipientId, realName, displayName, recipientAvatar, role, recipientDetail, params.recipientStudentID],
+      recipientId, realName, displayName, recipientAvatar, role, recipientDetail, params.recipientStudentID, stopTyping, backToLatest],
   );
 
   // Camera and gallery both stage a photo for review before Send uploads it.
@@ -760,11 +1046,15 @@ function DirectChatContent() {
   const handleSwipeReply = useCallback(
     (messageId: string) => {
       const msg = messages.find((m) => m.id === messageId);
-      if (msg) {
+      if (msg && !msg.deleted && !composerBusy) {
+        setEditingMessage(null);
+        setSelectionOverride(undefined);
         setReplyingTo(msg);
+        setEmojiPickerVisible(false);
+        requestAnimationFrame(() => inputRef.current?.focus());
       }
     },
-    [messages],
+    [messages, composerBusy],
   );
 
   // Pin / Unpin
@@ -807,16 +1097,6 @@ function DirectChatContent() {
   const latestPinnedMessage = useMemo(() => {
     return pinnedMessages[pinnedMessages.length - 1] || null;
   }, [pinnedMessages]);
-
-  const handleJumpToMessage = useCallback(
-    (messageId: string) => {
-      const idx = messages.findIndex((m) => m.id === messageId);
-      if (idx >= 0) {
-        listRef.current?.scrollToIndex({ index: messages.length - 1 - idx, animated: true, viewPosition: 0.5 });
-      }
-    },
-    [messages],
-  );
 
   // Media, Files, Links gallery list
   const galleryItems = useMemo(() => {
@@ -973,7 +1253,7 @@ function DirectChatContent() {
           </TouchableOpacity>
         )}
         {isOffline && <Text style={{ padding: 8, textAlign: "center", color: "#8f766e" }}>Offline · Reconnect to send messages</Text>}
-        {loading ? (
+        {loading && !isOffline ? (
           <View style={styles.centered}>
             <ActivityIndicator size="large" color={themeColor} />
           </View>
@@ -989,7 +1269,13 @@ function DirectChatContent() {
             onViewableItemsChanged={onViewableItemsChanged}
             viewabilityConfig={viewabilityConfig}
             onScrollToIndexFailed={({ index, averageItemLength }) => {
-              listRef.current?.scrollToOffset({ offset: index * averageItemLength, animated: true });
+              listRef.current?.scrollToOffset({ offset: index * averageItemLength, animated: false });
+              if (++scrollAttempts.current <= 4) {
+                clearTimeout(scrollRetry.current);
+                scrollRetry.current = setTimeout(() => {
+                  if (index < messagesRef.current.length) listRef.current?.scrollToIndex({ index, animated: false, viewPosition: 0.5 });
+                }, 160);
+              }
             }}
             ListFooterComponent={messages.length >= messageLimit ? (
               <TouchableOpacity disabled={loadingOlder} style={{ padding: 14, alignItems: "center" }} onPress={() => {
@@ -1006,15 +1292,20 @@ function DirectChatContent() {
             maxToRenderPerBatch={10}
             updateCellsBatchingPeriod={30}
             removeClippedSubviews={Platform.OS === "android"}
-            renderItem={({ item }) => {
+            renderItem={({ item, index }) => {
               const isOwn = item.senderId === currentUserId;
+              const newer = messages[messages.length - index];
+              const showAvatar = !newer || newer.senderId !== item.senderId || timestampMillis(newer.createdAt) - timestampMillis(item.createdAt) > 300000;
               return (
                 <DirectMessageBubble
                   item={item}
                   isOwn={isOwn}
                   themeColor={themeColor}
                   recipientAvatar={recipientAvatar}
+                  recipientName={displayName}
+                  showAvatar={showAvatar}
                   isLastOwnMessage={item.id === lastOwnMessageId}
+                  isPending={pendingIds.has(item.id)}
                   isSeenByRecipient={isSeenByRecipient}
                   isDelivered={receiptCoversMessage(conversation?.lastDeliveredAt?.[recipientId], item.createdAt)}
                   isHighlighted={item.id === activeHighlightedMessageId}
@@ -1025,6 +1316,7 @@ function DirectChatContent() {
                   onOpenImage={setViewerImage}
                   onToggleReveal={(id) => setRevealedTimestampId((prev) => (prev === id ? null : id))}
                   onSwipeReply={handleSwipeReply}
+                  onJumpToMessage={(id) => { Keyboard.dismiss(); void handleJumpToMessage(id); }}
                 />
               );
             }}
@@ -1032,17 +1324,32 @@ function DirectChatContent() {
         )}
 
         {/* ==================== SWIPE REPLY BANNER ==================== */}
-        {replyingTo && (
+        {isSearching && !!searchQuery.trim() && <Pressable disabled={!searchError} onPress={() => setRetryCount((value) => value + 1)} style={styles.chatNotice}>
+          <Text style={styles.chatNoticeText}>{searchLoading ? "Searching all messages..." : searchError || (searchMatches.length ? `${searchMatches.length} matches` : "No matches in your history")}</Text>
+        </Pressable>}
+        {jumping && <Text style={styles.chatNoticeText}>Loading message...</Text>}
+        {!!historyAnchor && <Pressable onPress={backToLatest} style={styles.chatNotice} accessibilityRole="button"><Text style={{ color: themeColor, fontWeight: "600" }}>Back to latest messages ↓</Text></Pressable>}
+        {!!notice && <View style={styles.chatNotice}><Text style={styles.chatNoticeText} accessibilityLiveRegion="polite">{notice}</Text></View>}
+        {isTyping && <ChatTypingIndicator name={displayName} avatar={recipientAvatar} />}
+        {editingMessage && <View style={styles.replyBanner}>
+          <Ionicons name="create-outline" size={20} color={themeColor} />
+          <View style={{ flex: 1, paddingHorizontal: 10 }}>
+            <Text style={styles.replyBannerSender}>Edit message</Text>
+            <Text style={styles.replyBannerText} numberOfLines={2}>{editError || "Your original draft will be here when you finish."}</Text>
+          </View>
+          <Pressable disabled={savingEdit} style={{ padding: 10 }} onPress={() => { setEditingMessage(null); setSelectionOverride(undefined); stopTyping(); }}><Text style={{ color: themeColor }}>Cancel</Text></Pressable>
+        </View>}
+        {replyingTo && !editingMessage && (
           <View style={styles.replyBanner}>
             <View style={[styles.replyBannerBar, { backgroundColor: themeColor }]} />
-            <View style={{ flex: 1 }}>
+            <Pressable style={{ flex: 1 }} onPress={() => { Keyboard.dismiss(); void handleJumpToMessage(replyingTo.id); }} accessibilityLabel="Go to original message" accessibilityRole="button">
               <Text style={styles.replyBannerSender} numberOfLines={1}>
                 Replying to {replyingTo.senderName}
               </Text>
               <Text style={styles.replyBannerText} numberOfLines={1}>
-                {replyingTo.text}
+                {replyPreviewText(replyingTo)}
               </Text>
-            </View>
+            </Pressable>
             <TouchableOpacity disabled={composerBusy} onPress={() => setReplyingTo(null)} style={{ padding: 4 }}>
               <Ionicons name="close" size={18} color="#9b766c" />
             </TouchableOpacity>
@@ -1050,10 +1357,10 @@ function DirectChatContent() {
         )}
 
         {/* ==================== COMPOSER ==================== */}
-        {draftAttachment && (
+        {draftAttachment && !editingMessage && (
           <View style={styles.attachmentPreview}>
             {draftAttachment.mimeType.startsWith("image/") ? (
-              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Preview selected photo"
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Preview selected image"
                 disabled={composerBusy} onPress={() => setViewerImage(draftAttachment.uri)}>
                 <Image source={{ uri: draftAttachment.uri }} style={styles.attachmentThumbnail} contentFit="cover" />
               </TouchableOpacity>
@@ -1081,17 +1388,17 @@ function DirectChatContent() {
           </View>
         )}
         <View style={[styles.composerWrap, { paddingBottom: keyboardVisible || emojiPickerVisible ? 8 : Math.max(insets.bottom, 10) }]}>
-          <TouchableOpacity disabled={composerBusy} onPress={() => void handlePickPhoto("camera")} style={styles.composerAttachBtn}
+          <TouchableOpacity disabled={composerBusy || !!editingMessage} onPress={() => void handlePickPhoto("camera")} style={styles.composerAttachBtn}
             accessibilityRole="button" accessibilityLabel="Take a photo">
             <Ionicons name="camera-outline" size={23} color="#5f0909" />
           </TouchableOpacity>
 
-          <TouchableOpacity disabled={composerBusy} onPress={() => void handlePickPhoto("gallery")} style={styles.composerAttachBtn}
+          <TouchableOpacity disabled={composerBusy || !!editingMessage} onPress={() => void handlePickPhoto("gallery")} style={styles.composerAttachBtn}
             accessibilityRole="button" accessibilityLabel="Choose a photo">
             <Ionicons name="image-outline" size={23} color="#5f0909" />
           </TouchableOpacity>
 
-          <TouchableOpacity disabled={composerBusy} onPress={handlePickDocument} style={styles.composerAttachBtn}
+          <TouchableOpacity disabled={composerBusy || !!editingMessage} onPress={handlePickDocument} style={styles.composerAttachBtn}
             accessibilityRole="button" accessibilityLabel="Attach a file">
             <Ionicons name="attach-outline" size={23} color="#5f0909" />
           </TouchableOpacity>
@@ -1103,8 +1410,11 @@ function DirectChatContent() {
               accessibilityLabel="Message"
               placeholder="Message..."
               placeholderTextColor="#af928b"
-              value={inputText}
-              onChangeText={(text) => { setInputText(text); setSelectionOverride(undefined); }}
+              value={editingMessage ? editText : inputText}
+              onChangeText={(text) => {
+                if (editingMessage) setEditText(text); else setInputText(text);
+                onTextChanged(text); setSelectionOverride(undefined);
+              }}
               selection={selectionOverride}
               onSelectionChange={({ nativeEvent }) => {
                 if (!emojiPickerVisible) {
@@ -1124,16 +1434,16 @@ function DirectChatContent() {
             </TouchableOpacity>
           </View>
 
-          {inputText.trim().length > 0 || draftAttachment || isSending ? (
+          {editingMessage || inputText.trim().length > 0 || draftAttachment || isSending ? (
             <TouchableOpacity
-              onPress={() => void handleSend()}
+              onPress={() => editingMessage ? void saveEdit() : void handleSend()}
               style={[styles.composerSendBtn, { backgroundColor: themeColor }]}
-              disabled={composerBusy}
+              disabled={sendDisabled || (!!editingMessage && !editText.trim())}
               accessibilityRole="button"
-              accessibilityLabel={isSending ? "Sending message" : "Send message"}
+              accessibilityLabel={editingMessage ? "Save edit" : isSending ? "Sending message" : "Send message"}
               accessibilityState={{ disabled: composerBusy, busy: isSending }}
             >
-              {isSending ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="arrow-up" size={20} color="#fff" />}
+              {isSending || savingEdit ? <ActivityIndicator size="small" color="#fff" /> : editingMessage ? <Text style={{ color: "#fff", fontWeight: "700", fontSize: 11 }}>Save</Text> : <Ionicons name="arrow-up" size={20} color="#fff" />}
             </TouchableOpacity>
           ) : (
             <TouchableOpacity
@@ -1149,9 +1459,16 @@ function DirectChatContent() {
         </View>
         {emojiPickerVisible && !keyboardVisible && (
           <ChatEmojiPicker onSelect={handleInsertEmoji} onClose={() => setEmojiPickerVisible(false)}
+            onOpenGifs={editingMessage ? undefined : () => { stopTyping(); setEmojiPickerVisible(false); setGifPickerVisible(true); }}
             disabled={composerBusy} color={themeColor} bottomInset={insets.bottom} />
         )}
       </View>
+
+      {gifPickerVisible && <ChatGifPicker color={themeColor} onClose={() => setGifPickerVisible(false)} onSelect={(gif) => {
+        setDraftAttachment({ uri: gif.url, name: gif.title, mimeType: "image/gif", source: "gif",
+          uploaded: { url: gif.url, name: gif.title, mimeType: "image/gif" } });
+        setGifPickerVisible(false);
+      }} />}
 
       {/* ==================== ACTION & REACTION MENU ==================== */}
       <Modal
@@ -1161,7 +1478,7 @@ function DirectChatContent() {
         onRequestClose={() => setActionMenuTarget(null)}
       >
         <Pressable style={styles.actionModalOverlay} onPress={() => setActionMenuTarget(null)}>
-          <View style={styles.actionModalCard}>
+          <ScrollView style={[styles.actionModalCard, { maxHeight: "80%" }]} keyboardShouldPersistTaps="handled">
             {/* Quick Emoji Reactions */}
             <View style={styles.emojiPickerBar}>
               {EMOJI_REACTIONS.map((emoji) => (
@@ -1188,7 +1505,7 @@ function DirectChatContent() {
                 <TouchableOpacity
                   style={styles.actionRow}
                   onPress={() => {
-                    setReplyingTo(actionMenuTarget);
+                    handleSwipeReply(actionMenuTarget.id);
                     setActionMenuTarget(null);
                   }}
                 >
@@ -1199,13 +1516,27 @@ function DirectChatContent() {
                 <TouchableOpacity
                   style={styles.actionRow}
                   onPress={() => {
-                    void Clipboard.setStringAsync(actionMenuTarget.text);
-                    setActionMenuTarget(null);
+                    void copyContent(actionMenuTarget.text, "Message");
                   }}
                 >
                   <Ionicons name="copy-outline" size={20} color="#5f0909" />
                   <Text style={styles.actionRowText}>Copy text</Text>
                 </TouchableOpacity>
+
+                {messageLinks(actionMenuTarget).map((link) => <TouchableOpacity key={link} style={styles.actionRow}
+                  onPress={() => void copyContent(link, "Link")}>
+                  <Ionicons name="link-outline" size={20} color="#5f0909" />
+                  <View style={{ flex: 1 }}><Text style={styles.actionRowText}>Copy link</Text><Text style={styles.replyBannerText} numberOfLines={1}>{link}</Text></View>
+                </TouchableOpacity>)}
+                {actionMenuTarget.senderId === currentUserId && !!actionMenuTarget.text && !actionMenuTarget.deleted && <TouchableOpacity
+                  style={styles.actionRow} disabled={composerBusy} onPress={() => {
+                    setEditingMessage(actionMenuTarget); setEditText(actionMenuTarget.text); setEditError("");
+                    selectionRef.current = { start: actionMenuTarget.text.length, end: actionMenuTarget.text.length };
+                    setSelectionOverride(selectionRef.current); setActionMenuTarget(null); setEmojiPickerVisible(false);
+                    requestAnimationFrame(() => inputRef.current?.focus());
+                  }}>
+                  <Ionicons name="create-outline" size={20} color="#5f0909" /><Text style={styles.actionRowText}>Edit message</Text>
+                </TouchableOpacity>}
 
                 <TouchableOpacity
                   style={styles.actionRow}
@@ -1239,7 +1570,7 @@ function DirectChatContent() {
                 )}
               </>
             )}
-          </View>
+          </ScrollView>
         </Pressable>
       </Modal>
 
@@ -1685,12 +2016,15 @@ const styles = StyleSheet.create({
   headerNameRow: {
     flexDirection: "row",
     alignItems: "center",
+    // Lets the name shrink instead of pushing the role chip off the header.
+    minWidth: 0,
   },
   headerDisplayName: {
     fontSize: 15.5,
     fontWeight: "800",
     color: "#2a0f0b",
     marginRight: 6,
+    flexShrink: 1,
   },
   headerSubstatus: {
     fontSize: 11.5,
@@ -1740,6 +2074,8 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 5,
     paddingVertical: 1,
+    // Never squashed and never pushed out — the name shrinks instead.
+    flexShrink: 0,
   },
   roleChipText: {
     fontSize: 9.5,
@@ -1785,7 +2121,16 @@ const styles = StyleSheet.create({
   },
   bubbleContainerOther: {
     alignSelf: "flex-start",
+    marginLeft: 34,
+    maxWidth: "78%",
   },
+  incomingAvatarWrap: { position: "absolute", left: -34, bottom: 0 },
+  incomingAvatar: { width: 28, height: 28, borderRadius: 14 },
+  chatAvatarFallback: { alignItems: "center", justifyContent: "center", backgroundColor: "#f0e3dd" },
+  chatAvatarInitial: { fontSize: 12, fontWeight: "600", color: "#8f2117" },
+  editedLabel: { fontSize: 10, color: "#93786f", marginTop: 4 },
+  chatNotice: { padding: 9, alignItems: "center", backgroundColor: "#f8efea" },
+  chatNoticeText: { fontSize: 12, color: "#85685f", textAlign: "center" },
   revealedTimeText: {
     fontSize: 10.5,
     color: "#9b766c",
@@ -1841,6 +2186,16 @@ const styles = StyleSheet.create({
     padding: 6,
     marginBottom: 6,
     gap: 8,
+    // The bubble is sized by its content, and a flexible child measures as
+    // zero — without this the quote's text collapses next to a short
+    // message and only the bar shows.
+    minWidth: 150,
+  },
+  replyQuoteThumb: {
+    width: 38,
+    height: 38,
+    borderRadius: 6,
+    backgroundColor: "rgba(0,0,0,0.08)",
   },
   replyQuoteWrapOwn: {
     backgroundColor: "rgba(255,255,255,0.18)",

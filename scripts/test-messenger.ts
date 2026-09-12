@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
-import { getDirectNotificationTarget, getPresenceState, isConversationVisible, isMessageAfterDeletion, PRESENCE_TIMEOUT_MS, receiptCoversMessage } from "../utils/messengerState";
+import { getDirectNotificationTarget, getPresenceState, isConversationArchived, isConversationVisible, isMessageAfterDeletion, PRESENCE_TIMEOUT_MS, receiptCoversMessage } from "../utils/messengerState";
 
 const now = 1_800_000_000_000;
 const stamp = (ms: number) => ({ seconds: ms / 1000 });
@@ -33,4 +33,13 @@ assert.equal(isConversationVisible(deleted, "bob"), true, "Deletion applies only
 assert.equal(isConversationVisible({ ...deleted, lastMessage: { createdAt: stamp(now + 1) } }, "alice"), true);
 assert.equal(isMessageAfterDeletion(stamp(now), stamp(now)), false);
 assert.equal(isMessageAfterDeletion({ seconds: 100, nanoseconds: 2000 }, { seconds: 100, nanoseconds: 1000 }), true, "Messages in the same millisecond retain their order");
-console.log("Messenger state: 22 regression assertions passed.");
+const archived = { lastMessage: { createdAt: stamp(now) }, archivedThrough: { alice: stamp(now) } };
+assert.equal(isConversationArchived(archived, "alice"), true);
+assert.equal(isConversationArchived(archived, "bob"), false);
+assert.equal(isConversationArchived({ ...archived, lastMessage: { createdAt: stamp(now + 1) } }, "alice"), false);
+assert.equal(isConversationArchived({ ...archived, archivedThrough: { alice: null } }, "alice"), false);
+assert.equal(isConversationArchived({ ...archived, deletedThrough: { alice: stamp(now) } }, "alice"), false);
+assert.equal(isConversationArchived({ archivedThrough: { alice: stamp(now) } }, "alice"), false);
+assert.equal(isConversationArchived(JSON.parse(JSON.stringify(archived)), "alice"), true, "Archive state survives offline-cache serialization");
+assert.equal(isConversationArchived({ lastMessage: { createdAt: { seconds: 100, nanoseconds: 2000 } }, archivedThrough: { alice: { seconds: 100, nanoseconds: 1000 } } }, "alice"), false);
+console.log("Messenger state: 30 regression assertions passed.");

@@ -56,6 +56,7 @@ import {
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { resolveUserRoleForAuthUser, updateUserDataCache, UserRole } from "@/utils/rbac";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
 import { Image } from "expo-image";
 import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import React, {
@@ -69,10 +70,10 @@ import {
     ActivityIndicator,
     Animated,
     BackHandler,
+    FlatList,
     Linking,
     Modal,
     Platform,
-    ScrollView,
     StyleSheet,
     Text,
     TextInput,
@@ -247,6 +248,16 @@ const ProfileScreen = () => {
   };
 
   const scaleAnim = useRef(new Animated.Value(0)).current;
+  const myPostsListRef = useRef<FlatList<Post>>(null);
+
+  // Tapping the Profile tab while it's already open scrolls back to the top.
+  useEffect(() => {
+    const subscription = subscribeTabScrollToTop("ProfileScreen", () => {
+      myPostsListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    });
+    return () => subscription.remove();
+  }, []);
+
   const router = useRouter();
   const navigation = useNavigation();
   const resolvedReturnTo = Array.isArray(returnTo) ? returnTo[0] : returnTo;
@@ -648,6 +659,51 @@ const ProfileScreen = () => {
     [router, user?.uid],
   );
 
+  const handleCommentPress = useCallback((postId: string) => {
+    setCommentModalPostId(postId);
+  }, []);
+
+  // The My Posts list only draws the posts near the screen.
+  const myPostsListData = useMemo<Post[]>(
+    () => (myPostsLoading ? [] : visiblePosts),
+    [myPostsLoading, visiblePosts],
+  );
+
+  const renderMyPost = useCallback(
+    ({ item: post }: { item: Post }) => (
+      <View style={styles.myPostsListInset}>
+        <PostCard
+          post={post as any}
+          isLiked={post.likedBy?.includes(user?.uid || "") || false}
+          currentUserRole={currentUserRole}
+          currentUserId={user?.uid}
+          onLike={handleLike}
+          onProfileClick={handlePostProfileClick}
+          onTagClick={handlePostTagClick}
+          onImagePress={openPostImageViewer}
+          onFilePress={handlePostFilePress}
+          getTimeAgo={getTimeAgo}
+          onCommentPress={handleCommentPress}
+          onEdit={handleEditPost}
+          onDelete={handleDeletePost}
+        />
+      </View>
+    ),
+    [
+      currentUserRole,
+      getTimeAgo,
+      handleCommentPress,
+      handleDeletePost,
+      handleEditPost,
+      handleLike,
+      handlePostFilePress,
+      handlePostProfileClick,
+      handlePostTagClick,
+      openPostImageViewer,
+      user?.uid,
+    ],
+  );
+
   const postImageViewerPost = postImageViewerPostId
     ? myPosts.find((p) => p.id === postImageViewerPostId)
     : undefined;
@@ -1015,290 +1071,287 @@ const ProfileScreen = () => {
           <View style={styles.offlineStatusBar}>
             <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
             <Text style={styles.offlineStatusText}>
-              Offline mode • Viewing saved profile and posts
+              Offline mode
             </Text>
           </View>
         )}
 
-        <ScrollView
+        {/* Only the posts near the screen are drawn. */}
+        <FlatList
+          ref={myPostsListRef}
+          data={myPostsListData}
+          keyExtractor={(post) => post.id}
+          renderItem={renderMyPost}
           contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}
-        >
-          {/* Profile Header Card */}
-          <View style={styles.profileCard}>
-            <TouchableOpacity
-              onPress={openImageViewer}
-              onLongPress={() => {
-                handleTabChange("photo");
-                setEditModalVisible(true);
-              }}
-              disabled={loading}
-              activeOpacity={0.88}
-              style={styles.avatarWrapper}
-            >
-              {imageUri ? (
-                <Image source={{ uri: avatarThumb(imageUri, AVATAR_SIZE_LARGE) }} style={styles.profileImage} />
-              ) : (
-                <View style={styles.placeholder}>
-                  <Ionicons name="person" size={48} color="#e0a53d" />
-                </View>
-              )}
-              <View style={styles.editBadge}>
-                <Ionicons name="camera" size={14} color="#fff" />
-              </View>
-              <View
-                style={[
-                  styles.statusBadge,
-                  { backgroundColor: student?.isOnline ? "#00e676" : "#999" },
-                ]}
-              />
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.statusBtn}
-              onPress={toggleOnlineStatus}
-              activeOpacity={0.75}
-            >
-              <View
-                style={[
-                  styles.statusDot,
-                  { backgroundColor: student?.isOnline ? "#00e676" : "#999" },
-                ]}
-              />
-              <Text
-                style={{
-                  color: student?.isOnline ? "#00e676" : "#c4a39b",
-                  fontWeight: "600",
-                }}
-              >
-                {student?.isOnline ? "Online" : "Offline"}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Grouped Personal Information Card */}
-<View style={styles.section}>
-  <View style={styles.sectionTitleRow}>
-    <Ionicons name="person" size={18} color="#5f0909" />
-    <Text style={styles.sectionTitle}>Personal Information</Text>
-  </View>
-  <View style={styles.goldCard}>
-    <CardItemRow
-      icon="person-outline"
-      label="Full Name"
-      value={fullName}
-      isLocked={true}
-    />
-    <View style={styles.rowDivider} />
-    {/* No lock, no chevron — edited cleanly via Edit Profile button */}
-    <CardItemRow
-      icon="mail-outline"
-      label="Email Address"
-      value={displayEmail}
-      isLocked={false}
-    />
-  </View>
-</View>
-
-{/* Grouped Academic Information Card */}
-<View style={styles.section}>
-  <View style={styles.sectionTitleRow}>
-    <Ionicons name="school" size={18} color="#5f0909" />
-    <Text style={styles.sectionTitle}>Academic Information</Text>
-  </View>
-  <View style={styles.goldCard}>
-    <CardItemRow
-      icon="school-outline"
-      label="Course / Program"
-      value={student?.course ?? "—"}
-      isLocked={true}
-    />
-    <View style={styles.rowDivider} />
-    {/* Locked: Year level auto-increments or managed by admin */}
-    <CardItemRow
-      icon="trending-up-outline"
-      label="Year Level"
-      value={student?.yearlvl ?? "—"}
-      isLocked={true}
-    />
-    <View style={styles.rowDivider} />
-    <CardItemRow
-      icon="card-outline"
-      label={profileIdLabel}
-      value={studentIdDisplay}
-      isLocked={true}
-    />
-  </View>
-</View>
-
-          {/* Actions Section */}
-          <View style={styles.section}>
-            <ActionButton
-              icon="create-outline"
-              text="Edit Profile"
-              onPress={() => setEditModalVisible(true)}
-            />
-            <ActionButton
-              icon="bookmark-outline"
-              text="Saved Posts"
-              onPress={() => router.push("/(main)/BookmarksScreen" as any)}
-            />
-            <ActionButton
-              icon="settings-outline"
-              text="Settings"
-              onPress={() => router.push("/(main)/SettingsScreen" as any)}
-            />
-            <ActionButton
-              icon="log-out-outline"
-              text="Log Out"
-              onPress={handleLogout}
-            />
-          </View>
-
-          {/* My Posts Section */}
-          <View style={styles.section}>
-            <View style={styles.sectionTitleRow}>
-              <Ionicons name="grid-outline" size={18} color="#5f0909" />
-              <Text style={styles.sectionTitle}>My Posts</Text>
-            </View>
-
-            {/* Toolbar: search, sort, date filter */}
-            <View style={styles.postsToolbar}>
-              <View style={styles.searchBar}>
-                <Ionicons name="search-outline" size={16} color="#b88f87" />
-                <TextInput
-                  style={styles.searchInput}
-                  placeholder="Search your posts"
-                  placeholderTextColor="#b88f87"
-                  value={postSearchQuery}
-                  onChangeText={setPostSearchQuery}
-                  returnKeyType="search"
-                />
-                {postSearchQuery.length > 0 && (
-                  <TouchableOpacity onPress={() => setPostSearchQuery("")}>
-                    <Ionicons name="close-circle" size={16} color="#b88f87" />
-                  </TouchableOpacity>
-                )}
-              </View>
-
-              <View style={styles.toolbarRow}>
+          initialNumToRender={4}
+          maxToRenderPerBatch={4}
+          windowSize={7}
+          ListHeaderComponent={
+            <>
+              {/* Profile Header Card */}
+              <View style={styles.profileCard}>
                 <TouchableOpacity
-                  style={styles.toolbarChip}
-                  onPress={() => setShowSortMenu(true)}
+                  onPress={openImageViewer}
+                  onLongPress={() => {
+                    handleTabChange("photo");
+                    setEditModalVisible(true);
+                  }}
+                  disabled={loading}
+                  activeOpacity={0.88}
+                  style={styles.avatarWrapper}
+                >
+                  {imageUri ? (
+                    <Image source={{ uri: avatarThumb(imageUri, AVATAR_SIZE_LARGE) }} style={styles.profileImage} />
+                  ) : (
+                    <View style={styles.placeholder}>
+                      <Ionicons name="person" size={48} color="#e0a53d" />
+                    </View>
+                  )}
+                  <View style={styles.editBadge}>
+                    <Ionicons name="camera" size={14} color="#fff" />
+                  </View>
+                  <View
+                    style={[
+                      styles.statusBadge,
+                      { backgroundColor: student?.isOnline ? "#00e676" : "#999" },
+                    ]}
+                  />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.statusBtn}
+                  onPress={toggleOnlineStatus}
                   activeOpacity={0.75}
                 >
-                  <Ionicons name="swap-vertical-outline" size={14} color="#5f0909" />
-                  <Text style={styles.toolbarChipText}>
-                    {POST_SORT_OPTIONS.find((o) => o.key === postSortOption)?.label}
-                  </Text>
-                  <Ionicons name="chevron-down" size={14} color="#5f0909" />
-                </TouchableOpacity>
-
-                {selectedDateFilter ? (
-                  <View style={[styles.toolbarChip, styles.toolbarChipActive]}>
-                    <Ionicons name="calendar-outline" size={14} color="#fffaf7" />
-                    <Text style={[styles.toolbarChipText, styles.toolbarChipTextActive]}>
-                      {selectedDateFilter.toLocaleDateString("en-US", {
-                        month: "short",
-                        day: "numeric",
-                      })}
-                    </Text>
-                    <TouchableOpacity onPress={() => setSelectedDateFilter(null)}>
-                      <Ionicons name="close" size={14} color="#fffaf7" />
-                    </TouchableOpacity>
-                  </View>
-                ) : (
-                  <TouchableOpacity
-                    style={styles.toolbarChip}
-                    onPress={() => setShowDatePicker(true)}
-                    activeOpacity={0.75}
+                  <View
+                    style={[
+                      styles.statusDot,
+                      { backgroundColor: student?.isOnline ? "#00e676" : "#999" },
+                    ]}
+                  />
+                  <Text
+                    style={{
+                      color: student?.isOnline ? "#00e676" : "#c4a39b",
+                      fontWeight: "600",
+                    }}
                   >
-                    <Ionicons name="calendar-outline" size={14} color="#5f0909" />
-                    <Text style={styles.toolbarChipText}>Date</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            </View>
-
-            {showDatePicker && (
-              <DateTimePicker
-                value={selectedDateFilter ?? new Date()}
-                mode="date"
-                display="default"
-                maximumDate={new Date()}
-                onChange={handleDateFilterChange}
-              />
-            )}
-
-            {/* Post list */}
-            {myPostsLoading ? (
-              <FeedSkeleton count={3} />
-            ) : myPosts.length === 0 ? (
-              <View style={styles.postsEmptyState}>
-                <Ionicons name="albums-outline" size={32} color="#c9a89c" />
-                <Text style={styles.postsEmptyTitle}>You haven't posted anything yet</Text>
-              </View>
-            ) : approvedMyPosts.length === 0 ? (
-              <View style={styles.postsEmptyState}>
-                <Ionicons name="time-outline" size={32} color="#c9a89c" />
-                <Text style={styles.postsEmptyTitle}>
-                  Your post{myPosts.length > 1 ? "s are" : " is"} awaiting moderator review
-                </Text>
-              </View>
-            ) : visiblePosts.length === 0 ? (
-              <View style={styles.postsEmptyState}>
-                <Ionicons name="search-outline" size={32} color="#c9a89c" />
-                <Text style={styles.postsEmptyTitle}>No posts match your filters</Text>
-                <TouchableOpacity
-                  onPress={() => {
-                    setPostSearchQuery("");
-                    setSelectedDateFilter(null);
-                  }}
-                >
-                  <Text style={styles.postsClearFiltersText}>Clear filters</Text>
+                    {student?.isOnline ? "Online" : "Offline"}
+                  </Text>
                 </TouchableOpacity>
               </View>
-            ) : (
-              visiblePosts.map((post) => (
-                <PostCard
-                  key={post.id}
-                  post={post as any}
-                  isLiked={post.likedBy?.includes(user?.uid || "") || false}
-                  currentUserRole={currentUserRole}
-                  currentUserId={user?.uid}
-                  onLike={handleLike}
-                  onProfileClick={handlePostProfileClick}
-                  onTagClick={handlePostTagClick}
-                  onImagePress={openPostImageViewer}
-                  onFilePress={handlePostFilePress}
-                  getTimeAgo={getTimeAgo}
-                  onCommentPress={(postId) => setCommentModalPostId(postId)}
-                  onEdit={handleEditPost}
-                  onDelete={handleDeletePost}
-                />
-              ))
-            )}
 
-            {/* Fix 4: page through post history instead of streaming all of it. */}
-            {!myPostsLoading && myPosts.length > 0 && hasMoreMyPosts && (
-              <TouchableOpacity
-                style={styles.loadMoreButton}
-                onPress={loadMoreMyPosts}
-                disabled={loadingMoreMyPosts}
-                activeOpacity={0.85}
-              >
-                {loadingMoreMyPosts ? (
-                  <ActivityIndicator size="small" color="#5f0909" />
-                ) : (
-                  <>
-                    <Ionicons name="chevron-down-circle-outline" size={17} color="#5f0909" />
-                    <Text style={styles.loadMoreButtonText}>Load more</Text>
-                  </>
+              {/* Grouped Personal Information Card */}
+    <View style={styles.section}>
+      <View style={styles.sectionTitleRow}>
+        <Ionicons name="person" size={18} color="#5f0909" />
+        <Text style={styles.sectionTitle}>Personal Information</Text>
+      </View>
+      <View style={styles.goldCard}>
+        <CardItemRow
+          icon="person-outline"
+          label="Full Name"
+          value={fullName}
+          isLocked={true}
+        />
+        <View style={styles.rowDivider} />
+        {/* No lock, no chevron — edited cleanly via Edit Profile button */}
+        <CardItemRow
+          icon="mail-outline"
+          label="Email Address"
+          value={displayEmail}
+          isLocked={false}
+        />
+      </View>
+    </View>
+
+    {/* Grouped Academic Information Card */}
+    <View style={styles.section}>
+      <View style={styles.sectionTitleRow}>
+        <Ionicons name="school" size={18} color="#5f0909" />
+        <Text style={styles.sectionTitle}>Academic Information</Text>
+      </View>
+      <View style={styles.goldCard}>
+        <CardItemRow
+          icon="school-outline"
+          label="Course / Program"
+          value={student?.course ?? "—"}
+          isLocked={true}
+        />
+        <View style={styles.rowDivider} />
+        {/* Locked: Year level auto-increments or managed by admin */}
+        <CardItemRow
+          icon="trending-up-outline"
+          label="Year Level"
+          value={student?.yearlvl ?? "—"}
+          isLocked={true}
+        />
+        <View style={styles.rowDivider} />
+        <CardItemRow
+          icon="card-outline"
+          label={profileIdLabel}
+          value={studentIdDisplay}
+          isLocked={true}
+        />
+      </View>
+    </View>
+
+              {/* Actions Section */}
+              <View style={styles.section}>
+                <ActionButton
+                  icon="create-outline"
+                  text="Edit Profile"
+                  onPress={() => setEditModalVisible(true)}
+                />
+                <ActionButton
+                  icon="bookmark-outline"
+                  text="Saved Posts"
+                  onPress={() => router.push("/(main)/BookmarksScreen" as any)}
+                />
+                <ActionButton
+                  icon="settings-outline"
+                  text="Settings"
+                  onPress={() => router.push("/(main)/SettingsScreen" as any)}
+                />
+                <ActionButton
+                  icon="log-out-outline"
+                  text="Log Out"
+                  onPress={handleLogout}
+                />
+              </View>
+
+              {/* My Posts Section */}
+              <View style={styles.section}>
+                <View style={styles.sectionTitleRow}>
+                  <Ionicons name="grid-outline" size={18} color="#5f0909" />
+                  <Text style={styles.sectionTitle}>My Posts</Text>
+                </View>
+
+                {/* Toolbar: search, sort, date filter */}
+                <View style={styles.postsToolbar}>
+                  <View style={styles.searchBar}>
+                    <Ionicons name="search-outline" size={16} color="#b88f87" />
+                    <TextInput
+                      style={styles.searchInput}
+                      placeholder="Search your posts"
+                      placeholderTextColor="#b88f87"
+                      value={postSearchQuery}
+                      onChangeText={setPostSearchQuery}
+                      returnKeyType="search"
+                    />
+                    {postSearchQuery.length > 0 && (
+                      <TouchableOpacity onPress={() => setPostSearchQuery("")}>
+                        <Ionicons name="close-circle" size={16} color="#b88f87" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  <View style={styles.toolbarRow}>
+                    <TouchableOpacity
+                      style={styles.toolbarChip}
+                      onPress={() => setShowSortMenu(true)}
+                      activeOpacity={0.75}
+                    >
+                      <Ionicons name="swap-vertical-outline" size={14} color="#5f0909" />
+                      <Text style={styles.toolbarChipText}>
+                        {POST_SORT_OPTIONS.find((o) => o.key === postSortOption)?.label}
+                      </Text>
+                      <Ionicons name="chevron-down" size={14} color="#5f0909" />
+                    </TouchableOpacity>
+
+                    {selectedDateFilter ? (
+                      <View style={[styles.toolbarChip, styles.toolbarChipActive]}>
+                        <Ionicons name="calendar-outline" size={14} color="#fffaf7" />
+                        <Text style={[styles.toolbarChipText, styles.toolbarChipTextActive]}>
+                          {selectedDateFilter.toLocaleDateString("en-US", {
+                            month: "short",
+                            day: "numeric",
+                          })}
+                        </Text>
+                        <TouchableOpacity onPress={() => setSelectedDateFilter(null)}>
+                          <Ionicons name="close" size={14} color="#fffaf7" />
+                        </TouchableOpacity>
+                      </View>
+                    ) : (
+                      <TouchableOpacity
+                        style={styles.toolbarChip}
+                        onPress={() => setShowDatePicker(true)}
+                        activeOpacity={0.75}
+                      >
+                        <Ionicons name="calendar-outline" size={14} color="#5f0909" />
+                        <Text style={styles.toolbarChipText}>Date</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+
+                {showDatePicker && (
+                  <DateTimePicker
+                    value={selectedDateFilter ?? new Date()}
+                    mode="date"
+                    display="default"
+                    maximumDate={new Date()}
+                    onChange={handleDateFilterChange}
+                  />
                 )}
-              </TouchableOpacity>
-            )}
-          </View>
-        </ScrollView>
+              </View>
+            </>
+          }
+          ListEmptyComponent={
+            <View style={styles.myPostsListInset}>
+              {myPostsLoading ? (
+                <FeedSkeleton count={3} />
+              ) : myPosts.length === 0 ? (
+                <View style={styles.postsEmptyState}>
+                  <Ionicons name="albums-outline" size={32} color="#c9a89c" />
+                  <Text style={styles.postsEmptyTitle}>You haven't posted anything yet</Text>
+                </View>
+              ) : approvedMyPosts.length === 0 ? (
+                <View style={styles.postsEmptyState}>
+                  <Ionicons name="time-outline" size={32} color="#c9a89c" />
+                  <Text style={styles.postsEmptyTitle}>
+                    Your post{myPosts.length > 1 ? "s are" : " is"} awaiting moderator review
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.postsEmptyState}>
+                  <Ionicons name="search-outline" size={32} color="#c9a89c" />
+                  <Text style={styles.postsEmptyTitle}>No posts match your filters</Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setPostSearchQuery("");
+                      setSelectedDateFilter(null);
+                    }}
+                  >
+                    <Text style={styles.postsClearFiltersText}>Clear filters</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          }
+          ListFooterComponent={
+            // Fix 4: page through post history instead of streaming all of it.
+            !myPostsLoading && myPosts.length > 0 && hasMoreMyPosts ? (
+              <View style={styles.myPostsListInset}>
+                <TouchableOpacity
+                  style={styles.loadMoreButton}
+                  onPress={loadMoreMyPosts}
+                  disabled={loadingMoreMyPosts}
+                  activeOpacity={0.85}
+                >
+                  {loadingMoreMyPosts ? (
+                    <ActivityIndicator size="small" color="#5f0909" />
+                  ) : (
+                    <>
+                      <Ionicons name="chevron-down-circle-outline" size={17} color="#5f0909" />
+                      <Text style={styles.loadMoreButtonText}>Load more</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            ) : null
+          }
+        />
       </View>
 
       {/* Sort options menu */}
@@ -2397,6 +2450,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     marginTop: 2,
   },
+  myPostsListInset: { marginHorizontal: 16 },
   loadMoreButton: {
     flexDirection: "row",
     alignItems: "center",

@@ -1,13 +1,13 @@
 // Updated CommentModal.tsx 
 import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
+import { useNetworkStatus } from "@/utils/networkUtils";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
-    Animated,
     BackHandler,
     Dimensions,
     FlatList,
@@ -42,11 +42,11 @@ import {
 } from "@/utils/aiWorker";
 import { resolveAvatarUri } from "@/utils/avatar";
 import {
-    SELF_HARM_SAFETY_MESSAGE,
     canViewModeratedContent,
     requestFirestoreModerationDecision,
     type ModerationDecision
 } from "@/utils/contentModeration";
+import SafetyDialog from "./SafetyDialog";
 import {
     confirmLostAndFoundResolution,
     dismissLostAndFoundResolutionPrompt,
@@ -86,6 +86,7 @@ import { auth, db } from "../../../Firebase_configure";
 import {
     UserRole,
     canDeleteContent,
+    canReportContent,
     canViewAnonymousIdentity,
     getRoleColor,
     getRoleDisplayName,
@@ -528,6 +529,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const [comments, setComments] = useState<Comment[]>([]);
   const [displayedComments, setDisplayedComments] = useState<Comment[]>([]);
   const [loading, setLoading] = useState(true);
+  const { isOffline } = useNetworkStatus();
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMoreComments, setHasMoreComments] = useState(true);
   const lastCommentDocRef = useRef<any>(null);
@@ -562,8 +564,15 @@ const CommentModal: React.FC<CommentModalProps> = ({
     singleAction?: boolean;
     onConfirm: () => void;
   } | null>(null);
+  // Self-harm gets its own dialog instead of the generic confirm one — see
+  // components/SafetyDialog.
+  const [safetyVisible, setSafetyVisible] = useState(false);
   const relativeTimeNow = useRelativeTimeNow();
-  const composerBottom = useRef(new Animated.Value(0)).current;
+  // Reanimated keeps the keyboard lift on the UI thread.
+  const composerBottom = useSharedValue(0);
+  const composerAnimatedStyle = useAnimatedStyle(() => ({
+    marginBottom: composerBottom.value,
+  }));
 
   const flatListRef = useRef<FlatList>(null);
   const initialReplyKeyRef = useRef<string | null>(null);
@@ -575,22 +584,24 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const backdropOpacity = useSharedValue(0);
 
   useEffect(() => {
+    const scrollCommentsToEnd = () => {
+      requestAnimationFrame(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      });
+    };
+
     const showSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
       (e: KeyboardEvent) => {
         const nextHeight = Math.max(0, e.endCoordinates.height);
         setKeyboardHeight(nextHeight);
-        Animated.timing(composerBottom, {
-          toValue: nextHeight + KEYBOARD_COMPOSER_LIFT,
-          duration: Platform.OS === "ios" ? e.duration || 250 : 220,
-          useNativeDriver: false,
-        }).start(({ finished }) => {
-          if (finished) {
-            requestAnimationFrame(() => {
-              flatListRef.current?.scrollToEnd({ animated: true });
-            });
-          }
-        });
+        composerBottom.value = withTiming(
+          nextHeight + KEYBOARD_COMPOSER_LIFT,
+          { duration: Platform.OS === "ios" ? e.duration || 250 : 220 },
+          (finished) => {
+            if (finished) runOnJS(scrollCommentsToEnd)();
+          },
+        );
       }
     );
 
@@ -598,11 +609,9 @@ const CommentModal: React.FC<CommentModalProps> = ({
       Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
       (e: KeyboardEvent) => {
         setKeyboardHeight(0);
-        Animated.timing(composerBottom, {
-          toValue: 0,
+        composerBottom.value = withTiming(0, {
           duration: Platform.OS === "ios" ? e.duration || 250 : 180,
-          useNativeDriver: false,
-        }).start();
+        });
       }
     );
 
@@ -753,7 +762,6 @@ const CommentModal: React.FC<CommentModalProps> = ({
       saveCachedComments(postId, fetchedComments);
     });
 
-    return unsubscribe;
     return () => {
       isMounted = false;
       unsubscribe();
@@ -908,14 +916,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
       }
 
       if (moderationDecision.selfHarm === true) {
-        setConfirmDialog({
-          title: "We’re concerned about your safety",
-          description: SELF_HARM_SAFETY_MESSAGE,
-          confirmText: "OK",
-          singleAction: true,
-          destructive: false,
-          onConfirm: () => setConfirmDialog(null),
-        });
+        setSafetyVisible(true);
         return;
       }
 
@@ -1210,6 +1211,86 @@ const CommentModal: React.FC<CommentModalProps> = ({
     [],
   );
 
+  // Reporting is a student-only tool: staff never report, and only a
+  // student's comment or an anonymous one can be reported — the same rule
+  // posts, polls, replies and server messages use, and the one the Firestore
+  // rules enforce.
+  const canReportComment = useCallback(
+    (comment: Comment) =>
+      canReportContent(
+        user?.role,
+        comment.role,
+        comment.isAnonymous === true,
+      ) && (comment.realUserId || comment.userId) !== user?.uid,
+    [user?.role, user?.uid],
+  );
+
+  const submitCommentReport = useCallback(
+    async (comment: Comment) => {
+      // Re-checked here so a menu left open (or a role change mid-session)
+      // can't slip a report past the button's own check.
+      if (!user?.uid || !canReportComment(comment)) {
+        setConfirmDialog({
+          title: "Report unavailable",
+          description: "This comment can't be reported.",
+          confirmText: "Done",
+          singleAction: true,
+          destructive: true,
+          onConfirm: () => setConfirmDialog(null),
+        });
+        return;
+      }
+
+      try {
+        await addDoc(collection(db, "reports"), {
+          contentType: "comment",
+          contentId: comment.id,
+          reportedBy: user.uid,
+          reason: "inappropriate",
+          createdAt: serverTimestamp(),
+          status: "pending",
+        });
+        setConfirmDialog({
+          title: "Reported",
+          description: "Thank you for your report",
+          confirmText: "OK",
+          singleAction: true,
+          destructive: false,
+          onConfirm: () => setConfirmDialog(null),
+        });
+      } catch (error) {
+        console.error("Failed to report comment:", error);
+        setConfirmDialog({
+          title: "Error",
+          description: "Failed to report",
+          confirmText: "OK",
+          singleAction: true,
+          destructive: true,
+          onConfirm: () => setConfirmDialog(null),
+        });
+      }
+    },
+    [canReportComment, user?.uid],
+  );
+
+  const handleReportComment = useCallback(
+    (comment: Comment) => {
+      setConfirmDialog({
+        title: "Report comment?",
+        description:
+          "This comment will be sent to the moderation team for review.",
+        confirmText: "Send report",
+        cancelText: "Cancel",
+        destructive: true,
+        onConfirm: () => {
+          setConfirmDialog(null);
+          void submitCommentReport(comment);
+        },
+      });
+    },
+    [submitCommentReport],
+  );
+
   const getCommentActionItems = useCallback((comment: Comment) => {
     const authorUserId = comment.realUserId || comment.userId;
     const viewerRole = parseUserRole(user?.role);
@@ -1257,8 +1338,20 @@ const CommentModal: React.FC<CommentModalProps> = ({
       });
     }
 
+    if (canReportComment(comment)) {
+      actions.push({
+        label: "Report Comment",
+        icon: "flag-outline",
+        destructive: true,
+        onPress: () => {
+          setCommentActionMenu(null);
+          handleReportComment(comment);
+        },
+      });
+    }
+
     return actions;
-  }, [handleDeleteComment, handleReply, user?.role, user?.uid]);
+  }, [canReportComment, handleDeleteComment, handleReply, handleReportComment, user?.role, user?.uid]);
 
   const handleProfileClick = useCallback((comment: Comment, profileDocId?: string | null) => {
     const isCommentAnonymous = comment.isAnonymous ?? true;
@@ -1559,7 +1652,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         windowSize={9}
         removeClippedSubviews={Platform.OS === "android"}
         renderItem={({ item }) =>
-          loading ? null : (
+          loading && !isOffline ? null : (
             <CommentItem
               item={item}
               user={user}
@@ -1577,7 +1670,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
           )
         }
         ListHeaderComponent={
-          loading ? (
+          loading && !isOffline ? (
             <ActivityIndicator
               color="#e0a53d"
               style={{ marginTop: 40 }}
@@ -1609,14 +1702,14 @@ const CommentModal: React.FC<CommentModalProps> = ({
       />
 
       {user && (
-        <Animated.View
+        <ReanimatedAnimated.View
           style={[
             styles.composerWrapper,
             {
-              marginBottom: composerBottom,
               paddingBottom:
                 keyboardHeight > 0 ? 8 : hiddenComposerPadding,
             },
+            composerAnimatedStyle,
           ]}
         >
           <CommentComposer
@@ -1625,7 +1718,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
             placeholder="Write a comment..."
             autoExpand={true}
           />
-        </Animated.View>
+        </ReanimatedAnimated.View>
       )}
     </View>
   </View>
@@ -1683,6 +1776,12 @@ const CommentModal: React.FC<CommentModalProps> = ({
   onCancel={() => setConfirmDialog(null)}
 />
 
+<SafetyDialog
+  visible={safetyVisible}
+  onClose={() => setSafetyVisible(false)}
+  contentLabel="comment"
+/>
+
 <Modal visible={!!editingComment} transparent animationType="fade" onRequestClose={() => !savingCommentEdit && setEditingComment(null)}>
   <View style={styles.editOverlay}>
     <View style={styles.editCard}>
@@ -1737,14 +1836,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
               setEditingComment(null);
 
               if (moderationDecision.selfHarm === true) {
-                setConfirmDialog({
-                  title: "We’re concerned about your safety",
-                  description: SELF_HARM_SAFETY_MESSAGE,
-                  confirmText: "OK",
-                  singleAction: true,
-                  destructive: false,
-                  onConfirm: () => setConfirmDialog(null),
-                });
+                setSafetyVisible(true);
               } else if (moderationDecision.status === "pending") {
                 setConfirmDialog({
                   title: "Comment Pending Review",
@@ -1899,11 +1991,11 @@ modalContainer: {
     paddingBottom: 8,
   },
   composerWrapper: {
-    borderTopWidth: 1,
+    borderTopWidth: 0,
     borderTopColor: "#f0e7e2",
-    backgroundColor: "#fff4ee",
-    paddingHorizontal: 12,
-    paddingTop: 8,
+    backgroundColor: "#fffaf7",
+    paddingHorizontal: 8,
+    paddingTop: 0,
   },
 
   commentItem: {

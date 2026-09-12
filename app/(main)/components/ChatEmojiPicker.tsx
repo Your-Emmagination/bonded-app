@@ -11,9 +11,10 @@ const CATEGORIES = [
   { name: "Things", icon: "⚽", emojis: ["⚽", "🏀", "🏐", "🏸", "🎮", "🎲", "🎯", "🎸", "🎹", "🎵", "🎧", "🎤", "🎬", "📷", "📱", "💻", "💡", "📚", "📖", "✏️", "📝", "🎓", "📌", "📅", "⏰", "🏠", "🏫", "🚗", "🚌", "✈️", "🚀", "✅", "❌", "❓", "❗"] },
 ];
 
-export default function ChatEmojiPicker({ onSelect, onClose, disabled, color, bottomInset }: {
+export default function ChatEmojiPicker({ onSelect, onClose, onOpenGifs, disabled, color, bottomInset }: {
   onSelect: (emoji: string) => void;
   onClose: () => void;
+  onOpenGifs?: () => void;
   disabled: boolean;
   color: string;
   bottomInset: number;
@@ -23,6 +24,9 @@ export default function ChatEmojiPicker({ onSelect, onClose, disabled, color, bo
     <View style={[styles.panel, { paddingBottom: Math.max(bottomInset, 8) }]} accessibilityLabel="Emoji picker">
       <View style={styles.heading}>
         <Text style={styles.title}>{CATEGORIES[category].name}</Text>
+        {onOpenGifs && <Pressable disabled={disabled} accessibilityRole="button" accessibilityLabel="Open GIF picker" onPress={onOpenGifs} style={styles.close}>
+          <Text style={[styles.title, { color }]}>GIF</Text>
+        </Pressable>}
         <Pressable accessibilityRole="button" accessibilityLabel="Close emoji picker" onPress={onClose} style={styles.close}>
           <Ionicons name="close" size={20} color="#7a554e" />
         </Pressable>

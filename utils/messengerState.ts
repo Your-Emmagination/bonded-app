@@ -55,6 +55,16 @@ export function isConversationVisible(conversation: {
     isMessageAfterDeletion(conversation.lastMessage.createdAt, conversation.deletedThrough?.[userId]);
 }
 
+/** Archiving hides a chat until a genuinely new message arrives, never a read or edit. */
+export function isConversationArchived(conversation: {
+  lastMessage?: { createdAt: any };
+  deletedThrough?: Record<string, any>;
+  archivedThrough?: Record<string, any>;
+}, userId: string): boolean {
+  return isConversationVisible(conversation, userId) &&
+    timestampMillis(conversation.archivedThrough?.[userId]) >= timestampMillis(conversation.lastMessage?.createdAt);
+}
+
 export function getDirectNotificationTarget(data: {
   entityType?: unknown; parentId?: unknown; message?: unknown;
 }) {

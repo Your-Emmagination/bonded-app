@@ -6,7 +6,6 @@ import { addDoc, collection, doc, getDoc, serverTimestamp, updateDoc } from "fir
 import React, { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   BackHandler,
   FlatList,
   KeyboardAvoidingView,
@@ -26,9 +25,9 @@ import { auth, db } from "../../Firebase_configure";
 import ConfirmDialog, { type ConfirmDialogVariant } from "./components/ConfirmDialog";
 import { uploadPostImage } from "@/utils/cloudinaryUpload";
 import {
-  SELF_HARM_SAFETY_MESSAGE,
   requestFirestoreModerationDecision,
 } from "@/utils/contentModeration";
+import SafetyDialog from "./components/SafetyDialog";
 import { emitHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
 import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
 import {
@@ -104,7 +103,7 @@ const CreatePollScreen = () => {
   } | null>(null);
   // Single-button "OK" info messages render through the app's branded
   // ConfirmDialog instead of the bare OS alert. The self-harm safety notice
-  // is intentionally left as a native Alert.alert call, untouched.
+  // has a dialog of its own — see components/SafetyDialog.
   const getDialogVariant = useCallback((title: string): ConfirmDialogVariant => {
     const normalizedTitle = title.trim().toLowerCase();
     if (normalizedTitle.includes("success")) return "success";
@@ -125,6 +124,11 @@ const CreatePollScreen = () => {
     }
     return "warning";
   }, []);
+
+  // Self-harm gets its own dialog instead of the generic one — see
+  // components/SafetyDialog. Closing it leaves the screen, the way the old
+  // alert's OK button did.
+  const [safetyVisible, setSafetyVisible] = useState(false);
 
   const showInfo = useCallback((title: string, description: string, onConfirm?: () => void) => {
     setInfoDialog({ title, description, variant: getDialogVariant(title), onConfirm });
@@ -435,9 +439,7 @@ const CreatePollScreen = () => {
         }
 
         if (moderationDecision.selfHarm === true) {
-          Alert.alert("We’re concerned about your safety", SELF_HARM_SAFETY_MESSAGE, [
-            { text: "OK", onPress: () => router.back() },
-          ]);
+          setSafetyVisible(true);
           return;
         }
 
@@ -504,9 +506,7 @@ const CreatePollScreen = () => {
       }
 
       if (moderationDecision.selfHarm === true) {
-        Alert.alert("We’re concerned about your safety", SELF_HARM_SAFETY_MESSAGE, [
-          { text: "OK", onPress: () => router.back() },
-        ]);
+        setSafetyVisible(true);
         return;
       }
 
@@ -764,6 +764,15 @@ const CreatePollScreen = () => {
           onConfirmCallback?.();
         }}
         onCancel={() => setInfoDialog(null)}
+      />
+
+      <SafetyDialog
+        visible={safetyVisible}
+        onClose={() => {
+          setSafetyVisible(false);
+          router.back();
+        }}
+        contentLabel="poll"
       />
     </SafeAreaView>
   );

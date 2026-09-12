@@ -6,19 +6,26 @@ import {
     DirectConversation,
     deleteDirectConversationForMe,
     getDirectChatParams,
+    setDirectConversationArchived,
     subscribeToUserConversations
 } from "@/utils/directMessages";
 import { getRoleColor, getRoleDisplayName, parseUserRole } from "@/utils/rbac";
 import { getTimeAgo, useRelativeTimeNow } from "@/utils/relativeTime";
-import { getPresenceState, type PresenceData } from "@/utils/messengerState";
+import { useNetworkStatus } from "@/utils/networkUtils";
+import {
+    getCachedConversations,
+    saveCachedConversations,
+} from "@/utils/offlineStorage";
+import { getPresenceState, isConversationArchived, isConversationVisible, type PresenceData } from "@/utils/messengerState";
 import { useUserPresence } from "@/utils/presence";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { collection, onSnapshot } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
+    BackHandler,
     FlatList,
     Keyboard,
     Modal,
@@ -52,7 +59,7 @@ interface ConversationRowProps {
   currentUserId: string;
   nowMs: number;
   onPress: (conversation: DirectConversation, otherUser: { uid: string; displayName: string; avatarUri: string | null }) => void;
-  onDelete: (conversation: DirectConversation, name: string) => void;
+  onActions: (conversation: DirectConversation, name: string) => void;
   deleting: boolean;
 }
 
@@ -61,7 +68,7 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
   currentUserId,
   nowMs,
   onPress,
-  onDelete,
+  onActions,
   deleting,
 }) => {
   const otherUserId = useMemo(() => {
@@ -125,14 +132,14 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
         isUnread && styles.conversationItemUnread,
       ]}
       onPress={handlePress}
-      onLongPress={() => onDelete(conversation, displayName)}
+      onLongPress={() => onActions(conversation, displayName)}
       disabled={deleting}
       accessibilityRole="button"
       accessibilityLabel={`Chat with ${displayName}`}
-      accessibilityHint="Long-press to delete this conversation for you."
-      accessibilityActions={[{ name: "delete", label: "Delete conversation for me" }]}
+      accessibilityHint="Long-press for archive and delete options."
+      accessibilityActions={[{ name: "options", label: "Conversation options" }]}
       onAccessibilityAction={({ nativeEvent }) => {
-        if (nativeEvent.actionName === "delete") onDelete(conversation, displayName);
+        if (nativeEvent.actionName === "options") onActions(conversation, displayName);
       }}
     >
       {/* Avatar with unread indicator / online badge */}
@@ -173,6 +180,7 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
           )}
 
           <Text style={[styles.timeText, isUnread && styles.timeTextUnread]}>{timeLabel}</Text>
+          {isConversationArchived(conversation, currentUserId) && <Ionicons name="archive-outline" size={15} color="#9b766c" accessibilityLabel="Archived" />}
         </View>
 
         <View style={styles.conversationPreviewRow}>
@@ -216,7 +224,21 @@ export default function MessagesScreen() {
 
   const [conversations, setConversations] = useState<DirectConversation[]>([]);
   const [loading, setLoading] = useState(true);
+  const { isOffline } = useNetworkStatus();
   const [searchQuery, setSearchQuery] = useState("");
+  const [folder, setFolder] = useState<"chats" | "archived">("chats");
+  const [actionTarget, setActionTarget] = useState<{ id: string; name: string } | null>(null);
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const [archiveError, setArchiveError] = useState("");
+  const [archiveNotice, setArchiveNotice] = useState("");
+  const archiveInFlight = useRef(false);
+  useFocusEffect(useCallback(() => {
+    if (folder !== "archived") return;
+    const back = BackHandler.addEventListener("hardwareBackPress", () => {
+      setFolder("chats"); setSearchQuery(""); return true;
+    });
+    return () => back.remove();
+  }, [folder]));
 
   // People Directory Modal state
   const [newChatModalVisible, setNewChatModalVisible] = useState(false);
@@ -228,6 +250,36 @@ export default function MessagesScreen() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const deletionInFlight = useRef(false);
+
+  useEffect(() => {
+    if (!archiveNotice) return;
+    const timer = setTimeout(() => setArchiveNotice(""), 3000);
+    return () => clearTimeout(timer);
+  }, [archiveNotice]);
+
+  const actionConversation = conversations.find((conversation) => conversation.id === actionTarget?.id);
+  const targetIsArchived = !!actionConversation && isConversationArchived(actionConversation, currentUserId);
+  const openConversationActions = useCallback((conversation: DirectConversation, name: string) => {
+    if (archiveInFlight.current || deletionInFlight.current) return;
+    Keyboard.dismiss(); setArchiveError(""); setActionTarget({ id: conversation.id, name });
+  }, []);
+  const closeConversationActions = useCallback(() => {
+    if (archiveInFlight.current) return;
+    setActionTarget(null); setArchiveError("");
+  }, []);
+  const changeArchive = useCallback(async () => {
+    if (!actionTarget || archiveInFlight.current) return;
+    if (isOffline) { setArchiveError("Reconnect to move this conversation."); return; }
+    archiveInFlight.current = true; setArchiveBusy(true); setArchiveError("");
+    try {
+      await setDirectConversationArchived(actionTarget.id, currentUserId, !targetIsArchived);
+      setActionTarget(null);
+      setArchiveNotice(targetIsArchived ? "Conversation moved to Chats" : "Conversation archived");
+    } catch (error) {
+      setArchiveError(error instanceof Error && /unavailable|no messages/.test(error.message)
+        ? error.message : "Could not move this conversation. Please try again.");
+    } finally { archiveInFlight.current = false; setArchiveBusy(false); }
+  }, [actionTarget, currentUserId, isOffline, targetIsArchived]);
 
   const handleDeleteConversation = useCallback((conversation: DirectConversation, name: string) => {
     if (deletionInFlight.current) return;
@@ -263,20 +315,43 @@ export default function MessagesScreen() {
   useEffect(() => {
     if (!currentUserId) return;
 
-    const unsubscribe = subscribeToUserConversations(currentUserId, (convList) => {
-      setConversations(convList);
+    // Show the saved list first, so Messenger isn't blank offline.
+    let active = true;
+    let receivedSnapshot = false;
+    getCachedConversations<DirectConversation>(currentUserId).then((cached) => {
+      if (!active || receivedSnapshot || cached.length === 0) return;
+      setConversations((prev) => (prev.length === 0 ? cached : prev));
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    const unsubscribe = subscribeToUserConversations(currentUserId, (convList, fromCache) => {
+      // An empty SDK cache must not overwrite our saved folders while offline.
+      if (fromCache && !convList.length) return;
+      receivedSnapshot = true;
+      setConversations(convList);
+      setLoading(false);
+      void saveCachedConversations(currentUserId, convList);
+    }, { includeArchived: true, onError: () => setLoading(false) });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [currentUserId]);
 
-  // Filter conversations by search
+  const visibleConversations = useMemo(() => conversations.filter((conversation) =>
+    isConversationVisible(conversation, currentUserId)), [conversations, currentUserId]);
+  const archivedCount = useMemo(() => visibleConversations.filter((conversation) =>
+    isConversationArchived(conversation, currentUserId)).length, [visibleConversations, currentUserId]);
+
+  // Main search includes archived chats; opening a result never unarchives it.
   const filteredConversations = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return conversations;
-
-    return conversations.filter((conv) => {
+    return visibleConversations.filter((conv) => {
+      const archived = isConversationArchived(conv, currentUserId);
+      if (folder === "archived" && !archived) return false;
+      if (folder === "chats" && !q && archived) return false;
+      if (!q) return true;
       const otherUserId = conv.participants.find((id) => id !== currentUserId) || "";
       const otherUser = conv.participantDetails?.[otherUserId];
       const nickname = conv.nicknames?.[otherUserId] || "";
@@ -284,7 +359,7 @@ export default function MessagesScreen() {
       const lastMsg = (conv.lastMessage?.text || "").toLowerCase();
       return name.includes(q) || lastMsg.includes(q);
     });
-  }, [conversations, searchQuery, currentUserId]);
+  }, [visibleConversations, searchQuery, currentUserId, folder]);
 
   // Open conversation handler
   const handleOpenConversation = useCallback(
@@ -407,12 +482,12 @@ export default function MessagesScreen() {
           currentUserId={currentUserId}
           nowMs={nowMs}
           onPress={handleOpenConversation}
-          onDelete={handleDeleteConversation}
-          deleting={deletingConversationId === item.id}
+          onActions={openConversationActions}
+          deleting={deletingConversationId === item.id || (archiveBusy && actionTarget?.id === item.id)}
         />
       );
     },
-    [currentUserId, nowMs, handleOpenConversation, handleDeleteConversation, deletingConversationId],
+    [currentUserId, nowMs, handleOpenConversation, openConversationActions, deletingConversationId, archiveBusy, actionTarget?.id],
   );
 
   return (
@@ -421,13 +496,13 @@ export default function MessagesScreen() {
       <View style={[styles.header, { paddingTop: Platform.OS === "android" ? 10 : 0 }]}>
         <TouchableOpacity
           style={styles.headerIconButton}
-          onPress={() => router.back()}
+          onPress={() => { if (folder === "archived") { setFolder("chats"); setSearchQuery(""); } else router.back(); }}
           accessibilityLabel="Go back"
         >
           <Ionicons name="arrow-back" size={24} color="#5f0909" />
         </TouchableOpacity>
 
-        <Text style={styles.headerTitle}>Messages</Text>
+        <Text style={styles.headerTitle}>{folder === "archived" ? "Archived chats" : "Messages"}</Text>
 
         <TouchableOpacity
           style={styles.headerIconButton}
@@ -443,7 +518,7 @@ export default function MessagesScreen() {
         <Ionicons name="search" size={18} color="#8f766e" style={styles.searchIcon} />
         <TextInput
           style={styles.searchInput}
-          placeholder="Search chats..."
+          placeholder={folder === "archived" ? "Search archived chats..." : "Search all chats..."}
           placeholderTextColor="#af928b"
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -456,8 +531,18 @@ export default function MessagesScreen() {
         )}
       </View>
 
+      <View style={styles.folderTabs}>
+        {(["chats", "archived"] as const).map((value) => <Pressable key={value} accessibilityRole="tab"
+          accessibilityState={{ selected: folder === value }} onPress={() => { setFolder(value); setSearchQuery(""); }}
+          style={[styles.folderTab, folder === value && styles.folderTabActive]}>
+          <Ionicons name={value === "chats" ? "chatbubbles-outline" : "archive-outline"} size={17} color={folder === value ? "#fffaf7" : "#79554c"} />
+          <Text style={[styles.folderTabText, folder === value && { color: "#fffaf7" }]}>{value === "chats" ? "Chats" : `Archived${archivedCount ? ` (${archivedCount})` : ""}`}</Text>
+        </Pressable>)}
+      </View>
+      {!!archiveNotice && <Text style={styles.archiveNotice} accessibilityLiveRegion="polite">{archiveNotice}</Text>}
+
       {/* Conversations List (Virtualized 60-120 FPS) */}
-      {loading ? (
+      {loading && !isOffline ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#8f2117" />
           <Text style={styles.loadingText}>Loading conversations...</Text>
@@ -477,17 +562,19 @@ export default function MessagesScreen() {
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <View style={styles.emptyIconCircle}>
-                <Ionicons name="chatbubbles-outline" size={44} color="#8f2117" />
+                <Ionicons name={folder === "archived" ? "archive-outline" : "chatbubbles-outline"} size={44} color="#8f2117" />
               </View>
               <Text style={styles.emptyTitle}>
-                {searchQuery ? "No matches found" : "No messages yet"}
+                {searchQuery ? "No matches found" : folder === "archived" ? "No archived chats" : archivedCount ? "Your inbox is clear" : "No messages yet"}
               </Text>
               <Text style={styles.emptySubtitle}>
                 {searchQuery
                   ? "Try searching with a different name or message phrase."
+                  : folder === "archived" ? "Long-press a chat and choose Archive. Your messages will stay here until you unarchive or send or receive a new message."
+                  : archivedCount ? "Your conversations are in Archived. Unarchive one or start a new chat."
                   : "Connect directly with students, teachers, or administrators."}
               </Text>
-              {!searchQuery && (
+              {!searchQuery && folder === "chats" && (
                 <TouchableOpacity
                   style={styles.startChatButton}
                   onPress={handleOpenNewChatModal}
@@ -623,6 +710,29 @@ export default function MessagesScreen() {
         </SafeAreaView>
       </Modal>
 
+      <Modal visible={!!actionTarget} transparent animationType="fade" onRequestClose={closeConversationActions}>
+        <Pressable style={styles.actionsOverlay} onPress={closeConversationActions}>
+          <Pressable style={styles.actionsCard} onPress={(event) => event.stopPropagation()}>
+            <Text style={styles.actionsTitle} numberOfLines={2}>{actionTarget?.name}</Text>
+            <Text style={styles.actionsDescription}>Manage this conversation for your account.</Text>
+            {!!archiveError && <Text style={styles.archiveError} accessibilityLiveRegion="polite">{archiveError}</Text>}
+            <Pressable style={styles.conversationAction} onPress={() => void changeArchive()} disabled={archiveBusy || !actionConversation}
+              accessibilityRole="button" accessibilityLabel={targetIsArchived ? "Unarchive conversation" : "Archive conversation"}>
+              {archiveBusy ? <ActivityIndicator color="#8f2117" /> : <Ionicons name={targetIsArchived ? "arrow-undo-outline" : "archive-outline"} size={23} color="#8f2117" />}
+              <View style={{ flex: 1 }}><Text style={styles.conversationActionText}>{targetIsArchived ? "Unarchive" : "Archive"}</Text>
+                <Text style={styles.actionsDescription}>{targetIsArchived ? "Move back to Chats" : "Hide from Chats and keep your messages"}</Text></View>
+            </Pressable>
+            <Pressable style={styles.conversationAction} disabled={archiveBusy || !actionConversation} onPress={() => {
+              if (!actionConversation || !actionTarget) return;
+              setActionTarget(null); handleDeleteConversation(actionConversation, actionTarget.name);
+            }} accessibilityRole="button" accessibilityLabel="Delete conversation for me">
+              <Ionicons name="trash-outline" size={23} color="#b3261e" /><Text style={[styles.conversationActionText, { color: "#b3261e" }]}>Delete conversation</Text>
+            </Pressable>
+            <Pressable style={styles.conversationAction} disabled={archiveBusy} onPress={closeConversationActions} accessibilityRole="button"><Text style={styles.conversationActionText}>Cancel</Text></Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <ConfirmDialog
         visible={!!deleteTarget}
         title={deleteError ? "Couldn’t delete conversation" : "Delete conversation for you?"}
@@ -643,6 +753,18 @@ export default function MessagesScreen() {
 
 /* ==================== STYLES ==================== */
 const styles = StyleSheet.create({
+  folderTabs: { flexDirection: "row", gap: 10, paddingHorizontal: 18, paddingBottom: 12 },
+  folderTab: { flexDirection: "row", alignItems: "center", gap: 7, borderRadius: 22, paddingHorizontal: 16, minHeight: 42, backgroundColor: "#f1e7e1" },
+  folderTabActive: { backgroundColor: "#8f2117" },
+  folderTabText: { fontSize: 13, fontWeight: "600", color: "#79554c" },
+  archiveNotice: { textAlign: "center", padding: 8, color: "#79554c", fontSize: 13 },
+  actionsOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center", padding: 24 },
+  actionsCard: { width: "100%", maxWidth: 360, borderRadius: 22, padding: 20, backgroundColor: "#fffaf7" },
+  actionsTitle: { color: "#4d1b17", fontSize: 19, fontWeight: "700", marginBottom: 6 },
+  actionsDescription: { color: "#95786e", fontSize: 12, lineHeight: 18 },
+  archiveError: { color: "#b3261e", fontSize: 13, paddingVertical: 12 },
+  conversationAction: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 15, minHeight: 48 },
+  conversationActionText: { color: "#5f0909", fontSize: 15, fontWeight: "600" },
   container: {
     flex: 1,
     backgroundColor: "#fffaf7",
