@@ -1,3 +1,5 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
 import { uploadServerImage } from "@/utils/cloudinaryUpload";
 import {
@@ -155,6 +157,7 @@ function ColorPicker({
   value: string;
   onChange: (nextValue: string) => void;
 }) {
+  const { styles } = useStyles();
   return (
     <View style={styles.colorRow}>
       {PRESET_ACCENTS.map((accent) => (
@@ -180,6 +183,7 @@ function TitleColorPicker({
   value: string;
   onChange: (nextValue: string) => void;
 }) {
+  const { styles } = useStyles();
   const colors = ["#fffaf7", "#ffffff", "#f6d365", "#dca33d", "#8f3a2b", "#2f7d6b", "#4568a8", "#7f5cf0", "#c04e8a"];
   return (
     <View style={styles.colorRow}>
@@ -211,6 +215,7 @@ function RailAvatarComponent({
   onSelectServer: (serverId: string) => void;
   onOpenEdit?: (server: CommunityServer) => void;
 }) {
+  const { styles, theme } = useStyles();
   return (
     <TouchableOpacity
       style={[styles.railAvatarWrap, selected && styles.railAvatarWrapSelected]}
@@ -227,7 +232,7 @@ function RailAvatarComponent({
           styles.railAvatar,
           selected && styles.railAvatarSelected,
           {
-            backgroundColor: server.logoUri ? "#220505" : server.accent,
+            backgroundColor: server.logoUri ? theme.chrome : server.accent,
             borderColor: selected ? "#ffffff" : "transparent",
           },
         ]}
@@ -279,6 +284,7 @@ const ServerHeroTitle = React.memo(function ServerHeroTitle({
   titleAlign?: "left" | "center" | "right";
   titleStroke?: "none" | "subtle" | "medium" | "strong";
 }) {
+  const { styles } = useStyles();
   const hasStroke = titleStroke !== "none" && strokeSize > 0;
   const offsets = useMemo(() => {
     if (!hasStroke) return [];
@@ -355,6 +361,7 @@ const DrawerHeader = React.memo(function DrawerHeader({
   onLeaveServer,
   onOpenThreadCreate,
 }: DrawerHeaderProps) {
+  const { styles, theme } = useStyles();
   return (
     <>
       <View style={[styles.heroCard, { backgroundColor: selectedServer.accent }]}>
@@ -429,7 +436,7 @@ const DrawerHeader = React.memo(function DrawerHeader({
           )}
           {membershipState === "pending" && (
             <View style={styles.pendingAccessPill}>
-              <Ionicons name="time-outline" size={15} color="#8a5a10" />
+              <Ionicons name="time-outline" size={15} color={theme.accent} />
               <Text style={styles.pendingAccessText}>Request Pending</Text>
             </View>
           )}
@@ -479,7 +486,7 @@ const DrawerHeader = React.memo(function DrawerHeader({
                   }
                   activeOpacity={0.82}
                 >
-                  <Ionicons name="close" size={16} color="#c0392b" />
+                  <Ionicons name="close" size={16} color={theme.danger} />
                   <Text style={styles.requestRejectText}>Reject</Text>
                 </TouchableOpacity>
               </View>
@@ -509,7 +516,7 @@ const DrawerHeader = React.memo(function DrawerHeader({
             onPress={onOpenThreadCreate}
             activeOpacity={0.82}
           >
-            <Ionicons name="add" size={15} color="#5f0909" />
+            <Ionicons name="add" size={15} color={theme.primary} />
             <Text style={styles.threadAddButtonText}>New</Text>
           </TouchableOpacity>
         )}
@@ -535,6 +542,7 @@ function ChannelRowComponent({
   onSelect: (channelId: string) => void;
   onOpenEdit?: (channel: CommunityChannel) => void;
 }) {
+  const { styles, theme } = useStyles();
   return (
     <TouchableOpacity
       style={[
@@ -557,7 +565,7 @@ function ChannelRowComponent({
         <View style={{ flexDirection: "row", alignItems: "center" }}>
           <Text style={styles.channelLabel}>#{channel.label}</Text>
           {isStaffOnlyChannel(channel) && (
-            <Ionicons name="lock-closed" size={11} color="#9b766c" style={{ marginLeft: 5 }} />
+            <Ionicons name="lock-closed" size={11} color={theme.textMuted} style={{ marginLeft: 5 }} />
           )}
         </View>
         {!!channel.hint && <Text style={styles.channelHint}>{channel.hint}</Text>}
@@ -573,7 +581,7 @@ function ChannelRowComponent({
           activeOpacity={0.7}
           accessibilityLabel={`Edit channel #${channel.label}`}
         >
-          <Ionicons name="create-outline" size={15} color="#7d3b30" />
+          <Ionicons name="create-outline" size={15} color={theme.textSecondary} />
         </TouchableOpacity>
       )}
       {!!channel.unreadCount ? (
@@ -597,6 +605,7 @@ function MemberRowComponent({
   member: ServerMemberPreview;
   onOpenProfile?: (userId?: string, profileDocId?: string) => void;
 }) {
+  const { styles } = useStyles();
   return (
     <TouchableOpacity
       style={styles.memberRow}
@@ -658,6 +667,7 @@ function ServerDrawerComponent({
   pendingJoinRequests = [],
   serverMembers = [],
 }: ServerDrawerProps) {
+  const { styles, theme } = useStyles();
   const insets = useSafeAreaInsets();
   const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -1082,14 +1092,14 @@ function ServerDrawerComponent({
       <ChannelRow
         channel={item}
         active={item.id === selectedChannelId}
-        accent={selectedServer?.accent ?? "#8f3a2b"}
+        accent={selectedServer?.accent ?? theme.textSecondary}
         disabled={!canEnterThreads}
         canManage={selectedServer?.canManage}
         onSelect={onSelectChannel}
         onOpenEdit={openEditChannel}
       />
     ),
-    [selectedChannelId, selectedServer?.accent, selectedServer?.canManage, canEnterThreads, onSelectChannel, openEditChannel],
+    [selectedChannelId, selectedServer?.accent, selectedServer?.canManage, canEnterThreads, onSelectChannel, openEditChannel, theme.textSecondary],
   );
 
   const renderMemberItem = useCallback(
@@ -1189,7 +1199,7 @@ function ServerDrawerComponent({
                       onPress={onExitServerView || onClose}
                       activeOpacity={0.82}
                     >
-                      <Ionicons name="arrow-back" size={18} color="#5f0909" />
+                      <Ionicons name="arrow-back" size={18} color={theme.primary} />
                       <Text style={styles.topBarButtonText}>Home</Text>
                     </TouchableOpacity>
 
@@ -1199,7 +1209,7 @@ function ServerDrawerComponent({
                         onPress={() => openEdit(selectedServer)}
                         activeOpacity={0.82}
                       >
-                        <Ionicons name="settings-outline" size={18} color="#5f0909" />
+                        <Ionicons name="settings-outline" size={18} color={theme.primary} />
                         <Text style={styles.topBarButtonText}>Manage</Text>
                       </TouchableOpacity>
                     )}
@@ -1222,7 +1232,7 @@ function ServerDrawerComponent({
                 </>
               ) : (
                 <View style={styles.emptyState}>
-                  <Ionicons name="server-outline" size={42} color="#c9b0a8" />
+                  <Ionicons name="server-outline" size={42} color={theme.textMuted} />
                   <Text style={styles.emptyStateText}>Select a server</Text>
                 </View>
               )}
@@ -1247,7 +1257,7 @@ function ServerDrawerComponent({
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Create Server</Text>
               <TouchableOpacity onPress={() => setCreateVisible(false)}>
-                <Ionicons name="close" size={22} color="#8f3a2b" />
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -1257,7 +1267,7 @@ function ServerDrawerComponent({
               value={createName}
               onChangeText={setCreateName}
               placeholder="Engineering projects"
-              placeholderTextColor="#b89a92"
+              placeholderTextColor={theme.textMuted}
               autoCapitalize="words"
               returnKeyType="done"
               blurOnSubmit
@@ -1269,7 +1279,7 @@ function ServerDrawerComponent({
               value={createDesc}
               onChangeText={setCreateDesc}
               placeholder="What makes this server useful?"
-              placeholderTextColor="#b89a92"
+              placeholderTextColor={theme.textMuted}
               multiline
             />
 
@@ -1295,7 +1305,7 @@ function ServerDrawerComponent({
                 {createLogoUri ? (
                   <Image source={{ uri: createLogoUri }} style={styles.mediaChoiceImage} />
                 ) : (
-                  <Ionicons name="image-outline" size={24} color="#8f3a2b" />
+                  <Ionicons name="image-outline" size={24} color={theme.textSecondary} />
                 )}
                 <View style={styles.mediaChoiceCopy}>
                   <Text style={styles.mediaChoiceTitle}>{createImageUploading === "logo" ? "Uploading…" : "Image"}</Text>
@@ -1310,7 +1320,7 @@ function ServerDrawerComponent({
                 value={createEmoji}
                 onChangeText={setCreateEmoji}
                 placeholder="🏫"
-                placeholderTextColor="#b89a92"
+                placeholderTextColor={theme.textMuted}
                 maxLength={3}
               />
             )}
@@ -1343,7 +1353,7 @@ function ServerDrawerComponent({
                   style={[styles.optionButton, createTitleAlign === value && { borderColor: createAccent, backgroundColor: `${createAccent}12` }]}
                   onPress={() => setCreateTitleAlign(value as "left" | "center" | "right")}
                 >
-                  <Ionicons name={icon as any} size={16} color="#5f0909" />
+                  <Ionicons name={icon as any} size={16} color={theme.primary} />
                   <Text style={styles.optionButtonText}>{label}</Text>
                 </TouchableOpacity>
               ))}
@@ -1448,8 +1458,8 @@ function ServerDrawerComponent({
               <Switch
                 value={createPublic}
                 onValueChange={setCreatePublic}
-                trackColor={{ false: "#e4d0ca", true: `${createAccent}99` }}
-                thumbColor={createPublic ? createAccent : "#c9b0a8"}
+                trackColor={{ false: theme.border, true: `${createAccent}99` }}
+                thumbColor={createPublic ? createAccent : theme.borderStrong}
               />
             </View>
 
@@ -1485,7 +1495,7 @@ function ServerDrawerComponent({
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Manage Server</Text>
               <TouchableOpacity onPress={() => setEditVisible(false)}>
-                <Ionicons name="close" size={22} color="#8f3a2b" />
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -1529,7 +1539,7 @@ function ServerDrawerComponent({
                 {editLogoUri ? (
                   <Image source={{ uri: editLogoUri }} style={styles.mediaChoiceImage} />
                 ) : (
-                  <Ionicons name="image-outline" size={24} color="#8f3a2b" />
+                  <Ionicons name="image-outline" size={24} color={theme.textSecondary} />
                 )}
                 <View style={styles.mediaChoiceCopy}>
                   <Text style={styles.mediaChoiceTitle}>{editImageUploading === "logo" ? "Uploading…" : "Image"}</Text>
@@ -1544,7 +1554,7 @@ function ServerDrawerComponent({
                 value={editEmoji}
                 onChangeText={setEditEmoji}
                 placeholder="🏫"
-                placeholderTextColor="#b89a92"
+                placeholderTextColor={theme.textMuted}
                 maxLength={3}
               />
             )}
@@ -1577,7 +1587,7 @@ function ServerDrawerComponent({
                   style={[styles.optionButton, editTitleAlign === value && { borderColor: editAccent, backgroundColor: `${editAccent}12` }]}
                   onPress={() => setEditTitleAlign(value as "left" | "center" | "right")}
                 >
-                  <Ionicons name={icon as any} size={16} color="#5f0909" />
+                  <Ionicons name={icon as any} size={16} color={theme.primary} />
                   <Text style={styles.optionButtonText}>{label}</Text>
                 </TouchableOpacity>
               ))}
@@ -1682,8 +1692,8 @@ function ServerDrawerComponent({
               <Switch
                 value={editPublic}
                 onValueChange={setEditPublic}
-                trackColor={{ false: "#e4d0ca", true: `${editAccent}99` }}
-                thumbColor={editPublic ? editAccent : "#c9b0a8"}
+                trackColor={{ false: theme.border, true: `${editAccent}99` }}
+                thumbColor={editPublic ? editAccent : theme.borderStrong}
               />
             </View>
 
@@ -1701,7 +1711,7 @@ function ServerDrawerComponent({
                   value={deleteReason}
                   onChangeText={setDeleteReason}
                   placeholder="Reason (optional) — e.g. course finished, no longer used"
-                  placeholderTextColor="#b9a49b"
+                  placeholderTextColor={theme.textMuted}
                   multiline
                 />
                 <TouchableOpacity
@@ -1709,7 +1719,7 @@ function ServerDrawerComponent({
                   onPress={handleRequestServerDeletion}
                   activeOpacity={0.85}
                 >
-                  <Ionicons name="trash-outline" size={15} color="#8f3a2b" />
+                  <Ionicons name="trash-outline" size={15} color={theme.textSecondary} />
                   <Text style={styles.requestDeleteButtonText}>Request Deletion</Text>
                 </TouchableOpacity>
               </View>
@@ -1718,7 +1728,7 @@ function ServerDrawerComponent({
             <View style={styles.modalActions}>
               {currentUserRole === "admin" ? (
                 <TouchableOpacity style={styles.dangerButton} onPress={handleDeleteServer}>
-                  <Ionicons name="trash-outline" size={16} color="#c0392b" />
+                  <Ionicons name="trash-outline" size={16} color={theme.danger} />
                 </TouchableOpacity>
               ) : null}
               <TouchableOpacity style={styles.secondaryButton} onPress={() => setEditVisible(false)}>
@@ -1743,7 +1753,7 @@ function ServerDrawerComponent({
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Create Channel</Text>
               <TouchableOpacity onPress={() => setThreadVisible(false)}>
-                <Ionicons name="close" size={22} color="#8f3a2b" />
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -1764,8 +1774,8 @@ function ServerDrawerComponent({
                     style={[
                       styles.channelTypeCard,
                       isSelected && {
-                        borderColor: selectedServer?.accent || "#5f0909",
-                        backgroundColor: `${selectedServer?.accent || "#5f0909"}14`,
+                        borderColor: selectedServer?.accent || theme.primary,
+                        backgroundColor: `${selectedServer?.accent || theme.primary}14`,
                       },
                     ]}
                     onPress={() => {
@@ -1777,13 +1787,13 @@ function ServerDrawerComponent({
                     <Ionicons
                       name={iconName as any}
                       size={18}
-                      color={isSelected ? selectedServer?.accent || "#5f0909" : "#7d3b30"}
+                      color={isSelected ? selectedServer?.accent || theme.primary : theme.textSecondary}
                     />
                     <View style={{ flex: 1, marginLeft: 8 }}>
                       <Text
                         style={[
                           styles.channelTypeTitle,
-                          isSelected && { color: selectedServer?.accent || "#5f0909", fontWeight: "700" },
+                          isSelected && { color: selectedServer?.accent || theme.primary, fontWeight: "700" },
                         ]}
                       >
                         {title}
@@ -1803,7 +1813,7 @@ function ServerDrawerComponent({
               value={threadName}
               onChangeText={setThreadName}
               placeholder={threadType === "rules" ? "rules" : threadType === "announcement" ? "announcements" : threadType === "media" ? "media" : "discussion"}
-              placeholderTextColor="#b89a92"
+              placeholderTextColor={theme.textMuted}
             />
 
             <Text style={styles.fieldLabel}>Channel Emoji</Text>
@@ -1812,7 +1822,7 @@ function ServerDrawerComponent({
               value={threadEmoji}
               onChangeText={setThreadEmoji}
               placeholder="📚"
-              placeholderTextColor="#b89a92"
+              placeholderTextColor={theme.textMuted}
               maxLength={3}
             />
 
@@ -1822,7 +1832,7 @@ function ServerDrawerComponent({
               value={threadDescription}
               onChangeText={setThreadDescription}
               placeholder="What is this channel for?"
-              placeholderTextColor="#b89a92"
+              placeholderTextColor={theme.textMuted}
               multiline
             />
 
@@ -1831,7 +1841,7 @@ function ServerDrawerComponent({
                 <Text style={styles.secondaryButtonText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.primaryButton, { backgroundColor: selectedServer?.accent || "#5f0909" }]}
+                style={[styles.primaryButton, { backgroundColor: selectedServer?.accent || theme.primary }]}
                 onPress={handleCreateThread}
                 disabled={!threadName.trim()}
               >
@@ -1854,7 +1864,7 @@ function ServerDrawerComponent({
                 </Text>
               </View>
               <TouchableOpacity onPress={() => setEditChannelVisible(false)}>
-                <Ionicons name="close" size={22} color="#8f3a2b" />
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -1875,8 +1885,8 @@ function ServerDrawerComponent({
                     style={[
                       styles.channelTypeCard,
                       isSelected && {
-                        borderColor: selectedServer?.accent || "#5f0909",
-                        backgroundColor: `${selectedServer?.accent || "#5f0909"}14`,
+                        borderColor: selectedServer?.accent || theme.primary,
+                        backgroundColor: `${selectedServer?.accent || theme.primary}14`,
                       },
                     ]}
                     onPress={() => {
@@ -1888,13 +1898,13 @@ function ServerDrawerComponent({
                     <Ionicons
                       name={iconName as any}
                       size={18}
-                      color={isSelected ? selectedServer?.accent || "#5f0909" : "#7d3b30"}
+                      color={isSelected ? selectedServer?.accent || theme.primary : theme.textSecondary}
                     />
                     <View style={{ flex: 1, marginLeft: 8 }}>
                       <Text
                         style={[
                           styles.channelTypeTitle,
-                          isSelected && { color: selectedServer?.accent || "#5f0909", fontWeight: "700" },
+                          isSelected && { color: selectedServer?.accent || theme.primary, fontWeight: "700" },
                         ]}
                       >
                         {title}
@@ -1914,7 +1924,7 @@ function ServerDrawerComponent({
               value={editChannelName}
               onChangeText={setEditChannelName}
               placeholder="channel-name"
-              placeholderTextColor="#b89a92"
+              placeholderTextColor={theme.textMuted}
             />
 
             <Text style={styles.fieldLabel}>Channel Emoji</Text>
@@ -1923,7 +1933,7 @@ function ServerDrawerComponent({
               value={editChannelEmoji}
               onChangeText={setEditChannelEmoji}
               placeholder="💬"
-              placeholderTextColor="#b89a92"
+              placeholderTextColor={theme.textMuted}
               maxLength={3}
             />
 
@@ -1933,7 +1943,7 @@ function ServerDrawerComponent({
               value={editChannelHint}
               onChangeText={setEditChannelHint}
               placeholder="What is this channel for?"
-              placeholderTextColor="#b89a92"
+              placeholderTextColor={theme.textMuted}
               multiline
             />
 
@@ -1942,7 +1952,7 @@ function ServerDrawerComponent({
               onPress={handleDeleteChannelPress}
               activeOpacity={0.82}
             >
-              <Ionicons name="trash-outline" size={16} color="#c0392b" />
+              <Ionicons name="trash-outline" size={16} color={theme.danger} />
               <Text style={styles.channelDeleteBtnText}>Delete Channel</Text>
             </TouchableOpacity>
 
@@ -1951,7 +1961,7 @@ function ServerDrawerComponent({
                 <Text style={styles.secondaryButtonText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.primaryButton, { backgroundColor: selectedServer?.accent || "#5f0909" }]}
+                style={[styles.primaryButton, { backgroundColor: selectedServer?.accent || theme.primary }]}
                 onPress={handleSaveChannel}
                 disabled={!editChannelName.trim()}
               >
@@ -1973,7 +1983,7 @@ function ServerDrawerComponent({
                 </Text>
               </View>
               <TouchableOpacity onPress={() => setMembersVisible(false)}>
-                <Ionicons name="close" size={22} color="#8f3a2b" />
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -1989,7 +1999,7 @@ function ServerDrawerComponent({
               removeClippedSubviews={Platform.OS === "android"}
               ListEmptyComponent={
                 <View style={styles.memberEmptyState}>
-                  <Ionicons name="people-outline" size={28} color="#c9b0a8" />
+                  <Ionicons name="people-outline" size={28} color={theme.textMuted} />
                   <Text style={styles.memberEmptyText}>No member list available yet.</Text>
                 </View>
               }
@@ -2015,7 +2025,8 @@ function ServerDrawerComponent({
 const ServerDrawer = React.memo(ServerDrawerComponent);
 export default ServerDrawer;
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   overlay: {
     flex: 1,
   },
@@ -2029,14 +2040,14 @@ const styles = StyleSheet.create({
   },
   rail: {
     width: RAIL_WIDTH,
-    backgroundColor: "#1e0303",
+    backgroundColor: c.chrome,
     alignItems: "center",
   },
   communityRailLabel: {
     width: 68,
     minHeight: 54,
     borderRadius: 14,
-    backgroundColor: "#350909",
+    backgroundColor: c.chromeBorder,
     borderWidth: 1,
     borderColor: "rgba(255,250,247,0.14)",
     alignItems: "center",
@@ -2045,7 +2056,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   communityRailLabelText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 8.5,
     fontWeight: "900",
     letterSpacing: 0.7,
@@ -2079,7 +2090,7 @@ const styles = StyleSheet.create({
     width: 32,
     borderTopLeftRadius: 18,
     borderBottomLeftRadius: 18,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     shadowColor: "#2a0505",
     shadowOpacity: 0.16,
     shadowRadius: 10,
@@ -2092,7 +2103,7 @@ const styles = StyleSheet.create({
     width: 5,
     height: 26,
     borderRadius: 999,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   railAvatar: {
     width: 48,
@@ -2105,7 +2116,7 @@ const styles = StyleSheet.create({
   },
   railAvatarSelected: {
     transform: [{ scale: 1.08 }],
-    shadowColor: "#fffaf7",
+    shadowColor: c.surface,
     shadowOpacity: 0.42,
     shadowRadius: 14,
     elevation: 9,
@@ -2124,24 +2135,24 @@ const styles = StyleSheet.create({
     width: 12,
     height: 12,
     borderRadius: 6,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderWidth: 2,
-    borderColor: "#1e0303",
+    borderColor: c.chrome,
   },
   addServerButton: {
     width: 48,
     height: 48,
     borderRadius: 18,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1.5,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
     marginTop: 8,
   },
   panel: {
     flex: 1,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
   panelTopBar: {
     flexDirection: "row",
@@ -2149,7 +2160,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 14,
     paddingBottom: 10,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
   topBarButton: {
     flexDirection: "row",
@@ -2158,12 +2169,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 9,
     borderRadius: 999,
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     borderWidth: 1,
-    borderColor: "#dfc9c1",
+    borderColor: c.borderStrong,
   },
   topBarButtonText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "700",
   },
@@ -2192,18 +2203,18 @@ const styles = StyleSheet.create({
     minHeight: 54,
     borderRadius: 12,
     borderWidth: 1.5,
-    borderColor: "#dfc9c1",
-    backgroundColor: "#fffaf7",
+    borderColor: c.borderStrong,
+    backgroundColor: c.surface,
     alignItems: "center",
     justifyContent: "center",
     gap: 2,
   },
   titleSizeButtonText: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "800",
   },
   titleSizeLabel: {
-    color: "#8d7770",
+    color: c.textMuted,
     fontSize: 10,
     fontWeight: "700",
   },
@@ -2219,15 +2230,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 11,
     borderWidth: 1.5,
-    borderColor: "#dfc9c1",
-    backgroundColor: "#fffaf7",
+    borderColor: c.borderStrong,
+    backgroundColor: c.surface,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
     gap: 5,
   },
   optionButtonText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 12,
     fontWeight: "800",
   },
@@ -2241,8 +2252,8 @@ const styles = StyleSheet.create({
     minHeight: 72,
     borderRadius: 16,
     borderWidth: 1.5,
-    borderColor: "#dfc9c1",
-    backgroundColor: "#fffaf7",
+    borderColor: c.borderStrong,
+    backgroundColor: c.surface,
     padding: 10,
     flexDirection: "row",
     alignItems: "center",
@@ -2262,26 +2273,26 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   mediaChoiceTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "800",
   },
   mediaChoiceHint: {
-    color: "#8d7770",
+    color: c.textMuted,
     fontSize: 11,
     lineHeight: 15,
     marginTop: 2,
   },
   optionalLabel: {
-    color: "#a58d84",
+    color: c.textMuted,
     fontWeight: "500",
   },
   bannerPicker: {
     minHeight: 78,
     borderRadius: 16,
     borderWidth: 1.5,
-    borderColor: "#dfc9c1",
-    backgroundColor: "#fffaf7",
+    borderColor: c.borderStrong,
+    backgroundColor: c.surface,
     overflow: "hidden",
     marginBottom: 12,
   },
@@ -2312,14 +2323,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: "#dfc9c1",
-    backgroundColor: "#fffaf7",
+    borderColor: c.borderStrong,
+    backgroundColor: c.surface,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
   },
   mediaClearText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 11,
     fontWeight: "700",
   },
@@ -2341,7 +2352,7 @@ const styles = StyleSheet.create({
     fontSize: 28,
   },
  heroTitle: {
-  color: "#fffaf7",
+  color: c.surface,
   fontSize: 22,
   fontWeight: "800",
   lineHeight: 34,
@@ -2380,25 +2391,25 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
   },
   metaPillText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 12.5,
     fontWeight: "600",
   },
   accessCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     padding: 16,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     marginBottom: 16,
   },
   accessTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 16,
     fontWeight: "800",
   },
   accessText: {
-    color: "#8b6b62",
+    color: c.textMuted,
     lineHeight: 19,
     marginTop: 6,
   },
@@ -2409,11 +2420,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
     borderRadius: 14,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     paddingVertical: 12,
   },
   joinButtonText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontWeight: "700",
   },
   pendingAccessPill: {
@@ -2424,12 +2435,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 9,
     borderRadius: 999,
-    backgroundColor: "#f8f1e5",
+    backgroundColor: c.accentSoft,
     borderWidth: 1,
-    borderColor: "#ddb977",
+    borderColor: c.accent,
   },
   pendingAccessText: {
-    color: "#8a5a10",
+    color: c.accent,
     fontSize: 13,
     fontWeight: "700",
   },
@@ -2443,15 +2454,15 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   sectionTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 15,
     fontWeight: "800",
   },
   sectionCount: {
     minWidth: 28,
     textAlign: "center",
-    color: "#fffaf7",
-    backgroundColor: "#8f3a2b",
+    color: c.surface,
+    backgroundColor: c.textSecondary,
     borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 4,
@@ -2463,20 +2474,20 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     padding: 12,
     marginBottom: 8,
   },
   requestName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "700",
   },
   requestMeta: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     marginTop: 3,
   },
@@ -2486,7 +2497,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#2f7d6b",
+    backgroundColor: c.success,
     flexDirection: "row",
     gap: 6,
     paddingHorizontal: 12,
@@ -2497,9 +2508,9 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fff1ef",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#f1c5bf",
+    borderColor: c.dangerSoft,
     flexDirection: "row",
     gap: 6,
     paddingHorizontal: 12,
@@ -2508,12 +2519,12 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   requestApproveText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 12,
     fontWeight: "700",
   },
   requestRejectText: {
-    color: "#c0392b",
+    color: c.danger,
     fontSize: 12,
     fontWeight: "700",
   },
@@ -2522,7 +2533,7 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
   },
   requestProfileLinkText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "700",
   },
@@ -2533,7 +2544,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
     borderRadius: 14,
-    backgroundColor: "#8f3a2b",
+    backgroundColor: c.textSecondary,
     paddingVertical: 12,
   },
   threadAddButton: {
@@ -2543,10 +2554,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 999,
-    backgroundColor: "#f4d7b1",
+    backgroundColor: c.accentSoft,
   },
   threadAddButtonText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 12,
     fontWeight: "700",
   },
@@ -2555,16 +2566,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 12,
     paddingVertical: 12,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 14,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     position: "relative",
   },
   channelRowActive: {
-    backgroundColor: "#fff5ef",
-    borderColor: "#f1c9bd",
+    backgroundColor: c.surfaceSunken,
+    borderColor: c.borderStrong,
   },
   channelRowDisabled: {
     opacity: 0.5,
@@ -2592,12 +2603,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   channelLabel: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "700",
   },
   channelHint: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11.5,
     marginTop: 2,
   },
@@ -2605,19 +2616,19 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: "#b64040",
+    backgroundColor: c.danger,
   },
   unreadBadge: {
     minWidth: 24,
     height: 24,
     paddingHorizontal: 7,
     borderRadius: 12,
-    backgroundColor: "#8f3a2b",
+    backgroundColor: c.textSecondary,
     alignItems: "center",
     justifyContent: "center",
   },
   unreadBadgeText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 11,
     fontWeight: "800",
   },
@@ -2628,7 +2639,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   emptyStateText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 14,
     fontWeight: "600",
   },
@@ -2644,11 +2655,11 @@ const styles = StyleSheet.create({
     paddingVertical: 20,
   },
   modalCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 22,
     padding: 20,
     borderWidth: 1,
-    borderColor: "#ecd6bf",
+    borderColor: c.borderStrong,
   },
   modalHeader: {
     flexDirection: "row",
@@ -2657,12 +2668,12 @@ const styles = StyleSheet.create({
     marginBottom: 18,
   },
   modalTitle: {
-    color: "#3d0808",
+    color: c.textPrimary,
     fontSize: 18,
     fontWeight: "800",
   },
   fieldLabel: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 11,
     fontWeight: "700",
     letterSpacing: 0.4,
@@ -2671,11 +2682,11 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   input: {
-    backgroundColor: "#fdf4ef",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#ecd6bf",
-    color: "#4d1b17",
+    borderColor: c.borderStrong,
+    color: c.textPrimary,
     fontSize: 14,
     paddingHorizontal: 14,
     paddingVertical: 11,
@@ -2686,7 +2697,7 @@ const styles = StyleSheet.create({
     textAlignVertical: "top",
   },
   memberModalSubtitle: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12.5,
     marginTop: 3,
   },
@@ -2698,14 +2709,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 11,
     borderBottomWidth: 1,
-    borderBottomColor: "#f1e4dc",
+    borderBottomColor: c.surfaceSunken,
     gap: 12,
   },
   memberAvatar: {
     width: 46,
     height: 46,
     borderRadius: 16,
-    backgroundColor: "#f4d7b1",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
@@ -2715,7 +2726,7 @@ const styles = StyleSheet.create({
     height: "100%",
   },
   memberAvatarText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 16,
     fontWeight: "800",
   },
@@ -2723,12 +2734,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   memberName: {
-    color: "#381713",
+    color: c.primary,
     fontSize: 15,
     fontWeight: "700",
   },
   memberMeta: {
-    color: "#8d6a61",
+    color: c.textMuted,
     fontSize: 12.5,
     marginTop: 3,
   },
@@ -2736,7 +2747,7 @@ const styles = StyleSheet.create({
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: "#2f7d6b",
+    backgroundColor: c.success,
   },
   memberEmptyState: {
     alignItems: "center",
@@ -2745,7 +2756,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   memberEmptyText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13.5,
     textAlign: "center",
   },
@@ -2763,30 +2774,30 @@ const styles = StyleSheet.create({
     borderColor: "transparent",
   },
   colorSwatchSelected: {
-    borderColor: "#3d0808",
+    borderColor: c.textPrimary,
     transform: [{ scale: 1.12 }],
   },
   lightColorSwatch: {
-    borderColor: "#c9b8b0",
+    borderColor: c.borderStrong,
   },
   switchRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#fdf4ef",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#ecd6bf",
+    borderColor: c.borderStrong,
     padding: 12,
     marginBottom: 18,
   },
   switchTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "700",
   },
   switchHint: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11.5,
     marginTop: 2,
   },
@@ -2799,14 +2810,14 @@ const styles = StyleSheet.create({
     flex: 1,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#e7d8d0",
+    borderColor: c.border,
     alignItems: "center",
     justifyContent: "center",
     paddingVertical: 12,
-    backgroundColor: "#f8f1ec",
+    backgroundColor: c.surfaceSunken,
   },
   secondaryButtonText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 14,
     fontWeight: "700",
   },
@@ -2818,7 +2829,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   primaryButtonText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 14,
     fontWeight: "700",
   },
@@ -2827,10 +2838,10 @@ const styles = StyleSheet.create({
     height: 46,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#f5c6c2",
+    borderColor: c.dangerSoft,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fff0ef",
+    backgroundColor: c.surfaceSunken,
   },
   // Task 6: "Request Deletion" block shown to non-admin managers in the edit sheet.
   requestDeleteBlock: {
@@ -2838,10 +2849,10 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     paddingTop: 14,
     borderTopWidth: 1,
-    borderTopColor: "#efdcd2",
+    borderTopColor: c.border,
   },
   requestDeleteHint: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     lineHeight: 17,
     marginBottom: 10,
@@ -2853,12 +2864,12 @@ const styles = StyleSheet.create({
     gap: 7,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#f5c6c2",
-    backgroundColor: "#fff0ef",
+    borderColor: c.dangerSoft,
+    backgroundColor: c.surfaceSunken,
     paddingVertical: 11,
   },
   requestDeleteButtonText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 13.5,
     fontWeight: "800",
   },
@@ -2872,26 +2883,26 @@ const styles = StyleSheet.create({
     padding: 10,
     borderRadius: 12,
     borderWidth: 1.5,
-    borderColor: "#e8dbd5",
-    backgroundColor: "#fffaf7",
+    borderColor: c.border,
+    backgroundColor: c.surface,
   },
   channelTypeTitle: {
     fontSize: 13.5,
     fontWeight: "600",
-    color: "#4d1b17",
+    color: c.textPrimary,
   },
   channelTypeHint: {
     fontSize: 11,
-    color: "#9b766c",
+    color: c.textMuted,
     marginTop: 1,
   },
   channelEditAction: {
     padding: 6,
     borderRadius: 8,
-    backgroundColor: "#fff0ea",
+    backgroundColor: c.surfaceSunken,
     marginRight: 6,
     borderWidth: 1,
-    borderColor: "#eedfd7",
+    borderColor: c.border,
   },
   channelDeleteBtn: {
     flexDirection: "row",
@@ -2901,14 +2912,20 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#f5c6c2",
-    backgroundColor: "#fff0ef",
+    borderColor: c.dangerSoft,
+    backgroundColor: c.surfaceSunken,
     marginTop: 10,
     marginBottom: 6,
   },
   channelDeleteBtnText: {
-    color: "#c0392b",
+    color: c.danger,
     fontSize: 13,
     fontWeight: "700",
   },
 });
+/** Themed stylesheet for this drawer. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

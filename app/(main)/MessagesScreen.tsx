@@ -9,7 +9,9 @@ import {
     setDirectConversationArchived,
     subscribeToUserConversations
 } from "@/utils/directMessages";
-import { getRoleColor, getRoleDisplayName, parseUserRole } from "@/utils/rbac";
+import { getRoleColor, getRoleDisplayName, parseUserRole, peekUserData } from "@/utils/rbac";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { getTimeAgo, useRelativeTimeNow } from "@/utils/relativeTime";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import {
@@ -71,6 +73,12 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
   onActions,
   deleting,
 }) => {
+  // The row reads the palette itself rather than taking styles as a prop: it
+  // is memoised, and handing it a freshly-built styles object every render
+  // would defeat that.
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+
   const otherUserId = useMemo(() => {
     return conversation.participants.find((id) => id !== currentUserId) || conversation.participants[0] || "";
   }, [conversation.participants, currentUserId]);
@@ -79,15 +87,28 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
   const presence = useUserPresence(otherUserId, otherParticipantDetail?.studentID);
   const activity = getPresenceState(presence, nowMs);
   const nickname = conversation.nicknames?.[otherUserId];
-  const displayName = nickname || otherParticipantDetail?.displayName || "User";
-  const role = parseUserRole(otherParticipantDetail?.role);
+  // participantDetails was written once when the conversation was created, so
+  // a changed profile picture never reached this list. peekUserData reads the
+  // shared cache the chat screen's live listener keeps current — no listener
+  // per row, and no read when the cache has nothing to say.
+  const cachedOther = peekUserData(
+    otherParticipantDetail?.studentID || otherUserId,
+  );
+  const cachedName = cachedOther
+    ? `${cachedOther.firstname || ""} ${cachedOther.lastname || ""}`.trim()
+    : "";
+
+  const displayName =
+    nickname || cachedName || otherParticipantDetail?.displayName || "User";
+  const role = parseUserRole(cachedOther?.role || otherParticipantDetail?.role);
   const roleColor = getRoleColor(role || "student");
   const unreadCount = conversation.unreadCounts?.[currentUserId] || 0;
   const isUnread = unreadCount > 0;
 
   const lastMessage = conversation.lastMessage;
   const isOwnLastMessage = lastMessage?.senderId === currentUserId;
-  const otherUserAvatar = otherParticipantDetail?.profileImage || null;
+  const otherUserAvatar =
+    resolveAvatarUri(cachedOther) || otherParticipantDetail?.profileImage || null;
 
   // Messenger Seen status: if current user sent last message and recipient has seen it
   const isSeenByOther = useMemo(() => {
@@ -180,7 +201,7 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
           )}
 
           <Text style={[styles.timeText, isUnread && styles.timeTextUnread]}>{timeLabel}</Text>
-          {isConversationArchived(conversation, currentUserId) && <Ionicons name="archive-outline" size={15} color="#9b766c" accessibilityLabel="Archived" />}
+          {isConversationArchived(conversation, currentUserId) && <Ionicons name="archive-outline" size={15} color={theme.textMuted} accessibilityLabel="Archived" />}
         </View>
 
         <View style={styles.conversationPreviewRow}>
@@ -192,7 +213,7 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
           </Text>
 
           {/* Right trailing indicator: unread badge pill OR seen miniature avatar */}
-          {deleting ? <ActivityIndicator size="small" color="#8f2117" /> : isUnread ? (
+          {deleting ? <ActivityIndicator size="small" color={theme.primary} /> : isUnread ? (
             <View style={styles.unreadBadgePill}>
               <Text style={styles.unreadBadgeText}>
                 {unreadCount > 99 ? "99+" : unreadCount}
@@ -205,7 +226,7 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
               contentFit="cover"
             />
           ) : isOwnLastMessage ? (
-            <Ionicons name="checkmark" size={15} color="#9b766c" />
+            <Ionicons name="checkmark" size={15} color={theme.textMuted} />
           ) : null}
         </View>
       </View>
@@ -217,6 +238,9 @@ const ConversationRow = React.memo(ConversationRowComponent);
 
 /* ==================== MAIN MESSAGES SCREEN ==================== */
 export default function MessagesScreen() {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const currentUserId = auth.currentUser?.uid || "";
@@ -499,7 +523,7 @@ export default function MessagesScreen() {
           onPress={() => { if (folder === "archived") { setFolder("chats"); setSearchQuery(""); } else router.back(); }}
           accessibilityLabel="Go back"
         >
-          <Ionicons name="arrow-back" size={24} color="#5f0909" />
+          <Ionicons name="arrow-back" size={24} color={theme.primary} />
         </TouchableOpacity>
 
         <Text style={styles.headerTitle}>{folder === "archived" ? "Archived chats" : "Messages"}</Text>
@@ -509,13 +533,13 @@ export default function MessagesScreen() {
           onPress={handleOpenNewChatModal}
           accessibilityLabel="Start a new conversation"
         >
-          <Ionicons name="create-outline" size={24} color="#5f0909" />
+          <Ionicons name="create-outline" size={24} color={theme.primary} />
         </TouchableOpacity>
       </View>
 
       {/* Search Conversations Bar */}
       <View style={styles.searchBarWrapper}>
-        <Ionicons name="search" size={18} color="#8f766e" style={styles.searchIcon} />
+        <Ionicons name="search" size={18} color={theme.textMuted} style={styles.searchIcon} />
         <TextInput
           style={styles.searchInput}
           placeholder={folder === "archived" ? "Search archived chats..." : "Search all chats..."}
@@ -526,7 +550,7 @@ export default function MessagesScreen() {
         />
         {searchQuery.length > 0 && Platform.OS === "android" && (
           <TouchableOpacity onPress={() => setSearchQuery("")} style={styles.clearSearchBtn}>
-            <Ionicons name="close-circle" size={18} color="#8f766e" />
+            <Ionicons name="close-circle" size={18} color={theme.textMuted} />
           </TouchableOpacity>
         )}
       </View>
@@ -535,8 +559,8 @@ export default function MessagesScreen() {
         {(["chats", "archived"] as const).map((value) => <Pressable key={value} accessibilityRole="tab"
           accessibilityState={{ selected: folder === value }} onPress={() => { setFolder(value); setSearchQuery(""); }}
           style={[styles.folderTab, folder === value && styles.folderTabActive]}>
-          <Ionicons name={value === "chats" ? "chatbubbles-outline" : "archive-outline"} size={17} color={folder === value ? "#fffaf7" : "#79554c"} />
-          <Text style={[styles.folderTabText, folder === value && { color: "#fffaf7" }]}>{value === "chats" ? "Chats" : `Archived${archivedCount ? ` (${archivedCount})` : ""}`}</Text>
+          <Ionicons name={value === "chats" ? "chatbubbles-outline" : "archive-outline"} size={17} color={folder === value ? theme.surface : theme.textMuted} />
+          <Text style={[styles.folderTabText, folder === value && { color: theme.surface }]}>{value === "chats" ? "Chats" : `Archived${archivedCount ? ` (${archivedCount})` : ""}`}</Text>
         </Pressable>)}
       </View>
       {!!archiveNotice && <Text style={styles.archiveNotice} accessibilityLiveRegion="polite">{archiveNotice}</Text>}
@@ -544,7 +568,7 @@ export default function MessagesScreen() {
       {/* Conversations List (Virtualized 60-120 FPS) */}
       {loading && !isOffline ? (
         <View style={styles.centered}>
-          <ActivityIndicator size="large" color="#8f2117" />
+          <ActivityIndicator size="large" color={theme.primary} />
           <Text style={styles.loadingText}>Loading conversations...</Text>
         </View>
       ) : (
@@ -562,7 +586,7 @@ export default function MessagesScreen() {
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <View style={styles.emptyIconCircle}>
-                <Ionicons name={folder === "archived" ? "archive-outline" : "chatbubbles-outline"} size={44} color="#8f2117" />
+                <Ionicons name={folder === "archived" ? "archive-outline" : "chatbubbles-outline"} size={44} color={theme.primary} />
               </View>
               <Text style={styles.emptyTitle}>
                 {searchQuery ? "No matches found" : folder === "archived" ? "No archived chats" : archivedCount ? "Your inbox is clear" : "No messages yet"}
@@ -580,7 +604,7 @@ export default function MessagesScreen() {
                   onPress={handleOpenNewChatModal}
                   activeOpacity={0.85}
                 >
-                  <Ionicons name="add" size={20} color="#fffaf7" />
+                  <Ionicons name="add" size={20} color={theme.onPrimary} />
                   <Text style={styles.startChatButtonText}>Start a Chat</Text>
                 </TouchableOpacity>
               )}
@@ -605,13 +629,13 @@ export default function MessagesScreen() {
               onPress={() => setNewChatModalVisible(false)}
               accessibilityLabel="Close"
             >
-              <Ionicons name="close" size={24} color="#5f0909" />
+              <Ionicons name="close" size={24} color={theme.primary} />
             </TouchableOpacity>
           </View>
 
           {/* People Search Input */}
           <View style={styles.modalSearchWrapper}>
-            <Ionicons name="search" size={18} color="#8f766e" style={styles.searchIcon} />
+            <Ionicons name="search" size={18} color={theme.textMuted} style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
               placeholder="Search people by name, ID, or course..."
@@ -623,7 +647,7 @@ export default function MessagesScreen() {
             />
             {peopleSearchQuery.length > 0 && Platform.OS === "android" && (
               <TouchableOpacity onPress={() => setPeopleSearchQuery("")} style={styles.clearSearchBtn}>
-                <Ionicons name="close-circle" size={18} color="#8f766e" />
+                <Ionicons name="close-circle" size={18} color={theme.textMuted} />
               </TouchableOpacity>
             )}
           </View>
@@ -631,7 +655,7 @@ export default function MessagesScreen() {
           {/* People Results List */}
           {directoryLoading ? (
             <View style={styles.centered}>
-              <ActivityIndicator size="small" color="#8f2117" />
+              <ActivityIndicator size="small" color={theme.primary} />
               <Text style={styles.loadingText}>Loading campus directory...</Text>
             </View>
           ) : (
@@ -692,9 +716,9 @@ export default function MessagesScreen() {
                     </View>
 
                     {isStarting ? (
-                      <ActivityIndicator size="small" color="#8f2117" />
+                      <ActivityIndicator size="small" color={theme.primary} />
                     ) : (
-                      <Ionicons name="chatbubble-outline" size={20} color="#8f2117" />
+                      <Ionicons name="chatbubble-outline" size={20} color={theme.primary} />
                     )}
                   </TouchableOpacity>
                 );
@@ -718,7 +742,7 @@ export default function MessagesScreen() {
             {!!archiveError && <Text style={styles.archiveError} accessibilityLiveRegion="polite">{archiveError}</Text>}
             <Pressable style={styles.conversationAction} onPress={() => void changeArchive()} disabled={archiveBusy || !actionConversation}
               accessibilityRole="button" accessibilityLabel={targetIsArchived ? "Unarchive conversation" : "Archive conversation"}>
-              {archiveBusy ? <ActivityIndicator color="#8f2117" /> : <Ionicons name={targetIsArchived ? "arrow-undo-outline" : "archive-outline"} size={23} color="#8f2117" />}
+              {archiveBusy ? <ActivityIndicator color={theme.primary} /> : <Ionicons name={targetIsArchived ? "arrow-undo-outline" : "archive-outline"} size={23} color={theme.primary} />}
               <View style={{ flex: 1 }}><Text style={styles.conversationActionText}>{targetIsArchived ? "Unarchive" : "Archive"}</Text>
                 <Text style={styles.actionsDescription}>{targetIsArchived ? "Move back to Chats" : "Hide from Chats and keep your messages"}</Text></View>
             </Pressable>
@@ -752,22 +776,23 @@ export default function MessagesScreen() {
 }
 
 /* ==================== STYLES ==================== */
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   folderTabs: { flexDirection: "row", gap: 10, paddingHorizontal: 18, paddingBottom: 12 },
-  folderTab: { flexDirection: "row", alignItems: "center", gap: 7, borderRadius: 22, paddingHorizontal: 16, minHeight: 42, backgroundColor: "#f1e7e1" },
-  folderTabActive: { backgroundColor: "#8f2117" },
-  folderTabText: { fontSize: 13, fontWeight: "600", color: "#79554c" },
-  archiveNotice: { textAlign: "center", padding: 8, color: "#79554c", fontSize: 13 },
+  folderTab: { flexDirection: "row", alignItems: "center", gap: 7, borderRadius: 22, paddingHorizontal: 16, minHeight: 42, backgroundColor: c.border },
+  folderTabActive: { backgroundColor: c.primary },
+  folderTabText: { fontSize: 13, fontWeight: "600", color: c.textMuted },
+  archiveNotice: { textAlign: "center", padding: 8, color: c.textMuted, fontSize: 13 },
   actionsOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center", padding: 24 },
-  actionsCard: { width: "100%", maxWidth: 360, borderRadius: 22, padding: 20, backgroundColor: "#fffaf7" },
-  actionsTitle: { color: "#4d1b17", fontSize: 19, fontWeight: "700", marginBottom: 6 },
-  actionsDescription: { color: "#95786e", fontSize: 12, lineHeight: 18 },
+  actionsCard: { width: "100%", maxWidth: 360, borderRadius: 22, padding: 20, backgroundColor: c.surface },
+  actionsTitle: { color: c.textPrimary, fontSize: 19, fontWeight: "700", marginBottom: 6 },
+  actionsDescription: { color: c.textMuted, fontSize: 12, lineHeight: 18 },
   archiveError: { color: "#b3261e", fontSize: 13, paddingVertical: 12 },
   conversationAction: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 15, minHeight: 48 },
-  conversationActionText: { color: "#5f0909", fontSize: 15, fontWeight: "600" },
+  conversationActionText: { color: c.primary, fontSize: 15, fontWeight: "600" },
   container: {
     flex: 1,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   header: {
     flexDirection: "row",
@@ -777,7 +802,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "rgba(95, 9, 9, 0.12)",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   headerIconButton: {
     width: 40,
@@ -790,7 +815,7 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 20,
     fontWeight: "800",
-    color: "#4d1510",
+    color: c.textPrimary,
     letterSpacing: -0.3,
   },
   searchBarWrapper: {
@@ -809,7 +834,7 @@ const styles = StyleSheet.create({
   searchInput: {
     flex: 1,
     fontSize: 15,
-    color: "#4d1510",
+    color: c.textPrimary,
     paddingVertical: 0,
   },
   clearSearchBtn: {
@@ -828,14 +853,14 @@ const styles = StyleSheet.create({
   loadingText: {
     marginTop: 10,
     fontSize: 14,
-    color: "#7a554e",
+    color: c.textMuted,
   },
   conversationItem: {
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 16,
     paddingVertical: 12,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   conversationItemPressed: {
     backgroundColor: "rgba(143, 33, 23, 0.05)",
@@ -851,7 +876,7 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 26,
-    backgroundColor: "#f2e8e3",
+    backgroundColor: c.surfaceSunken,
   },
   avatarPlaceholder: {
     width: 52,
@@ -871,9 +896,9 @@ const styles = StyleSheet.create({
     width: 13,
     height: 13,
     borderRadius: 6.5,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderWidth: 2,
-    borderColor: "#fffaf7",
+    borderColor: c.surface,
   },
   conversationBody: {
     flex: 1,
@@ -888,13 +913,13 @@ const styles = StyleSheet.create({
   displayNameText: {
     fontSize: 16,
     fontWeight: "600",
-    color: "#2a0f0b",
+    color: c.textPrimary,
     flex: 1,
     marginRight: 6,
   },
   displayNameTextBold: {
     fontWeight: "800",
-    color: "#1a0805",
+    color: c.textPrimary,
   },
   roleChip: {
     borderWidth: 1,
@@ -910,10 +935,10 @@ const styles = StyleSheet.create({
   },
   timeText: {
     fontSize: 12,
-    color: "#9b766c",
+    color: c.textMuted,
   },
   timeTextUnread: {
-    color: "#8f2117",
+    color: c.primary,
     fontWeight: "700",
   },
   conversationPreviewRow: {
@@ -923,25 +948,25 @@ const styles = StyleSheet.create({
   },
   previewText: {
     fontSize: 14,
-    color: "#7a554e",
+    color: c.textMuted,
     flex: 1,
     marginRight: 8,
   },
   previewTextUnread: {
-    color: "#1a0805",
+    color: c.textPrimary,
     fontWeight: "700",
   },
   unreadBadgePill: {
     minWidth: 20,
     height: 20,
     borderRadius: 10,
-    backgroundColor: "#8f2117",
+    backgroundColor: c.primary,
     justifyContent: "center",
     alignItems: "center",
     paddingHorizontal: 6,
   },
   unreadBadgeText: {
-    color: "#fffaf7",
+    color: c.onPrimary,
     fontSize: 11,
     fontWeight: "800",
   },
@@ -950,7 +975,7 @@ const styles = StyleSheet.create({
     height: 16,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: "#fffaf7",
+    borderColor: c.surface,
   },
   emptyContainer: {
     flex: 1,
@@ -971,13 +996,13 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontSize: 19,
     fontWeight: "800",
-    color: "#4d1510",
+    color: c.textPrimary,
     marginBottom: 8,
     textAlign: "center",
   },
   emptySubtitle: {
     fontSize: 14,
-    color: "#8f766e",
+    color: c.textMuted,
     textAlign: "center",
     lineHeight: 20,
     marginBottom: 20,
@@ -985,14 +1010,14 @@ const styles = StyleSheet.create({
   startChatButton: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#8f2117",
+    backgroundColor: c.primary,
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 24,
     gap: 6,
   },
   startChatButtonText: {
-    color: "#fffaf7",
+    color: c.onPrimary,
     fontSize: 15,
     fontWeight: "700",
   },
@@ -1000,7 +1025,7 @@ const styles = StyleSheet.create({
   /* Modal Styles */
   modalContainer: {
     flex: 1,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   modalHeader: {
     flexDirection: "row",
@@ -1014,7 +1039,7 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 18,
     fontWeight: "800",
-    color: "#4d1510",
+    color: c.textPrimary,
   },
   modalCloseBtn: {
     padding: 6,
@@ -1051,7 +1076,7 @@ const styles = StyleSheet.create({
     borderRadius: 6.5,
     backgroundColor: "#22c55e",
     borderWidth: 2,
-    borderColor: "#fffaf7",
+    borderColor: c.surface,
   },
   personInfo: {
     flex: 1,
@@ -1065,12 +1090,12 @@ const styles = StyleSheet.create({
   personName: {
     fontSize: 15.5,
     fontWeight: "700",
-    color: "#2a0f0b",
+    color: c.textPrimary,
     marginRight: 6,
   },
   personSubtext: {
     fontSize: 12.5,
-    color: "#8f766e",
+    color: c.textMuted,
   },
   modalEmpty: {
     alignItems: "center",
@@ -1080,7 +1105,7 @@ const styles = StyleSheet.create({
   },
   modalEmptyText: {
     fontSize: 14.5,
-    color: "#8f766e",
+    color: c.textMuted,
     fontWeight: "600",
   },
 });

@@ -1,4 +1,7 @@
 // app/(main)/components/AnnouncementCarousel.tsx
+import { useMemo } from "react";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import {
     Dimensions,
@@ -111,6 +114,7 @@ export default function AnnouncementCarousel({
   announcements,
   onPressAnnouncement,
 }: AnnouncementCarouselProps) {
+  const { styles, theme } = useStyles();
   if (!announcements || announcements.length === 0) {
     return null;
   }
@@ -120,7 +124,7 @@ export default function AnnouncementCarousel({
       <View style={styles.headerRow}>
         <View style={styles.titleRow}>
           <View style={styles.iconCircle}>
-            <Ionicons name="megaphone" size={15} color="#5f0909" />
+            <Ionicons name="megaphone" size={15} color={theme.primary} />
           </View>
           <Text style={styles.sectionTitle}>Active Announcements</Text>
           <View style={styles.countBadge}>
@@ -161,7 +165,7 @@ export default function AnnouncementCarousel({
 
                 {hasImage && (
                   <View style={styles.mediaPill}>
-                    <Ionicons name="image-outline" size={12} color="#70483e" />
+                    <Ionicons name="image-outline" size={12} color={theme.textSecondary} />
                   </View>
                 )}
               </View>
@@ -172,14 +176,14 @@ export default function AnnouncementCarousel({
 
               <View style={styles.cardFooter}>
                 <View style={styles.authorRow}>
-                  <Ionicons name="person-circle-outline" size={13} color="#8a5a4c" />
+                  <Ionicons name="person-circle-outline" size={13} color={theme.textMuted} />
                   <Text style={styles.authorText} numberOfLines={1}>
                     {item.username || "Staff Notice"}
                   </Text>
                 </View>
                 <View style={styles.viewLinkRow}>
                   <Text style={styles.viewLinkText}>View</Text>
-                  <Ionicons name="chevron-forward" size={12} color="#5f0909" />
+                  <Ionicons name="chevron-forward" size={12} color={theme.primary} />
                 </View>
               </View>
             </TouchableOpacity>
@@ -190,7 +194,15 @@ export default function AnnouncementCarousel({
   );
 }
 
-const styles = StyleSheet.create({
+/** Themed stylesheet for this component. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: {
     marginBottom: 12,
   },
@@ -210,18 +222,18 @@ const styles = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 12,
-    backgroundColor: "#ffeedf",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
   },
   sectionTitle: {
     fontSize: 13.5,
     fontWeight: "800",
-    color: "#5f0909",
+    color: c.primary,
     letterSpacing: -0.2,
   },
   countBadge: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderRadius: 10,
     paddingHorizontal: 6,
     paddingVertical: 1.5,
@@ -229,11 +241,11 @@ const styles = StyleSheet.create({
   countText: {
     fontSize: 10.5,
     fontWeight: "800",
-    color: "#ffffff",
+    color: c.onPrimary,
   },
   swipeHint: {
     fontSize: 11,
-    color: "#a88177",
+    color: c.textMuted,
     fontWeight: "600",
   },
   listContent: {
@@ -242,13 +254,13 @@ const styles = StyleSheet.create({
   },
   card: {
     width: CARD_WIDTH,
-    backgroundColor: "#fffdfa",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#f0dfd5",
+    borderColor: c.border,
     padding: 12,
     justifyContent: "space-between",
-    shadowColor: "#5f0909",
+    shadowColor: c.primary,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05,
     shadowRadius: 5,
@@ -274,7 +286,7 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
   mediaPill: {
-    backgroundColor: "#f5ece6",
+    backgroundColor: c.surfaceSunken,
     paddingHorizontal: 5,
     paddingVertical: 2,
     borderRadius: 8,
@@ -282,7 +294,7 @@ const styles = StyleSheet.create({
   cardContent: {
     fontSize: 13,
     lineHeight: 18,
-    color: "#3c1815",
+    color: c.textPrimary,
     fontWeight: "600",
     marginBottom: 8,
   },
@@ -291,7 +303,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "#f3e6de",
+    borderTopColor: c.border,
     paddingTop: 6,
   },
   authorRow: {
@@ -303,7 +315,7 @@ const styles = StyleSheet.create({
   },
   authorText: {
     fontSize: 11,
-    color: "#8a5a4c",
+    color: c.textMuted,
     fontWeight: "700",
   },
   viewLinkRow: {
@@ -314,7 +326,7 @@ const styles = StyleSheet.create({
   viewLinkText: {
     fontSize: 11,
     fontWeight: "800",
-    color: "#5f0909",
+    color: c.primary,
   },
 });
 

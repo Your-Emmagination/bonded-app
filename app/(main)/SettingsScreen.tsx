@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { createAudioPlayer, type AudioPlayer } from "expo-audio";
 import { useRouter } from "expo-router";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -15,6 +15,9 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ListSkeleton } from "./components/Skeleton";
 import { auth } from "../../Firebase_configure";
+import { subscribeToMyTicketBadge } from "@/utils/supportTickets";
+import { useTheme } from "@/contexts/ThemeContext";
+import { THEME_OPTIONS, type ThemeTokens } from "@/utils/theme";
 import {
   fetchNotificationSoundId,
   setNotificationSoundId,
@@ -35,6 +38,22 @@ const SettingsScreen = () => {
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<NotificationSoundId | null>(null);
   const activePlayerRef = useRef<AudioPlayer | null>(null);
+  // Support replies waiting to be read. Shown as a badge on the row so a
+  // student who never thinks to check finds out anyway.
+  const [supportUnread, setSupportUnread] = useState(0);
+  const {
+    choice: themeChoice,
+    resolved: resolvedTheme,
+    setChoice: setThemeChoice,
+    colors: theme,
+  } = useTheme();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+
+  useEffect(() => {
+    const user = auth.currentUser;
+    if (!user) return;
+    return subscribeToMyTicketBadge(user.uid, setSupportUnread);
+  }, []);
 
   useEffect(() => {
     const user = auth.currentUser;
@@ -100,30 +119,117 @@ const SettingsScreen = () => {
   }, []);
 
   return (
-    <SafeAreaView style={styles.container} edges={["top"]}>
-      <View style={styles.headerBar}>
+    <SafeAreaView
+      style={[styles.container, { backgroundColor: theme.background }]}
+      edges={["top"]}
+    >
+      <View style={[styles.headerBar, { backgroundColor: theme.primary }]}>
         <TouchableOpacity
           onPress={() => router.back()}
           style={styles.backBtn}
           hitSlop={10}
         >
-          <Ionicons name="chevron-back" size={24} color="#fffaf7" />
+          <Ionicons name="chevron-back" size={24} color={theme.onChrome} />
         </TouchableOpacity>
-        <Text style={styles.header}>Settings</Text>
+        <Text style={[styles.header, { color: theme.onChrome }]}>Settings</Text>
         <View style={{ width: 32 }} />
       </View>
 
       <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
+      {/* First section on purpose: it is the setting people come looking for,
+          and every choice below is previewed live as you tap it. */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>APPEARANCE</Text>
+        <Text style={styles.sectionHint}>
+          {themeChoice === "system"
+            ? `Following your phone — currently ${resolvedTheme === "light" ? "light" : "dark"}`
+            : "Applies to this device only"}
+        </Text>
+
+        <View style={styles.goldCard}>
+          {THEME_OPTIONS.map((option, index) => {
+            const selected = themeChoice === option.id;
+            return (
+              <View key={option.id}>
+                <TouchableOpacity
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}
+                  accessibilityLabel={`${option.label}. ${option.description}`}
+                  style={styles.soundRow}
+                  activeOpacity={0.75}
+                  onPress={() => setThemeChoice(option.id)}
+                >
+                  {/* Three bands of the actual palette — a name alone does not
+                      tell anyone what "Dim" looks like. */}
+                  <View style={styles.themeSwatch}>
+                    {option.swatch.map((shade, shadeIndex) => (
+                      <View
+                        key={`${option.id}-${shadeIndex}`}
+                        style={[styles.themeSwatchBand, { backgroundColor: shade }]}
+                      />
+                    ))}
+                  </View>
+
+                  <View style={{ marginLeft: 12, flex: 1 }}>
+                    <Text style={styles.rowLabel}>{option.label}</Text>
+                    <Text style={styles.rowSubtext}>{option.description}</Text>
+                  </View>
+
+                  {selected ? (
+                    <Ionicons name="checkmark-circle" size={22} color={theme.primary} />
+                  ) : (
+                    <View style={styles.unselectedCircle} />
+                  )}
+                </TouchableOpacity>
+                {index < THEME_OPTIONS.length - 1 && <View style={styles.rowDivider} />}
+              </View>
+            );
+          })}
+        </View>
+      </View>
+
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>ACCOUNT</Text>
         <View style={styles.goldCard}>
           <TouchableOpacity accessibilityRole="button" style={styles.soundRow} onPress={() => router.push({ pathname: "/(main)/(tabs)/ProfileScreen", params: { editTab: "password" } })}>
-            <View style={styles.iconBox}><Ionicons name="lock-closed-outline" size={18} color="#5f0909" /></View>
+            <View style={styles.iconBox}><Ionicons name="lock-closed-outline" size={18} color={theme.primary} /></View>
             <View style={{ marginLeft: 12, flex: 1 }}><Text style={styles.rowLabel}>Change Password</Text><Text style={styles.rowSubtext}>Update your password whenever you need to</Text></View>
-            <Ionicons name="chevron-forward" size={20} color="#9b766c" />
+            <Ionicons name="chevron-forward" size={20} color={theme.textMuted} />
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* Support sits here rather than in the Profile action list: it is not
+          another thing about you, it is where you go when something breaks.
+          A waiting reply is surfaced loudly, though — burying the entry point
+          is fine, burying the answer is not. */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>HELP &amp; SUPPORT</Text>
+        <View style={styles.goldCard}>
+          <TouchableOpacity
+            accessibilityRole="button"
+            style={styles.soundRow}
+            onPress={() => router.push("/(main)/SupportScreen" as any)}
+          >
+            <View style={styles.iconBox}>
+              <Ionicons name="help-buoy-outline" size={18} color={theme.primary} />
+            </View>
+            <View style={{ marginLeft: 12, flex: 1 }}>
+              <Text style={styles.rowLabel}>Help &amp; Support</Text>
+              <Text style={styles.rowSubtext}>
+                Report a problem or check a request you sent
+              </Text>
+            </View>
+            {supportUnread > 0 && (
+              <View style={styles.supportBadge}>
+                <Text style={styles.supportBadgeText}>{supportUnread}</Text>
+              </View>
+            )}
+            <Ionicons name="chevron-forward" size={20} color={theme.textMuted} />
+          </TouchableOpacity>
+        </View>
+      </View>
+
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>PUSH NOTIFICATIONS</Text>
         <View style={styles.goldCard}>
@@ -219,45 +325,46 @@ const SettingsScreen = () => {
   );
 };
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f6f1ed" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.background },
   headerBar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
     paddingHorizontal: 12,
     paddingVertical: 14,
   },
   backBtn: { width: 32, alignItems: "flex-start" },
-  header: { color: "#fffaf7", fontSize: 18, fontWeight: "700" },
+  header: { color: c.onChrome, fontSize: 18, fontWeight: "700" },
   section: { marginHorizontal: 16, marginTop: 20 },
   sectionTitle: {
-    color: "#5f0909",
+    color: c.textSecondary,
     fontWeight: "700",
     fontSize: 12,
     letterSpacing: 0.5,
     marginBottom: 8,
   },
   sectionHint: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     marginBottom: 8,
     marginTop: -4,
   },
   skeletonCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 2,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
     paddingVertical: 6,
     marginTop: 4,
   },
   goldCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 2,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
     paddingHorizontal: 14,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 2 },
@@ -276,25 +383,47 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   rowDivider: { height: 1, backgroundColor: "rgba(224,165,61,0.25)" },
+  // A stack of three bands from the palette itself, so each option shows what
+  // it actually looks like rather than asking people to guess from a name.
+  themeSwatch: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(95,9,9,0.15)",
+  },
+  themeSwatchBand: { flex: 1 },
   iconBox: {
     width: 36,
     height: 36,
     borderRadius: 10,
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.surfaceSunken,
     justifyContent: "center",
     alignItems: "center",
   },
-  rowLabel: { color: "#4d1b17", fontSize: 14, fontWeight: "600" },
-  rowSubtext: { color: "#9b766c", fontSize: 11, marginTop: 2 },
+  rowLabel: { color: c.textPrimary, fontSize: 14, fontWeight: "600" },
+  rowSubtext: { color: c.textMuted, fontSize: 11, marginTop: 2 },
+  supportBadge: {
+    minWidth: 21,
+    height: 21,
+    borderRadius: 999,
+    backgroundColor: c.danger,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+    marginRight: 6,
+  },
+  supportBadgeText: { color: c.onPrimary, fontSize: 11, fontWeight: "900" },
   unselectedCircle: {
     width: 20,
     height: 20,
     borderRadius: 10,
     borderWidth: 2,
-    borderColor: "#e8d3b2",
+    borderColor: c.borderStrong,
   },
   iosNote: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     marginTop: 10,
     fontStyle: "italic",

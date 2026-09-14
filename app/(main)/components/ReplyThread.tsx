@@ -50,6 +50,8 @@ import {
     subscribeToUserDataUpdates,
 } from "@/utils/rbac";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
@@ -75,7 +77,7 @@ import {
     type DocumentData,
     type QueryDocumentSnapshot,
 } from "firebase/firestore";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Animated,
@@ -102,7 +104,7 @@ import ReanimatedAnimated, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { db } from "../../../Firebase_configure";
 import AiReplyCard from "./AiReplyCard";
-import CommentComposer from "./CommentComposer";
+import ReplyComposer from "./ReplyComposer";
 import ConfirmDialog from "./ConfirmDialog";
 import ExpandableText from "./ExpandableText";
 import ImageZoomViewer from "./ImageZoomViewer";
@@ -216,6 +218,7 @@ const ReplyBubbleComponent: React.FC<{
   getFileDisplayName,
   isHighlighted = false,
 }) => {
+  const { styles, theme } = useStyles();
   const [authorData, setAuthorData] = useState<any>(null);
   const [revealed, setRevealed] = useState(false);
 
@@ -887,6 +890,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   currentUser,
   initialReplyId,
 }) => {
+  const { styles, theme } = useStyles();
   const [replies, setReplies] = useState<Reply[]>([]);
   // Mirrors replies for callbacks (like, jump to reply) so they keep the same
   // identity across thread updates instead of redrawing every ReplyBubble.
@@ -2972,7 +2976,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                 composerAnimatedStyle,
               ]}
             >
-              <CommentComposer
+              <ReplyComposer
                 currentUser={
                   currentUser
                 }
@@ -3620,10 +3624,24 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   );
 };
 
-const styles = StyleSheet.create({
+/**
+ * The themed stylesheet for this component.
+ *
+ * Declared once because several memoised sub-components here render chrome,
+ * and each must read the palette itself — handing them a styles object as a
+ * prop would change its identity every render and defeat the memo.
+ */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
 
   header: {
@@ -3632,8 +3650,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#8f3a2b",
-    backgroundColor: "#5f0909",
+    borderBottomColor: c.textSecondary,
+    backgroundColor: c.chrome,
   },
 
   backBtn: {
@@ -3647,13 +3665,13 @@ const styles = StyleSheet.create({
   },
 
   headerTitle: {
-    color: "#fffaf7",
+    color: c.onChrome,
     fontSize: 17,
     fontWeight: "700",
   },
 
   headerSub: {
-    color: "#f0d2c2",
+    color: c.borderStrong,
     fontSize: 12.5,
     marginTop: 2,
   },
@@ -3676,15 +3694,15 @@ const styles = StyleSheet.create({
   dateLine: {
     flex: 1,
     height: 1,
-    backgroundColor: "#c78c7d",
+    backgroundColor: c.textMuted,
   },
 
   dateLabel: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 11.5,
     fontWeight: "600",
     paddingHorizontal: 6,
-    backgroundColor: "#f4e7df",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 8,
     overflow: "hidden",
     paddingVertical: 3,
@@ -3721,7 +3739,7 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 17,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
@@ -3751,7 +3769,7 @@ const styles = StyleSheet.create({
   },
 
   highlightedBubbleWrapper: {
-    shadowColor: "#e0a53d",
+    shadowColor: c.accent,
     shadowOpacity: 0.2,
     shadowRadius: 12,
     elevation: 3,
@@ -3788,34 +3806,34 @@ const styles = StyleSheet.create({
 
   replyPreview: {
     flexDirection: "row",
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
     borderRadius: 10,
     padding: 8,
     marginBottom: 4,
     borderWidth: 1,
-    borderColor: "#e8d3b2",
+    borderColor: c.borderStrong,
   },
 
   replyPreviewRight: {
-    backgroundColor: "#8f3a2b",
+    backgroundColor: c.textSecondary,
   },
 
   replyPreviewBar: {
     width: 3,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderRadius: 2,
     marginRight: 8,
   },
 
   replyPreviewAuthor: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 11,
     fontWeight: "700",
     marginBottom: 2,
   },
 
   replyPreviewText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     lineHeight: 16,
   },
@@ -3828,19 +3846,19 @@ const styles = StyleSheet.create({
   },
 
   bubbleLeft: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderBottomLeftRadius: 4,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
 
   bubbleRight: {
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderBottomRightRadius: 4,
   },
 
   bubbleText: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     lineHeight: 21,
   },
@@ -3850,13 +3868,13 @@ const styles = StyleSheet.create({
   },
 
   replyToggleText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 13,
     fontWeight: "700",
   },
 
   replyToggleTextRight: {
-    color: "#fff7cc",
+    color: c.accentSoft,
   },
 
   gifContainer: {
@@ -3868,7 +3886,7 @@ const styles = StyleSheet.create({
   gifImage: {
     width: 220,
     height: 160,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
 
   imageContainer: {
@@ -3881,7 +3899,7 @@ const styles = StyleSheet.create({
   imagePreview: {
     width: 220,
     height: 160,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
 
   imageCountBadge: {
@@ -3910,7 +3928,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 7,
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     padding: 8,
     borderRadius: 9,
   },
@@ -3922,14 +3940,14 @@ const styles = StyleSheet.create({
 
   docText: {
     flex: 1,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 12,
   },
 
   linkPreview: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     padding: 9,
     borderRadius: 10,
     marginTop: 6,
@@ -3944,14 +3962,14 @@ const styles = StyleSheet.create({
   },
 
   linkTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 12.5,
     fontWeight: "600",
     marginBottom: 1,
   },
 
   linkUrl: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
   },
 
@@ -3961,7 +3979,7 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 3,
     marginTop: 7,
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     paddingHorizontal: 8,
     paddingVertical: 5,
     borderRadius: 8,
@@ -3973,7 +3991,7 @@ const styles = StyleSheet.create({
   },
 
   taggedWith: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
   },
 
@@ -4002,12 +4020,12 @@ const styles = StyleSheet.create({
   },
 
   timeText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
   },
 
   timeTextRight: {
-    color: "#9b766c",
+    color: c.textMuted,
   },
 
   footerActions: {
@@ -4023,21 +4041,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 5,
     borderRadius: 999,
-    backgroundColor: "#f5efeb",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#e8d3b2",
+    borderColor: c.borderStrong,
   },
 
   footerActionText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 11,
     fontWeight: "600",
   },
 
   composerWrapper: {
     borderTopWidth: 0,
-    borderTopColor: "#e8d3b2",
-    backgroundColor: "#fffaf7",
+    borderTopColor: c.borderStrong,
+    backgroundColor: c.surface,
     paddingHorizontal: 8,
     paddingTop: 0,
   },
@@ -4050,27 +4068,27 @@ const styles = StyleSheet.create({
   },
 
   actionSheet: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingHorizontal: 14,
     paddingTop: 10,
     paddingBottom: 18,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
 
   actionSheetHandle: {
     width: 42,
     height: 4,
     borderRadius: 999,
-    backgroundColor: "#d9c5bc",
+    backgroundColor: c.border,
     alignSelf: "center",
     marginBottom: 12,
   },
 
   actionSheetTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 16,
     fontWeight: "700",
     textAlign: "center",
@@ -4084,14 +4102,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 12,
     marginTop: 4,
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#f0e0d7",
+    borderColor: c.border,
   },
 
   actionMenuItemDanger: {
-    backgroundColor: "#fff5f5",
-    borderColor: "#f1d2d2",
+    backgroundColor: c.dangerSoft,
+    borderColor: c.dangerSoft,
   },
 
   actionMenuItemIcon: {
@@ -4100,22 +4118,22 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f4e7df",
+    backgroundColor: c.surfaceSunken,
     marginRight: 11,
   },
 
   actionMenuItemIconDanger: {
-    backgroundColor: "#fde7e7",
+    backgroundColor: c.dangerSoft,
   },
 
   actionMenuItemText: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "600",
   },
 
   actionMenuItemTextDanger: {
-    color: "#c62828",
+    color: c.danger,
   },
 
   editOverlay: {
@@ -4130,11 +4148,11 @@ const styles = StyleSheet.create({
   editSheet: {
     width: "100%",
     maxWidth: 520,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 20,
     padding: 16,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
   },
 
   editHeader: {
@@ -4145,7 +4163,7 @@ const styles = StyleSheet.create({
   },
 
   editTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 17,
     fontWeight: "700",
   },
@@ -4154,10 +4172,10 @@ const styles = StyleSheet.create({
     minHeight: 130,
     maxHeight: 240,
     borderWidth: 1,
-    borderColor: "#e2cfc6",
+    borderColor: c.border,
     borderRadius: 14,
-    backgroundColor: "#fff4ee",
-    color: "#4d1b17",
+    backgroundColor: c.surface,
+    color: c.textPrimary,
     fontSize: 15,
     lineHeight: 21,
     paddingHorizontal: 13,
@@ -4176,14 +4194,14 @@ const styles = StyleSheet.create({
     height: 44,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#d9c5bc",
+    borderColor: c.border,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 14,
   },
 
   editCancelText: {
-    color: "#6d4b43",
+    color: c.textSecondary,
     fontSize: 14,
     fontWeight: "700",
   },
@@ -4192,7 +4210,7 @@ const styles = StyleSheet.create({
     minWidth: 90,
     height: 44,
     borderRadius: 12,
-    backgroundColor: "#8f3a2b",
+    backgroundColor: c.textSecondary,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 16,
@@ -4217,13 +4235,13 @@ const styles = StyleSheet.create({
   },
 
   seenSheet: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     width: "86%",
     maxHeight: "60%",
     overflow: "hidden",
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
 
   seenHeader: {
@@ -4233,11 +4251,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     padding: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#f0e7e2",
+    borderBottomColor: c.border,
   },
 
   seenTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 16,
     fontWeight: "700",
   },
@@ -4248,14 +4266,14 @@ const styles = StyleSheet.create({
     gap: 10,
     padding: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#f0e7e2",
+    borderBottomColor: c.border,
   },
 
   seenAvatar: {
     width: 34,
     height: 34,
     borderRadius: 17,
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     justifyContent: "center",
     alignItems: "center",
   },
@@ -4267,7 +4285,7 @@ const styles = StyleSheet.create({
   },
 
   seenName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "500",
   },
@@ -4280,14 +4298,14 @@ const styles = StyleSheet.create({
   },
 
   emptyTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 17,
     fontWeight: "700",
     marginTop: 14,
   },
 
   emptySub: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13.5,
     marginTop: 6,
   },

@@ -3,6 +3,7 @@ import {
   handlePushNotificationRequest,
 } from "./push.js";
 import { checkKeywordFlags } from "./keywordModeration.js";
+import { checkLinkFlags } from "./linkModeration.js";
 import { checkAccountPassword } from "./accountSetup.js";
 
 const OPENMODERATION_API_URL = "https://api.openmoderation.com/v1/moderation";
@@ -708,13 +709,30 @@ async function moderateTextWithOpenModeration(env, text, scope) {
   // miss for a short, unthreatening-sounding mention.
   const keywordResult = checkKeywordFlags(text);
 
-  const isFlagged = aiFlagged || keywordResult.flagged;
+  // Link rules, layered the same way — see linkModeration.js. OpenModeration
+  // scores what the words mean and has nothing to say about where a URL
+  // leads, so a phishing post reading "enrollment is open!" is clean text
+  // pointing somewhere it should not. This reads the destinations instead.
+  const linkResult = checkLinkFlags(text);
+
+  const isFlagged = aiFlagged || keywordResult.flagged || linkResult.flagged;
   const categories = [
     ...aiCategories,
     ...keywordResult.matches.map((match) => `keyword:${match.category}`),
+    ...linkResult.matches.map((match) => `link:${match.category}`),
   ];
-  const selfHarm = aiSelfHarm; // keyword list currently has no self-harm terms
-  const priority = selfHarm || keywordResult.priority === "critical" ? "critical" : "normal";
+  // Either signal is enough. OpenModeration scores context but is English-
+  // first, so "gusto ko na mamatay" can fall under its threshold; the keyword
+  // list covers that phrasing and nothing else covers the model's reach into
+  // English the list will never match. Whichever fires, the student sees
+  // SafetyDialog.
+  const selfHarm = aiSelfHarm || keywordResult.selfHarm === true;
+  const priority =
+    selfHarm ||
+    keywordResult.priority === "critical" ||
+    linkResult.priority === "critical"
+      ? "critical"
+      : "normal";
 
   // These strings are written to Firestore and read by teachers in the
   // moderation queue, so they say what was found in plain words — no vendor
@@ -746,11 +764,23 @@ async function moderateTextWithOpenModeration(env, text, scope) {
       reasons.push(`${label}: ${[...terms].map((term) => `“${term}”`).join(", ")}`);
     });
   }
+  if (linkResult.matches.length > 0) {
+    // One line per kind of problem, naming the host, so a moderator can
+    // decide from the queue without opening the link.
+    const hostsByLabel = new Map();
+    linkResult.matches.forEach((match) => {
+      if (!hostsByLabel.has(match.label)) hostsByLabel.set(match.label, new Set());
+      hostsByLabel.get(match.label).add(match.host);
+    });
+    hostsByLabel.forEach((hosts, label) => {
+      reasons.push(`${label}: ${[...hosts].join(", ")}`);
+    });
+  }
 
   // Category scores come from OpenModeration; the keyword list is a
   // separate, deterministic check layered on top — see keywordModeration.js.
   // Either one alone is enough to send content to pending.
-  if (scored.length > 0 || keywordResult.matches.length > 0) {
+  if (scored.length > 0 || keywordResult.matches.length > 0 || linkResult.matches.length > 0) {
     console.log(
       "[Moderation] OpenModeration scores:",
       scored
@@ -763,13 +793,15 @@ async function moderateTextWithOpenModeration(env, text, scope) {
         .join(", ") || "(none)",
       "| Keyword matches:",
       keywordResult.matches.map((match) => match.term).join(", ") || "(none)",
+      "| Link matches:",
+      linkResult.matches.map((match) => `${match.category}:${match.host}`).join(", ") || "(none)",
     );
   }
 
   const ruleSource =
-    aiFlagged && keywordResult.flagged
+    aiFlagged && (keywordResult.flagged || linkResult.flagged)
       ? "ai+keyword"
-      : keywordResult.flagged
+      : keywordResult.flagged || linkResult.flagged
         ? "keyword"
         : "ai";
 
@@ -1292,8 +1324,24 @@ function extractContentText(collectionName, content) {
       .filter(Boolean)
       .join("\n");
   }
-  if (collectionName === "posts") return String(content.content || "").trim();
-  return String(content.text || "").trim();
+  if (collectionName === "posts") {
+    // The attached link is a separate field from the body. Appending it means
+    // link rules see the URL a student deliberately attached — previously the
+    // only URL in a post that moderation could not read.
+    return [
+      String(content.content || "").trim(),
+      String(content.link?.url || "").trim(),
+      String(content.link?.title || "").trim(),
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  return [
+    String(content.text || "").trim(),
+    String(content.link?.url || "").trim(),
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function hasMediaRequiringSeparateReview(collectionName, content, callerRole = "student") {

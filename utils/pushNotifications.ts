@@ -189,9 +189,12 @@ const ensureAndroidNotificationChannel = async (
         importance: notifications.AndroidImportance.MAX,
         vibrationPattern: [0, 250, 250, 250],
         lightColor: "#e0a53d",
+        // null is genuinely no sound. `undefined` falls back to the phone's
+        // own default tone, which made the "Silent" option audible and left
+        // no channel a quiet notification could be routed through.
         sound: option.iosFileName
           ? toAndroidSoundResourceName(option.iosFileName)
-          : undefined,
+          : null,
       }),
     ),
   );
@@ -369,6 +372,33 @@ const readEmergencyAlertTargetFromNotificationData = (data: unknown) => {
   };
 };
 
+/**
+ * A mention inside a community server channel. Needs both ids: the server
+ * alone cannot say which channel to open.
+ */
+const readThreadTargetFromNotificationData = (data: unknown) => {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  const record = data as Record<string, unknown>;
+  if (record.entityType !== "thread_message") {
+    return null;
+  }
+
+  const serverId = typeof record.parentId === "string" ? record.parentId : null;
+  const channelId =
+    typeof record.channelId === "string" ? record.channelId : null;
+  if (!serverId || !channelId) {
+    return null;
+  }
+
+  return {
+    pathname: "/(main)/ServerChannelScreen",
+    params: { serverId, channelId },
+  };
+};
+
 const navigateFromNotificationResponse = (
   response: NotificationResponse | null | undefined,
   router: RouterLike,
@@ -384,6 +414,13 @@ const navigateFromNotificationResponse = (
 
   if (emergencyTarget) {
     router.push(emergencyTarget);
+    return true;
+  }
+
+  const threadTarget = readThreadTargetFromNotificationData(notificationData);
+
+  if (threadTarget) {
+    router.push(threadTarget);
     return true;
   }
 

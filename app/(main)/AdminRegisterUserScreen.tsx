@@ -1,3 +1,5 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import { deleteApp, initializeApp } from "firebase/app";
@@ -40,9 +42,9 @@ import {
   parseUserRole,
   type UserRole,
 } from "@/utils/rbac";
+import { normalizeYearLevel, YEAR_LEVELS } from "@/utils/yearLevels";
 
 const ROLES: UserRole[] = ["student", "teacher", "moderator", "admin"];
-const YEAR_LEVELS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "Graduated"];
 
 type Program = {
   id: string;
@@ -149,7 +151,7 @@ async function createManagedUser(input: RegistrationInput): Promise<Registration
   if ((role === "student" || role === "moderator") && !course) {
     throw new Error("A program/course is required for student accounts.");
   }
-  if ((role === "student" || role === "moderator") && !YEAR_LEVELS.includes(yearlvl)) {
+  if ((role === "student" || role === "moderator") && !normalizeYearLevel(yearlvl)) {
     throw new Error("A valid year level is required for student accounts.");
   }
 
@@ -228,6 +230,7 @@ async function createManagedUser(input: RegistrationInput): Promise<Registration
 }
 
 export default function AdminRegisterUserScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const [role, setRole] = useState<UserRole>("student");
   const [firstname, setFirstname] = useState("");
@@ -330,7 +333,7 @@ export default function AdminRegisterUserScreen() {
       showInfo("Select a Program", "Choose a program from Manage Programs before registering this account.");
       return;
     }
-    if ((role === "student" || role === "moderator") && !YEAR_LEVELS.includes(yearlvl)) {
+    if ((role === "student" || role === "moderator") && !normalizeYearLevel(yearlvl)) {
       showInfo("Select Year Level", "Choose a valid year level.");
       return;
     }
@@ -419,14 +422,14 @@ export default function AdminRegisterUserScreen() {
   };
 
   if (authorized === null) {
-    return <SafeAreaView style={styles.container}><ActivityIndicator size="large" color="#e0a53d" /></SafeAreaView>;
+    return <SafeAreaView style={styles.container}><ActivityIndicator size="large" color={theme.accent} /></SafeAreaView>;
   }
 
   if (!authorized) {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.center}>
-          <Ionicons name="lock-closed" size={54} color="#e0a53d" />
+          <Ionicons name="lock-closed" size={54} color={theme.accent} />
           <Text style={styles.title}>Access Denied</Text>
           <Text style={styles.muted}>Only administrators can register users.</Text>
           <TouchableOpacity style={styles.button} onPress={() => router.back()}><Text style={styles.buttonText}>Go Back</Text></TouchableOpacity>
@@ -438,7 +441,7 @@ export default function AdminRegisterUserScreen() {
   const field = (label: string, value: string, onChangeText: (value: string) => void, placeholder: string) => (
     <View style={styles.fieldWrap}>
       <Text style={styles.label}>{label}</Text>
-      <TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor="#b88f87" style={styles.input} />
+      <TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={theme.textMuted} style={styles.input} />
     </View>
   );
 
@@ -446,14 +449,14 @@ export default function AdminRegisterUserScreen() {
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}><Ionicons name="arrow-back" size={24} color="#7a3b2e" /></TouchableOpacity>
+          <TouchableOpacity onPress={() => router.back()}><Ionicons name="arrow-back" size={24} color={theme.textSecondary} /></TouchableOpacity>
           <Text style={styles.headerTitle}>Register User</Text>
           <View style={{ width: 24 }} />
         </View>
 
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           <View style={styles.hero}>
-            <View style={styles.heroIcon}><Ionicons name="person-add-outline" size={26} color="#fffaf7" /></View>
+            <View style={styles.heroIcon}><Ionicons name="person-add-outline" size={26} color={theme.onPrimary} /></View>
             <View style={{ flex: 1 }}>
               <Text style={styles.heroTitle}>Create a campus account</Text>
               <Text style={styles.heroText}>Accounts are created directly with Firebase. Your admin session stays signed in.</Text>
@@ -475,16 +478,16 @@ export default function AdminRegisterUserScreen() {
 
           <Text style={styles.label}>Program / Course {role === "student" || role === "moderator" ? "*" : ""}</Text>
           <View style={styles.searchShell}>
-            <Ionicons name="search-outline" size={18} color="#9b766c" />
+            <Ionicons name="search-outline" size={18} color={theme.textSecondary} />
             <TextInput
               value={course}
               onChangeText={changeCourseText}
               placeholder={programsLoading ? "Loading programs..." : "Search program or code"}
-              placeholderTextColor="#b88f87"
+              placeholderTextColor={theme.textMuted}
               style={styles.searchInput}
               editable={!programsLoading}
             />
-            <TouchableOpacity onPress={() => setProgramPickerOpen((value) => !value)}><Ionicons name={programPickerOpen ? "chevron-up" : "chevron-down"} size={20} color="#7a3b2e" /></TouchableOpacity>
+            <TouchableOpacity onPress={() => setProgramPickerOpen((value) => !value)}><Ionicons name={programPickerOpen ? "chevron-up" : "chevron-down"} size={20} color={theme.textSecondary} /></TouchableOpacity>
           </View>
           {programPickerOpen && (
             <View style={styles.dropdown}>
@@ -500,7 +503,7 @@ export default function AdminRegisterUserScreen() {
           <Text style={styles.label}>Year Level {role === "student" || role === "moderator" ? "*" : ""}</Text>
           <TouchableOpacity style={styles.select} onPress={() => setYearPickerOpen((value) => !value)}>
             <Text style={styles.selectText}>{yearlvl || "Select year level"}</Text>
-            <Ionicons name={yearPickerOpen ? "chevron-up" : "chevron-down"} size={20} color="#7a3b2e" />
+            <Ionicons name={yearPickerOpen ? "chevron-up" : "chevron-down"} size={20} color={theme.textSecondary} />
           </TouchableOpacity>
           {yearPickerOpen && <View style={styles.dropdown}>{YEAR_LEVELS.map((item) => <TouchableOpacity key={item} style={styles.dropdownItemSimple} onPress={() => { setYearlvl(item); setYearPickerOpen(false); }}><Text style={styles.dropdownName}>{item}</Text></TouchableOpacity>)}</View>}
 
@@ -511,12 +514,12 @@ export default function AdminRegisterUserScreen() {
           </View>
 
           <TouchableOpacity style={[styles.primaryButton, loading && { opacity: 0.6 }]} onPress={handleRegister} disabled={loading}>
-            {loading ? <ActivityIndicator color="#fffaf7" /> : <Ionicons name="person-add" size={19} color="#fffaf7" />}
+            {loading ? <ActivityIndicator color={theme.onPrimary} /> : <Ionicons name="person-add" size={19} color={theme.onPrimary} />}
             <Text style={styles.primaryButtonText}>{loading ? "Registering..." : "Register User"}</Text>
           </TouchableOpacity>
 
           <TouchableOpacity style={[styles.secondaryButton, bulkLoading && { opacity: 0.6 }]} onPress={handleImportCsv} disabled={bulkLoading}>
-            {bulkLoading ? <ActivityIndicator color="#7a3b2e" /> : <Ionicons name="cloud-upload-outline" size={19} color="#7a3b2e" />}
+            {bulkLoading ? <ActivityIndicator color={theme.textSecondary} /> : <Ionicons name="cloud-upload-outline" size={19} color={theme.textSecondary} />}
             <Text style={styles.secondaryButtonText}>{bulkLoading ? "Importing..." : "Register from Student CSV"}</Text>
           </TouchableOpacity>
 
@@ -540,48 +543,56 @@ export default function AdminRegisterUserScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#fffaf7" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.surface },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
-  title: { marginTop: 12, fontSize: 24, fontWeight: "800", color: "#4f2921" },
-  muted: { marginTop: 7, color: "#8f6c63", textAlign: "center" },
-  button: { marginTop: 20, paddingHorizontal: 22, paddingVertical: 12, borderRadius: 12, backgroundColor: "#7a3b2e" },
-  buttonText: { color: "#fffaf7", fontWeight: "800" },
-  header: { height: 58, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 18, borderBottomWidth: 1, borderBottomColor: "#ead9d2" },
-  headerTitle: { fontSize: 20, fontWeight: "800", color: "#4f2921" },
+  title: { marginTop: 12, fontSize: 24, fontWeight: "800", color: c.textPrimary },
+  muted: { marginTop: 7, color: c.textSecondary, textAlign: "center" },
+  button: { marginTop: 20, paddingHorizontal: 22, paddingVertical: 12, borderRadius: 12, backgroundColor: c.textSecondary },
+  buttonText: { color: c.surface, fontWeight: "800" },
+  header: { height: 58, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 18, borderBottomWidth: 1, borderBottomColor: c.borderStrong },
+  headerTitle: { fontSize: 20, fontWeight: "800", color: c.textPrimary },
   content: { padding: 18, paddingBottom: 42 },
-  hero: { flexDirection: "row", gap: 12, backgroundColor: "#f7ebe5", borderRadius: 18, padding: 16, marginBottom: 20 },
-  heroIcon: { width: 48, height: 48, borderRadius: 15, alignItems: "center", justifyContent: "center", backgroundColor: "#7a3b2e" },
-  heroTitle: { fontSize: 17, fontWeight: "800", color: "#4f2921" },
-  heroText: { marginTop: 4, color: "#8f6c63", lineHeight: 19 },
+  hero: { flexDirection: "row", gap: 12, backgroundColor: c.surface, borderRadius: 18, padding: 16, marginBottom: 20 },
+  heroIcon: { width: 48, height: 48, borderRadius: 15, alignItems: "center", justifyContent: "center", backgroundColor: c.textSecondary },
+  heroTitle: { fontSize: 17, fontWeight: "800", color: c.textPrimary },
+  heroText: { marginTop: 4, color: c.textSecondary, lineHeight: 19 },
   fieldWrap: { marginBottom: 14 },
-  label: { fontSize: 13, fontWeight: "800", color: "#6d4036", marginBottom: 7, marginTop: 6 },
-  input: { borderWidth: 1, borderColor: "#ddc8c0", backgroundColor: "#fff", borderRadius: 12, paddingHorizontal: 13, paddingVertical: 12, color: "#4f2921" },
+  label: { fontSize: 13, fontWeight: "800", color: c.textSecondary, marginBottom: 7, marginTop: 6 },
+  input: { borderWidth: 1, borderColor: c.borderStrong, backgroundColor: c.surfaceRaised, borderRadius: 12, paddingHorizontal: 13, paddingVertical: 12, color: c.textPrimary },
   choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 },
-  choice: { borderWidth: 1, borderColor: "#ddc8c0", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9, backgroundColor: "#fff" },
-  choiceActive: { backgroundColor: "#7a3b2e", borderColor: "#7a3b2e" },
-  choiceText: { color: "#6d4036", fontWeight: "700" },
-  choiceTextActive: { color: "#fffaf7" },
-  searchShell: { minHeight: 48, borderWidth: 1, borderColor: "#ddc8c0", borderRadius: 12, backgroundColor: "#fff", flexDirection: "row", alignItems: "center", paddingHorizontal: 12, marginBottom: 6 },
-  searchInput: { flex: 1, color: "#4f2921", paddingHorizontal: 9, paddingVertical: 11 },
-  dropdown: { borderWidth: 1, borderColor: "#ead9d2", backgroundColor: "#fff", borderRadius: 12, overflow: "hidden", marginBottom: 14 },
-  dropdownItem: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderBottomWidth: 1, borderBottomColor: "#f1e5e0" },
-  dropdownItemSimple: { padding: 13, borderBottomWidth: 1, borderBottomColor: "#f1e5e0" },
-  dropdownName: { fontWeight: "800", color: "#4f2921" },
-  dropdownCode: { marginTop: 2, color: "#9b766c", fontSize: 12 },
-  dropdownEmpty: { padding: 14, color: "#8f6c63" },
-  programBadge: { width: 44, height: 44, borderRadius: 12, backgroundColor: "#f1dfd7", alignItems: "center", justifyContent: "center" },
-  programBadgeText: { color: "#7a3b2e", fontWeight: "900", fontSize: 11 },
-  select: { minHeight: 48, borderWidth: 1, borderColor: "#ddc8c0", borderRadius: 12, backgroundColor: "#fff", flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 13, marginBottom: 6 },
-  selectText: { color: "#4f2921", fontWeight: "700" },
-  previewCard: { marginTop: 18, backgroundColor: "#f7ebe5", borderRadius: 16, padding: 15 },
-  previewTitle: { fontWeight: "900", color: "#4f2921", marginBottom: 10 },
-  previewLabel: { color: "#8f6c63", fontSize: 12, marginTop: 6 },
-  previewValue: { color: "#4f2921", fontWeight: "800", marginTop: 2 },
-  primaryButton: { marginTop: 16, minHeight: 50, borderRadius: 13, backgroundColor: "#7a3b2e", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 },
-  primaryButtonText: { color: "#fffaf7", fontWeight: "900", fontSize: 15 },
-  secondaryButton: { marginTop: 10, minHeight: 48, borderRadius: 13, borderWidth: 1, borderColor: "#c9a79c", backgroundColor: "#fff", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 },
-  secondaryButtonText: { color: "#7a3b2e", fontWeight: "900" },
-  summary: { marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: "#edf6ed" },
-  summaryText: { textAlign: "center", color: "#37633d", fontWeight: "800" },
+  choice: { borderWidth: 1, borderColor: c.borderStrong, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9, backgroundColor: c.surfaceRaised },
+  choiceActive: { backgroundColor: c.textSecondary, borderColor: c.textSecondary },
+  choiceText: { color: c.textSecondary, fontWeight: "700" },
+  choiceTextActive: { color: c.surface },
+  searchShell: { minHeight: 48, borderWidth: 1, borderColor: c.borderStrong, borderRadius: 12, backgroundColor: c.surfaceRaised, flexDirection: "row", alignItems: "center", paddingHorizontal: 12, marginBottom: 6 },
+  searchInput: { flex: 1, color: c.textPrimary, paddingHorizontal: 9, paddingVertical: 11 },
+  dropdown: { borderWidth: 1, borderColor: c.borderStrong, backgroundColor: c.surfaceRaised, borderRadius: 12, overflow: "hidden", marginBottom: 14 },
+  dropdownItem: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderBottomWidth: 1, borderBottomColor: c.border },
+  dropdownItemSimple: { padding: 13, borderBottomWidth: 1, borderBottomColor: c.border },
+  dropdownName: { fontWeight: "800", color: c.textPrimary },
+  dropdownCode: { marginTop: 2, color: c.textMuted, fontSize: 12 },
+  dropdownEmpty: { padding: 14, color: c.textSecondary },
+  programBadge: { width: 44, height: 44, borderRadius: 12, backgroundColor: c.surfaceSunken, alignItems: "center", justifyContent: "center" },
+  programBadgeText: { color: c.textSecondary, fontWeight: "900", fontSize: 11 },
+  select: { minHeight: 48, borderWidth: 1, borderColor: c.borderStrong, borderRadius: 12, backgroundColor: c.surfaceRaised, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 13, marginBottom: 6 },
+  selectText: { color: c.textPrimary, fontWeight: "700" },
+  previewCard: { marginTop: 18, backgroundColor: c.surface, borderRadius: 16, padding: 15 },
+  previewTitle: { fontWeight: "900", color: c.textPrimary, marginBottom: 10 },
+  previewLabel: { color: c.textSecondary, fontSize: 12, marginTop: 6 },
+  previewValue: { color: c.textPrimary, fontWeight: "800", marginTop: 2 },
+  primaryButton: { marginTop: 16, minHeight: 50, borderRadius: 13, backgroundColor: c.textSecondary, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 },
+  primaryButtonText: { color: c.surface, fontWeight: "900", fontSize: 15 },
+  secondaryButton: { marginTop: 10, minHeight: 48, borderRadius: 13, borderWidth: 1, borderColor: c.borderStrong, backgroundColor: c.surfaceRaised, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 },
+  secondaryButtonText: { color: c.textSecondary, fontWeight: "900" },
+  summary: { marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: c.successSoft },
+  summaryText: { textAlign: "center", color: c.success, fontWeight: "800" },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

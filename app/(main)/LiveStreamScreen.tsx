@@ -1,3 +1,5 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useNavigation } from "expo-router";
 import { useMemo, useState } from "react";
@@ -23,6 +25,7 @@ const getSingleParam = (value?: string | string[]) =>
   Array.isArray(value) ? value[0] : value;
 
 export default function LiveStreamScreen() {
+  const { styles, theme } = useStyles();
   const { serverId, serverName, channelLabel } =
     useLocalSearchParams<LiveStreamRouteParams>();
   const navigation = useNavigation();
@@ -54,7 +57,7 @@ export default function LiveStreamScreen() {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity style={styles.iconButton} onPress={handleBack}>
-          <Ionicons name="arrow-back" size={23} color="#5f0909" />
+          <Ionicons name="arrow-back" size={23} color={theme.primary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Live Stream</Text>
         <View style={styles.headerSpacer} />
@@ -91,7 +94,7 @@ export default function LiveStreamScreen() {
               <Ionicons
                 name="home-outline"
                 size={18}
-                color={audience === "global" ? "#fffaf7" : "#5f0909"}
+                color={audience === "global" ? theme.onPrimary : theme.primary}
               />
               <Text
                 style={[
@@ -114,7 +117,7 @@ export default function LiveStreamScreen() {
               <Ionicons
                 name="people-outline"
                 size={18}
-                color={audience === "server" ? "#fffaf7" : "#5f0909"}
+                color={audience === "server" ? theme.onPrimary : theme.primary}
               />
               <Text
                 style={[
@@ -129,7 +132,7 @@ export default function LiveStreamScreen() {
         </View>
 
         <TouchableOpacity style={styles.primaryButton} onPress={handleBack}>
-          <Ionicons name="arrow-back-outline" size={21} color="#fffaf7" />
+          <Ionicons name="arrow-back-outline" size={21} color={theme.onChrome} />
           <Text style={styles.primaryButtonText}>Go Back</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -137,10 +140,11 @@ export default function LiveStreamScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
   },
   header: {
     flexDirection: "row",
@@ -155,7 +159,7 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 18,
     fontWeight: "700",
-    color: "#fffaf7",
+    color: c.surface,
   },
   headerSpacer: {
     width: 32,
@@ -168,7 +172,7 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
   },
   messageCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     padding: 20,
     marginTop: 16,
@@ -176,25 +180,25 @@ const styles = StyleSheet.create({
   messageTitle: {
     fontSize: 20,
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
     marginBottom: 10,
   },
   messageText: {
     fontSize: 15,
-    color: "#5f0909",
+    color: c.primary,
     lineHeight: 22,
   },
   section: {
     marginTop: 24,
   },
   label: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 13,
     fontWeight: "600",
     marginBottom: 10,
   },
   value: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 16,
     fontWeight: "600",
   },
@@ -205,7 +209,7 @@ const styles = StyleSheet.create({
   segmentButton: {
     flex: 1,
     borderWidth: 1,
-    borderColor: "#fffaf7",
+    borderColor: c.surface,
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
@@ -215,34 +219,41 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   segmentButtonActive: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   segmentButtonDisabled: {
     opacity: 0.4,
   },
   segmentText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 14,
     fontWeight: "600",
   },
   segmentTextActive: {
-    color: "#5f0909",
+    color: c.primary,
   },
   primaryButton: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 10,
-    backgroundColor: "#5f0909",
-    borderColor: "#fffaf7",
+    backgroundColor: c.primary,
+    borderColor: c.surface,
     borderWidth: 1,
     borderRadius: 14,
     paddingVertical: 14,
     marginTop: 28,
   },
   primaryButtonText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 16,
     fontWeight: "700",
   },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

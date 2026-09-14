@@ -10,6 +10,7 @@ import {
     registerDeviceForPushNotifications,
 } from "@/utils/pushNotifications";
 import { AccountSetupProvider, useAccountSetup } from "@/contexts/AccountSetupContext";
+import { ThemeProvider, useTheme } from "@/contexts/ThemeContext";
 import { resolveUserRoleForAuthUser } from "@/utils/rbac";
 import { Image } from "expo-image";
 import { Stack, useRouter, useSegments } from "expo-router";
@@ -22,7 +23,15 @@ import { db } from "../Firebase_configure";
 import AppToast from "./(main)/components/AppToast";
 
 export default function RootLayout() {
-  return <AccountSetupProvider><RootNavigator /></AccountSetupProvider>;
+  // Outermost, so every screen and every modal can read the palette — and so
+  // the stored choice is applied before the first screen paints.
+  return (
+    <ThemeProvider>
+      <AccountSetupProvider>
+        <RootNavigator />
+      </AccountSetupProvider>
+    </ThemeProvider>
+  );
 }
 
 function RootNavigator() {
@@ -33,6 +42,7 @@ function RootNavigator() {
   const segments = useSegments();
   const lastHandledNotificationId = useRef<string | null>(null);
   const appActive = useAppActive();
+  const { colors } = useTheme();
   usePresenceHeartbeat(user);
 
   useEffect(() => {
@@ -202,7 +212,9 @@ function RootNavigator() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <StatusBar style={isAuthChecking ? "light" : "dark"} />
+      {/* The splash is always the dark maroon, so its bar stays light
+          regardless of appearance; after that the palette decides. */}
+      <StatusBar style={isAuthChecking ? "light" : colors.statusBarStyle} />
       <Stack
         screenOptions={{
           headerShown: false,

@@ -2,6 +2,8 @@
 import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { useNetworkStatus } from "@/utils/networkUtils";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
@@ -208,6 +210,7 @@ function CommentItemComponent({
   onTagClick,
   onFilePress,
 }: CommentItemProps) {
+  const { styles, theme } = useStyles();
   const [authorData, setAuthorData] = useState<any>(null);
   const [revealed, setRevealed] = useState(false);
   useEffect(() => {
@@ -477,6 +480,7 @@ const TaggedUsersDisplay = ({
   taggedUsers: { id: string; name: string; studentID: string }[];
   onTagClick?: (userId: string) => void;
 }) => {
+  const { styles, theme } = useStyles();
   const [expanded, setExpanded] = useState(false);
 
   const MAX_VISIBLE = 1;
@@ -525,6 +529,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
   initialReplyId,
   autoOpenReplyThread = false,
 }) => {
+  const { styles, theme } = useStyles();
   const [internalVisible, setInternalVisible] = useState(visible);
   const [comments, setComments] = useState<Comment[]>([]);
   const [displayedComments, setDisplayedComments] = useState<Comment[]>([]);
@@ -1872,15 +1877,29 @@ const CommentModal: React.FC<CommentModalProps> = ({
   );
 };
 
-const styles = StyleSheet.create({
+/**
+ * The themed stylesheet for this component.
+ *
+ * Declared once because several memoised sub-components here render chrome,
+ * and each must read the palette itself — handing them a styles object as a
+ * prop would change its identity every render and defeat the memo.
+ */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   editOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "center", padding: 24 },
-  editCard: { backgroundColor: "#fffaf7", borderRadius: 18, padding: 18, borderWidth: 1, borderColor: "#eadbd4" },
-  editTitle: { color: "#4d1b17", fontSize: 18, fontWeight: "700", marginBottom: 12 },
-  editInput: { minHeight: 120, maxHeight: 220, backgroundColor: "#f6f1ed", borderWidth: 1, borderColor: "#eadbd4", borderRadius: 12, padding: 12, color: "#4d1b17", textAlignVertical: "top" },
+  editCard: { backgroundColor: c.surface, borderRadius: 18, padding: 18, borderWidth: 1, borderColor: c.border },
+  editTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "700", marginBottom: 12 },
+  editInput: { minHeight: 120, maxHeight: 220, backgroundColor: c.surfaceSunken, borderWidth: 1, borderColor: c.border, borderRadius: 12, padding: 12, color: c.textPrimary, textAlignVertical: "top" },
   editButtonRow: { flexDirection: "row", gap: 10, marginTop: 14 },
-  editCancelButton: { flex: 1, minHeight: 44, borderRadius: 12, backgroundColor: "#f0e7e2", alignItems: "center", justifyContent: "center" },
-  editCancelText: { color: "#7a3b2e", fontWeight: "700" },
-  editSaveButton: { flex: 1, minHeight: 44, borderRadius: 12, backgroundColor: "#7a0020", alignItems: "center", justifyContent: "center" },
+  editCancelButton: { flex: 1, minHeight: 44, borderRadius: 12, backgroundColor: c.border, alignItems: "center", justifyContent: "center" },
+  editCancelText: { color: c.textSecondary, fontWeight: "700" },
+  editSaveButton: { flex: 1, minHeight: 44, borderRadius: 12, backgroundColor: c.danger, alignItems: "center", justifyContent: "center" },
   editSaveText: { color: "#fff", fontWeight: "700" },
   modalOverlay: { flex: 1 },
   backdrop: { ...StyleSheet.absoluteFill, backgroundColor: "rgba(0,0,0,0.82)" },
@@ -1890,7 +1909,7 @@ modalContainer: {
   left: 0,
   right: 0,
   height: SCREEN_HEIGHT,
-  backgroundColor: "#f6f1ed",
+  backgroundColor: c.surfaceSunken,
   borderTopLeftRadius: 20,
   borderTopRightRadius: 20,
   overflow: "hidden",
@@ -1900,15 +1919,15 @@ modalContainer: {
     flex: 1,
   },
   dragIndicatorContainer: { alignItems: "center", paddingVertical: 8 },
-  dragIndicator: { width: 40, height: 4, backgroundColor: "#9b766c", borderRadius: 2, opacity: 0.5 },
+  dragIndicator: { width: 40, height: 4, backgroundColor: c.textMuted, borderRadius: 2, opacity: 0.5 },
   header: {
     alignItems: "center",
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#8f3a2b",
-    backgroundColor: "#5f0909",
+    borderBottomColor: c.textSecondary,
+    backgroundColor: c.chrome,
   },
-  headerTitle: { color: "#fffaf7", fontSize: 17, fontWeight: "700" },
+  headerTitle: { color: c.onChrome, fontSize: 17, fontWeight: "700" },
 
   sortContainer: {
     flexDirection: "row",
@@ -1916,8 +1935,8 @@ modalContainer: {
     paddingVertical: 10,
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: "#f0e7e2",
-    backgroundColor: "#fff4ee",
+    borderBottomColor: c.border,
+    backgroundColor: c.surface,
   },
   sortButton: {
     flexDirection: "row",
@@ -1926,16 +1945,16 @@ modalContainer: {
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 20,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   sortButtonActive: {
     backgroundColor: "rgba(224,165,61,0.16)",
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
-  sortText: { color: "#9b766c", fontSize: 13, fontWeight: "600" },
-  sortTextActive: { color: "#e0a53d" },
+  sortText: { color: c.textMuted, fontSize: 13, fontWeight: "600" },
+  sortTextActive: { color: c.accent },
 
   resolutionBanner: {
     flexDirection: "row",
@@ -1943,13 +1962,13 @@ modalContainer: {
     gap: 8,
     paddingHorizontal: 16,
     paddingVertical: 10,
-    backgroundColor: "#eafaf0",
+    backgroundColor: c.successSoft,
     borderBottomWidth: 1,
-    borderBottomColor: "#cdeedb",
+    borderBottomColor: c.successSoft,
   },
   resolutionBannerText: {
     flex: 1,
-    color: "#1f6e3d",
+    color: c.success,
     fontSize: 13,
     fontWeight: "600",
   },
@@ -1963,7 +1982,7 @@ modalContainer: {
     borderRadius: 14,
   },
   resolutionBannerDismissText: {
-    color: "#6b8f7a",
+    color: c.success,
     fontSize: 12,
     fontWeight: "600",
   },
@@ -1971,10 +1990,10 @@ modalContainer: {
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 14,
-    backgroundColor: "#2f9e44",
+    backgroundColor: c.success,
   },
   resolutionBannerConfirmText: {
-    color: "#ffffff",
+    color: c.onPrimary,
     fontSize: 12,
     fontWeight: "700",
   },
@@ -1985,31 +2004,31 @@ modalContainer: {
     alignItems: "center",
     paddingVertical: 80,
   },
-  emptyText: { color: "#4d1b17", fontSize: 17, fontWeight: "700", marginTop: 16 },
-  emptySubText: { color: "#9b766c", fontSize: 14, marginTop: 6 },
+  emptyText: { color: c.textPrimary, fontSize: 17, fontWeight: "700", marginTop: 16 },
+  emptySubText: { color: c.textMuted, fontSize: 14, marginTop: 6 },
   listContent: {
     paddingBottom: 8,
   },
   composerWrapper: {
     borderTopWidth: 0,
-    borderTopColor: "#f0e7e2",
-    backgroundColor: "#fffaf7",
+    borderTopColor: c.border,
+    backgroundColor: c.surface,
     paddingHorizontal: 8,
     paddingTop: 0,
   },
 
   commentItem: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     marginHorizontal: 16,
     marginTop: 12,
     padding: 14,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   commentItemHighlighted: {
-    borderColor: "#e0a53d",
-    shadowColor: "#e0a53d",
+    borderColor: c.accent,
+    shadowColor: c.accent,
     shadowOpacity: 0.18,
     shadowRadius: 12,
     elevation: 3,
@@ -2019,12 +2038,12 @@ modalContainer: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
     borderWidth: 1.5,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   avatarImage: { width: "100%", height: "100%" },
   avatarText: { fontSize: 17, fontWeight: "700" },
@@ -2034,18 +2053,18 @@ modalContainer: {
   roleChip: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1 },
   roleChipText: { fontSize: 10, fontWeight: "700" },
   eyeButton: { padding: 4 },
-  commentRole: { color: "#9b766c", fontSize: 12.5, marginTop: 3 },
+  commentRole: { color: c.textMuted, fontSize: 12.5, marginTop: 3 },
 
   commentContentContainer: { marginTop: 4, marginBottom: 8 },
-  commentText: { color: "#4d1b17", fontSize: 15, lineHeight: 21 },
+  commentText: { color: c.textPrimary, fontSize: 15, lineHeight: 21 },
   seeMoreButton: { alignSelf: "flex-start", marginTop: 4 },
-  seeMoreText: { color: "#e0a53d", fontSize: 14, fontWeight: "600" },
+  seeMoreText: { color: c.accent, fontSize: 14, fontWeight: "600" },
 
   commentGifContainer: { marginTop: 10, marginHorizontal: -14, overflow: "hidden", borderRadius: 12 },
-  commentGif: { width: "100%", height: 220, backgroundColor: "#f6f1ed" },
+  commentGif: { width: "100%", height: 220, backgroundColor: c.surfaceSunken },
 
   commentImageContainer: { position: "relative", marginTop: 10, marginHorizontal: -14, overflow: "hidden", borderRadius: 12 },
-  commentImageFull: { width: "100%", backgroundColor: "#f6f1ed" },
+  commentImageFull: { width: "100%", backgroundColor: c.surfaceSunken },
   imageCountBadge: {
     position: "absolute",
     top: 8,
@@ -2064,43 +2083,43 @@ modalContainer: {
   commentDocItem: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     padding: 10,
     borderRadius: 10,
     gap: 10,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
-  commentDocText: { flex: 1, color: "#4d1b17", fontSize: 13 },
+  commentDocText: { flex: 1, color: c.textPrimary, fontSize: 13 },
 
   commentLinkPreview: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     padding: 12,
     borderRadius: 12,
     marginTop: 10,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
-  commentLinkTitle: { color: "#4d1b17", fontSize: 14, fontWeight: "600", marginBottom: 2 },
-  commentLinkUrl: { color: "#9b766c", fontSize: 12 },
+  commentLinkTitle: { color: c.textPrimary, fontSize: 14, fontWeight: "600", marginBottom: 2 },
+  commentLinkUrl: { color: c.textMuted, fontSize: 12 },
 
   taggedBox: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 12,
     paddingVertical: 8,
     paddingHorizontal: 12,
     marginVertical: 10,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   taggedContent: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 4 },
-  taggedLabel: { color: "#9b766c", fontSize: 13 },
-  taggedName: { color: "#8f3a2b", fontWeight: "600", fontSize: 13.5 },
-  taggedSeparator: { color: "#9b766c", fontSize: 13 },
-  moreCount: { color: "#9b766c", fontWeight: "600", fontSize: 13.5 },
-  showLessText: { color: "#9b766c", fontSize: 13, fontStyle: "italic" },
+  taggedLabel: { color: c.textMuted, fontSize: 13 },
+  taggedName: { color: c.textSecondary, fontWeight: "600", fontSize: 13.5 },
+  taggedSeparator: { color: c.textMuted, fontSize: 13 },
+  moreCount: { color: c.textMuted, fontWeight: "600", fontSize: 13.5 },
+  showLessText: { color: c.textMuted, fontSize: 13, fontStyle: "italic" },
 
   actionRow: {
     flexDirection: "row",
@@ -2109,11 +2128,11 @@ modalContainer: {
     paddingTop: 10,
     marginTop: 8,
     borderTopWidth: 1,
-    borderTopColor: "#f0e7e2",
+    borderTopColor: c.border,
   },
   dragHandleZone: {
   width: "100%",
-  backgroundColor: "#5f0909",
+  backgroundColor: c.chrome,
 },
   actionBtn: {
     flexDirection: "row",
@@ -2122,11 +2141,11 @@ modalContainer: {
     paddingVertical: 6,
     paddingHorizontal: 10,
     borderRadius: 999,
-    backgroundColor: "#f5efeb",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
-  actionText: { color: "#5f0909", fontSize: 13, fontWeight: "600" },
+  actionText: { color: c.primary, fontSize: 13, fontWeight: "600" },
 
   imageViewerContainer: { flex: 1, backgroundColor: "#000", justifyContent: "center", alignItems: "center" },
   imageViewerClose: {

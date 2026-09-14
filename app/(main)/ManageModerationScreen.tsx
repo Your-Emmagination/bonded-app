@@ -1,4 +1,6 @@
 // app/(main)/ManageModerationScreen.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import { onSurface, type ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
@@ -37,11 +39,8 @@ import { friendlyModerationReasons } from "@/utils/moderationReasons";
 import { ListSkeleton } from "./components/Skeleton";
 import { createModerationNotification } from "@/utils/notifications";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
-import {
-  isStaff,
-  resolveUserRoleForAuthUser,
-  type UserRole,
-} from "@/utils/rbac";
+import { isStaff } from "@/utils/rbac";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 
 type ModerationType = "post" | "poll" | "comment" | "reply" | "message";
 type MediaFilter = "all" | "image" | "video" | "url" | "text";
@@ -199,9 +198,12 @@ const matchesMediaFilter = (item: ModerationItem, filter: MediaFilter): boolean 
 const selectionKey = (item: Pick<ModerationItem, "type" | "id">) => `${item.type}:${item.id}`;
 
 export default function ManageModerationScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const [loading, setLoading] = useState(true);
-  const [role, setRole] = useState<UserRole | undefined>(undefined);
+  // Live, so an account that loses staff access is turned out of the queue
+  // instead of keeping it open until the screen is reopened.
+  const role = useCurrentUserRole();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [previewVideoUrl, setPreviewVideoUrl] = useState<string | null>(null);
@@ -237,29 +239,24 @@ export default function ManageModerationScreen() {
   const canManage = isStaff(role);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setLoading(false);
       if (!user) {
-        setLoading(false);
         router.replace("/(main)/(tabs)/HomeScreen");
-        return;
-      }
-
-      try {
-        const nextRole = await resolveUserRoleForAuthUser(user);
-        setRole(nextRole);
-        if (!isStaff(nextRole)) {
-          router.replace("/(main)/(tabs)/HomeScreen");
-        }
-      } catch (error) {
-        console.error("Error loading moderation role:", error);
-        router.replace("/(main)/(tabs)/DashboardScreen");
-      } finally {
-        setLoading(false);
       }
     });
 
     return unsubscribe;
   }, [router]);
+
+  // The role is tracked live above, so losing staff access closes the queue
+  // straight away rather than only on the next visit. undefined means it has
+  // not resolved yet, which must not trigger a redirect.
+  useEffect(() => {
+    if (role !== undefined && !isStaff(role)) {
+      router.replace("/(main)/(tabs)/HomeScreen");
+    }
+  }, [role, router]);
 
   // Critical items — unlimited, always fully loaded.
   useEffect(() => {
@@ -680,7 +677,7 @@ export default function ManageModerationScreen() {
           onPress={() => router.back()}
           activeOpacity={0.8}
         >
-          <Ionicons name="arrow-back" size={21} color="#fffaf6" />
+          <Ionicons name="arrow-back" size={21} color={theme.onPrimary} />
         </TouchableOpacity>
         <View style={styles.topBarCopy}>
           <Text style={styles.topBarEyebrow}>STAFF WORKSPACE</Text>
@@ -706,7 +703,7 @@ export default function ManageModerationScreen() {
           <>
             <View style={styles.heroCard}>
               <View style={styles.heroIcon}>
-                <Ionicons name="shield-checkmark-outline" size={29} color="#d39a32" />
+                <Ionicons name="shield-checkmark-outline" size={29} color={theme.accent} />
               </View>
               <View style={styles.heroCopy}>
                 <Text style={styles.heroTitle}>Review queue</Text>
@@ -720,15 +717,15 @@ export default function ManageModerationScreen() {
 
             <View style={styles.metricRow}>
               <View style={styles.metricCard}>
-                <View style={[styles.metricIcon, { backgroundColor: "#f3e5df" }]}>
-                  <Ionicons name="hourglass-outline" size={18} color="#7a3b2e" />
+                <View style={[styles.metricIcon, { backgroundColor: theme.surfaceSunken }]}>
+                  <Ionicons name="hourglass-outline" size={18} color={theme.textSecondary} />
                 </View>
                 <Text style={styles.metricValue}>{items.length}</Text>
                 <Text style={styles.metricLabel}>Loaded</Text>
               </View>
               <View style={styles.metricCard}>
-                <View style={[styles.metricIcon, { backgroundColor: "#fde6e3" }]}>
-                  <Ionicons name="warning-outline" size={18} color="#a63b32" />
+                <View style={[styles.metricIcon, { backgroundColor: theme.dangerSoft }]}>
+                  <Ionicons name="warning-outline" size={18} color={theme.danger} />
                 </View>
                 <Text style={styles.metricValue}>{criticalCount}</Text>
                 <Text style={styles.metricLabel}>Priority</Text>
@@ -746,7 +743,7 @@ export default function ManageModerationScreen() {
                 active={activeType === "all"}
                 onPress={() => setActiveType("all")}
                 icon="apps-outline"
-                color="#5f0909"
+                color={theme.primary}
               />
               {MODERATION_TYPES.map((type) => (
                 <FilterChip
@@ -756,7 +753,7 @@ export default function ManageModerationScreen() {
                   active={activeType === type}
                   onPress={() => setActiveType(type)}
                   icon={TYPE_META[type].icon}
-                  color={TYPE_META[type].color}
+                  color={onSurface(TYPE_META[type].color, theme)}
                 />
               ))}
             </ScrollView>
@@ -773,7 +770,7 @@ export default function ManageModerationScreen() {
                   active={mediaFilter === filter}
                   onPress={() => setMediaFilter(filter)}
                   icon={MEDIA_FILTER_META[filter].icon}
-                  color="#5f0909"
+                  color={theme.primary}
                 />
               ))}
             </ScrollView>
@@ -801,11 +798,11 @@ export default function ManageModerationScreen() {
                   <Ionicons
                     name={selectMode ? "close" : "checkmark-done-outline"}
                     size={17}
-                    color={selectMode ? "#5f0909" : "#7a3b2e"}
+                    color={selectMode ? theme.primary : theme.textSecondary}
                   />
                 </TouchableOpacity>
                 <View style={styles.filterIconBox}>
-                  <Ionicons name="funnel-outline" size={17} color="#8f6a60" />
+                  <Ionicons name="funnel-outline" size={17} color={theme.textSecondary} />
                 </View>
               </View>
             </View>
@@ -814,7 +811,7 @@ export default function ManageModerationScreen() {
         ListEmptyComponent={
           <View style={styles.emptyCard}>
             <View style={styles.emptyIcon}>
-              <Ionicons name="shield-checkmark-outline" size={31} color="#6f8d79" />
+              <Ionicons name="shield-checkmark-outline" size={31} color={theme.success} />
             </View>
             <Text style={styles.emptyTitle}>Queue is clear</Text>
             <Text style={styles.emptyText}>
@@ -831,10 +828,10 @@ export default function ManageModerationScreen() {
               activeOpacity={0.85}
             >
               {loadingMore ? (
-                <ActivityIndicator size="small" color="#5f0909" />
+                <ActivityIndicator size="small" color={theme.primary} />
               ) : (
                 <>
-                  <Ionicons name="chevron-down-circle-outline" size={17} color="#5f0909" />
+                  <Ionicons name="chevron-down-circle-outline" size={17} color={theme.primary} />
                   <Text style={styles.loadMoreText}>Load more</Text>
                 </>
               )}
@@ -857,7 +854,7 @@ export default function ManageModerationScreen() {
               disabled={bulkBusy}
               activeOpacity={0.85}
             >
-              <Ionicons name="trash-outline" size={16} color="#9b2f2f" />
+              <Ionicons name="trash-outline" size={16} color={theme.danger} />
               <Text style={styles.bulkDeleteText}>Delete</Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -867,9 +864,9 @@ export default function ManageModerationScreen() {
               activeOpacity={0.85}
             >
               {bulkBusy ? (
-                <ActivityIndicator size="small" color="#fff" />
+                <ActivityIndicator size="small" color={theme.onPrimary} />
               ) : (
-                <Ionicons name="checkmark-circle-outline" size={16} color="#fff" />
+                <Ionicons name="checkmark-circle-outline" size={16} color={theme.onPrimary} />
               )}
               <Text style={styles.bulkApproveText}>Approve</Text>
             </TouchableOpacity>
@@ -892,7 +889,7 @@ export default function ManageModerationScreen() {
             onPress={() => setPreviewVideoUrl(null)}
             hitSlop={10}
           >
-            <Ionicons name="close-circle" size={32} color="#fffaf6" />
+            <Ionicons name="close-circle" size={32} color={theme.onPrimary} />
           </TouchableOpacity>
           {/* Reviewing flagged content — start with audio so the moderator
               hears it immediately (not the feed's muted-autoplay default). */}
@@ -947,6 +944,7 @@ const ModerationCard = React.memo(function ModerationCard({
   onPreviewImage: () => void;
   onPreviewVideo: () => void;
 }) {
+  const { styles, theme } = useStyles();
   const [videoThumbFailed, setVideoThumbFailed] = useState(false);
   const videoThumbUrl = !videoThumbFailed ? videoThumb(item.videoUrl, 260) : undefined;
 
@@ -963,12 +961,12 @@ const ModerationCard = React.memo(function ModerationCard({
       <View style={styles.reviewHeader}>
         {selectMode && (
           <View style={[styles.selectCircle, isSelected && styles.selectCircleActive]}>
-            {isSelected && <Ionicons name="checkmark" size={13} color="#fffaf6" />}
+            {isSelected && <Ionicons name="checkmark" size={13} color={theme.onPrimary} />}
           </View>
         )}
-        <View style={[styles.typePill, { backgroundColor: meta.color + "12" }]}>
-          <Ionicons name={meta.icon} size={14} color={meta.color} />
-          <Text style={[styles.typeText, { color: meta.color }]}>
+        <View style={[styles.typePill, { backgroundColor: onSurface(meta.color, theme) + "12" }]}>
+          <Ionicons name={meta.icon} size={14} color={onSurface(meta.color, theme)} />
+          <Text style={[styles.typeText, { color: onSurface(meta.color, theme) }]}>
             {meta.label.slice(0, -1).toUpperCase()}
           </Text>
         </View>
@@ -979,7 +977,7 @@ const ModerationCard = React.memo(function ModerationCard({
 
       {item.priority === "critical" && (
         <View style={styles.criticalBanner}>
-          <Ionicons name="warning" size={15} color="#8d2d28" />
+          <Ionicons name="warning" size={15} color={theme.danger} />
           <Text style={styles.criticalText}>
             PRIORITY SAFETY REVIEW ·{" "}
             {item.safetyType === "weapon"
@@ -1007,7 +1005,7 @@ const ModerationCard = React.memo(function ModerationCard({
             contentFit="cover"
           />
           <View style={styles.imageHint}>
-            <Ionicons name="expand-outline" size={14} color="#fff" />
+            <Ionicons name="expand-outline" size={14} color={theme.onPrimary} />
             <Text style={styles.imageHintText}>Preview</Text>
           </View>
         </TouchableOpacity>
@@ -1030,10 +1028,10 @@ const ModerationCard = React.memo(function ModerationCard({
             <View style={[styles.reviewImage, styles.videoPlaceholder]} />
           )}
           <View style={styles.videoPlayBadge}>
-            <Ionicons name="play-circle" size={40} color="#fffaf6" />
+            <Ionicons name="play-circle" size={40} color={theme.onPrimary} />
           </View>
           <View style={styles.imageHint}>
-            <Ionicons name="videocam-outline" size={14} color="#fff" />
+            <Ionicons name="videocam-outline" size={14} color={theme.onPrimary} />
             <Text style={styles.imageHintText}>Video</Text>
           </View>
         </TouchableOpacity>
@@ -1041,7 +1039,7 @@ const ModerationCard = React.memo(function ModerationCard({
 
       {!!item.linkUrl && (
         <View style={styles.linkPreview}>
-          <Ionicons name="link-outline" size={15} color="#5f0909" />
+          <Ionicons name="link-outline" size={15} color={theme.primary} />
           <Text style={styles.linkPreviewText} numberOfLines={1}>
             {item.linkTitle || item.linkUrl}
           </Text>
@@ -1050,7 +1048,7 @@ const ModerationCard = React.memo(function ModerationCard({
 
       {!!item.reasons.length && (
         <View style={styles.reasonBox}>
-          <Ionicons name="alert-circle-outline" size={15} color="#9a473c" />
+          <Ionicons name="alert-circle-outline" size={15} color={theme.textSecondary} />
           <View style={styles.reasonChips}>
             {item.reasons.map((reason) => (
               <View key={reason} style={styles.reasonChip}>
@@ -1068,7 +1066,7 @@ const ModerationCard = React.memo(function ModerationCard({
             onPress={onOpenUser}
             activeOpacity={0.82}
           >
-            <Ionicons name="person-circle-outline" size={16} color="#79521c" />
+            <Ionicons name="person-circle-outline" size={16} color={theme.accent} />
             <Text style={styles.profileButtonText}>
               {item.isAnonymous ? "Real user" : "Profile"}
             </Text>
@@ -1085,9 +1083,9 @@ const ModerationCard = React.memo(function ModerationCard({
             activeOpacity={0.82}
           >
             {isBusy ? (
-              <ActivityIndicator size="small" color="#fff" />
+              <ActivityIndicator size="small" color={theme.onPrimary} />
             ) : (
-              <Ionicons name="checkmark-circle-outline" size={16} color="#fff" />
+              <Ionicons name="checkmark-circle-outline" size={16} color={theme.onPrimary} />
             )}
             <Text style={styles.approveButtonText}>
               {isOwnContent ? "Own content" : "Approve"}
@@ -1100,7 +1098,7 @@ const ModerationCard = React.memo(function ModerationCard({
             disabled={isBusy}
             activeOpacity={0.82}
           >
-            <Ionicons name="trash-outline" size={16} color="#9b2f2f" />
+            <Ionicons name="trash-outline" size={16} color={theme.danger} />
           </TouchableOpacity>
         </View>
       )}
@@ -1123,13 +1121,14 @@ function FilterChip({
   icon: keyof typeof Ionicons.glyphMap;
   color: string;
 }) {
+  const { styles, theme } = useStyles();
   return (
     <TouchableOpacity
       style={[styles.filterChip, active && styles.filterChipActive]}
       onPress={onPress}
       activeOpacity={0.82}
     >
-      <Ionicons name={icon} size={14} color={active ? "#fffaf6" : color} />
+      <Ionicons name={icon} size={14} color={active ? theme.onPrimary : onSurface(color, theme)} />
       <Text style={[styles.filterText, active && styles.filterTextActive]}>
         {label}
       </Text>
@@ -1149,17 +1148,18 @@ function FilterChip({
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#5f0909" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: c.primary },
   topBar: {
     minHeight: 66,
     paddingHorizontal: 16,
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderBottomWidth: 1,
-    borderBottomColor: "#7e2724",
+    borderBottomColor: c.primary,
   },
   backButton: {
     width: 40,
@@ -1171,13 +1171,13 @@ const styles = StyleSheet.create({
   },
   topBarCopy: { flex: 1 },
   topBarEyebrow: {
-    color: "#d9b27a",
+    color: c.accent,
     fontSize: 10,
     fontWeight: "900",
     letterSpacing: 1.1,
   },
   topBarTitle: {
-    color: "#fffaf6",
+    color: c.background,
     fontSize: 22,
     fontWeight: "900",
     marginTop: 2,
@@ -1191,7 +1191,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.08)",
   },
   selectModeButtonActive: {
-    backgroundColor: "#e2aa45",
+    backgroundColor: c.accent,
   },
   queueBadge: {
     minWidth: 40,
@@ -1200,33 +1200,33 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#e2aa45",
+    backgroundColor: c.accent,
   },
-  queueBadgeText: { color: "#5f0909", fontSize: 14, fontWeight: "900" },
-  body: { flex: 1, backgroundColor: "#f8f3ef" },
+  queueBadgeText: { color: c.primary, fontSize: 14, fontWeight: "900" },
+  body: { flex: 1, backgroundColor: c.surfaceSunken },
   content: { padding: 16, paddingBottom: 100 },
   heroCard: {
     flexDirection: "row",
     gap: 14,
     padding: 18,
     borderRadius: 22,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#ead8ce",
+    borderColor: c.borderStrong,
     marginBottom: 14,
   },
   heroIcon: {
     width: 52,
     height: 52,
     borderRadius: 18,
-    backgroundColor: "#f7ead4",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
   },
   heroCopy: { flex: 1 },
-  heroTitle: { color: "#4c1b14", fontSize: 18, fontWeight: "900" },
+  heroTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "900" },
   heroText: {
-    color: "#87685f",
+    color: c.textMuted,
     fontSize: 12.5,
     lineHeight: 19,
     marginTop: 5,
@@ -1234,10 +1234,10 @@ const styles = StyleSheet.create({
   metricRow: { flexDirection: "row", gap: 10, marginBottom: 14 },
   metricCard: {
     flex: 1,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 17,
     borderWidth: 1,
-    borderColor: "#eee1da",
+    borderColor: c.border,
     padding: 14,
   },
   metricIcon: {
@@ -1248,9 +1248,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 10,
   },
-  metricValue: { color: "#4c1b14", fontSize: 22, fontWeight: "900" },
+  metricValue: { color: c.textPrimary, fontSize: 22, fontWeight: "900" },
   metricLabel: {
-    color: "#92736a",
+    color: c.textSecondary,
     fontSize: 11.5,
     fontWeight: "700",
     marginTop: 2,
@@ -1262,15 +1262,15 @@ const styles = StyleSheet.create({
     gap: 6,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: "#e7d5cc",
-    backgroundColor: "#fffaf6",
+    borderColor: c.borderStrong,
+    backgroundColor: c.background,
     paddingLeft: 11,
     paddingRight: 8,
     paddingVertical: 8,
   },
-  filterChipActive: { backgroundColor: "#6e1717", borderColor: "#6e1717" },
-  filterText: { color: "#70483e", fontSize: 11.5, fontWeight: "800" },
-  filterTextActive: { color: "#fffaf6" },
+  filterChipActive: { backgroundColor: c.primary, borderColor: c.primary },
+  filterText: { color: c.textSecondary, fontSize: 11.5, fontWeight: "800" },
+  filterTextActive: { color: c.background },
   filterCount: {
     minWidth: 22,
     height: 22,
@@ -1278,11 +1278,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 5,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f0e3dc",
+    backgroundColor: c.border,
   },
   filterCountActive: { backgroundColor: "rgba(255,255,255,0.18)" },
-  filterCountText: { color: "#7a3b2e", fontSize: 10.5, fontWeight: "900" },
-  filterCountTextActive: { color: "#fffaf6" },
+  filterCountText: { color: c.textSecondary, fontSize: 10.5, fontWeight: "900" },
+  filterCountTextActive: { color: c.background },
   sectionHeading: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -1290,8 +1290,8 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     marginTop: 6,
   },
-  sectionTitle: { color: "#4c1b14", fontSize: 17, fontWeight: "900" },
-  sectionSubtitle: { color: "#98766d", fontSize: 11.5, marginTop: 3 },
+  sectionTitle: { color: c.textPrimary, fontSize: 17, fontWeight: "900" },
+  sectionSubtitle: { color: c.textMuted, fontSize: 11.5, marginTop: 3 },
   sectionActions: {
     flexDirection: "row",
     alignItems: "center",
@@ -1303,13 +1303,13 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f0e3dc",
+    backgroundColor: c.border,
     borderWidth: 1,
-    borderColor: "#e4d3c9",
+    borderColor: c.borderStrong,
   },
   sectionSelectButtonActive: {
-    backgroundColor: "#e2aa45",
-    borderColor: "#d49a35",
+    backgroundColor: c.accent,
+    borderColor: c.accent,
   },
   filterIconBox: {
     width: 36,
@@ -1317,29 +1317,29 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f8efe9",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#ebdcd3",
+    borderColor: c.borderStrong,
   },
   reviewCard: {
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 19,
     borderWidth: 1,
-    borderColor: "#eadfd9",
+    borderColor: c.border,
     padding: 14,
     marginBottom: 11,
   },
   skeletonContent: { padding: 16 },
   skeletonCard: {
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 19,
     borderWidth: 1,
-    borderColor: "#eadfd9",
+    borderColor: c.border,
     padding: 16,
     marginBottom: 11,
   },
-  reviewCardCritical: { borderColor: "#dfa8a2", backgroundColor: "#fff9f7" },
-  reviewCardSelected: { borderColor: "#e2aa45", borderWidth: 2, backgroundColor: "#fffaf0" },
+  reviewCardCritical: { borderColor: c.borderStrong, backgroundColor: c.surfaceRaised },
+  reviewCardSelected: { borderColor: c.accent, borderWidth: 2, backgroundColor: c.surfaceRaised },
   reviewHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -1351,11 +1351,11 @@ const styles = StyleSheet.create({
     height: 22,
     borderRadius: 11,
     borderWidth: 2,
-    borderColor: "#d7bdae",
+    borderColor: c.borderStrong,
     alignItems: "center",
     justifyContent: "center",
   },
-  selectCircleActive: { backgroundColor: "#e2aa45", borderColor: "#e2aa45" },
+  selectCircleActive: { backgroundColor: c.accent, borderColor: c.accent },
   typePill: {
     flexDirection: "row",
     alignItems: "center",
@@ -1368,7 +1368,7 @@ const styles = StyleSheet.create({
   authorText: {
     flex: 1,
     textAlign: "right",
-    color: "#95766d",
+    color: c.textSecondary,
     fontSize: 11.5,
     fontWeight: "700",
   },
@@ -1376,24 +1376,24 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 7,
-    backgroundColor: "#fde6e3",
+    backgroundColor: c.dangerSoft,
     borderWidth: 1,
-    borderColor: "#e7b4ae",
+    borderColor: c.danger,
     borderRadius: 11,
     paddingHorizontal: 10,
     paddingVertical: 8,
     marginBottom: 10,
   },
-  criticalText: { flex: 1, color: "#8d2d28", fontSize: 10.5, fontWeight: "900" },
-  reviewBody: { color: "#4c1b14", fontSize: 13.5, lineHeight: 20 },
+  criticalText: { flex: 1, color: c.danger, fontSize: 10.5, fontWeight: "900" },
+  reviewBody: { color: c.textPrimary, fontSize: 13.5, lineHeight: 20 },
   reviewImage: {
     width: "100%",
     height: 172,
     borderRadius: 14,
     marginTop: 12,
-    backgroundColor: "#f0e2da",
+    backgroundColor: c.surfaceSunken,
   },
-  videoPlaceholder: { backgroundColor: "#2c2320" },
+  videoPlaceholder: { backgroundColor: c.chrome },
   videoPlayBadge: {
     position: "absolute",
     top: 0,
@@ -1416,34 +1416,34 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     backgroundColor: "rgba(45,18,14,0.72)",
   },
-  imageHintText: { color: "#fff", fontSize: 10.5, fontWeight: "800" },
+  imageHintText: { color: c.onPrimary, fontSize: 10.5, fontWeight: "800" },
   linkPreview: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#f7ead4",
+    backgroundColor: c.accentSoft,
     borderRadius: 11,
     padding: 10,
     marginTop: 12,
   },
-  linkPreviewText: { flex: 1, color: "#5f0909", fontSize: 12, fontWeight: "700" },
+  linkPreviewText: { flex: 1, color: c.primary, fontSize: 12, fontWeight: "700" },
   reasonBox: {
     flexDirection: "row",
     alignItems: "flex-start",
     gap: 7,
-    backgroundColor: "#fbf1ed",
+    backgroundColor: c.surface,
     borderRadius: 11,
     padding: 10,
     marginTop: 11,
   },
   reasonChips: { flex: 1, flexDirection: "row", flexWrap: "wrap", gap: 6 },
   reasonChip: {
-    backgroundColor: "#f6e2db",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 8,
     paddingHorizontal: 8,
     paddingVertical: 3,
   },
-  reasonText: { color: "#9a473c", fontSize: 11, lineHeight: 16 },
+  reasonText: { color: c.textSecondary, fontSize: 11, lineHeight: 16 },
   actionRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1460,18 +1460,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 11,
   },
   profileButton: {
-    backgroundColor: "#faf0de",
+    backgroundColor: c.accentSoft,
     borderWidth: 1,
-    borderColor: "#e0bf80",
+    borderColor: c.accent,
   },
-  profileButtonText: { color: "#79521c", fontSize: 11.5, fontWeight: "800" },
-  approveButton: { flex: 1, backgroundColor: "#356a59" },
-  approveButtonText: { color: "#fff", fontSize: 11.5, fontWeight: "900" },
+  profileButtonText: { color: c.accent, fontSize: 11.5, fontWeight: "800" },
+  approveButton: { flex: 1, backgroundColor: c.success },
+  approveButtonText: { color: c.onPrimary, fontSize: 11.5, fontWeight: "900" },
   deleteButton: {
     width: 42,
-    backgroundColor: "#fff0ee",
+    backgroundColor: c.dangerSoft,
     borderWidth: 1,
-    borderColor: "#efc4bf",
+    borderColor: c.danger,
   },
   disabledButton: { opacity: 0.45 },
   loadMoreButton: {
@@ -1479,14 +1479,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#e7d5cc",
+    borderColor: c.borderStrong,
     borderRadius: 14,
     paddingVertical: 13,
     marginTop: 4,
   },
-  loadMoreText: { color: "#5f0909", fontSize: 13, fontWeight: "800" },
+  loadMoreText: { color: c.primary, fontSize: 13, fontWeight: "800" },
   bulkBar: {
     position: "absolute",
     left: 14,
@@ -1495,7 +1495,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#2c1410",
+    backgroundColor: c.chrome,
     borderRadius: 18,
     paddingHorizontal: 16,
     paddingVertical: 12,
@@ -1505,7 +1505,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     elevation: 8,
   },
-  bulkBarText: { color: "#fffaf6", fontSize: 13.5, fontWeight: "800" },
+  bulkBarText: { color: c.background, fontSize: 13.5, fontWeight: "800" },
   bulkBarActions: { flexDirection: "row", gap: 8 },
   bulkActionButton: {
     flexDirection: "row",
@@ -1517,8 +1517,8 @@ const styles = StyleSheet.create({
   },
   bulkDeleteButton: { backgroundColor: "rgba(255,255,255,0.12)" },
   bulkDeleteText: { color: "#ffb3ab", fontSize: 12, fontWeight: "800" },
-  bulkApproveButton: { backgroundColor: "#356a59" },
-  bulkApproveText: { color: "#fff", fontSize: 12, fontWeight: "900" },
+  bulkApproveButton: { backgroundColor: c.success },
+  bulkApproveText: { color: c.onPrimary, fontSize: 12, fontWeight: "900" },
   videoPreviewOverlay: {
     position: "absolute",
     top: 0,
@@ -1539,9 +1539,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     padding: 30,
     borderRadius: 19,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#eadfd9",
+    borderColor: c.border,
   },
   emptyIcon: {
     width: 58,
@@ -1549,10 +1549,17 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#eaf1ec",
+    backgroundColor: c.successSoft,
   },
-  emptyTitle: { color: "#4c1b14", fontSize: 15, fontWeight: "900", marginTop: 12 },
-  emptyText: { color: "#98766d", fontSize: 11.5, lineHeight: 17, textAlign: "center", marginTop: 5 },
+  emptyTitle: { color: c.textPrimary, fontSize: 15, fontWeight: "900", marginTop: 12 },
+  emptyText: { color: c.textMuted, fontSize: 11.5, lineHeight: 17, textAlign: "center", marginTop: 5 },
   loadingState: { flex: 1, alignItems: "center", justifyContent: "center" },
-  loadingText: { color: "#f2d7c8", fontSize: 12.5, fontWeight: "700", marginTop: 12 },
+  loadingText: { color: c.onPrimary, fontSize: 12.5, fontWeight: "700", marginTop: 12 },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

@@ -3,8 +3,10 @@
 // Matches the app's existing cream/maroon visual language so it drops into any
 // screen (comments, posts, events, admin user management, etc.) without
 // needing bespoke Alert.alert() calls scattered throughout the codebase.
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
-import React from "react";
+import React, { useMemo } from "react";
 import {
     ActivityIndicator,
     Modal,
@@ -55,6 +57,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   icon,
   singleAction = false,
 }) => {
+  const { styles, theme: palette } = useStyles();
   const resolvedVariant: ConfirmDialogVariant = variant ?? (destructive ? "destructive" : "info");
   const variantTheme: Record<
     ConfirmDialogVariant,
@@ -62,23 +65,23 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   > = {
     success: {
       icon: "checkmark-circle-outline",
-      accent: "#2e7d32",
-      iconBackground: "rgba(46,125,50,0.12)",
+      accent: palette.success,
+      iconBackground: palette.successSoft,
     },
     info: {
       icon: "information-circle-outline",
-      accent: "#e0a53d",
-      iconBackground: "rgba(224,165,61,0.16)",
+      accent: palette.accent,
+      iconBackground: palette.accentSoft,
     },
     warning: {
       icon: "warning-outline",
-      accent: "#b56a16",
-      iconBackground: "rgba(181,106,22,0.14)",
+      accent: palette.warning,
+      iconBackground: palette.accentSoft,
     },
     destructive: {
       icon: "alert-circle-outline",
-      accent: "#b3261e",
-      iconBackground: "rgba(179,38,30,0.12)",
+      accent: palette.danger,
+      iconBackground: palette.dangerSoft,
     },
   };
   const theme = variantTheme[resolvedVariant];
@@ -137,7 +140,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
               activeOpacity={0.85}
             >
               {loading ? (
-                <ActivityIndicator size="small" color="#fffaf7" />
+                <ActivityIndicator size="small" color={palette.onPrimary} />
               ) : (
                 <Text style={styles.confirmButtonText}>{confirmText}</Text>
               )}
@@ -149,10 +152,18 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   );
 };
 
-const styles = StyleSheet.create({
+/** Themed stylesheet for this component. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: c.scrim,
     justifyContent: "center",
     alignItems: "center",
     paddingHorizontal: 28,
@@ -160,14 +171,14 @@ const styles = StyleSheet.create({
   card: {
     width: "100%",
     maxWidth: 360,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     paddingTop: 22,
     paddingHorizontal: 20,
     paddingBottom: 16,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   iconCircle: {
     width: 52,
@@ -178,13 +189,13 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   title: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 17,
     fontWeight: "700",
     textAlign: "center",
   },
   description: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 14,
     textAlign: "center",
     marginTop: 6,
@@ -204,12 +215,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   cancelButton: {
-    backgroundColor: "#f5efeb",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
-  cancelButtonText: { color: "#5f0909", fontSize: 15, fontWeight: "600" },
-  confirmButtonText: { color: "#fffaf7", fontSize: 15, fontWeight: "700" },
+  cancelButtonText: { color: c.primary, fontSize: 15, fontWeight: "600" },
+  confirmButtonText: { color: c.onPrimary, fontSize: 15, fontWeight: "700" },
   buttonDisabled: { opacity: 0.7 },
 });
 

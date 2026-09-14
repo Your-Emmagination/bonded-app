@@ -1,4 +1,6 @@
 // app/(main)/BookmarksScreen.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import {
     removeLikeNotification,
@@ -9,7 +11,8 @@ import {
     saveCachedBookmarks,
 } from "@/utils/offlineStorage";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
-import { getStudentDocIdFromAuthUser, resolveUserRoleForAuthUser, UserRole } from "@/utils/rbac";
+import { getStudentDocIdFromAuthUser } from "@/utils/rbac";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
@@ -20,13 +23,7 @@ import {
     onSnapshot,
     updateDoc,
 } from "firebase/firestore";
-import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     FlatList,
     Linking,
@@ -146,11 +143,13 @@ const matchesDateRange = (post: Post, range: DateRangeFilter): boolean => {
 
 
 export default function BookmarksScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const relativeTimeNow = useRelativeTimeNow();
 
   const [user, setUser] = useState<User | null>(auth.currentUser);
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>();
+  // Live, so a role change is reflected without reopening the screen.
+  const currentUserRole = useCurrentUserRole();
   const [bookmarkedPostIds, setBookmarkedPostIds] = useState<string[]>([]);
   const [postsById, setPostsById] = useState<Record<string, Post>>({});
   const [loading, setLoading] = useState(true);
@@ -204,14 +203,8 @@ export default function BookmarksScreen() {
 
   // ─── Auth + role ──────────────────────────────────────────────────────
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser);
-      if (nextUser) {
-        const role = await resolveUserRoleForAuthUser(nextUser);
-        setCurrentUserRole(role as UserRole);
-      } else {
-        setCurrentUserRole(undefined);
-      }
     });
     return unsubscribe;
   }, []);
@@ -556,7 +549,7 @@ export default function BookmarksScreen() {
           onPress={() => router.back()}
           activeOpacity={0.75}
         >
-          <Ionicons name="chevron-back" size={24} color="#4f1c17" />
+          <Ionicons name="chevron-back" size={24} color={theme.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Saved Posts</Text>
         <TouchableOpacity
@@ -564,7 +557,7 @@ export default function BookmarksScreen() {
           onPress={() => setShowFilterSheet(true)}
           activeOpacity={0.75}
         >
-          <Ionicons name="options-outline" size={22} color="#4f1c17" />
+          <Ionicons name="options-outline" size={22} color={theme.textPrimary} />
           {activeFilterCount > 0 && (
             <View style={styles.filterCountBadge}>
               <Text style={styles.filterCountBadgeText}>{activeFilterCount}</Text>
@@ -576,7 +569,7 @@ export default function BookmarksScreen() {
       {/* Above the branches, so it also shows when nothing was saved yet. */}
       {isOffline && (
         <View style={styles.offlineStatusBar}>
-          <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+          <Ionicons name="cloud-offline-outline" size={14} color={theme.warning} />
           <Text style={styles.offlineStatusText}>Offline mode</Text>
         </View>
       )}
@@ -587,7 +580,7 @@ export default function BookmarksScreen() {
         <FeedSkeleton count={4} />
       ) : bookmarkedPostIds.length === 0 ? (
         <View style={styles.centerState}>
-          <Ionicons name="bookmark-outline" size={40} color="#c9a89c" />
+          <Ionicons name="bookmark-outline" size={40} color={theme.textMuted} />
           <Text style={styles.emptyTitle}>No saved posts yet</Text>
           <Text style={styles.emptySubtitle}>
             Tap the bookmark icon on a post to save it here.
@@ -595,7 +588,7 @@ export default function BookmarksScreen() {
         </View>
       ) : savedPosts.length === 0 ? (
         <View style={styles.centerState}>
-          <Ionicons name="search-outline" size={40} color="#c9a89c" />
+          <Ionicons name="search-outline" size={40} color={theme.textMuted} />
           <Text style={styles.emptyTitle}>No matches</Text>
           <Text style={styles.emptySubtitle}>
             Nothing matches this filter. Try a different type or date range.
@@ -665,7 +658,7 @@ export default function BookmarksScreen() {
             <View style={styles.sheetHeader}>
               <Text style={styles.sheetTitle}>Filter &amp; sort</Text>
               <TouchableOpacity onPress={() => setShowFilterSheet(false)} hitSlop={10}>
-                <Ionicons name="close" size={22} color="#8f6a60" />
+                <Ionicons name="close" size={22} color={theme.textMuted} />
               </TouchableOpacity>
             </View>
 
@@ -684,7 +677,7 @@ export default function BookmarksScreen() {
                       <Ionicons
                         name={option.icon}
                         size={15}
-                        color={active ? "#fffaf7" : "#7d5c53"}
+                        color={active ? theme.onPrimary : theme.textMuted}
                       />
                       <Text style={[styles.chipText, active && styles.chipTextActive]}>
                         {option.label}
@@ -727,13 +720,13 @@ export default function BookmarksScreen() {
                       <Ionicons
                         name={option.icon}
                         size={18}
-                        color={active ? "#5f0909" : "#7d5c53"}
+                        color={active ? theme.primary : theme.textMuted}
                       />
                       <Text style={[styles.sortRowText, active && styles.sortRowTextActive]}>
                         {option.label}
                       </Text>
                       {active && (
-                        <Ionicons name="checkmark-circle" size={18} color="#5f0909" />
+                        <Ionicons name="checkmark-circle" size={18} color={theme.primary} />
                       )}
                     </TouchableOpacity>
                   );
@@ -755,8 +748,9 @@ export default function BookmarksScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f6f1ed" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.surfaceSunken },
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -764,11 +758,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: "#ead8cf",
-    backgroundColor: "#fffaf7",
+    borderBottomColor: c.border,
+    backgroundColor: c.surface,
   },
   backButton: { width: 36, height: 36, justifyContent: "center", alignItems: "center" },
-  headerTitle: { color: "#4f1c17", fontSize: 17, fontWeight: "700" },
+  headerTitle: { color: c.textPrimary, fontSize: 17, fontWeight: "700" },
   filterButton: {
     width: 36,
     height: 36,
@@ -784,11 +778,11 @@ const styles = StyleSheet.create({
     height: 16,
     borderRadius: 8,
     paddingHorizontal: 3,
-    backgroundColor: "#a61f1f",
+    backgroundColor: c.danger,
     alignItems: "center",
     justifyContent: "center",
   },
-  filterCountBadgeText: { color: "#fffaf7", fontSize: 10, fontWeight: "800" },
+  filterCountBadgeText: { color: c.surface, fontSize: 10, fontWeight: "800" },
   listContent: { paddingBottom: 24 },
   centerState: {
     flex: 1,
@@ -797,16 +791,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
     gap: 8,
   },
-  emptyTitle: { color: "#4f1c17", fontSize: 16, fontWeight: "700", marginTop: 4 },
-  emptySubtitle: { color: "#8f6a60", fontSize: 13.5, textAlign: "center", lineHeight: 19 },
+  emptyTitle: { color: c.textPrimary, fontSize: 16, fontWeight: "700", marginTop: 4 },
+  emptySubtitle: { color: c.textMuted, fontSize: 13.5, textAlign: "center", lineHeight: 19 },
   clearFiltersButton: {
     marginTop: 6,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderRadius: 12,
     paddingHorizontal: 18,
     paddingVertical: 10,
   },
-  clearFiltersButtonText: { color: "#fffaf7", fontSize: 13.5, fontWeight: "700" },
+  clearFiltersButtonText: { color: c.surface, fontSize: 13.5, fontWeight: "700" },
 
   // ─── Filter / sort bottom sheet ─────────────────────────────────────
   sheetOverlay: {
@@ -815,7 +809,7 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
   },
   sheetCard: {
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
     paddingHorizontal: 18,
@@ -827,7 +821,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: "#e0cfc6",
+    backgroundColor: c.borderStrong,
     alignSelf: "center",
     marginBottom: 12,
   },
@@ -837,9 +831,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginBottom: 8,
   },
-  sheetTitle: { color: "#4d1b17", fontSize: 18, fontWeight: "800" },
+  sheetTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "800" },
   sheetSectionTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "800",
     marginTop: 16,
@@ -856,53 +850,59 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     borderRadius: 999,
     paddingHorizontal: 13,
     paddingVertical: 8,
   },
-  chipActive: { backgroundColor: "#5f0909", borderColor: "#5f0909" },
-  chipText: { color: "#7d5c53", fontSize: 13, fontWeight: "700" },
-  chipTextActive: { color: "#fffaf7" },
+  chipActive: { backgroundColor: c.primary, borderColor: c.primary },
+  chipText: { color: c.textMuted, fontSize: 13, fontWeight: "700" },
+  chipTextActive: { color: c.surface },
   sortList: { gap: 8 },
   sortRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
   },
-  sortRowActive: { borderColor: "#5f0909", backgroundColor: "#fdf1ee" },
-  sortRowText: { flex: 1, color: "#4d1b17", fontSize: 14, fontWeight: "600" },
-  sortRowTextActive: { color: "#5f0909", fontWeight: "800" },
+  sortRowActive: { borderColor: c.primary, backgroundColor: c.dangerSoft },
+  sortRowText: { flex: 1, color: c.textPrimary, fontSize: 14, fontWeight: "600" },
+  sortRowTextActive: { color: c.primary, fontWeight: "800" },
   sheetDoneButton: {
     marginTop: 18,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderRadius: 14,
     paddingVertical: 14,
     alignItems: "center",
   },
-  sheetDoneButtonText: { color: "#fffaf7", fontSize: 15, fontWeight: "800" },
+  sheetDoneButtonText: { color: c.surface, fontSize: 15, fontWeight: "800" },
   offlineStatusBar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#ffedd5",
+    backgroundColor: c.accentSoft,
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#fed7aa",
+    borderBottomColor: c.borderStrong,
     gap: 6,
   },
   offlineStatusText: {
     fontSize: 12,
     fontWeight: "600",
-    color: "#9a3412",
+    color: c.warning,
   },
 });
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

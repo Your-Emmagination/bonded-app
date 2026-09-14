@@ -1,7 +1,7 @@
 import type { User } from "firebase/auth";
-import { collection, doc, getDoc, getDocs, limit, query, where } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, limit, onSnapshot, query, where } from "firebase/firestore";
 import { auth, db } from "../Firebase_configure";
-import { getCachedMyProfile } from "./offlineStorage";
+import { getCachedMyProfile, saveCachedMyProfile } from "./offlineStorage";
 
 export type UserRole = "student" | "moderator" | "teacher" | "admin";
 
@@ -258,6 +258,139 @@ export function subscribeToUserDataUpdates(listener: UserDataListener): () => vo
   };
 }
 
+/**
+ * Watches somebody else's profile document.
+ *
+ * Conversations store a copy of each participant's name, role and picture in
+ * `participantDetails`, written once when the conversation is created. It was
+ * never refreshed, so changing your profile picture updated it everywhere in
+ * the app except the chats you were already in — the person you were talking
+ * to kept seeing the picture you had on the day you first messaged.
+ *
+ * The snapshot is still the starting value, because it renders instantly and
+ * works offline. This corrects it a moment later.
+ *
+ * `documentId` is the students document id — the same thing stored as
+ * `studentID`, which is not always the auth uid.
+ */
+export function subscribeToStudentProfile(
+  documentId: string | null | undefined,
+  onProfile: (data: UserData | null) => void,
+): () => void {
+  if (!documentId) {
+    onProfile(null);
+    return () => {};
+  }
+
+  return onSnapshot(
+    doc(db, "students", documentId),
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        onProfile(null);
+        return;
+      }
+      // Built field by field, the same way subscribeToCurrentUserProfile does,
+      // rather than spreading the raw document — a students record carries
+      // fields UserData does not describe.
+      const record = snapshot.data() as StudentRecord;
+      const userData: UserData = {
+        studentID: record.studentID || documentId,
+        firstname: record.firstname || "",
+        lastname: record.lastname || "",
+        email: record.email || "",
+        course: record.course,
+        yearlvl: record.yearlvl,
+        role: normalizeUserRole(record.role),
+        permissions: record.permissions || getDefaultPermissions(),
+        profileImage: record.profileImage || null,
+        bio: record.bio,
+        isOnline: record.isOnline,
+        userId: record.userId || documentId,
+      };
+
+      // Feed the shared cache too, so other screens reading this person by id
+      // get the corrected picture without their own listener.
+      updateUserDataCache([documentId], userData);
+      onProfile(userData);
+    },
+    (error) => {
+      // A profile that cannot be read is not worth breaking a chat over; the
+      // stored snapshot stays on screen.
+      console.warn("Profile subscription failed:", error);
+    },
+  );
+}
+
+/**
+ * Watches the signed-in user's own profile document and keeps every copy of it
+ * honest.
+ *
+ * An admin changing someone's role writes to that student document, and
+ * nothing told the affected device about it. The in-memory cache never
+ * expired, and the saved profile re-seeded that cache on the next cold start,
+ * so a promoted or demoted account could hold its old role indefinitely —
+ * Firestore rules granting or refusing access the interface disagreed with.
+ *
+ * Refreshing the memory cache, the saved copy, and the reported role together
+ * means a role change lands within a moment, with no restart and no reinstall.
+ */
+export function subscribeToCurrentUserProfile(
+  user: User | null | undefined,
+  onProfile: (data: UserData | null) => void,
+): () => void {
+  const docId = getStudentDocIdFromAuthUser(user);
+  if (!user || !docId) {
+    onProfile(null);
+    return () => {};
+  }
+
+  return onSnapshot(
+    doc(db, "students", docId),
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        onProfile(null);
+        return;
+      }
+
+      const record = snapshot.data() as StudentRecord;
+      const userData: UserData = {
+        studentID: record.studentID || docId,
+        firstname: record.firstname || "",
+        lastname: record.lastname || "",
+        email: record.email || user.email || "",
+        course: record.course,
+        yearlvl: record.yearlvl,
+        role: normalizeUserRole(record.role),
+        permissions: record.permissions || getDefaultPermissions(),
+        profileImage: record.profileImage || (user as any).photoURL || null,
+        bio: record.bio,
+        isOnline: record.isOnline,
+        userId: user.uid,
+      };
+
+      // Overwrite every key this profile is cached under, so no screen can go
+      // on reading the previous role from a different key.
+      cacheUserDataForKeys(userData, [
+        user.uid,
+        docId,
+        userData.studentID,
+        user.email?.split("@")[0]?.trim(),
+      ]);
+      // The saved copy seeds the cache on the next cold start, so it has to
+      // move too — otherwise the old role returns after a restart.
+      void saveCachedMyProfile(user.uid, record);
+      // Merges nothing new, but notifies subscribeToUserDataUpdates listeners
+      // so screens holding their own copy refresh as well.
+      updateUserDataCache([user.uid, docId], userData);
+
+      onProfile(userData);
+    },
+    (error) => {
+      console.warn("[rbac] Own-profile subscription failed:", error);
+    },
+  );
+}
+
 export function invalidateUserDataCache(userId?: string | null): void {
   if (userId) {
     userDataCache.delete(userId);
@@ -295,6 +428,87 @@ export function updateUserDataCache(
 export function peekUserData(userId: string | null | undefined): UserData | null | undefined {
   if (!userId) return undefined;
   return userDataCache.get(userId);
+}
+
+// Firestore caps an "in" filter at 30 values, so lookups are chunked.
+const USER_LOOKUP_CHUNK = 30;
+
+/**
+ * Loads any of these people who are not in the cache yet, in as few reads as
+ * possible, and tells every listener about them.
+ *
+ * Screens that show other people store a copy of their name and picture at
+ * write time — a notification keeps the avatar its actor had when it was
+ * created, and never learns about a new one. The cache is what the live-
+ * rendering screens read through, but only three things ever filled it: your
+ * own profile, a profile you opened, and the chat partner in an open DM.
+ * Anybody else stayed unknown, so their stored copy was all a screen had.
+ *
+ * `ids` are auth uids. The students collection is keyed by studentID with the
+ * uid in a `userId` field, so this matches on that field rather than the
+ * document id — looking them up by document id silently returns nothing.
+ *
+ * Safe to call on every render pass: ids already cached cost nothing, and a
+ * screen with twenty distinct actors costs one query.
+ */
+export async function ensureUserData(
+  ids: (string | null | undefined)[],
+): Promise<void> {
+  const missing = Array.from(
+    new Set(
+      ids
+        .map((id) => id?.trim())
+        .filter((id): id is string => !!id && !userDataCache.has(id)),
+    ),
+  );
+  if (missing.length === 0) return;
+
+  for (let index = 0; index < missing.length; index += USER_LOOKUP_CHUNK) {
+    const chunk = missing.slice(index, index + USER_LOOKUP_CHUNK);
+    try {
+      const snapshot = await getDocs(
+        query(collection(db, "students"), where("userId", "in", chunk)),
+      );
+
+      const found = new Set<string>();
+      snapshot.forEach((docSnap) => {
+        const record = docSnap.data() as StudentRecord;
+        const uid = String(record.userId || "");
+        if (!uid) return;
+        found.add(uid);
+
+        const userData: UserData = {
+          studentID: record.studentID || docSnap.id,
+          firstname: record.firstname || "",
+          lastname: record.lastname || "",
+          email: record.email || "",
+          course: record.course,
+          yearlvl: record.yearlvl,
+          role: normalizeUserRole(record.role),
+          permissions: record.permissions || getDefaultPermissions(),
+          profileImage: record.profileImage || null,
+          bio: record.bio,
+          isOnline: record.isOnline,
+          userId: uid,
+        };
+
+        // Cached under both keys, because callers hold whichever they have.
+        cacheUserDataForKeys(userData, [uid, docSnap.id, record.studentID]);
+        updateUserDataCache([uid, docSnap.id], userData);
+      });
+
+      // Remember the misses too. Without this an id with no student document
+      // — a deleted account, the AI assistant — is looked up again on every
+      // single render.
+      chunk.forEach((id) => {
+        if (!found.has(id)) userDataCache.set(id, null);
+      });
+    } catch (error) {
+      // A failed lookup just means the stored copy keeps showing.
+      console.warn("[rbac] ensureUserData lookup failed:", error);
+      return;
+    }
+  }
 }
 
 export async function getUserData(userId: string): Promise<UserData | null> {

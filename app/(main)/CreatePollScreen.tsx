@@ -1,9 +1,23 @@
 // CreatePollScreen.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { addDoc, collection, doc, getDoc, serverTimestamp, updateDoc } from "firebase/firestore";
-import React, { useCallback, useMemo, useState } from "react";
+import {
+  addDoc,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  orderBy,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where,
+} from "firebase/firestore";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   BackHandler,
@@ -29,6 +43,8 @@ import {
 } from "@/utils/contentModeration";
 import SafetyDialog from "./components/SafetyDialog";
 import { emitHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
+import { getTimeAgo } from "@/utils/relativeTime";
+import { findMostSimilar } from "@/utils/textSimilarity";
 import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
 import {
   canUsePostFlair,
@@ -56,6 +72,25 @@ type FormSection = {
   type: string;
 };
 
+type RecentPoll = {
+  id: string;
+  question: string;
+  createdAt: any;
+};
+
+// How alike two questions must be before the hint appears, as a share of
+// significant words. Tuned against real campus phrasing: at 0.5 "best canteen
+// food?" and "best canteen seat?" score exactly 0.50 and warn about each
+// other, which is wrong — they are different questions on one topic. 0.6
+// keeps those quiet while still catching a reposted question with a word or
+// two changed. A hint nobody trusts is worse than no hint, so this errs
+// toward missing a borderline repeat rather than nagging about a new one.
+const SIMILAR_POLL_THRESHOLD = 0.6;
+
+// Only warn about polls from the last term or so. A question asked two years
+// ago is not a repeat, it is a new year group being asked again.
+const SIMILAR_POLL_WINDOW_DAYS = 120;
+
 type CreatePollRouteParams = {
   editPollId?: string | string[];
   serverId?: string | string[];
@@ -68,7 +103,13 @@ const getSingleParam = (value?: string | string[]) =>
   Array.isArray(value) ? value[0] : value;
 
 const CreatePollScreen = () => {
+  const { styles, theme } = useStyles();
   const [question, setQuestion] = useState("");
+  // Recent polls, read once, used only to warn about repeats. Kept small and
+  // fetched once rather than listened to: this is a writing aid, not data the
+  // screen has to keep current.
+  const [recentPolls, setRecentPolls] = useState<RecentPoll[]>([]);
+  const [similarPollDismissed, setSimilarPollDismissed] = useState(false);
   const [selectedFlair, setSelectedFlair] =
     useState<PostFlairId>(DEFAULT_POST_FLAIR);
   const [authorRole, setAuthorRole] = useState<string>("student");
@@ -542,10 +583,64 @@ const CreatePollScreen = () => {
     [allowMultiple, filledOptionsCount],
   );
 
+  // Read once on open. Bounded by both a date window and a row limit so this
+  // never becomes an unbounded read as the poll history grows.
+  useEffect(() => {
+    let cancelled = false;
+
+    const since = new Date();
+    since.setDate(since.getDate() - SIMILAR_POLL_WINDOW_DAYS);
+
+    getDocs(
+      query(
+        collection(db, "polls"),
+        where("createdAt", ">=", since),
+        orderBy("createdAt", "desc"),
+        limit(60),
+      ),
+    )
+      .then((snapshot) => {
+        if (cancelled) return;
+        setRecentPolls(
+          snapshot.docs.map((pollDoc) => ({
+            id: pollDoc.id,
+            question: String(pollDoc.data()?.question || ""),
+            createdAt: pollDoc.data()?.createdAt,
+          })),
+        );
+      })
+      .catch((error) => {
+        // A missing hint is not worth an error message to the user.
+        console.warn("Similar-poll lookup failed:", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const similarPoll = useMemo(() => {
+    if (similarPollDismissed) return null;
+    // Nothing useful to compare until the question is actually a question.
+    if (question.trim().length < 12) return null;
+
+    const match = findMostSimilar(
+      question,
+      recentPolls.filter(
+        (poll) => poll.id !== selectedEditPollId && poll.question,
+      ),
+      (poll) => poll.question,
+      SIMILAR_POLL_THRESHOLD,
+    );
+
+    return match?.item ?? null;
+  }, [question, recentPolls, selectedEditPollId, similarPollDismissed]);
+
   const formSections: FormSection[] = useMemo(
     () => [
       { id: "flair", type: "flair" },
       { id: "question", type: "question" },
+      ...(similarPoll ? [{ id: "similarPoll", type: "similarPoll" }] : []),
       { id: "image", type: "image" },
       { id: "options-header", type: "optionsHeader" },
       ...options.map((opt) => ({ id: opt.id, type: "option" })),
@@ -555,7 +650,7 @@ const CreatePollScreen = () => {
       { id: "spacing", type: "spacing" },
       { id: "button", type: "button" },
     ],
-    [options],
+    [options, similarPoll],
   );
 
   const renderItem: ListRenderItem<FormSection> = ({ item }) => {
@@ -607,6 +702,30 @@ const CreatePollScreen = () => {
 
       case "question":
         return <QuestionSection question={question} setQuestion={setQuestion} />;
+
+      case "similarPoll":
+        // A hint, never a block: the poll can still be posted as written.
+        // Repeating a poll is sometimes exactly right (a new year group, a
+        // changed timetable), so this only makes sure it is a choice.
+        return similarPoll ? (
+          <View style={styles.similarPollCard}>
+            <Ionicons name="repeat-outline" size={18} color={theme.accent} />
+            <View style={styles.similarPollCopy}>
+              <Text style={styles.similarPollTitle}>
+                A similar poll ran {getTimeAgo(similarPoll.createdAt)}
+              </Text>
+              <Text style={styles.similarPollQuestion} numberOfLines={2}>
+                {`“${similarPoll.question}”`}
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setSimilarPollDismissed(true)}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons name="close" size={17} color={theme.textMuted} />
+            </TouchableOpacity>
+          </View>
+        ) : null;
 
       case "image":
         return (
@@ -710,7 +829,7 @@ const CreatePollScreen = () => {
       >
         <View style={styles.header}>
           <TouchableOpacity onPress={() => router.back()}>
-            <Ionicons name="arrow-back" size={24} color="#e0a53d" />
+            <Ionicons name="arrow-back" size={24} color={theme.accent} />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{isEditMode ? "Edit Poll" : "Create Poll"}</Text>
           <View style={{ width: 24 }} />
@@ -720,7 +839,7 @@ const CreatePollScreen = () => {
           <Ionicons
             name={selectedServerId ? "server-outline" : "home-outline"}
             size={18}
-            color="#e0a53d"
+            color={theme.accent}
           />
           <View style={styles.scopeCopy}>
             <Text style={styles.scopeLabel}>
@@ -736,7 +855,7 @@ const CreatePollScreen = () => {
 
         {loadingEditPoll ? (
           <View style={styles.loadingEditContainer}>
-            <ActivityIndicator color="#e0a53d" />
+            <ActivityIndicator color={theme.accent} />
           </View>
         ) : (
         <FlatList
@@ -786,21 +905,25 @@ const QuestionSection = ({
 }: {
   question: string;
   setQuestion: (q: string) => void;
-}) => (
-  <View style={styles.section}>
-    <Text style={styles.sectionTitle}>Ask a question</Text>
-    <TextInput
-      style={styles.questionInput}
-      placeholder="Enter your poll question"
-      placeholderTextColor="#9b766c"
-      value={question}
-      onChangeText={setQuestion}
-      multiline
-      maxLength={200}
-    />
-    <Text style={styles.charCount}>{question.length} / 200</Text>
-  </View>
-);
+}) => {
+  const { styles, theme } = useStyles();
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>Ask a question</Text>
+      <TextInput
+        style={styles.questionInput}
+        placeholder="Enter your poll question"
+        placeholderTextColor={theme.textMuted}
+        value={question}
+        onChangeText={setQuestion}
+        multiline
+        maxLength={200}
+      />
+      <Text style={styles.charCount}>{question.length} / 200</Text>
+    </View>
+  );
+};
 
 const ImageSection = ({
   pollImage,
@@ -812,38 +935,42 @@ const ImageSection = ({
   uploading: boolean;
   onPickImage: () => void;
   onRemoveImage: () => void;
-}) => (
-  <View style={styles.section}>
-    <Text style={styles.sectionTitle}>Poll Image (Optional)</Text>
-    {pollImage ? (
-      <View style={styles.imagePreviewContainer}>
-        <Image source={{ uri: pollImage }} style={styles.imagePreview} />
+}) => {
+  const { styles, theme } = useStyles();
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>Poll Image (Optional)</Text>
+      {pollImage ? (
+        <View style={styles.imagePreviewContainer}>
+          <Image source={{ uri: pollImage }} style={styles.imagePreview} />
+          <TouchableOpacity
+            style={styles.removeImageBtn}
+            onPress={onRemoveImage}
+            disabled={uploading}
+          >
+            <Ionicons name="close" size={24} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      ) : (
         <TouchableOpacity
-          style={styles.removeImageBtn}
-          onPress={onRemoveImage}
+          style={styles.uploadImageBtn}
+          onPress={onPickImage}
           disabled={uploading}
         >
-          <Ionicons name="close" size={24} color="#fff" />
+          {uploading ? (
+            <ActivityIndicator color={theme.accent} />
+          ) : (
+            <>
+              <Ionicons name="image-outline" size={24} color={theme.accent} />
+              <Text style={styles.uploadImageText}>Add Image to Poll</Text>
+            </>
+          )}
         </TouchableOpacity>
-      </View>
-    ) : (
-      <TouchableOpacity
-        style={styles.uploadImageBtn}
-        onPress={onPickImage}
-        disabled={uploading}
-      >
-        {uploading ? (
-          <ActivityIndicator color="#e0a53d" />
-        ) : (
-          <>
-            <Ionicons name="image-outline" size={24} color="#e0a53d" />
-            <Text style={styles.uploadImageText}>Add Image to Poll</Text>
-          </>
-        )}
-      </TouchableOpacity>
-    )}
-  </View>
-);
+      )}
+    </View>
+  );
+};
 
 const OptionItem = ({
   option,
@@ -859,33 +986,37 @@ const OptionItem = ({
   locked: boolean;
   onUpdateOption: (id: string, text: string) => void;
   onRemoveOption: (id: string) => void;
-}) => (
-  <View style={styles.optionContainer}>
-    <View style={styles.optionInputWrapper}>
-      <Text style={styles.optionLabel}>Choice {index + 1}</Text>
-      <View style={styles.optionRow}>
-        <TextInput
-          style={styles.optionInput}
-          placeholder={`Option ${index + 1}`}
-          placeholderTextColor="#9b766c"
-          value={option.text}
-          onChangeText={(text) => onUpdateOption(option.id, text)}
-          maxLength={25}
-          editable={!locked}
-        />
-        {canDelete && (
-          <TouchableOpacity
-            onPress={() => onRemoveOption(option.id)}
-            style={styles.deleteBtn}
-          >
-            <Ionicons name="close" size={20} color="#e0a53d" />
-          </TouchableOpacity>
-        )}
+}) => {
+  const { styles, theme } = useStyles();
+
+  return (
+    <View style={styles.optionContainer}>
+      <View style={styles.optionInputWrapper}>
+        <Text style={styles.optionLabel}>Choice {index + 1}</Text>
+        <View style={styles.optionRow}>
+          <TextInput
+            style={styles.optionInput}
+            placeholder={`Option ${index + 1}`}
+            placeholderTextColor={theme.textMuted}
+            value={option.text}
+            onChangeText={(text) => onUpdateOption(option.id, text)}
+            maxLength={25}
+            editable={!locked}
+          />
+          {canDelete && (
+            <TouchableOpacity
+              onPress={() => onRemoveOption(option.id)}
+              style={styles.deleteBtn}
+            >
+              <Ionicons name="close" size={20} color={theme.accent} />
+            </TouchableOpacity>
+          )}
+        </View>
+        <Text style={styles.charCount}>{option.text.length} / 25</Text>
       </View>
-      <Text style={styles.charCount}>{option.text.length} / 25</Text>
     </View>
-  </View>
-);
+  );
+};
 
 const AddOptionButton = ({
   disabled,
@@ -893,16 +1024,20 @@ const AddOptionButton = ({
 }: {
   disabled: boolean;
   onPress: () => void;
-}) => (
-  <TouchableOpacity
-    style={[styles.addOptionBtn, disabled && styles.addOptionBtnDisabled]}
-    onPress={onPress}
-    disabled={disabled}
-  >
-    <Ionicons name="add" size={20} color="#e0a53d" />
-    <Text style={styles.addOptionText}>Add Option</Text>
-  </TouchableOpacity>
-);
+}) => {
+  const { styles, theme } = useStyles();
+
+  return (
+    <TouchableOpacity
+      style={[styles.addOptionBtn, disabled && styles.addOptionBtnDisabled]}
+      onPress={onPress}
+      disabled={disabled}
+    >
+      <Ionicons name="add" size={20} color={theme.accent} />
+      <Text style={styles.addOptionText}>Add Option</Text>
+    </TouchableOpacity>
+  );
+};
 
 const SettingsSection = ({
   allowMultiple,
@@ -928,91 +1063,95 @@ const SettingsSection = ({
   allowAdding: boolean;
   setAllowAdding: (v: boolean) => void;
   choiceSettingsLocked: boolean;
-}) => (
-  <View style={styles.section}>
-    <Text style={styles.sectionTitle}>Poll Settings</Text>
+}) => {
+  const { styles } = useStyles();
 
-    {/* Allow multiple answers */}
-    <View style={styles.settingRow}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.settingLabel}>Allow multiple answers</Text>
-        <Text style={styles.settingSubtext}>
-          Users can select multiple options
-        </Text>
-      </View>
-      <TouchableOpacity
-        style={[styles.toggle, allowMultiple && styles.toggleActive]}
-        onPress={() => setAllowMultiple(!allowMultiple)}
-        disabled={choiceSettingsLocked}
-      >
-        <View
-          style={[
-            styles.toggleThumb,
-            allowMultiple && styles.toggleThumbActive,
-          ]}
-        />
-      </TouchableOpacity>
-    </View>
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>Poll Settings</Text>
 
-    {/* Max selections dropdown */}
-    {allowMultiple && (
-      <View style={styles.maxSelectionsWrapper}>
-        <Text style={styles.settingLabel}>Maximum answers per user</Text>
-        <DropDownPicker
-          open={maxSelectionsOpen}
-          value={maxSelections}
-          items={maxSelectionsOptions}
-          setOpen={(open) => {
-            if (typeof open === "function") {
-              const newOpen = open(maxSelectionsOpen);
-              if (newOpen) onOpenDropdown();
-              else setMaxSelectionsOpen(false);
-            } else {
-              if (open) onOpenDropdown();
-              else setMaxSelectionsOpen(false);
-            }
-          }}
-          setValue={(callback) => {
-            const newValue =
-              typeof callback === "function" ? callback(maxSelections) : callback;
-            setMaxSelections(newValue);
-          }}
-          style={styles.dropdown}
-          dropDownContainerStyle={styles.dropdownContainer}
-          textStyle={styles.dropdownText}
-          placeholderStyle={styles.placeholderStyle}
-          arrowIconStyle={styles.arrowIcon}
-          tickIconStyle={styles.tickIcon}
-          listItemContainerStyle={styles.listItemContainer}
-          listItemLabelStyle={styles.listItemLabel}
-          zIndex={3000}
-          zIndexInverse={1000}
+      {/* Allow multiple answers */}
+      <View style={styles.settingRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.settingLabel}>Allow multiple answers</Text>
+          <Text style={styles.settingSubtext}>
+            Users can select multiple options
+          </Text>
+        </View>
+        <TouchableOpacity
+          style={[styles.toggle, allowMultiple && styles.toggleActive]}
+          onPress={() => setAllowMultiple(!allowMultiple)}
           disabled={choiceSettingsLocked}
-        />
+        >
+          <View
+            style={[
+              styles.toggleThumb,
+              allowMultiple && styles.toggleThumbActive,
+            ]}
+          />
+        </TouchableOpacity>
       </View>
-    )}
 
-    {/* Allow users to add new options */}
-    <View style={[styles.settingRow, { marginTop: 14 }]}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.settingLabel}>
-          Allow users to add new options
-        </Text>
-        <Text style={styles.settingSubtext}>
-          Users can submit their own choices in this poll
-        </Text>
+      {/* Max selections dropdown */}
+      {allowMultiple && (
+        <View style={styles.maxSelectionsWrapper}>
+          <Text style={styles.settingLabel}>Maximum answers per user</Text>
+          <DropDownPicker
+            open={maxSelectionsOpen}
+            value={maxSelections}
+            items={maxSelectionsOptions}
+            setOpen={(open) => {
+              if (typeof open === "function") {
+                const newOpen = open(maxSelectionsOpen);
+                if (newOpen) onOpenDropdown();
+                else setMaxSelectionsOpen(false);
+              } else {
+                if (open) onOpenDropdown();
+                else setMaxSelectionsOpen(false);
+              }
+            }}
+            setValue={(callback) => {
+              const newValue =
+                typeof callback === "function" ? callback(maxSelections) : callback;
+              setMaxSelections(newValue);
+            }}
+            style={styles.dropdown}
+            dropDownContainerStyle={styles.dropdownContainer}
+            textStyle={styles.dropdownText}
+            placeholderStyle={styles.placeholderStyle}
+            arrowIconStyle={styles.arrowIcon}
+            tickIconStyle={styles.tickIcon}
+            listItemContainerStyle={styles.listItemContainer}
+            listItemLabelStyle={styles.listItemLabel}
+            zIndex={3000}
+            zIndexInverse={1000}
+            disabled={choiceSettingsLocked}
+          />
+        </View>
+      )}
+
+      {/* Allow users to add new options */}
+      <View style={[styles.settingRow, { marginTop: 14 }]}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.settingLabel}>
+            Allow users to add new options
+          </Text>
+          <Text style={styles.settingSubtext}>
+            Users can submit their own choices in this poll
+          </Text>
+        </View>
+        <TouchableOpacity
+          style={[styles.toggle, allowAdding && styles.toggleActive]}
+          onPress={() => setAllowAdding(!allowAdding)}
+        >
+          <View
+            style={[styles.toggleThumb, allowAdding && styles.toggleThumbActive]}
+          />
+        </TouchableOpacity>
       </View>
-      <TouchableOpacity
-        style={[styles.toggle, allowAdding && styles.toggleActive]}
-        onPress={() => setAllowAdding(!allowAdding)}
-      >
-        <View
-          style={[styles.toggleThumb, allowAdding && styles.toggleThumbActive]}
-        />
-      </TouchableOpacity>
     </View>
-  </View>
-);
+  );
+};
 
 const DurationSection = ({
   duration,
@@ -1028,40 +1167,44 @@ const DurationSection = ({
   minutesOpen: boolean;
   onUpdateDuration: (field: "days" | "hours" | "minutes", value: number) => void;
   onOpenDropdown: (dropdown: "days" | "hours" | "minutes") => void;
-}) => (
-  <View style={[styles.section, { zIndex: 1 }]}>
-    <Text style={styles.sectionTitle}>Poll duration</Text>
-    <View style={styles.durationRow}>
-      <DurationDropdown
-        label="Days"
-        value={duration.days}
-        onChange={(val) => onUpdateDuration("days", val)}
-        max={30}
-        open={daysOpen}
-        setOpen={() => onOpenDropdown("days")}
-        zIndex={100}
-      />
-      <DurationDropdown
-        label="Hours"
-        value={duration.hours}
-        onChange={(val) => onUpdateDuration("hours", val)}
-        max={23}
-        open={hoursOpen}
-        setOpen={() => onOpenDropdown("hours")}
-        zIndex={99}
-      />
-      <DurationDropdown
-        label="Minutes"
-        value={duration.minutes}
-        onChange={(val) => onUpdateDuration("minutes", val)}
-        max={59}
-        open={minutesOpen}
-        setOpen={() => onOpenDropdown("minutes")}
-        zIndex={98}
-      />
+}) => {
+  const { styles } = useStyles();
+
+  return (
+    <View style={[styles.section, { zIndex: 1 }]}>
+      <Text style={styles.sectionTitle}>Poll duration</Text>
+      <View style={styles.durationRow}>
+        <DurationDropdown
+          label="Days"
+          value={duration.days}
+          onChange={(val) => onUpdateDuration("days", val)}
+          max={30}
+          open={daysOpen}
+          setOpen={() => onOpenDropdown("days")}
+          zIndex={100}
+        />
+        <DurationDropdown
+          label="Hours"
+          value={duration.hours}
+          onChange={(val) => onUpdateDuration("hours", val)}
+          max={23}
+          open={hoursOpen}
+          setOpen={() => onOpenDropdown("hours")}
+          zIndex={99}
+        />
+        <DurationDropdown
+          label="Minutes"
+          value={duration.minutes}
+          onChange={(val) => onUpdateDuration("minutes", val)}
+          max={59}
+          open={minutesOpen}
+          setOpen={() => onOpenDropdown("minutes")}
+          zIndex={98}
+        />
+      </View>
     </View>
-  </View>
-);
+  );
+};
 
 const CreateButton = ({
   loading,
@@ -1071,19 +1214,23 @@ const CreateButton = ({
   loading: boolean;
   onPress: () => void;
   editMode: boolean;
-}) => (
-  <TouchableOpacity
-    style={[styles.createBtn, loading && styles.createBtnDisabled]}
-    onPress={onPress}
-    disabled={loading}
-  >
-    {loading ? (
-      <ActivityIndicator color="#fff" />
-    ) : (
-      <Text style={styles.createBtnText}>{editMode ? "Save Changes" : "Create Poll"}</Text>
-    )}
-  </TouchableOpacity>
-);
+}) => {
+  const { styles, theme } = useStyles();
+
+  return (
+    <TouchableOpacity
+      style={[styles.createBtn, loading && styles.createBtnDisabled]}
+      onPress={onPress}
+      disabled={loading}
+    >
+      {loading ? (
+        <ActivityIndicator color={theme.onPrimary} />
+      ) : (
+        <Text style={styles.createBtnText}>{editMode ? "Save Changes" : "Create Poll"}</Text>
+      )}
+    </TouchableOpacity>
+  );
+};
 
 // ==================== DURATION DROPDOWN ====================
 const DurationDropdown = ({
@@ -1103,6 +1250,7 @@ const DurationDropdown = ({
   setOpen: () => void;
   zIndex?: number;
 }) => {
+  const { styles } = useStyles();
   const items = useMemo(
     () =>
       Array.from({ length: max + 1 }, (_, i) => ({
@@ -1144,14 +1292,15 @@ const DurationDropdown = ({
 export default CreatePollScreen;
 
 // ==================== STYLES ====================
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
   },
   contentShell: {
     flex: 1,
-    backgroundColor: "#f8ebe6",
+    backgroundColor: c.surfaceSunken,
   },
   header: {
     flexDirection: "row",
@@ -1159,11 +1308,11 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     padding: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#efd7cd",
-    backgroundColor: "#fff7f3",
+    borderBottomColor: c.border,
+    backgroundColor: c.surface,
   },
   headerTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 18,
     fontWeight: "700",
   },
@@ -1175,9 +1324,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     borderRadius: 14,
-    backgroundColor: "#fff7f2",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#f0c7ba",
+    borderColor: c.borderStrong,
     gap: 10,
   },
   scopeCopy: { flex: 1 },
@@ -1191,12 +1340,12 @@ const styles = StyleSheet.create({
     marginBottom: 9,
   },
   flairSectionTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "800",
   },
   flairSectionHint: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     fontWeight: "600",
   },
@@ -1211,34 +1360,34 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 9,
     borderRadius: 18,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#e5d4cc",
+    borderColor: c.border,
   },
   flairChoiceSelected: {
-    backgroundColor: "#5f0909",
-    borderColor: "#5f0909",
+    backgroundColor: c.primary,
+    borderColor: c.primary,
   },
   flairChoiceEmoji: {
     fontSize: 14,
   },
   flairChoiceText: {
-    color: "#6f4a40",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "700",
   },
   flairChoiceTextSelected: {
-    color: "#ffffff",
+    color: c.surfaceRaised,
   },
   scopeLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     fontWeight: "700",
     textTransform: "uppercase",
     letterSpacing: 0.6,
   },
   scopeValue: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "600",
     marginTop: 3,
@@ -1257,30 +1406,51 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   sectionTitle: {
-    color: "#8f2117",
+    color: c.primary,
     fontSize: 16,
     fontWeight: "700",
     marginBottom: 12,
   },
   lockedOptionsText: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 12.5,
     lineHeight: 18,
     marginTop: -6,
   },
+  similarPollCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 11,
+    backgroundColor: c.accentSoft,
+    borderWidth: 1,
+    borderColor: c.borderStrong,
+    borderRadius: 14,
+    padding: 13,
+    marginHorizontal: 16,
+    marginBottom: 12,
+  },
+  similarPollCopy: { flex: 1 },
+  similarPollTitle: { color: c.accent, fontSize: 12.5, fontWeight: "900" },
+  similarPollQuestion: {
+    color: c.textMuted,
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 3,
+    fontStyle: "italic",
+  },
   questionInput: {
-    backgroundColor: "#fffdfa",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1.5,
-    borderColor: "#d88872",
+    borderColor: c.borderStrong,
     borderRadius: 12,
     padding: 14,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     minHeight: 80,
     textAlignVertical: "top",
   },
   charCount: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     marginTop: 6,
     textAlign: "right",
@@ -1294,7 +1464,7 @@ const styles = StyleSheet.create({
     width: "100%",
     height: 200,
     borderRadius: 12,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
   removeImageBtn: {
     position: "absolute",
@@ -1305,9 +1475,9 @@ const styles = StyleSheet.create({
     padding: 8,
   },
   uploadImageBtn: {
-    backgroundColor: "#fff7f2",
+    backgroundColor: c.surface,
     borderWidth: 2,
-    borderColor: "#c44a3c",
+    borderColor: c.primary,
     borderRadius: 12,
     paddingVertical: 30,
     alignItems: "center",
@@ -1315,7 +1485,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   uploadImageText: {
-    color: "#8f2117",
+    color: c.primary,
     fontSize: 14,
     fontWeight: "600",
   },
@@ -1323,14 +1493,14 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   optionInputWrapper: {
-    backgroundColor: "#fff7f2",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#f0c7ba",
+    borderColor: c.borderStrong,
     borderRadius: 12,
     padding: 14,
   },
   optionLabel: {
-    color: "#8f2117",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "600",
     marginBottom: 8,
@@ -1342,13 +1512,13 @@ const styles = StyleSheet.create({
   },
   optionInput: {
     flex: 1,
-    backgroundColor: "#fffdfa",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 8,
     padding: 10,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     borderWidth: 1,
-    borderColor: "#d88872",
+    borderColor: c.borderStrong,
   },
   deleteBtn: {
     padding: 8,
@@ -1361,16 +1531,16 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     gap: 8,
     borderWidth: 1,
-    borderColor: "#c44a3c",
+    borderColor: c.primary,
     borderRadius: 10,
     marginTop: 8,
-    backgroundColor: "#fff7f2",
+    backgroundColor: c.surface,
   },
   addOptionBtnDisabled: {
     opacity: 0.5,
   },
   addOptionText: {
-    color: "#8f2117",
+    color: c.primary,
     fontSize: 14,
     fontWeight: "600",
   },
@@ -1378,20 +1548,20 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#fff7f2",
+    backgroundColor: c.surface,
     padding: 14,
     borderRadius: 12,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "#f0c7ba",
+    borderColor: c.borderStrong,
   },
   settingLabel: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "600",
   },
   settingSubtext: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     marginTop: 4,
   },
@@ -1399,18 +1569,18 @@ const styles = StyleSheet.create({
     width: 50,
     height: 28,
     borderRadius: 14,
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     padding: 2,
     justifyContent: "center",
   },
   toggleActive: {
-    backgroundColor: "#a61f1f",
+    backgroundColor: c.danger,
   },
   toggleThumb: {
     width: 24,
     height: 24,
     borderRadius: 12,
-    backgroundColor: "#9b766c",
+    backgroundColor: c.textMuted,
     alignSelf: "flex-start",
     shadowColor: "#000",
     shadowOpacity: 0.18,
@@ -1419,7 +1589,7 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   toggleThumbActive: {
-    backgroundColor: "#fff",
+    backgroundColor: c.surfaceRaised,
     alignSelf: "flex-end",
   },
   maxSelectionsWrapper: {
@@ -1435,50 +1605,50 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   durationLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     marginTop: 8,
     textAlign: "center",
   },
   dropdown: {
-    backgroundColor: "#fffdfa",
-    borderColor: "#d88872",
+    backgroundColor: c.surfaceRaised,
+    borderColor: c.borderStrong,
     borderWidth: 1,
     borderRadius: 10,
     minHeight: 50,
   },
   durationDropdown: {
-    backgroundColor: "#fffdfa",
-    borderColor: "#d88872",
+    backgroundColor: c.surfaceRaised,
+    borderColor: c.borderStrong,
     borderWidth: 1,
     borderRadius: 10,
     minHeight: 50,
   },
   dropdownContainer: {
-    backgroundColor: "#fffdfa",
-    borderColor: "#d88872",
+    backgroundColor: c.surfaceRaised,
+    borderColor: c.borderStrong,
     borderWidth: 1,
     borderRadius: 10,
   },
   durationDropdownContainer: {
-    backgroundColor: "#fffdfa",
-    borderColor: "#d88872",
+    backgroundColor: c.surfaceRaised,
+    borderColor: c.borderStrong,
     borderWidth: 1,
     borderRadius: 10,
     maxHeight: 200,
   },
   dropdownText: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
   },
   placeholderStyle: {
-    color: "#9b766c",
+    color: c.textMuted,
   },
   arrowIcon: {
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
   tickIcon: {
-    backgroundColor: "#8f2117",
+    backgroundColor: c.primary,
     borderRadius: 4,
   },
   listItemContainer: {
@@ -1486,10 +1656,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: 0.5,
   },
   listItemLabel: {
-    color: "#4d1b17",
+    color: c.textPrimary,
   },
   createBtn: {
-    backgroundColor: "#8f2117",
+    backgroundColor: c.primary,
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: "center",
@@ -1503,8 +1673,15 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   createBtnText: {
-    color: "#fff",
+    color: c.onPrimary,
     fontSize: 16,
     fontWeight: "700",
   },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

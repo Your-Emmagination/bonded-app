@@ -23,6 +23,7 @@ import {
   subscribeToTotalUnreadMessages,
 } from "@/utils/directMessages";
 import { subscribeHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import {
   removeLikeNotification,
@@ -41,9 +42,7 @@ import { buildUserProfileHref } from "@/utils/profileNavigation";
 import {
   getStudentDocIdFromAuthUser,
   getUserDataByAuthUser,
-  resolveUserRoleForAuthUser,
   subscribeToUserDataUpdates,
-  UserRole,
 } from "@/utils/rbac";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
@@ -114,6 +113,8 @@ import ServerDrawer, {
   ServerMemberPreview,
 } from "../components/ServerDrawer";
 import { FeedSkeleton } from "../components/Skeleton";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 // Width of one card in the horizontal "Trending this week" scroller.
@@ -124,12 +125,6 @@ const HOME_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
 // Unread channel badges only count messages from this many recent days, so
 // Home doesn't download a community's whole message history on every connect.
 const COMMUNITY_UNREAD_WINDOW_DAYS = 14;
-
-const BONDED = {
-  colors: {
-    gold: "#e0a53d",
-  },
-} as const;
 
 
 
@@ -555,6 +550,12 @@ const FeedPostCard = memo(function FeedPostCard({
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HomeScreen = () => {
+  // Rebuilt only when the palette changes. Named `theme` rather than `colors`
+  // because several screens already bind `colors` to a per-item palette, and
+  // shadowing that is a silent bug rather than a loud one.
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+
   const insets = useSafeAreaInsets();
   const [user, setUser] = useState<User | null>(null);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
@@ -641,9 +642,9 @@ const HomeScreen = () => {
   const [searchExpanded, setSearchExpanded] = useState(false);
   // Set by HomeSearchProvider while search results cover the feed.
   const [searchResultsVisible, setSearchResultsVisible] = useState(false);
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>(
-    undefined,
-  );
+  // Live: this was fetched once and guarded against refetching, so a role
+  // change never reached the feed until the app was restarted.
+  const currentUserRole = useCurrentUserRole();
   const [currentUserProfile, setCurrentUserProfile] = useState<any>(null);
   const [remoteServers, setRemoteServers] = useState<
     RemoteCommunityServerRecord[]
@@ -1450,9 +1451,14 @@ const selectedChannel = useMemo(() => {
       // composite index, and these documents are already fetched. Events
       // written before `status` existed count as published.
       setUpcomingEventsCount(
-        snapshot.docs.filter(
-          (eventDoc) => (eventDoc.data().status ?? "published") === "published",
-        ).length,
+        snapshot.docs.filter((eventDoc) => {
+          const data = eventDoc.data();
+          // Parts are counted through their main event, or a week with seven
+          // sessions would read as seven upcoming events.
+          return (
+            (data.status ?? "published") === "published" && !data.parentEventId
+          );
+        }).length,
       );
     });
     return unsubscribe;
@@ -1470,24 +1476,19 @@ const selectedChannel = useMemo(() => {
     return unsubscribe;
   }, [user?.uid, isOffline]);
 
-  // ── Fetch current user role
+  // ── Fetch current user profile (the role comes from useCurrentUserRole)
   useEffect(() => {
-    const fetchCurrentUserRole = async () => {
-      if (user?.uid && !isOffline && !currentUserRole) {
+    const fetchCurrentUserProfile = async () => {
+      if (user?.uid && !isOffline && !currentUserProfile) {
         try {
-          const [userData, role] = await Promise.all([
-            getUserDataByAuthUser(user),
-            resolveUserRoleForAuthUser(user),
-          ]);
-          setCurrentUserProfile(userData);
-          setCurrentUserRole(role);
+          setCurrentUserProfile(await getUserDataByAuthUser(user));
         } catch (error) {
-          console.error("Error fetching role:", error);
+          console.error("Error fetching profile:", error);
         }
       }
     };
-    fetchCurrentUserRole();
-  }, [user, isOffline, currentUserRole]);
+    fetchCurrentUserProfile();
+  }, [user, isOffline, currentUserProfile]);
 
   useEffect(() => {
     if (!user?.uid || isOffline) return;
@@ -2852,7 +2853,7 @@ const handleSelectChannel = useCallback(
         accent: accent || nextServer.accent,
         emoji: emoji || nextServer.emoji,
         logoUri: logoUri || null,
-        titleColor: titleColor || "#fffaf7",
+        titleColor: titleColor || theme.surface,
         titleSize: titleSize || 22,
         titleAlign: titleAlign || "left",
         titleEdge: titleEdge || "none",
@@ -3982,7 +3983,7 @@ const handleSelectChannel = useCallback(
                   { opacity: campusPulseHaloOpacity },
                 ]}
               />
-              <Ionicons name="school-outline" size={15} color="#7d4e12" />
+              <Ionicons name="school-outline" size={15} color={theme.accent} />
             </Animated.View>
             <View style={styles.feedEyebrowPill}>
               <Text style={styles.feedEyebrow}>CAMPUS COMMUNITY</Text>
@@ -4190,7 +4191,7 @@ const renderEmptyState = () => {
   if (isOffline && feedItems.length === 0) {
     return (
       <View style={styles.emptySearchState}>   {/* Reuse the nice empty style */}
-        <Ionicons name="cloud-offline" size={58} color="#d4b8a8" />
+        <Ionicons name="cloud-offline" size={58} color={theme.textMuted} />
         <Text style={styles.emptyTitle}>No Connection</Text>
         <Text style={styles.emptySubtitle}>
           Please check your internet connection
@@ -4202,7 +4203,7 @@ const renderEmptyState = () => {
   if (!isLoading && visibleFeedItems.length === 0) {
     return (
       <View style={styles.emptySearchState}>
-        <Ionicons name="chatbubbles-outline" size={58} color="#d4b8a8" />
+        <Ionicons name="chatbubbles-outline" size={58} color={theme.textMuted} />
         <Text style={styles.emptyTitle}>No posts yet</Text>
         <Text style={styles.emptySubtitle}>
           Be the first to share something on the Home feed
@@ -4242,7 +4243,7 @@ return (
                 activeOpacity={0.82}
                 onPress={openServerDrawer}
               >
-                <Ionicons name="menu" size={22} color="#f4e7df" />
+                <Ionicons name="menu" size={22} color={theme.onChrome} />
               </TouchableOpacity>
               {/* Search the feed — people, posts and polls in view. */}
               <TouchableOpacity
@@ -4251,7 +4252,7 @@ return (
                 onPress={openSearchExperience}
                 accessibilityLabel="Search"
               >
-                <Ionicons name="search-circle-outline" size={24} color="#5f0909" />
+                <Ionicons name="search-circle-outline" size={24} color={theme.onAccent} />
               </TouchableOpacity>
             </View>
 
@@ -4271,7 +4272,7 @@ return (
                 onPress={() => router.push("/(main)/MessagesScreen" as any)}
                 accessibilityLabel="Messages"
               >
-                <Ionicons name="chatbubble-ellipses-outline" size={22} color="#5f0909" />
+                <Ionicons name="chatbubble-ellipses-outline" size={22} color={theme.onAccent} />
                 {totalUnreadMessages > 0 && (
                   <View style={styles.eventBadge}>
                     <Text style={styles.eventBadgeText}>
@@ -4284,7 +4285,7 @@ return (
                 style={styles.calendarButton}
                 onPress={() => router.push("/EventCalendarScreen")}
               >
-                <Ionicons name="calendar-outline" size={22} color="#5f0909" />
+                <Ionicons name="calendar-outline" size={22} color={theme.onAccent} />
                 {upcomingEventsCount > 0 && (
                   <View style={styles.eventBadge}>
                     <Text style={styles.eventBadgeText}>
@@ -4345,7 +4346,7 @@ return (
             ListFooterComponent={
               isLoadingMore ? (
                 <View style={styles.feedFooter}>
-                  <ActivityIndicator size="small" color="#e0a53d" />
+                  <ActivityIndicator size="small" color={theme.accent} />
                 </View>
               ) : visibleFeedItems.length > 0 &&
                 !hasMorePosts &&
@@ -4356,7 +4357,7 @@ return (
                   <Ionicons
                     name="checkmark-circle-outline"
                     size={17}
-                    color="#b08243"
+                    color={theme.accent}
                   />
                   <Text style={styles.feedFooterText}>
                     You&apos;re all caught up
@@ -4369,10 +4370,10 @@ return (
               <RefreshControl
                 refreshing={refreshing}
                 onRefresh={onRefresh}
-                colors={["#dca33d"]}
-                tintColor="#dca33d"
+                colors={[theme.accent]}
+                tintColor={theme.accent}
                 title={isOffline ? "Offline" : "Refreshing feed..."}
-                titleColor="#dca33d"
+                titleColor={theme.accent}
               />
             }
             onScrollToIndexFailed={(info) => {
@@ -4416,7 +4417,7 @@ return (
                   stagedFeedCount === 1 ? "post" : "posts"
                 }`}
               >
-                <Ionicons name="arrow-up" size={14} color="#fffaf7" />
+                <Ionicons name="arrow-up" size={14} color={theme.onPrimary} />
                 <Text style={styles.newPostsPillText}>
                   {stagedFeedCount === 1
                     ? "1 new post"
@@ -4447,7 +4448,7 @@ return (
                 </Text>
               </View>
               <TouchableOpacity onPress={() => setOnlineUsersModalVisible(false)}>
-                <Ionicons name="close" size={24} color="#7a3b2e" />
+                <Ionicons name="close" size={24} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -4528,7 +4529,7 @@ return (
                         }}
                         accessibilityLabel={`Message ${fullName}`}
                       >
-                        <Ionicons name="chatbubble-ellipses-outline" size={18} color="#5f0909" />
+                        <Ionicons name="chatbubble-ellipses-outline" size={18} color={theme.primary} />
                       </TouchableOpacity>
                     )}
                   </TouchableOpacity>
@@ -4672,7 +4673,7 @@ return (
           <Animated.View
             style={{ transform: [{ rotate: rotation }], width: 28, height: 28 }}
           >
-            <Ionicons name="add" size={28} color="#5f0909" />
+            <Ionicons name="add" size={28} color={theme.primary} />
           </Animated.View>
         </TouchableOpacity>
       </Animated.View>
@@ -4717,10 +4718,11 @@ export default HomeScreen;
 
 // ─── Final Improved Styles ─────────────────────────────────────────────────────
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: { 
     flex: 1, 
-    backgroundColor: "#5f0909" 
+    backgroundColor: c.chrome 
   },
 
   /* ====================== FEED WELCOME ====================== */
@@ -4733,10 +4735,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 18,
     borderRadius: 22,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#ead3c7",
-    shadowColor: "#4d1b17",
+    borderColor: c.border,
+    shadowColor: c.textPrimary,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.08,
     shadowRadius: 10,
@@ -4748,7 +4750,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: 3,
-    backgroundColor: "#c9962f",
+    backgroundColor: c.accent,
     opacity: 0.9,
   },
   feedWelcomeGlowGold: {
@@ -4758,7 +4760,7 @@ const styles = StyleSheet.create({
     borderRadius: 56,
     right: -34,
     top: -40,
-    backgroundColor: "#f3cf82",
+    backgroundColor: c.accentSoft,
     opacity: 0.2,
   },
   feedWelcomeGlowMaroon: {
@@ -4768,7 +4770,7 @@ const styles = StyleSheet.create({
     borderRadius: 38,
     right: 26,
     bottom: -40,
-    backgroundColor: "#7f2220",
+    backgroundColor: c.primary,
     opacity: 0.06,
   },
   feedWelcomeCopy: {
@@ -4788,9 +4790,9 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fff0cd",
+    backgroundColor: c.accentSoft,
     borderWidth: 1,
-    borderColor: "#ebcf93",
+    borderColor: c.accentSoft,
   },
   feedWelcomeIconHalo: {
     position: "absolute",
@@ -4800,31 +4802,31 @@ const styles = StyleSheet.create({
     left: -4,
     borderRadius: 14,
     borderWidth: 2,
-    borderColor: "#d8a53d",
+    borderColor: c.accent,
   },
   feedEyebrowPill: {
     paddingHorizontal: 9,
     paddingVertical: 4,
     borderRadius: 999,
-    backgroundColor: "#fbedd5",
+    backgroundColor: c.accentSoft,
     borderWidth: 1,
-    borderColor: "#ecd7b2",
+    borderColor: c.accentSoft,
   },
   feedEyebrow: {
-    color: "#8f5d1e",
+    color: c.accent,
     fontSize: 10,
     fontWeight: "900",
     letterSpacing: 1.05,
   },
   feedWelcomeTitle: {
-    color: "#541613",
+    color: c.primary,
     fontSize: 22,
     fontWeight: "900",
     lineHeight: 28,
     letterSpacing: -0.2,
   },
   feedWelcomeSubtitle: {
-    color: "#795e56",
+    color: c.textMuted,
     fontSize: 13.25,
     lineHeight: 19.5,
     marginTop: 6,
@@ -4833,10 +4835,10 @@ const styles = StyleSheet.create({
   // "Trending this week" band — visually distinct from the vertical feed:
   // its own tinted strip with a header and a horizontal card scroller.
   trendingSection: {
-    backgroundColor: "#fbeee9",
+    backgroundColor: c.surfaceSunken,
     borderTopWidth: 1,
     borderBottomWidth: 1,
-    borderColor: "#efd9cf",
+    borderColor: c.border,
     paddingTop: 12,
     paddingBottom: 14,
     marginBottom: 10,
@@ -4849,7 +4851,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   trendingTitle: {
-    color: "#7a1d16",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "800",
     letterSpacing: 0.3,
@@ -4862,19 +4864,19 @@ const styles = StyleSheet.create({
     // card — the compact card's clamps keep normal cards well under this, so
     // the like/comment row is never clipped.
     maxHeight: 460,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ecd8ce",
+    borderColor: c.border,
     overflow: "hidden",
   },
   flairFilterSection: { marginBottom: 10 },
   flairFilterContent: { paddingHorizontal: 14, gap: 8, paddingRight: 22 },
-  flairFilterChip: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18, backgroundColor: "#fff8f3", borderWidth: 1, borderColor: "#ead8cf" },
-  flairFilterChipActive: { backgroundColor: "#5f0909", borderColor: "#5f0909" },
+  flairFilterChip: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18, backgroundColor: c.surface, borderWidth: 1, borderColor: c.border },
+  flairFilterChipActive: { backgroundColor: c.primary, borderColor: c.primary },
   flairFilterEmoji: { fontSize: 13 },
-  flairFilterText: { color: "#70483e", fontSize: 12, fontWeight: "800" },
-  flairFilterTextActive: { color: "#ffffff" },
+  flairFilterText: { color: c.textSecondary, fontSize: 12, fontWeight: "800" },
+  flairFilterTextActive: { color: c.onPrimary },
 
   /* ====================== HEADER ====================== */
   header: {
@@ -4884,8 +4886,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#7f2220",
-    backgroundColor: "#5f0909",
+    borderBottomColor: c.chromeBorder,
+    backgroundColor: c.chrome,
   },
   edgeSwipeArea: {
     position: "absolute",
@@ -4911,7 +4913,7 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 19,
     fontWeight: "700",
-    color: "#f4e7df",
+    color: c.onChrome,
     letterSpacing: 0.8,
   },
   headerIcons: {
@@ -4922,22 +4924,22 @@ const styles = StyleSheet.create({
   onlineUsersContainer: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     paddingHorizontal: 11,
     paddingVertical: 6,
     borderRadius: 20,
     gap: 6,
     borderWidth: 1,
-    borderColor: "#d6c9c2",
+    borderColor: c.borderStrong,
   },
   onlineDot: {
     width: 9,
     height: 9,
     borderRadius: 5,
-    backgroundColor: "#8f3a2b",
+    backgroundColor: c.textSecondary,
   },
   onlineUsersText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13.5,
     fontWeight: "700",
   },
@@ -4949,11 +4951,11 @@ const styles = StyleSheet.create({
   },
   onlineModalCard: {
     maxHeight: "76%",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 24,
     padding: 18,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
   },
   onlineModalHeader: {
     flexDirection: "row",
@@ -4962,12 +4964,12 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   onlineModalTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 19,
     fontWeight: "800",
   },
   onlineModalSubtitle: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13,
     marginTop: 3,
   },
@@ -4976,14 +4978,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#f1e4dc",
+    borderBottomColor: c.surfaceSunken,
     gap: 12,
   },
   onlineAvatarWrap: {
     width: 48,
     height: 48,
     borderRadius: 18,
-    backgroundColor: "#f4d7b1",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
@@ -4993,7 +4995,7 @@ const styles = StyleSheet.create({
     height: "100%",
   },
   onlineAvatarText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 17,
     fontWeight: "800",
   },
@@ -5001,12 +5003,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   onlineUserName: {
-    color: "#381713",
+    color: c.primary,
     fontSize: 15.5,
     fontWeight: "700",
   },
   onlineUserMeta: {
-    color: "#8d6a61",
+    color: c.textMuted,
     fontSize: 12.5,
     marginTop: 3,
   },
@@ -5018,7 +5020,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: "#f5e8e8",
+    backgroundColor: c.surfaceSunken,
     alignItems: "center",
     justifyContent: "center",
     marginLeft: 4,
@@ -5029,10 +5031,10 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
   },
   onlineStatusPillActive: {
-    backgroundColor: "#e7f8ec",
+    backgroundColor: c.successSoft,
   },
   onlineStatusPillIdle: {
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
   },
   onlineStatusText: {
     fontSize: 11.5,
@@ -5042,10 +5044,10 @@ const styles = StyleSheet.create({
     color: "#17663a",
   },
   onlineStatusTextIdle: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
   },
   onlineLastSeenText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     textAlign: "right",
     marginTop: 4,
@@ -5054,28 +5056,28 @@ const styles = StyleSheet.create({
     width: 46,
     height: 46,
     borderRadius: 23,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1.5,
-    borderColor: "#d69a2f",
+    borderColor: c.accent,
     position: "relative",
   },
   eventBadge: {
     position: "absolute",
     top: -4,
     right: -4,
-    backgroundColor: "#f4e7df",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 12,
     minWidth: 22,
     height: 22,
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1.5,
-    borderColor: "#5f0909",
+    borderColor: c.primary,
   },
   eventBadgeText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 11.5,
     fontWeight: "bold",
   },
@@ -5083,7 +5085,7 @@ const styles = StyleSheet.create({
   /* ====================== SEARCH ====================== */
   contentArea: {
     flex: 1,
-    backgroundColor: "#f8f3ef",
+    backgroundColor: c.surfaceSunken,
   },
 
   /* Recent Searches */
@@ -5098,13 +5100,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   sectionTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 16,
     fontWeight: "800",
     letterSpacing: 0.3,
   },
   clearAllText: {
-    color: "#c15f4a",
+    color: c.primary,
     fontSize: 13.5,
     fontWeight: "700",
   },
@@ -5122,10 +5124,10 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 999,
     borderWidth: 1.5,
-    borderColor: "#e8d9d0",
+    borderColor: c.border,
   },
   recentChipText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 14,
     fontWeight: "600",
   },
@@ -5137,14 +5139,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 26,
   },
   emptyTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 18,
     fontWeight: "800",
     marginTop: 14,
     textAlign: "center",
   },
   emptySubtitle: {
-    color: "#9b776d",
+    color: c.textMuted,
     fontSize: 14.5,
     lineHeight: 21,
     marginTop: 8,
@@ -5158,17 +5160,17 @@ emptyStateContainer: {
   justifyContent: "center",
   alignItems: "center",
   paddingVertical: 120,
-  backgroundColor: "#f8f3ef",
+  backgroundColor: c.surfaceSunken,
 },
 emptyStateTitle: {
-  color: "#5f0909",
+  color: c.primary,
   fontSize: 19,
   fontWeight: "700",
   marginTop: 16,
   textAlign: "center",
 },
 emptyStateText: {
-  color: "#a17d71",
+  color: c.textMuted,
   fontSize: 15,
   textAlign: "center",
   lineHeight: 22,
@@ -5185,11 +5187,11 @@ emptyStateText: {
     width: 62,
     height: 62,
     borderRadius: 31,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     justifyContent: "center",
     alignItems: "center",
     elevation: 12,
-    shadowColor: "#5f0909",
+    shadowColor: c.primary,
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.3,
     shadowRadius: 14,
@@ -5204,7 +5206,7 @@ emptyStateText: {
     alignItems: "flex-end",
   },
   menuItem: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
     paddingVertical: 13,
     paddingHorizontal: 20,
     borderRadius: 30,
@@ -5212,7 +5214,7 @@ emptyStateText: {
     alignItems: "center",
     gap: 12,
     borderWidth: 1.5,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
     minWidth: 145,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 5 },
@@ -5221,7 +5223,7 @@ emptyStateText: {
     elevation: 10,
   },
   menuText: {
-    color: "#f4e7df",
+    color: c.onChrome,
     fontSize: 15.5,
     fontWeight: "600",
     letterSpacing: 0.3,
@@ -5231,7 +5233,7 @@ emptyStateText: {
   flatListContent: {
     paddingTop: 12,
     paddingBottom: 130,
-    backgroundColor: "#f8f3ef",
+    backgroundColor: c.surfaceSunken,
   },
   emptyListContent: {
     // Keep the same header geometry as the populated feed.
@@ -5241,7 +5243,7 @@ emptyStateText: {
     flexGrow: 1,
     paddingTop: 12,
     paddingBottom: 130,
-    backgroundColor: "#f8f3ef",
+    backgroundColor: c.surfaceSunken,
   },
   loadingContainer: {
     flex: 1,
@@ -5250,7 +5252,7 @@ emptyStateText: {
     paddingVertical: 120,
   },
   loadingText: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontSize: 16.5,
     marginTop: 16,
     fontWeight: "600",
@@ -5298,17 +5300,17 @@ emptyStateText: {
     paddingHorizontal: 16,
     paddingVertical: 9,
     borderRadius: 999,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderWidth: 1,
-    borderColor: "#e0a53d",
-    shadowColor: "#3d0606",
+    borderColor: c.accent,
+    shadowColor: c.primary,
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.28,
     shadowRadius: 6,
     elevation: 5,
   },
   newPostsPillText: {
-    color: "#fffaf7",
+    color: c.onPrimary,
     fontSize: 13,
     fontWeight: "700",
   },
@@ -5320,7 +5322,7 @@ emptyStateText: {
     paddingVertical: 18,
   },
   feedFooterText: {
-    color: "#b08243",
+    color: c.accent,
     fontSize: 13,
     fontWeight: "600",
   },

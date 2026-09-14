@@ -1,7 +1,9 @@
 //createpostscreen.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
-import * as DocumentPicker from "expo-document-picker";
+import { pickUploadDocuments } from "@/utils/uploadAttachments";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { router, useLocalSearchParams } from "expo-router";
@@ -12,11 +14,15 @@ import {
     doc,
     getDoc,
     getDocs,
+    limit,
+    orderBy,
+    query,
     serverTimestamp,
     Timestamp,
     updateDoc,
+    where,
 } from "firebase/firestore";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { memo, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Animated,
@@ -39,6 +45,7 @@ import {
     useSafeAreaInsets,
 } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
+import AlumniBadge from "./components/AlumniBadge";
 import ConfirmDialog, { type ConfirmDialogVariant } from "./components/ConfirmDialog";
 
 import { notifyAnnouncement } from "@/services/notificationService";
@@ -82,9 +89,12 @@ import {
     canUsePostFlair,
     DEFAULT_POST_FLAIR,
     POST_FLAIRS,
+    normalizePostFlair,
     STAFF_POST_FLAIR_ROLES,
     type PostFlairId,
 } from "@/utils/postFlairs";
+import { getTimeAgo } from "@/utils/relativeTime";
+import { findMostSimilar } from "@/utils/textSimilarity";
 import { buildPostSearchTerms } from "@/utils/postSearchTerms";
 import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
 
@@ -113,27 +123,31 @@ const FlairSuggestionBanner = ({
   message: string;
   onSwitch: () => void;
   onDismiss: () => void;
-}) => (
-  <View style={styles.flairSuggestionBanner}>
-    <Text style={styles.flairSuggestionText}>{message}</Text>
-    <View style={styles.flairSuggestionActions}>
-      <TouchableOpacity
-        style={styles.flairSuggestionSwitchButton}
-        activeOpacity={0.82}
-        onPress={onSwitch}
-      >
-        <Text style={styles.flairSuggestionSwitchText}>Switch flair</Text>
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={styles.flairSuggestionDismissButton}
-        activeOpacity={0.82}
-        onPress={onDismiss}
-      >
-        <Text style={styles.flairSuggestionDismissText}>Not now</Text>
-      </TouchableOpacity>
+}) => {
+  const { styles } = useStyles();
+
+  return (
+    <View style={styles.flairSuggestionBanner}>
+      <Text style={styles.flairSuggestionText}>{message}</Text>
+      <View style={styles.flairSuggestionActions}>
+        <TouchableOpacity
+          style={styles.flairSuggestionSwitchButton}
+          activeOpacity={0.82}
+          onPress={onSwitch}
+        >
+          <Text style={styles.flairSuggestionSwitchText}>Switch flair</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.flairSuggestionDismissButton}
+          activeOpacity={0.82}
+          onPress={onDismiss}
+        >
+          <Text style={styles.flairSuggestionDismissText}>Not now</Text>
+        </TouchableOpacity>
+      </View>
     </View>
-  </View>
-);
+  );
+};
 
 interface Student {
   id: string;
@@ -141,7 +155,24 @@ interface Student {
   lastname: string;
   email: string;
   studentID: string;
+  /** Carried only so the mention picker can mark alumni. Never filters. */
+  yearlvl?: string;
 }
+
+type RecentQuestion = {
+  id: string;
+  content: string;
+  authorName: string;
+  createdAt: any;
+};
+
+// Share of significant words that must match. Tuned against real campus
+// phrasing: at 0.5, "where is the registrar office" and "what are the
+// registrar office hours" both score 0.50 and warn about each other — same
+// topic, different question. 0.6 keeps those quiet and still catches a
+// genuine repost. See the same constant in CreatePollScreen.
+const DUPLICATE_QUESTION_THRESHOLD = 0.6;
+const DUPLICATE_QUESTION_WINDOW_DAYS = 30;
 
 type MentionDraft = Student & {
   mentionToken: string;
@@ -185,15 +216,16 @@ const AnonymousToggle = memo(function AnonymousToggle({
   progress: Animated.Value;
   onToggle: () => void;
 }) {
+  const { styles, theme } = useStyles();
   // Built once instead of on every render, so the toggle's animation isn't
   // re-attached each time the screen redraws.
   const trackColor = useMemo(
     () =>
       progress.interpolate({
         inputRange: [0, 1],
-        outputRange: ["#d6c9c2", "#e0a53d"],
+        outputRange: [theme.border, theme.accent],
       }),
-    [progress],
+    [progress, theme.border, theme.accent],
   );
   const thumbTranslateX = useMemo(
     () =>
@@ -252,6 +284,7 @@ const FlairPicker = memo(function FlairPicker({
   onPickerScroll: (x: number) => void;
   onChipLayout: (flairId: string, x: number, width: number) => void;
 }) {
+  const { styles, theme } = useStyles();
   const flairs = useMemo(
     () => POST_FLAIRS.filter((flair) => !flair.staffOnly || canUsePostFlair(flair.id, authorRole)),
     [authorRole],
@@ -286,7 +319,7 @@ const FlairPicker = memo(function FlairPicker({
               <Ionicons
                 name="checkmark-circle"
                 size={14}
-                color="#ffffff"
+                color={theme.onPrimary}
                 style={styles.flairChoiceCheck}
               />
             )}
@@ -314,11 +347,12 @@ const PinSection = memo(function PinSection({
   onOpenTimePicker: () => void;
   onPinIndefinitely: () => void;
 }) {
+  const { styles, theme } = useStyles();
   return (
     <View style={styles.pinSection}>
       <View style={styles.pinRow}>
         <View style={styles.pinLabelContainer}>
-          <Ionicons name="pin" size={18} color="#7a0020" style={{ marginRight: 8 }} />
+          <Ionicons name="pin" size={18} color={theme.primary} style={{ marginRight: 8 }} />
           <View style={{ flex: 1 }}>
             <Text style={styles.pinTitle}>Pin to Top of Feed</Text>
             <Text style={styles.pinSubtitle}>
@@ -351,7 +385,7 @@ const PinSection = memo(function PinSection({
               onPress={onOpenDatePicker}
               activeOpacity={0.7}
             >
-              <Ionicons name="calendar-outline" size={16} color="#7a0020" />
+              <Ionicons name="calendar-outline" size={16} color={theme.primary} />
               <Text style={styles.pinDateButtonText}>
                 {targetDate
                   ? targetDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
@@ -364,7 +398,7 @@ const PinSection = memo(function PinSection({
               onPress={onOpenTimePicker}
               activeOpacity={0.7}
             >
-              <Ionicons name="time-outline" size={16} color="#7a0020" />
+              <Ionicons name="time-outline" size={16} color={theme.primary} />
               <Text style={styles.pinDateButtonText}>
                 {targetDate
                   ? targetDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
@@ -415,6 +449,7 @@ const AttachmentPreviews = memo(function AttachmentPreviews({
   onRemoveExistingFile: (index: number) => void;
   onRemoveFile: (index: number) => void;
 }) {
+  const { styles, theme } = useStyles();
   return (
     <>
       {selectedGif && (
@@ -425,7 +460,7 @@ const AttachmentPreviews = memo(function AttachmentPreviews({
             style={styles.removeFile}
             onPress={onRemoveGif}
           >
-            <Ionicons name="close-circle" size={22} color="#e0a53d" />
+            <Ionicons name="close-circle" size={22} color={theme.accent} />
           </TouchableOpacity>
         </View>
       )}
@@ -448,7 +483,7 @@ const AttachmentPreviews = memo(function AttachmentPreviews({
             accessibilityRole="button"
             accessibilityLabel="Remove link"
           >
-            <Ionicons name="close-circle" size={22} color="#e0a53d" />
+            <Ionicons name="close-circle" size={22} color={theme.accent} />
           </TouchableOpacity>
         </View>
       )}
@@ -470,7 +505,7 @@ const AttachmentPreviews = memo(function AttachmentPreviews({
                 </View>
               )}
               <TouchableOpacity activeOpacity={0.7} style={styles.removeFile} onPress={() => onRemoveExistingFile(i)}>
-                <Ionicons name="close-circle" size={22} color="#e0a53d" />
+                <Ionicons name="close-circle" size={22} color={theme.accent} />
               </TouchableOpacity>
             </View>
           ))}
@@ -510,7 +545,7 @@ const AttachmentPreviews = memo(function AttachmentPreviews({
                 style={styles.removeFile}
                 onPress={() => onRemoveFile(i)}
               >
-                <Ionicons name="close-circle" size={22} color="#e0a53d" />
+                <Ionicons name="close-circle" size={22} color={theme.accent} />
               </TouchableOpacity>
             </View>
           ))}
@@ -537,6 +572,7 @@ const AddToPostToolbar = memo(function AddToPostToolbar({
   onOpenLink: () => void;
   onOpenGif: () => void;
 }) {
+  const { styles, theme } = useStyles();
   const filesFull = filesCount >= MAX_FILES;
   return (
     <View style={styles.addToPostContainer}>
@@ -549,7 +585,7 @@ const AddToPostToolbar = memo(function AddToPostToolbar({
           disabled={filesFull}
           accessibilityLabel="Take a photo"
         >
-          <Ionicons name="camera" size={24} color={filesFull ? "#5a6380" : "#a61f1f"} />
+          <Ionicons name="camera" size={24} color={filesFull ? theme.textMuted : theme.primary} />
         </TouchableOpacity>
         <TouchableOpacity
           activeOpacity={0.7}
@@ -558,7 +594,7 @@ const AddToPostToolbar = memo(function AddToPostToolbar({
           disabled={filesFull}
           accessibilityLabel="Choose photos"
         >
-          <Ionicons name="images" size={24} color={filesFull ? "#5a6380" : "#4f9cff"} />
+          <Ionicons name="images" size={24} color={filesFull ? theme.textMuted : "#4f9cff"} />
         </TouchableOpacity>
         <TouchableOpacity
           activeOpacity={0.7}
@@ -567,7 +603,7 @@ const AddToPostToolbar = memo(function AddToPostToolbar({
           disabled={filesFull}
           accessibilityLabel="Attach files"
         >
-          <Ionicons name="attach" size={24} color={filesFull ? "#5a6380" : "#e0a53d"} />
+          <Ionicons name="attach" size={24} color={filesFull ? theme.textMuted : theme.accent} />
         </TouchableOpacity>
         <TouchableOpacity
           activeOpacity={0.7}
@@ -575,7 +611,7 @@ const AddToPostToolbar = memo(function AddToPostToolbar({
           onPress={onPickVideos}
           disabled={filesFull}
         >
-          <Ionicons name="videocam" size={24} color={filesFull ? "#5a6380" : "#7a0020"} />
+          <Ionicons name="videocam" size={24} color={filesFull ? theme.textMuted : theme.primary} />
         </TouchableOpacity>
         <TouchableOpacity activeOpacity={0.7} style={styles.iconButton} onPress={onOpenLink}>
           <Ionicons name="link" size={24} color="#4f9cff" />
@@ -589,6 +625,7 @@ const AddToPostToolbar = memo(function AddToPostToolbar({
 });
 
 const CreatePostScreen = () => {
+  const { styles, theme } = useStyles();
   const [content, setContent] = useState("");
   const [selectedFlair, setSelectedFlair] = useState<PostFlairId>(DEFAULT_POST_FLAIR);
   const [authorRole, setAuthorRole] = useState<string>("student");
@@ -654,6 +691,11 @@ const CreatePostScreen = () => {
   // Mirror of lostFoundSuggestionDismissed for the Help / Advice flair
   // suggestion. Both re-arm together when the compose box is fully cleared.
   const [helpSuggestionDismissed, setHelpSuggestionDismissed] = useState(false);
+  // Recent questions, read once, used only to warn that something has already
+  // been asked. Never blocks posting and never filters the feed.
+  const [recentQuestions, setRecentQuestions] = useState<RecentQuestion[]>([]);
+  const [duplicateQuestionDismissed, setDuplicateQuestionDismissed] =
+    useState(false);
 
   // Target date detection and pin-until-date expiration for staff announcements
   const isStaff = STAFF_POST_FLAIR_ROLES.has(String(authorRole || "").toLowerCase());
@@ -805,7 +847,7 @@ const CreatePostScreen = () => {
       const currentStudentID = currentUserEmail?.split("@")[0];
 
       const studentsList = studentsSnapshot.docs
-        .map((doc) => {
+        .map((doc): Student | null => {
           const data = doc.data();
           if (!data.firstname || !data.lastname || !data.studentID) {
             console.warn(`Student ${doc.id} missing required fields`);
@@ -817,6 +859,7 @@ const CreatePostScreen = () => {
             lastname: String(data.lastname || "").trim(),
             email: String(data.email || ""),
             studentID: String(data.studentID || ""),
+            yearlvl: String(data.yearlvl || ""),
           };
         })
         .filter((student): student is Student => {
@@ -889,10 +932,9 @@ const CreatePostScreen = () => {
         return;
       }
 
-      const result = await DocumentPicker.getDocumentAsync({
+      const result = await pickUploadDocuments({
         type: "image/*",
         multiple: true,
-        copyToCacheDirectory: true,
       });
 
       if (!result.canceled && result.assets?.length > 0) {
@@ -931,10 +973,9 @@ const CreatePostScreen = () => {
         return;
       }
 
-      const result = await DocumentPicker.getDocumentAsync({
+      const result = await pickUploadDocuments({
         type: "*/*",
         multiple: true,
-        copyToCacheDirectory: true,
       });
 
       if (!result.canceled && result.assets?.length > 0) {
@@ -975,10 +1016,9 @@ const CreatePostScreen = () => {
         return;
       }
 
-      const result = await DocumentPicker.getDocumentAsync({
+      const result = await pickUploadDocuments({
         type: "video/*",
         multiple: true,
-        copyToCacheDirectory: true,
       });
 
       if (!result.canceled && result.assets?.length > 0) {
@@ -1628,9 +1668,90 @@ try {
     ];
   }, [searchQuery, showTagModal, students]);
 
+  // Recent questions, read once when the composer opens. Bounded by a date
+  // window and a row limit, and filtered to question-flaired posts in memory
+  // so the query stays single-field and needs no deployed composite index.
+  useEffect(() => {
+    let cancelled = false;
+
+    const since = new Date();
+    since.setDate(since.getDate() - DUPLICATE_QUESTION_WINDOW_DAYS);
+
+    getDocs(
+      query(
+        collection(db, "posts"),
+        where("createdAt", ">=", since),
+        orderBy("createdAt", "desc"),
+        limit(80),
+      ),
+    )
+      .then((snapshot) => {
+        if (cancelled) return;
+        setRecentQuestions(
+          snapshot.docs
+            .filter((postDoc) => {
+              const data = (postDoc.data() || {}) as any;
+              // Only approved questions. Warning about a pending or rejected
+              // post would leak content the author is not allowed to see.
+              const status = String(data.moderationStatus ?? "approved").toLowerCase();
+              return (
+                status === "approved" &&
+                normalizePostFlair(data.flair) === "question"
+              );
+            })
+            .map((postDoc) => {
+              const data = (postDoc.data() || {}) as any;
+              return {
+                id: postDoc.id,
+                content: String(data.content || ""),
+                authorName: String(data.username || data.authorName || "Someone"),
+                createdAt: data.createdAt,
+              };
+            }),
+        );
+      })
+      .catch((error) => {
+        // A missing hint is never worth interrupting the composer for.
+        console.warn("Duplicate-question lookup failed:", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Require a bit of real content before suggesting anything — avoids
   // firing on a half-typed word every keystroke.
   const hasEnoughContentForSuggestion = content.trim().length >= 12;
+
+  // Only for things actually being asked: the Question flair, or text that
+  // ends in a question mark. Running this on every post would put a
+  // "someone said this already" hint under ordinary conversation.
+  const looksLikeQuestion =
+    selectedFlair === "question" || content.trim().endsWith("?");
+
+  const duplicateQuestion = useMemo(() => {
+    if (duplicateQuestionDismissed || !looksLikeQuestion) return null;
+    if (!hasEnoughContentForSuggestion) return null;
+
+    const match = findMostSimilar(
+      content,
+      recentQuestions.filter(
+        (item: RecentQuestion) => item.id !== selectedEditPostId && item.content,
+      ),
+      (item) => item.content,
+      DUPLICATE_QUESTION_THRESHOLD,
+    );
+
+    return match?.item ?? null;
+  }, [
+    content,
+    duplicateQuestionDismissed,
+    hasEnoughContentForSuggestion,
+    looksLikeQuestion,
+    recentQuestions,
+    selectedEditPostId,
+  ]);
 
   const showLostFoundSuggestion =
     !lostFoundSuggestionDismissed &&
@@ -1733,7 +1854,7 @@ try {
             onPress={() => router.back()}
             accessibilityRole="button"
           >
-            <Ionicons name="close" size={28} color="#7a3b2e" />
+            <Ionicons name="close" size={28} color={theme.textSecondary} />
           </TouchableOpacity>
         </View>
 
@@ -1741,7 +1862,7 @@ try {
           <Ionicons
             name={selectedServerId ? "server-outline" : "home-outline"}
             size={18}
-            color="#e0a53d"
+            color={theme.accent}
           />
           <View style={styles.scopeCopy}>
             <Text style={styles.scopeLabel}>
@@ -1813,6 +1934,31 @@ try {
                 }}
               />
             )}
+            {!!duplicateQuestion && (
+              <View style={styles.duplicateQuestionCard}>
+                <Ionicons name="help-circle-outline" size={19} color={theme.accent} />
+                <View style={styles.duplicateQuestionCopy}>
+                  <Text style={styles.duplicateQuestionTitle}>
+                    {`${duplicateQuestion.authorName} asked something similar ${getTimeAgo(duplicateQuestion.createdAt)}`}
+                  </Text>
+                  <Text
+                    style={styles.duplicateQuestionText}
+                    numberOfLines={2}
+                  >
+                    {`“${duplicateQuestion.content}”`}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => {
+                    easeLayout();
+                    setDuplicateQuestionDismissed(true);
+                  }}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <Ionicons name="close" size={17} color={theme.textMuted} />
+                </TouchableOpacity>
+              </View>
+            )}
             <FlairPicker
               pickerRef={flairPickerRef}
               selectedFlair={selectedFlair}
@@ -1874,7 +2020,7 @@ try {
           {detectedTargetDate && (
             <View style={styles.dateSuggestionBanner}>
               <View style={styles.dateSuggestionHeader}>
-                <Ionicons name="sparkles" size={16} color="#c28724" />
+                <Ionicons name="sparkles" size={16} color={theme.accent} />
                 <Text style={styles.dateSuggestionTitle}>Upcoming Target Date Detected</Text>
               </View>
               <Text style={styles.dateSuggestionText}>
@@ -1920,7 +2066,7 @@ try {
             <TextInput
               style={styles.input}
               placeholder="Share something with BondED..."
-              placeholderTextColor="#a0a8c0"
+              placeholderTextColor={theme.textMuted}
               multiline
               value={content}
               onChangeText={handleContentChange}
@@ -1991,7 +2137,7 @@ try {
 
           {effectiveTaggedUsers.length > 0 && (
             <View style={styles.taggedPreview}>
-              <Ionicons name="people" size={16} color="#e0a53d" />
+              <Ionicons name="people" size={16} color={theme.accent} />
               <Text style={styles.taggedPreviewText}>
                 Tagged {effectiveTaggedUsers.length}{" "}
                 {effectiveTaggedUsers.length === 1 ? "mention" : "mentions"}
@@ -2049,7 +2195,7 @@ try {
               }
             >
               {uploading ? (
-                <ActivityIndicator color="#fff" />
+                <ActivityIndicator color={theme.onAccent} />
               ) : (
                 <Text style={styles.postButtonText}>{isEditMode ? "Save Changes" : "Post"}</Text>
               )}
@@ -2072,7 +2218,7 @@ try {
                   {effectiveTaggedUsers.length > 0 && `(${effectiveTaggedUsers.length})`}
                 </Text>
                 <TouchableOpacity onPress={() => setShowTagModal(false)}>
-                  <Ionicons name="close" size={28} color="#7a3b2e" />
+                  <Ionicons name="close" size={28} color={theme.textSecondary} />
                 </TouchableOpacity>
               </View>
 
@@ -2091,14 +2237,14 @@ try {
                     setTaggedUsers([...taggedUsers, ...allTagged]);
                   }}
                 >
-                  <Ionicons name="people-circle" size={20} color="#fff" />
+                  <Ionicons name="people-circle" size={20} color={theme.onAccent} />
                   <Text style={styles.tagAllText}>Tag All</Text>
                 </TouchableOpacity>
               )}
 
               <TextInput
                 placeholder="Search students..."
-                placeholderTextColor="#a0a8c0"
+                placeholderTextColor={theme.textMuted}
                 value={searchQuery}
                 onChangeText={setSearchQuery}
                 style={styles.searchInput}
@@ -2127,11 +2273,16 @@ try {
                         </Text>
                       </View>
                       <View style={styles.studentInfo}>
-                        <Text style={styles.studentName}>
-                          {isEveryoneMentionId(item.id)
-                            ? EVERYONE_MENTION_NAME
-                            : `${firstname} ${lastname}`}
-                        </Text>
+                        <View style={styles.studentNameRow}>
+                          <Text style={styles.studentName} numberOfLines={1}>
+                            {isEveryoneMentionId(item.id)
+                              ? EVERYONE_MENTION_NAME
+                              : `${firstname} ${lastname}`}
+                          </Text>
+                          {/* Alumni stay fully mentionable - this only says
+                              who you are about to reach. */}
+                          <AlumniBadge yearlvl={item.yearlvl} />
+                        </View>
                       </View>
                       {tagged && (
                         <Ionicons
@@ -2176,13 +2327,13 @@ try {
                   accessibilityRole="button"
                   accessibilityLabel="Close Add Link"
                 >
-                  <Ionicons name="close" size={22} color="#7a3b2e" />
+                  <Ionicons name="close" size={22} color={theme.textSecondary} />
                 </TouchableOpacity>
               </View>
 
               <TextInput
                 placeholder="Enter URL (e.g., https://example.com)"
-                placeholderTextColor="#a0a8c0"
+                placeholderTextColor={theme.textMuted}
                 value={linkUrl}
                 onChangeText={setLinkUrl}
                 style={styles.linkInput}
@@ -2192,7 +2343,7 @@ try {
 
               <TextInput
                 placeholder="Link title (optional)"
-                placeholderTextColor="#a0a8c0"
+                placeholderTextColor={theme.textMuted}
                 value={linkTitle}
                 onChangeText={setLinkTitle}
                 style={styles.linkInput}
@@ -2202,7 +2353,7 @@ try {
                 <TouchableOpacity
                   style={[
                     styles.linkModalButton,
-                    { backgroundColor: "#fffaf7" },
+                    { backgroundColor: theme.surface },
                   ]}
                   onPress={handleCloseLinkModal}
                 >
@@ -2212,7 +2363,7 @@ try {
                 <TouchableOpacity
                   style={[
                     styles.linkModalButton,
-                    { backgroundColor: "#e0a53d" },
+                    { backgroundColor: theme.accent },
                   ]}
                   onPress={handleAddLink}
                 >
@@ -2236,14 +2387,14 @@ try {
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Choose a GIF</Text>
                 <TouchableOpacity onPress={() => setShowGifModal(false)}>
-                  <Ionicons name="close" size={28} color="#7a3b2e" />
+                  <Ionicons name="close" size={28} color={theme.textSecondary} />
                 </TouchableOpacity>
               </View>
 
               <View style={styles.gifSearchContainer}>
                 <TextInput
                   placeholder="Search GIFs..."
-                  placeholderTextColor="#a0a8c0"
+                  placeholderTextColor={theme.textMuted}
                   value={gifSearchQuery}
                   onChangeText={setGifSearchQuery}
                   onSubmitEditing={() => searchGifs(gifSearchQuery)}
@@ -2254,13 +2405,13 @@ try {
                   style={styles.gifSearchButton}
                   onPress={() => searchGifs(gifSearchQuery)}
                 >
-                  <Ionicons name="search" size={20} color="#fff" />
+                  <Ionicons name="search" size={20} color={theme.onAccent} />
                 </TouchableOpacity>
               </View>
 
               {loadingGifs ? (
                 <View style={styles.gifLoadingContainer}>
-                  <ActivityIndicator size="large" color="#e0a53d" />
+                  <ActivityIndicator size="large" color={theme.accent} />
                   <Text style={styles.gifLoadingText}>Searching GIFs...</Text>
                 </View>
               ) : gifError ? (
@@ -2268,7 +2419,7 @@ try {
                   <Ionicons
                     name="cloud-offline-outline"
                     size={64}
-                    color="#e0a53d"
+                    color={theme.accent}
                   />
                   <Text style={styles.errorText}>{gifError}</Text>
                   <TouchableOpacity
@@ -2311,7 +2462,7 @@ try {
 />
               ) : (
                 <View style={styles.gifEmptyContainer}>
-                  <Ionicons name="images-outline" size={64} color="#5a6380" />
+                  <Ionicons name="images-outline" size={64} color={theme.textMuted} />
                   <Text style={styles.emptyText}>
                     {gifSearchQuery
                       ? "No GIFs found"
@@ -2353,9 +2504,10 @@ try {
 
 export default CreatePostScreen;
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#5f0909" },
-  contentShell: { flex: 1, backgroundColor: "#f6f1ed" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.primary },
+  contentShell: { flex: 1, backgroundColor: c.surfaceSunken },
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -2364,47 +2516,47 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     minHeight: 60,
     borderBottomWidth: 1,
-    borderBottomColor: "#eadbd4",
-    backgroundColor: "#fffaf7",
+    borderBottomColor: c.border,
+    backgroundColor: c.surface,
   },
-  headerTitle: { color: "#7a3b2e", fontSize: 20, fontWeight: "bold" },
+  headerTitle: { color: c.textSecondary, fontSize: 20, fontWeight: "bold" },
   headerCloseButton: {
     width: 44,
     height: 44,
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f5e9e3",
+    backgroundColor: c.surfaceSunken,
   },
   flairSection: { marginTop: 16, marginBottom: 16 },
   flairSectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 9 },
-  flairSectionTitle: { color: "#4d1b17", fontSize: 14, fontWeight: "800" },
-  flairSectionHint: { color: "#9b766c", fontSize: 12, fontWeight: "600" },
+  flairSectionTitle: { color: c.textPrimary, fontSize: 14, fontWeight: "800" },
+  flairSectionHint: { color: c.textMuted, fontSize: 12, fontWeight: "600" },
   flairPickerContent: { gap: 8, paddingRight: 16 },
   // Shared by both flair-suggestion banners (Lost & Found, Help / Advice) —
   // see the FlairSuggestionBanner component near the top of this file.
   flairSuggestionBanner: {
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
     borderRadius: 12,
     padding: 12,
     marginBottom: 10,
   },
-  flairSuggestionText: { color: "#4d1b17", fontSize: 13, fontWeight: "700", marginBottom: 8 },
+  flairSuggestionText: { color: c.textPrimary, fontSize: 13, fontWeight: "700", marginBottom: 8 },
   flairSuggestionActions: { flexDirection: "row", gap: 8 },
-  flairSuggestionSwitchButton: { backgroundColor: "#5f0909", borderRadius: 14, paddingHorizontal: 14, paddingVertical: 7 },
-  flairSuggestionSwitchText: { color: "#ffffff", fontSize: 12, fontWeight: "800" },
-  flairSuggestionDismissButton: { backgroundColor: "transparent", borderWidth: 1, borderColor: "#e5d4cc", borderRadius: 14, paddingHorizontal: 14, paddingVertical: 7 },
-  flairSuggestionDismissText: { color: "#9b766c", fontSize: 12, fontWeight: "700" },
+  flairSuggestionSwitchButton: { backgroundColor: c.primary, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 7 },
+  flairSuggestionSwitchText: { color: c.surfaceRaised, fontSize: 12, fontWeight: "800" },
+  flairSuggestionDismissButton: { backgroundColor: "transparent", borderWidth: 1, borderColor: c.border, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 7 },
+  flairSuggestionDismissText: { color: c.textMuted, fontSize: 12, fontWeight: "700" },
   pinSection: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     padding: 14,
     marginBottom: 16,
-    shadowColor: "#4d1b17",
+    shadowColor: c.textPrimary,
     shadowOpacity: 0.04,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
@@ -2422,12 +2574,12 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   pinTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "700",
   },
   pinSubtitle: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     marginTop: 2,
     lineHeight: 15,
@@ -2435,18 +2587,18 @@ const styles = StyleSheet.create({
   miniToggle: {
     width: 44,
     height: 26,
-    backgroundColor: "#d6c9c2",
+    backgroundColor: c.borderStrong,
     borderRadius: 13,
     justifyContent: "center",
     padding: 2,
   },
   miniToggleActive: {
-    backgroundColor: "#7a0020",
+    backgroundColor: c.danger,
   },
   miniToggleThumb: {
     width: 22,
     height: 22,
-    backgroundColor: "#fff",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 11,
     shadowColor: "#000",
     shadowOpacity: 0.15,
@@ -2461,10 +2613,10 @@ const styles = StyleSheet.create({
     marginTop: 12,
     paddingTop: 12,
     borderTopWidth: 1,
-    borderTopColor: "#f0e2da",
+    borderTopColor: c.border,
   },
   pinDetailsInfo: {
-    color: "#6f4a40",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "700",
     marginBottom: 8,
@@ -2479,15 +2631,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 6,
-    backgroundColor: "#f5ece7",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#e2d0c7",
+    borderColor: c.border,
     borderRadius: 10,
     paddingVertical: 9,
     paddingHorizontal: 8,
   },
   pinDateButtonText: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 12,
     fontWeight: "700",
   },
@@ -2498,26 +2650,26 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   pinExpiryBadge: {
-    color: "#7a0020",
+    color: c.danger,
     fontSize: 12,
     fontWeight: "700",
   },
   pinRemoveDateText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     fontWeight: "600",
     textDecorationLine: "underline",
   },
   pinIndefiniteNote: {
     marginTop: 8,
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     fontStyle: "italic",
   },
   dateSuggestionBanner: {
-    backgroundColor: "#fff8eb",
+    backgroundColor: c.accentSoft,
     borderWidth: 1,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
     borderRadius: 12,
     padding: 12,
     marginBottom: 14,
@@ -2529,28 +2681,28 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   dateSuggestionTitle: {
-    color: "#7a4e00",
+    color: c.accent,
     fontSize: 13,
     fontWeight: "700",
   },
   dateSuggestionText: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 13,
     lineHeight: 18,
     marginBottom: 10,
   },
   dateSuggestionBold: {
     fontWeight: "800",
-    color: "#7a0020",
+    color: c.danger,
   },
-  flairChoice: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 18, backgroundColor: "#fffaf7", borderWidth: 1, borderColor: "#e5d4cc" },
-  flairChoiceSelected: { backgroundColor: "#5f0909", borderColor: "#5f0909" },
+  flairChoice: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 18, backgroundColor: c.surface, borderWidth: 1, borderColor: c.border },
+  flairChoiceSelected: { backgroundColor: c.primary, borderColor: c.primary },
   flairChoiceEmoji: { fontSize: 14 },
-  flairChoiceText: { color: "#6f4a40", fontSize: 12, fontWeight: "700" },
-  flairChoiceTextSelected: { color: "#ffffff" },
+  flairChoiceText: { color: c.textSecondary, fontSize: 12, fontWeight: "700" },
+  flairChoiceTextSelected: { color: c.surfaceRaised },
   flairChoiceCheck: { marginLeft: 1 },
   composerCardFocused: {
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
     shadowOpacity: 0.1,
   },
   sheetHandle: {
@@ -2558,7 +2710,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: "#d8c7bf",
+    backgroundColor: c.borderStrong,
     marginTop: 8,
   },
   scopeCard: {
@@ -2569,21 +2721,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     borderRadius: 14,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#eadbd4",
+    borderColor: c.border,
     gap: 10,
   },
   scopeCopy: { flex: 1 },
   scopeLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     fontWeight: "700",
     textTransform: "uppercase",
     letterSpacing: 0.6,
   },
   scopeValue: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "600",
     marginTop: 3,
@@ -2591,13 +2743,13 @@ const styles = StyleSheet.create({
   scroll: { flex: 1 },
   scrollContent: { padding: 16, paddingBottom: 120 },
   fileLimitInfo: {
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     padding: 10,
     borderRadius: 8,
     marginBottom: 12,
   },
   fileLimitText: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontSize: 13,
     textAlign: "center",
     fontWeight: "600",
@@ -2606,20 +2758,20 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     padding: 14,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#ead7cf",
-    shadowColor: "#4d1b17",
+    borderColor: c.borderStrong,
+    shadowColor: c.textPrimary,
     shadowOpacity: 0.04,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
     elevation: 1,
   },
-  anonymousLabel: { color: "#4d1b17", fontSize: 15, fontWeight: "600" },
+  anonymousLabel: { color: c.textPrimary, fontSize: 15, fontWeight: "600" },
   anonymousNote: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13,
     marginTop: 6,
     marginBottom: 14,
@@ -2628,7 +2780,7 @@ const styles = StyleSheet.create({
   toggle: {
     width: 48,
     height: 28,
-    backgroundColor: "#d6c9c2",
+    backgroundColor: c.borderStrong,
     borderRadius: 14,
     justifyContent: "center",
     padding: 2,
@@ -2636,7 +2788,7 @@ const styles = StyleSheet.create({
   toggleThumb: {
     width: 24,
     height: 24,
-    backgroundColor: "#fff",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 12,
     shadowColor: "#000",
     shadowOpacity: 0.18,
@@ -2645,21 +2797,21 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   input: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 16,
     minHeight: 132,
     textAlignVertical: "top",
     lineHeight: 23,
   },
   composerCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     paddingHorizontal: 14,
     paddingVertical: 12,
     marginBottom: 14,
-    shadowColor: "#4d1b17",
+    shadowColor: c.textPrimary,
     shadowOpacity: 0.04,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 3 },
@@ -2667,14 +2819,14 @@ const styles = StyleSheet.create({
   },
   mentionSheet: {
     marginBottom: 14,
-    backgroundColor: "#fff7f1",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#f0d2c2",
+    borderColor: c.borderStrong,
     overflow: "hidden",
   },
   mentionLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     fontWeight: "700",
     textTransform: "uppercase",
@@ -2689,7 +2841,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderTopWidth: 1,
-    borderTopColor: "#f5e3d9",
+    borderTopColor: c.border,
   },
   mentionAvatar: {
     width: 36,
@@ -2697,38 +2849,38 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fff0ea",
+    backgroundColor: c.surfaceSunken,
     marginRight: 10,
   },
   mentionAvatarAi: {
     backgroundColor: "#efe3ff",
   },
   mentionAvatarText: {
-    color: "#7d1d13",
+    color: c.primary,
     fontSize: 12,
     fontWeight: "800",
   },
   mentionName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 13,
     fontWeight: "700",
   },
   mentionMeta: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     marginTop: 2,
   },
   taggedPreview: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     padding: 10,
     borderRadius: 8,
     marginBottom: 12,
     gap: 8,
   },
   taggedPreviewText: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontSize: 13,
     fontWeight: "600",
   },
@@ -2736,7 +2888,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     marginHorizontal: 16,
     marginBottom: 10,
     paddingVertical: 10,
@@ -2744,7 +2896,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   tagAllText: {
-    color: "#fff",
+    color: c.onAccent,
     fontWeight: "600",
     fontSize: 14,
   },
@@ -2754,9 +2906,9 @@ const styles = StyleSheet.create({
     position: "relative",
     padding: 6,
     borderRadius: 16,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     overflow: "hidden",
   },
   gifImage: {
@@ -2767,7 +2919,7 @@ const styles = StyleSheet.create({
   linkPreview: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     minHeight: 72,
     paddingLeft: 14,
     paddingVertical: 12,
@@ -2775,15 +2927,15 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     marginBottom: 14,
     borderWidth: 1,
-    borderColor: "#dfc9c1",
+    borderColor: c.borderStrong,
   },
   linkTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "600",
   },
   linkUrl: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     marginTop: 2,
   },
@@ -2795,7 +2947,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginLeft: 8,
     flexShrink: 0,
-    backgroundColor: "#fff7f0",
+    backgroundColor: c.surface,
   },
   filePreviewContainer: { gap: 12, marginBottom: 2 },
   filePreview: {
@@ -2803,30 +2955,30 @@ const styles = StyleSheet.create({
     position: "relative",
     padding: 6,
     borderRadius: 16,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     overflow: "hidden",
   },
   videoPreview: {
     width: 110,
     height: 90,
     borderRadius: 12,
-    backgroundColor: "#eef4ff",
+    backgroundColor: c.surfaceSunken,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 8,
   },
   imagePreview: { width: "100%", height: 250, borderRadius: 11 },
   documentPreview: {
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     padding: 20,
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
   },
   documentName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 13,
     marginTop: 8,
     textAlign: "center",
@@ -2843,14 +2995,14 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,250,247,0.92)",
   },
   addToPostContainer: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     padding: 14,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     gap: 12,
   },
-  addToPostLabel: { color: "#7a3b2e", fontSize: 15, fontWeight: "600" },
+  addToPostLabel: { color: c.textSecondary, fontSize: 15, fontWeight: "600" },
   iconRow: {
     width: "100%",
     flexDirection: "row",
@@ -2865,7 +3017,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     position: "relative",
-    backgroundColor: "#f7ede8",
+    backgroundColor: c.surfaceSunken,
   },
   iconButtonDisabled: {
     opacity: 0.4,
@@ -2874,7 +3026,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     top: 0,
     right: 0,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderRadius: 10,
     minWidth: 18,
     height: 18,
@@ -2883,36 +3035,36 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   tagBadgeText: {
-    color: "#fff",
+    color: c.onAccent,
     fontSize: 10,
     fontWeight: "bold",
   },
   footer: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     paddingHorizontal: 16,
     paddingTop: 12,
-    borderTopColor: "#eadbd4",
+    borderTopColor: c.border,
     borderTopWidth: 1,
   },
   postButton: {
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     minHeight: 50,
     borderRadius: 15,
     paddingVertical: 13,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#7a3b2e",
+    shadowColor: c.textSecondary,
     shadowOpacity: 0.14,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 4 },
     elevation: 2,
   },
   disabledButton: { opacity: 0.5 },
-  postButtonText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
+  postButtonText: { color: c.onAccent, fontSize: 16, fontWeight: "bold" },
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)" },
   modalContainer: {
     flex: 1,
-    backgroundColor: "#f5efeb",
+    backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 18,
     borderTopRightRadius: 18,
     paddingBottom: 20,
@@ -2922,10 +3074,10 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     padding: 16,
   },
-  modalTitle: { color: "#7a3b2e", fontSize: 18, fontWeight: "bold" },
+  modalTitle: { color: c.textSecondary, fontSize: 18, fontWeight: "bold" },
   searchInput: {
-    backgroundColor: "#fffaf7",
-    color: "#4d1b17",
+    backgroundColor: c.surface,
+    color: c.textPrimary,
     borderRadius: 10,
     padding: 12,
     marginHorizontal: 16,
@@ -2935,11 +3087,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     padding: 14,
-    borderBottomColor: "#ece0d9",
+    borderBottomColor: c.border,
     borderBottomWidth: 1,
   },
   studentAvatar: {
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     width: 40,
     height: 40,
     borderRadius: 20,
@@ -2947,21 +3099,51 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginRight: 12,
   },
-  studentAvatarText: { color: "#7a3b2e", fontWeight: "bold" },
+  studentAvatarText: { color: c.textSecondary, fontWeight: "bold" },
   studentInfo: {
     flex: 1,
   },
+  duplicateQuestionCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 11,
+    backgroundColor: c.accentSoft,
+    borderWidth: 1,
+    borderColor: c.borderStrong,
+    borderRadius: 14,
+    padding: 13,
+    marginBottom: 12,
+  },
+  duplicateQuestionCopy: { flex: 1 },
+  duplicateQuestionTitle: {
+    color: c.accent,
+    fontSize: 12.5,
+    fontWeight: "900",
+  },
+  duplicateQuestionText: {
+    color: c.textMuted,
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 3,
+    fontStyle: "italic",
+  },
+  studentNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
   studentName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "600",
+    flexShrink: 1,
   },
   studentID: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     marginTop: 2,
   },
-  emptyText: { color: "#9b766c", textAlign: "center", marginTop: 40 },
+  emptyText: { color: c.textMuted, textAlign: "center", marginTop: 40 },
   linkModalOverlay: {
     flex: 1,
     justifyContent: "center",
@@ -2970,7 +3152,7 @@ const styles = StyleSheet.create({
   },
   linkModalContent: {
     width: "85%",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     padding: 20,
   },
@@ -2982,7 +3164,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   linkModalTitle: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontSize: 18,
     fontWeight: "bold",
     textAlign: "center",
@@ -2995,16 +3177,16 @@ const styles = StyleSheet.create({
     borderRadius: 13,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f5e9e3",
+    backgroundColor: c.surfaceSunken,
   },
   linkInput: {
-    backgroundColor: "#f0e7e2",
-    color: "#4d1b17",
+    backgroundColor: c.border,
+    color: c.textPrimary,
     borderRadius: 10,
     padding: 12,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "#dfc9c1",
+    borderColor: c.borderStrong,
   },
   linkModalButtons: {
     flexDirection: "row",
@@ -3018,12 +3200,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   linkModalButtonText: {
-    color: "#fff",
+    color: c.onAccent,
     fontSize: 15,
     fontWeight: "600",
   },
   linkModalCancelText: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontSize: 15,
     fontWeight: "600",
   },
@@ -3034,7 +3216,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   gifSearchButton: {
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     padding: 12,
     borderRadius: 10,
     marginBottom: 12,
@@ -3045,7 +3227,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   gifLoadingText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 14,
     marginTop: 12,
   },
@@ -3076,7 +3258,7 @@ const styles = StyleSheet.create({
     paddingVertical: 60,
   },
   errorText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 14,
     textAlign: "center",
     marginTop: 12,
@@ -3084,15 +3266,22 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   retryButton: {
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 8,
     marginTop: 16,
   },
   retryButtonText: {
-    color: "#fff",
+    color: c.onAccent,
     fontWeight: "600",
     fontSize: 14,
   },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

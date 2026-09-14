@@ -1,4 +1,6 @@
 // app/(main)/(tabs)/AiChatScreen.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { AI_ASSISTANT_NAME } from "@/utils/aiAssistant";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import { requestNonGenerativeChatbotReply } from "@/utils/nonGenerativeChatbot";
@@ -11,6 +13,7 @@ import {
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
 import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
     addDoc,
@@ -28,7 +31,7 @@ import {
     updateDoc,
     writeBatch,
 } from "firebase/firestore";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, NativeScrollEvent, NativeSyntheticEvent } from "react-native";
 import {
     ActivityIndicator,
@@ -274,6 +277,7 @@ function FadeSlideIn({
 }
 
 function TypingDots() {
+  const { styles } = useStyles();
   const dots = useRef([
     new Animated.Value(0),
     new Animated.Value(0),
@@ -324,6 +328,7 @@ function TypingDots() {
  * used by chat assistants. No external markdown library needed.
  */
 function FormattedMessageText({ text, style }: { text: string; style?: any }) {
+  const { styles } = useStyles();
   const segments = React.useMemo(() => {
     const pattern = /\*\*(.+?)\*\*/g;
     const parts: { text: string; bold: boolean }[] = [];
@@ -364,18 +369,33 @@ function FormattedMessageText({ text, style }: { text: string; style?: any }) {
  * on a timer and forcing every mounted ChatBubble to re-render with it.
  */
 const TimeAgoText = React.memo(function TimeAgoText({ createdAt }: { createdAt: any }) {
+  const { styles } = useStyles();
   const nowMs = useRelativeTimeNow();
   return <Text style={styles.messageMeta}>{getTimeAgo(createdAt, nowMs)}</Text>;
 });
 
 const ChatBubble = React.memo(function ChatBubble({
   item,
+  askedQuestion,
   onFeedback,
+  onEscalate,
 }: {
   item: ChatMessage;
+  /** The user message this answer replies to, prefilled into a ticket. */
+  askedQuestion?: string;
   onFeedback: (messageId: string, feedback: ChatFeedback | null) => void;
+  onEscalate: (question: string) => void;
 }) {
+  const { styles, theme } = useStyles();
   const isOwnMessage = item.role === "user";
+
+  // Every branch of the chatbot that gives up returns intent "unknown" (see
+  // logUnansweredQuestion in utils/nonGenerativeChatbot.ts), so that is the
+  // one reliable signal that a human should take over. Offering a ticket
+  // here rather than only from Settings means the escalation happens at the
+  // moment somebody is actually stuck, and arrives already knowing what they
+  // asked — which is also what keeps answerable questions out of the queue.
+  const unanswered = !isOwnMessage && item.intent === "unknown";
 
   return (
     <FadeSlideIn
@@ -386,7 +406,7 @@ const ChatBubble = React.memo(function ChatBubble({
     >
       {!isOwnMessage && (
         <View style={styles.avatar}>
-          <Ionicons name="sparkles" size={15} color="#5f0909" />
+          <Ionicons name="sparkles" size={15} color={theme.primary} />
         </View>
       )}
       <View style={styles.messageContentWrap}>
@@ -405,6 +425,18 @@ const ChatBubble = React.memo(function ChatBubble({
             </Text>
           ) : (
             <FormattedMessageText text={item.text} style={styles.messageText} />
+          )}
+
+          {unanswered && (
+            <TouchableOpacity
+              style={styles.escalateButton}
+              onPress={() => onEscalate(askedQuestion || "")}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="help-buoy-outline" size={15} color={theme.accent} />
+              <Text style={styles.escalateText}>Still need help? Ask staff</Text>
+              <Ionicons name="chevron-forward" size={14} color={theme.accent} />
+            </TouchableOpacity>
           )}
         </View>
 
@@ -429,7 +461,7 @@ const ChatBubble = React.memo(function ChatBubble({
                 <Ionicons
                   name={item.feedback === "up" ? "thumbs-up" : "thumbs-up-outline"}
                   size={14}
-                  color={item.feedback === "up" ? "#e0a53d" : "#9b766c"}
+                  color={item.feedback === "up" ? theme.accent : theme.textMuted}
                 />
               </TouchableOpacity>
               <TouchableOpacity
@@ -443,7 +475,7 @@ const ChatBubble = React.memo(function ChatBubble({
                 <Ionicons
                   name={item.feedback === "down" ? "thumbs-down" : "thumbs-down-outline"}
                   size={14}
-                  color={item.feedback === "down" ? "#e0a53d" : "#9b766c"}
+                  color={item.feedback === "down" ? theme.accent : theme.textMuted}
                 />
               </TouchableOpacity>
             </View>
@@ -455,10 +487,11 @@ const ChatBubble = React.memo(function ChatBubble({
 });
 
 function TypingBubble() {
+  const { styles, theme } = useStyles();
   return (
     <FadeSlideIn style={[styles.messageRow, styles.messageRowOther]}>
       <View style={styles.avatar}>
-        <Ionicons name="sparkles" size={15} color="#5f0909" />
+        <Ionicons name="sparkles" size={15} color={theme.primary} />
       </View>
       <View style={styles.messageContentWrap}>
         <View style={styles.messageBubble}>
@@ -471,10 +504,11 @@ function TypingBubble() {
 }
 
 function EmptyState() {
+  const { styles, theme } = useStyles();
   return (
     <View style={styles.emptyState}>
       <View style={styles.avatar}>
-        <Ionicons name="sparkles" size={15} color="#5f0909" />
+        <Ionicons name="sparkles" size={15} color={theme.primary} />
       </View>
       <View style={styles.messageContentWrap}>
         <View style={styles.messageBubble}>
@@ -491,6 +525,7 @@ function SuggestionsBar({
 }: {
   onSelect: (question: string) => void;
 }) {
+  const { styles } = useStyles();
   return (
     <View style={styles.suggestionsBar}>
       <Text style={styles.suggestionsBarLabel}>Try asking</Text>
@@ -511,6 +546,7 @@ function SuggestionsBar({
 }
 
 export default function AiChatScreen() {
+  const { styles, theme } = useStyles();
   const [user, setUser] = useState<User | null>(auth.currentUser);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -532,6 +568,7 @@ export default function AiChatScreen() {
   );
   const [startingNewChat, setStartingNewChat] = useState(false);
   const [historyVisible, setHistoryVisible] = useState(false);
+  const router = useRouter();
   const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE_SIZE);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
@@ -1220,18 +1257,38 @@ export default function AiChatScreen() {
 
   const canSend = !!inputText.trim() && !sending && !!user?.uid;
 
+  const handleEscalate = useCallback(
+    (question: string) => {
+      router.push({
+        pathname: "/SupportScreen",
+        params: { compose: "1", question },
+      });
+    },
+    [router],
+  );
+
   const renderItem = useCallback(
-    ({ item }: { item: ChatMessage }) => (
-      <ChatBubble item={item} onFeedback={handleFeedback} />
-    ),
-    [handleFeedback],
+    ({ item, index }: { item: ChatMessage; index: number }) => {
+      // The list renders newest-last, so the question that produced an answer
+      // is the user message immediately before it.
+      const previous = messages[index - 1];
+      return (
+        <ChatBubble
+          item={item}
+          askedQuestion={previous?.role === "user" ? previous.text : undefined}
+          onFeedback={handleFeedback}
+          onEscalate={handleEscalate}
+        />
+      );
+    },
+    [handleEscalate, handleFeedback, messages],
   );
 
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
       <View style={styles.header}>
         <View style={styles.headerAvatar}>
-          <Ionicons name="sparkles" size={18} color="#e0a53d" />
+          <Ionicons name="sparkles" size={18} color={theme.accent} />
         </View>
         <View style={styles.headerCopy}>
           <Text style={styles.headerTitle}>{AI_ASSISTANT_NAME}</Text>
@@ -1245,7 +1302,7 @@ export default function AiChatScreen() {
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               accessibilityLabel="New chat"
             >
-              <Ionicons name="create-outline" size={19} color="#e7cdbf" />
+              <Ionicons name="create-outline" size={19} color={theme.onChromeMuted} />
             </TouchableOpacity>
           )}
           {conversations.length > 0 && (
@@ -1255,7 +1312,7 @@ export default function AiChatScreen() {
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               accessibilityLabel="Conversation history"
             >
-              <Ionicons name="time-outline" size={19} color="#e7cdbf" />
+              <Ionicons name="time-outline" size={19} color={theme.onChromeMuted} />
             </TouchableOpacity>
           )}
           {messages.length > 0 && !!activeConversationId && (
@@ -1265,7 +1322,7 @@ export default function AiChatScreen() {
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               accessibilityLabel="Clear this conversation"
             >
-              <Ionicons name="trash-outline" size={19} color="#e7cdbf" />
+              <Ionicons name="trash-outline" size={19} color={theme.onChromeMuted} />
             </TouchableOpacity>
           )}
         </View>
@@ -1273,7 +1330,7 @@ export default function AiChatScreen() {
 
       {isOffline && (
         <View style={styles.offlineBanner}>
-          <Ionicons name="cloud-offline-outline" size={14} color="#7d3b30" />
+          <Ionicons name="cloud-offline-outline" size={14} color={theme.textSecondary} />
           <Text style={styles.offlineBannerText}>
             You&apos;re offline — messages will send once you&apos;re back online.
           </Text>
@@ -1315,7 +1372,7 @@ export default function AiChatScreen() {
             activeOpacity={0.85}
             accessibilityLabel="Scroll to latest messages"
           >
-            <Ionicons name="chevron-down" size={20} color="#fff" />
+            <Ionicons name="chevron-down" size={20} color={theme.onPrimary} />
           </TouchableOpacity>
         )}
 
@@ -1333,14 +1390,14 @@ export default function AiChatScreen() {
             <Ionicons
               name={suggestionsOpen ? "bulb" : "bulb-outline"}
               size={18}
-              color={suggestionsOpen ? "#fff" : "#8f3a2b"}
+              color={suggestionsOpen ? theme.onPrimary : theme.textSecondary}
             />
           </TouchableOpacity>
           <TextInput
             value={inputText}
             onChangeText={setInputText}
             placeholder={`Message ${AI_ASSISTANT_NAME}...`}
-            placeholderTextColor="#9b766c"
+            placeholderTextColor={theme.textMuted}
             style={styles.input}
             multiline
             editable={!!user}
@@ -1352,12 +1409,12 @@ export default function AiChatScreen() {
             style={[styles.sendButton, !canSend && styles.sendButtonDisabled]}
           >
             {sending ? (
-              <ActivityIndicator size="small" color="#fff" />
+              <ActivityIndicator size="small" color={theme.onPrimary} />
             ) : (
               <Ionicons
                 name="send"
                 size={16}
-                color={canSend ? "#fff" : "#9b766c"}
+                color={canSend ? theme.onPrimary : theme.textMuted}
               />
             )}
           </TouchableOpacity>
@@ -1379,7 +1436,7 @@ export default function AiChatScreen() {
                 onPress={() => setHistoryVisible(false)}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
-                <Ionicons name="close" size={22} color="#7a3b2e" />
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -1388,7 +1445,7 @@ export default function AiChatScreen() {
               onPress={startNewChat}
               activeOpacity={0.85}
             >
-              <Ionicons name="add" size={18} color="#5f0909" />
+              <Ionicons name="add" size={18} color={theme.primary} />
               <Text style={styles.historyNewButtonText}>New chat</Text>
             </TouchableOpacity>
 
@@ -1428,9 +1485,9 @@ export default function AiChatScreen() {
                       accessibilityLabel="Delete conversation"
                     >
                       {deletingConversationId === item.id ? (
-                        <ActivityIndicator size="small" color="#b3261e" />
+                        <ActivityIndicator size="small" color={theme.danger} />
                       ) : (
-                        <Ionicons name="trash-outline" size={18} color="#b3261e" />
+                        <Ionicons name="trash-outline" size={18} color={theme.danger} />
                       )}
                     </TouchableOpacity>
                   </View>
@@ -1450,7 +1507,7 @@ export default function AiChatScreen() {
                     activeOpacity={0.85}
                   >
                     {historyLoadingMore ? (
-                      <ActivityIndicator size="small" color="#5f0909" />
+                      <ActivityIndicator size="small" color={theme.primary} />
                     ) : (
                       <Text style={styles.historyLoadMoreText}>Load more</Text>
                     )}
@@ -1491,14 +1548,15 @@ export default function AiChatScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
   },
   flexFill: {
     flex: 1,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
   header: {
     flexDirection: "row",
@@ -1507,9 +1565,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 8,
     paddingBottom: 16,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
     borderBottomWidth: 1,
-    borderBottomColor: "#7f2220",
+    borderBottomColor: c.chromeBorder,
   },
   headerAvatar: {
     width: 40,
@@ -1519,18 +1577,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
   headerCopy: {
     flex: 1,
   },
   headerTitle: {
-    color: "#fffaf7",
+    color: c.onChrome,
     fontSize: 17,
     fontWeight: "800",
   },
   headerSubtitle: {
-    color: "#e7cdbf",
+    color: c.onChromeMuted,
     fontSize: 12,
     marginTop: 2,
   },
@@ -1552,13 +1610,13 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 16,
     paddingVertical: 8,
-    backgroundColor: "#f7ddd7",
+    backgroundColor: c.dangerSoft,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(95,9,9,0.12)",
   },
   offlineBannerText: {
     flex: 1,
-    color: "#7d3b30",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "600",
   },
@@ -1585,7 +1643,7 @@ const styles = StyleSheet.create({
     width: 38,
     height: 38,
     borderRadius: 19,
-    backgroundColor: "#7a3b2e",
+    backgroundColor: c.textSecondary,
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#000",
@@ -1616,42 +1674,42 @@ const styles = StyleSheet.create({
     borderRadius: 15,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#ead7cf",
+    backgroundColor: c.borderStrong,
     marginRight: 8,
   },
   messageContentWrap: {
     maxWidth: "78%",
   },
   messageBubble: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 20,
     paddingHorizontal: 15,
     paddingVertical: 13,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
   },
   messageBubbleOwn: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderColor: "transparent",
     borderBottomRightRadius: 8,
   },
   messageAuthor: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "700",
     marginBottom: 5,
   },
   messageText: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     lineHeight: 22.5,
   },
   messageTextOwn: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   messageTextBold: {
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
   },
   messageFooter: {
     flexDirection: "row",
@@ -1664,7 +1722,7 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
   },
   messageMeta: {
-    color: "#b09188",
+    color: c.textMuted,
     fontSize: 11,
   },
   feedbackRow: {
@@ -1674,6 +1732,16 @@ const styles = StyleSheet.create({
   feedbackButton: {
     padding: 3,
   },
+  escalateButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: c.border,
+  },
+  escalateText: { flex: 1, color: c.accent, fontSize: 12.5, fontWeight: "800" },
   feedbackButtonInactive: {
     opacity: 0.6,
   },
@@ -1687,18 +1755,18 @@ const styles = StyleSheet.create({
     width: 7,
     height: 7,
     borderRadius: 3.5,
-    backgroundColor: "#8f3a2b",
+    backgroundColor: c.textSecondary,
   },
   suggestionsBar: {
     paddingHorizontal: 16,
     paddingTop: 10,
     paddingBottom: 4,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
     borderTopWidth: 1,
-    borderTopColor: "#ead7cf",
+    borderTopColor: c.borderStrong,
   },
   suggestionsBarLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     fontWeight: "700",
     letterSpacing: 0.3,
@@ -1711,17 +1779,17 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   suggestionChip: {
-    backgroundColor: "#fff8f4",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 18,
     paddingHorizontal: 14,
     paddingVertical: 10,
     minHeight: 38,
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
   suggestionChipText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 12.5,
     fontWeight: "600",
   },
@@ -1732,26 +1800,26 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 10,
     paddingBottom: 96,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
     borderTopWidth: 1,
-    borderTopColor: "#ead7cf",
+    borderTopColor: c.borderStrong,
   },
   suggestionsToggle: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#fff8f4",
+    backgroundColor: c.surfaceRaised,
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
   suggestionsToggleActive: {
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
   },
   input: {
     flex: 1,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14.5,
     maxHeight: 100,
     minHeight: 40,
@@ -1759,7 +1827,7 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
     paddingHorizontal: 14,
     lineHeight: 20,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 20,
     borderWidth: 1,
     borderColor: "rgba(95,9,9,0.16)",
@@ -1768,15 +1836,15 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
   sendButtonDisabled: {
-    backgroundColor: "#f0d2c2",
-    borderColor: "#f0d2c2",
+    backgroundColor: c.borderStrong,
+    borderColor: c.borderStrong,
   },
   historyBackdrop: {
     flex: 1,
@@ -1784,7 +1852,7 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
   },
   historyCard: {
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
     paddingTop: 16,
@@ -1799,7 +1867,7 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
   },
   historyTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 18,
     fontWeight: "900",
   },
@@ -1812,12 +1880,12 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     paddingVertical: 12,
     borderRadius: 14,
-    backgroundColor: "#fff8f4",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
   historyNewButtonText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13.5,
     fontWeight: "800",
   },
@@ -1833,29 +1901,29 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     paddingLeft: 14,
     paddingRight: 6,
     marginBottom: 8,
   },
   historyRowActive: {
-    borderColor: "#e0a53d",
-    backgroundColor: "#fff8f4",
+    borderColor: c.accent,
+    backgroundColor: c.surfaceRaised,
   },
   historyRowMain: {
     flex: 1,
     paddingVertical: 12,
   },
   historyRowTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "700",
   },
   historyRowMeta: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11.5,
     marginTop: 3,
   },
@@ -1866,7 +1934,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   historyEmptyText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13,
     textAlign: "center",
     paddingVertical: 24,
@@ -1877,13 +1945,20 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     marginTop: 2,
     borderRadius: 12,
-    backgroundColor: "#fff8f4",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
   },
   historyLoadMoreText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "800",
   },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

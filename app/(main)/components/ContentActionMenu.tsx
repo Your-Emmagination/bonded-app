@@ -1,3 +1,6 @@
+import { useMemo } from "react";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import React from "react";
 import { Modal, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -17,6 +20,7 @@ type Props = {
 };
 
 const ContentActionMenu: React.FC<Props> = ({ visible, title, actions, onClose }) => {
+  const { styles, theme } = useStyles();
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.overlay}>
@@ -25,7 +29,7 @@ const ContentActionMenu: React.FC<Props> = ({ visible, title, actions, onClose }
           <View style={styles.header}>
             <Text style={styles.title}>{title}</Text>
             <TouchableOpacity onPress={onClose} hitSlop={10} style={styles.closeButton}>
-              <Ionicons name="close" size={20} color="#8f6a60" />
+              <Ionicons name="close" size={20} color={theme.textMuted} />
             </TouchableOpacity>
           </View>
 
@@ -42,7 +46,7 @@ const ContentActionMenu: React.FC<Props> = ({ visible, title, actions, onClose }
                   <Ionicons
                     name={action.icon}
                     size={19}
-                    color={action.destructive ? "#a61f1f" : "#8f6a60"}
+                    color={action.destructive ? theme.danger : theme.textMuted}
                   />
                 </View>
                 <Text style={[styles.actionText, action.destructive && styles.actionTextDestructive]}>
@@ -55,7 +59,7 @@ const ContentActionMenu: React.FC<Props> = ({ visible, title, actions, onClose }
 
           <View style={styles.divider} />
           <TouchableOpacity style={styles.cancelItem} activeOpacity={0.75} onPress={onClose}>
-            <Ionicons name="close-circle-outline" size={19} color="#8f6a60" />
+            <Ionicons name="close-circle-outline" size={19} color={theme.textMuted} />
             <Text style={styles.cancelText}>Cancel</Text>
           </TouchableOpacity>
         </View>
@@ -64,7 +68,8 @@ const ContentActionMenu: React.FC<Props> = ({ visible, title, actions, onClose }
   );
 };
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   overlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.48)",
@@ -75,10 +80,10 @@ const styles = StyleSheet.create({
   card: {
     width: "100%",
     maxWidth: 390,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#eadbd4",
+    borderColor: c.border,
     overflow: "hidden",
     shadowColor: "#000",
     shadowOpacity: 0.18,
@@ -93,10 +98,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  title: { color: "#4d1b17", fontSize: 17, fontWeight: "700" },
+  title: { color: c.textPrimary, fontSize: 17, fontWeight: "700" },
   closeButton: { padding: 4 },
-  divider: { height: 1, backgroundColor: "#eadbd4" },
-  itemDivider: { height: 1, backgroundColor: "#f0e7e2", marginLeft: 58 },
+  divider: { height: 1, backgroundColor: c.border },
+  itemDivider: { height: 1, backgroundColor: c.border, marginLeft: 58 },
   actionItem: {
     minHeight: 54,
     flexDirection: "row",
@@ -107,14 +112,14 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 10,
-    backgroundColor: "#f6eee9",
+    backgroundColor: c.surfaceSunken,
     alignItems: "center",
     justifyContent: "center",
     marginRight: 12,
   },
-  iconBoxDestructive: { backgroundColor: "#fbeaea" },
-  actionText: { flex: 1, color: "#4d1b17", fontSize: 14.5, fontWeight: "600" },
-  actionTextDestructive: { color: "#a61f1f" },
+  iconBoxDestructive: { backgroundColor: c.dangerSoft },
+  actionText: { flex: 1, color: c.textPrimary, fontSize: 14.5, fontWeight: "600" },
+  actionTextDestructive: { color: c.primary },
   cancelItem: {
     minHeight: 52,
     flexDirection: "row",
@@ -122,7 +127,14 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
   },
-  cancelText: { color: "#8f6a60", fontSize: 14, fontWeight: "600" },
+  cancelText: { color: c.textMuted, fontSize: 14, fontWeight: "600" },
 });
 
 export default ContentActionMenu;
+
+/** Themed stylesheet for this file. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

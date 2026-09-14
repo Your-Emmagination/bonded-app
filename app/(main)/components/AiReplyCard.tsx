@@ -1,3 +1,6 @@
+import { useMemo } from "react";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { AI_ASSISTANT_NAME } from "@/utils/aiAssistant";
 import { Ionicons } from "@expo/vector-icons";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
@@ -16,6 +19,7 @@ export default function AiReplyCard({
   reply?: AiReply | null;
   compact?: boolean;
 }) {
+  const { styles, theme } = useStyles();
   if (!reply) return null;
 
   const isGenerating = reply.status === "generating";
@@ -27,13 +31,13 @@ export default function AiReplyCard({
     <View style={[styles.card, compact && styles.cardCompact]}>
       <View style={styles.header}>
         <View style={styles.badge}>
-          <Ionicons name="sparkles" size={13} color="#fff7f0" />
+          <Ionicons name="sparkles" size={13} color={theme.onPrimary} />
         </View>
         <Text style={styles.title}>{AI_ASSISTANT_NAME}</Text>
       </View>
       {isGenerating ? (
         <View style={styles.pendingRow}>
-          <ActivityIndicator size="small" color="#8f2117" />
+          <ActivityIndicator size="small" color={theme.primary} />
           <Text style={styles.pendingText}>Generating a reply...</Text>
         </View>
       ) : (
@@ -49,14 +53,22 @@ export default function AiReplyCard({
   );
 }
 
-const styles = StyleSheet.create({
+/** Themed stylesheet for this component. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   card: {
     marginTop: 12,
     padding: 14,
     borderRadius: 18,
-    backgroundColor: "#fff4ef",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#f0c7ba",
+    borderColor: c.borderStrong,
     shadowColor: "#7a2016",
     shadowOpacity: 0.08,
     shadowRadius: 12,
@@ -78,22 +90,22 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#8f2117",
+    backgroundColor: c.primary,
     marginRight: 8,
   },
   title: {
-    color: "#6f160f",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "800",
     letterSpacing: 0.2,
   },
   body: {
-    color: "#4f1c17",
+    color: c.textPrimary,
     fontSize: 13.5,
     lineHeight: 20,
   },
   toggleText: {
-    color: "#8f2117",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "700",
   },
@@ -103,7 +115,7 @@ const styles = StyleSheet.create({
   },
   pendingText: {
     marginLeft: 10,
-    color: "#7d3b30",
+    color: c.textSecondary,
     fontSize: 13,
     fontWeight: "600",
   },

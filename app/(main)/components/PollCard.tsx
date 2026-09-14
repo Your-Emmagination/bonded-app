@@ -1,5 +1,7 @@
 // PollCard.tsx 
 
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
@@ -189,6 +191,7 @@ const PollProgressBar = React.memo(function PollProgressBar({
 }: {
   percentage: number;
 }) {
+  const { styles, theme } = useStyles();
   const width = useSharedValue(percentage);
 
   useEffect(() => {
@@ -237,6 +240,7 @@ const PollCard = React.memo<PollCardProps>(({
   onEdit,
 
 }: PollCardProps) => {
+  const { styles, theme } = useStyles();
 
   const expired = isPollExpired(poll.expiresAt);
 
@@ -1808,11 +1812,25 @@ export default PollCard;
 
 
 
-const styles = StyleSheet.create({
+/**
+ * The themed stylesheet for this component.
+ *
+ * Declared once because several memoised sub-components here render chrome,
+ * and each must read the palette itself — handing them a styles object as a
+ * prop would change its identity every render and defeat the memo.
+ */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
 
   pollCard: {
 
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
 
     paddingVertical: 14,
 
@@ -1820,7 +1838,7 @@ const styles = StyleSheet.create({
 
     borderBottomWidth: 1,
 
-    borderBottomColor: "#ead8cf",
+    borderBottomColor: c.border,
 
     overflow: "visible",
 
@@ -1830,9 +1848,9 @@ const styles = StyleSheet.create({
 
     borderLeftWidth: 4,
 
-    borderLeftColor: "#a61f1f",
+    borderLeftColor: c.danger,
 
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
 
   },
 
@@ -1860,7 +1878,7 @@ const styles = StyleSheet.create({
 
     borderRadius: 20,
 
-    backgroundColor: "#f2dfd4",
+    backgroundColor: c.border,
 
     justifyContent: "center",
 
@@ -1868,7 +1886,7 @@ const styles = StyleSheet.create({
 
     borderWidth: 1.5,
 
-    borderColor: "#e3c3b8",
+    borderColor: c.borderStrong,
 
     overflow: "hidden",
 
@@ -1932,7 +1950,7 @@ const styles = StyleSheet.create({
 
   username: {
 
-    color: "#4f1c17",
+    color: c.textPrimary,
 
     fontSize: 15,
 
@@ -1990,7 +2008,7 @@ const styles = StyleSheet.create({
 
   timestamp: {
 
-    color: "#8f6a60",
+    color: c.textMuted,
 
     fontSize: 12.5,
 
@@ -2020,11 +2038,11 @@ const styles = StyleSheet.create({
 
     borderRadius: 12,
 
-    backgroundColor: "#f3ece8",
+    backgroundColor: c.surfaceSunken,
 
     borderWidth: 1,
 
-    borderColor: "#e5d5cd",
+    borderColor: c.border,
 
   },
 
@@ -2036,7 +2054,7 @@ const styles = StyleSheet.create({
 
   flairBadgeText: {
 
-    color: "#6d463c",
+    color: c.textSecondary,
 
     fontSize: 11.5,
 
@@ -2046,7 +2064,7 @@ const styles = StyleSheet.create({
 
   pollQuestion: {
 
-    color: "#4f1c17",
+    color: c.textPrimary,
 
     fontSize: 15,
 
@@ -2092,7 +2110,7 @@ const styles = StyleSheet.create({
 
   pollOption: {
 
-    backgroundColor: "#fcf0ec",
+    backgroundColor: c.surfaceSunken,
 
     borderRadius: 8,
 
@@ -2100,7 +2118,7 @@ const styles = StyleSheet.create({
 
     borderWidth: 1,
 
-    borderColor: "#f2c4b9",
+    borderColor: c.dangerSoft,
 
     overflow: "hidden",
 
@@ -2108,9 +2126,9 @@ const styles = StyleSheet.create({
 
   pollOptionVoted: {
 
-    borderColor: "#a61f1f",
+    borderColor: c.danger,
 
-    backgroundColor: "#fff4f1",
+    backgroundColor: c.surface,
 
   },
 
@@ -2136,7 +2154,7 @@ const styles = StyleSheet.create({
 
     borderWidth: 2,
 
-    borderColor: "#b88f87",
+    borderColor: c.textMuted,
 
     justifyContent: "center",
 
@@ -2146,9 +2164,9 @@ const styles = StyleSheet.create({
 
   checkboxActive: {
 
-    backgroundColor: "#a61f1f",
+    backgroundColor: c.danger,
 
-    borderColor: "#a61f1f",
+    borderColor: c.danger,
 
   },
 
@@ -2162,7 +2180,7 @@ const styles = StyleSheet.create({
 
     borderWidth: 2,
 
-    borderColor: "#b88f87",
+    borderColor: c.textMuted,
 
     justifyContent: "center",
 
@@ -2172,7 +2190,7 @@ const styles = StyleSheet.create({
 
   radioActive: {
 
-    borderColor: "#a61f1f",
+    borderColor: c.danger,
 
   },
 
@@ -2184,13 +2202,13 @@ const styles = StyleSheet.create({
 
     borderRadius: 4,
 
-    backgroundColor: "#a61f1f",
+    backgroundColor: c.danger,
 
   },
 
   pollOptionText: {
 
-    color: "#4f1c17",
+    color: c.textPrimary,
 
     fontSize: 13,
 
@@ -2200,7 +2218,7 @@ const styles = StyleSheet.create({
 
   userAddedBadge: {
 
-    backgroundColor: "#f4e7df",
+    backgroundColor: c.surfaceSunken,
 
     paddingHorizontal: 6,
 
@@ -2210,13 +2228,13 @@ const styles = StyleSheet.create({
 
     borderWidth: 0.5,
 
-    borderColor: "#d8b36b",
+    borderColor: c.accentSoft,
 
   },
 
   userAddedText: {
 
-    color: "#8f6a60",
+    color: c.textMuted,
 
     fontSize: 9,
 
@@ -2256,7 +2274,7 @@ const styles = StyleSheet.create({
 
     bottom: 0,
 
-    backgroundColor: "#c72d1f",
+    backgroundColor: c.danger,
 
     opacity: 0.24,
 
@@ -2270,7 +2288,7 @@ const styles = StyleSheet.create({
 
   pollVoteCount: {
 
-    color: "#6b1c16",
+    color: c.textPrimary,
 
     fontSize: 11,
 
@@ -2284,7 +2302,7 @@ const styles = StyleSheet.create({
 
   addOptionButtonText: {
 
-    color: "#a61f1f",
+    color: c.danger,
 
     fontWeight: "600",
 
@@ -2294,7 +2312,7 @@ const styles = StyleSheet.create({
 
   addOptionForm: {
 
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
 
     borderRadius: 8,
 
@@ -2306,7 +2324,7 @@ const styles = StyleSheet.create({
 
     borderWidth: 1,
 
-    borderColor: "#ecd2b0",
+    borderColor: c.accentSoft,
 
   },
 
@@ -2320,7 +2338,7 @@ const styles = StyleSheet.create({
 
   addOptionCharCount: {
 
-    color: "#8f6a60",
+    color: c.textMuted,
 
     fontSize: 11,
 
@@ -2338,13 +2356,13 @@ const styles = StyleSheet.create({
 
   voterSection: {
 
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
 
     borderRadius: 12,
 
     borderWidth: 1,
 
-    borderColor: "#f2d4ca",
+    borderColor: c.border,
 
     padding: 12,
 
@@ -2364,7 +2382,7 @@ const styles = StyleSheet.create({
 
   voterToggleButtonText: {
 
-    color: "#8f3a2b",
+    color: c.textSecondary,
 
     fontSize: 12.5,
 
@@ -2386,13 +2404,13 @@ const styles = StyleSheet.create({
 
     gap: 8,
 
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
 
     borderRadius: 10,
 
     borderWidth: 1,
 
-    borderColor: "#edd6cc",
+    borderColor: c.border,
 
     paddingHorizontal: 12,
 
@@ -2402,7 +2420,7 @@ const styles = StyleSheet.create({
 
   voterEmptyStateText: {
 
-    color: "#9b766c",
+    color: c.textMuted,
 
     fontSize: 12,
 
@@ -2426,7 +2444,7 @@ const styles = StyleSheet.create({
 
   voterOptionTitle: {
 
-    color: "#5f0909",
+    color: c.primary,
 
     fontSize: 12.5,
 
@@ -2448,13 +2466,13 @@ const styles = StyleSheet.create({
 
   voterChip: {
 
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
 
     borderRadius: 999,
 
     borderWidth: 1,
 
-    borderColor: "#e6c6b9",
+    borderColor: c.border,
 
     paddingHorizontal: 10,
 
@@ -2464,7 +2482,7 @@ const styles = StyleSheet.create({
 
   voterChipText: {
 
-    color: "#5f0909",
+    color: c.primary,
 
     fontSize: 12,
 
@@ -2484,7 +2502,7 @@ const styles = StyleSheet.create({
 
   statText: {
 
-    color: "#8f6a60",
+    color: c.textMuted,
 
     fontSize: 13,
 
@@ -2504,7 +2522,7 @@ const styles = StyleSheet.create({
 
   pollExpired: {
 
-    color: "#a61f1f",
+    color: c.danger,
 
     fontSize: 12,
 
@@ -2532,7 +2550,7 @@ const styles = StyleSheet.create({
 
   addOptionFormContainer: {
 
-  backgroundColor: "#f8eee8",
+  backgroundColor: c.surfaceSunken,
 
   borderRadius: 10,
 
@@ -2542,7 +2560,7 @@ const styles = StyleSheet.create({
 
   borderWidth: 1,
 
-  borderColor: "#ecd2b0",
+  borderColor: c.accentSoft,
 
 },
 
@@ -2550,7 +2568,7 @@ const styles = StyleSheet.create({
 
 addOptionLabel: {
 
-  color: "#8f6a60",
+  color: c.textMuted,
 
   fontSize: 13,
 
@@ -2574,7 +2592,7 @@ addOptionInputWrapper: {
 
 addOptionInput: {
 
-  backgroundColor: "#fffaf8",
+  backgroundColor: c.surface,
 
   borderRadius: 8,
 
@@ -2582,13 +2600,13 @@ addOptionInput: {
 
   paddingVertical: 11,
 
-  color: "#4f1c17",
+  color: c.textPrimary,
 
   fontSize: 14,
 
   borderWidth: 1,
 
-  borderColor: "#ddc6bb",
+  borderColor: c.border,
 
 },
 
@@ -2608,7 +2626,7 @@ charCounter: {
 
 charCountText: {
 
-  color: "#a07b70",
+  color: c.textMuted,
 
   fontSize: 11,
 
@@ -2632,7 +2650,7 @@ addOptionActions: {
 
 addOptionSubmitBtn: {
 
-  backgroundColor: "#e0a53d",
+  backgroundColor: c.accent,
 
   paddingHorizontal: 16,
 
@@ -2660,7 +2678,7 @@ addOptionCancelBtn: {
 
   borderWidth: 1,
 
-  borderColor: "#d8b36b",
+  borderColor: c.accentSoft,
 
   minWidth: 80,
 
@@ -2672,7 +2690,7 @@ addOptionCancelBtn: {
 
 submitText: {
 
-  color: "#5f0909",
+  color: c.primary,
 
   fontWeight: "600",
 
@@ -2684,7 +2702,7 @@ submitText: {
 
 cancelText: {
 
-  color: "#8f6a60",
+  color: c.textMuted,
 
   fontWeight: "500",
 
@@ -2702,7 +2720,7 @@ btnDisabled: {
 
 addOptionErrorText: {
 
-  color: "#a61f1f",
+  color: c.danger,
 
   fontSize: 12,
 
@@ -2726,7 +2744,7 @@ addOptionDisabledNotice: {
 
 disabledText: {
 
-  color: "#8f6a60",
+  color: c.textMuted,
 
   fontSize: 13,
 
@@ -2752,9 +2770,9 @@ addOptionButton: {
 
   borderWidth: 1.5,
 
-  borderColor: "#d8b36b",
+  borderColor: c.accentSoft,
 
-  backgroundColor: "#f8eee8",
+  backgroundColor: c.surfaceSunken,
 
   alignSelf: "flex-start",
 
@@ -2782,13 +2800,13 @@ reportModalContainer: {
 
   maxHeight: "80%",
 
-  backgroundColor: "#fffaf7",
+  backgroundColor: c.surface,
 
   borderRadius: 16,
 
   borderWidth: 1,
 
-  borderColor: "#ead8cf",
+  borderColor: c.border,
 
   overflow: "hidden",
 
@@ -2814,7 +2832,7 @@ reportModalHeader: {
 
 reportModalTitle: {
 
-  color: "#4f1c17",
+  color: c.textPrimary,
 
   fontSize: 17,
 
@@ -2824,7 +2842,7 @@ reportModalTitle: {
 
 reportModalSubtitle: {
 
-  color: "#8f6a60",
+  color: c.textMuted,
 
   fontSize: 13,
 
@@ -2844,7 +2862,7 @@ reportReasonButton: {
 
   borderTopWidth: 1,
 
-  borderTopColor: "#f0e3dc",
+  borderTopColor: c.border,
 
   gap: 12,
 
@@ -2858,7 +2876,7 @@ reportReasonIcon: {
 
   borderRadius: 17,
 
-  backgroundColor: "#fff0ec",
+  backgroundColor: c.surface,
 
   alignItems: "center",
 
@@ -2870,7 +2888,7 @@ reportReasonText: {
 
   flex: 1,
 
-  color: "#4f1c17",
+  color: c.textPrimary,
 
   fontSize: 14,
 
@@ -2894,7 +2912,7 @@ reportSubmitting: {
 
 reportSubmittingText: {
 
-  color: "#8f6a60",
+  color: c.textMuted,
 
   fontSize: 13,
 

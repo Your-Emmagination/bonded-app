@@ -1,7 +1,12 @@
 // app/(main)/(tabs)/DashboardScreen.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import { onSurface, type ThemeTokens } from "@/utils/theme";
 import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
 import { friendlyModerationReasons } from "@/utils/moderationReasons";
-const YEAR_LEVEL_OPTIONS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "Graduated"];
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
+import { YEAR_LEVELS } from "@/utils/yearLevels";
+import { subscribeToStaffTicketBadge } from "@/utils/supportTickets";
+const YEAR_LEVEL_OPTIONS = YEAR_LEVELS;
 import { avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import {
@@ -22,7 +27,6 @@ import {
     getRoleHierarchyLevel,
     isStaff,
     parseUserRole,
-    resolveUserRoleForAuthUser,
     type UserRole,
 } from "@/utils/rbac";
 import { Ionicons } from "@expo/vector-icons";
@@ -101,8 +105,12 @@ const MANAGED_ROLE_OPTIONS: {
 ];
 
 export default function DashboardScreen() {
+  const { styles, theme } = useStyles();
   const { isOffline } = useNetworkStatus();
-  const [userRole, setUserRole] = useState<string | null>(null);
+  // Live, so a demotion trips the non-staff redirect below straight away
+  // instead of leaving the dashboard open until it is reopened.
+  const liveUserRole = useCurrentUserRole();
+  const userRole = liveUserRole ?? null;
   const [loading, setLoading] = useState(true);
 
   // Single dialog state used to render every alert on this screen through
@@ -208,6 +216,17 @@ export default function DashboardScreen() {
   const canManageModeration = isStaff(normalizedUserRole);
   const canOpenAiMemory = canManageAiMemory(normalizedUserRole);
   const canOpenManageUsers = canManageUsers(normalizedUserRole);
+  // Count on the card rather than a separate metric: a support queue nobody
+  // notices is the failure mode that makes tickets worse than no tickets.
+  //
+  // Gated on admin, not staff, so a moderator's device never opens a listener
+  // over a collection the rules would refuse anyway.
+  const [supportWaiting, setSupportWaiting] = useState(0);
+
+  useEffect(() => {
+    if (normalizedUserRole !== "admin") return;
+    return subscribeToStaffTicketBadge(setSupportWaiting);
+  }, [normalizedUserRole]);
   // User and moderation management live on dedicated screens now — the "Manage
   // Users" quick action links to ManageUsersScreen, which owns the paginated,
   // virtualized roster. This flag keeps the old inline sections (and their
@@ -271,23 +290,10 @@ export default function DashboardScreen() {
   }, [managedUserFilter, managedUserSearch, managedUsers]);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      try {
-        if (!user) {
-          setUserRole("student");
-          setLoading(false);
-          return;
-        }
-
-        const role = await resolveUserRoleForAuthUser(user);
-        if (__DEV__) console.log("📊 Dashboard - User Role:", role);
-        setUserRole(role);
-      } catch (error) {
-        console.error("Error loading role:", error);
-        setUserRole("student");
-      } finally {
-        setLoading(false);
-      }
+    // The role itself comes from useCurrentUserRole above; this only waits for
+    // Firebase to report whether anyone is signed in.
+    const unsubscribe = onAuthStateChanged(auth, () => {
+      setLoading(false);
     });
     return unsubscribe;
   }, []);
@@ -874,13 +880,13 @@ const handleYearLevelChange = useCallback(
             <Text style={styles.subtitle}>Welcome back, {userRole?.toUpperCase()}</Text>
           </View>
           <View style={[styles.roleBadge, { backgroundColor: getRoleColor(userRole) }]}>
-            <Ionicons name={getRoleIcon(userRole)} size={20} color="#fff" />
+            <Ionicons name={getRoleIcon(userRole)} size={20} color={theme.onPrimary} />
           </View>
         </View>
 
         {isOffline && (
           <View style={styles.offlineStatusBar}>
-            <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+            <Ionicons name="cloud-offline-outline" size={14} color={theme.warning} />
             <Text style={styles.offlineStatusText}>
               Offline mode
             </Text>
@@ -958,8 +964,22 @@ const handleYearLevelChange = useCallback(
                   <ActionButton
                     icon="school-outline"
                     label="Manage Programs"
-                    color="#e0a53d"
+                    color={theme.accent}
                     onPress={() => router.push("/AdminManageProgramsScreen" as any)}
+                  />
+                  {/* Administrators only, like Manage Users beside it. Not the
+                      same thing as View Reports: that is content somebody
+                      objected to, this is problems with the app or an account,
+                      and it carries account and records details. */}
+                  <ActionButton
+                    icon="help-buoy-outline"
+                    label={
+                      supportWaiting > 0
+                        ? `Support Requests (${supportWaiting})`
+                        : "Support Requests"
+                    }
+                    color="#1d7a8c"
+                    onPress={() => router.push("/ManageSupportScreen" as any)}
                   />
                 </>
               )}
@@ -974,7 +994,7 @@ const handleYearLevelChange = useCallback(
                 <ActionButton
                   icon="shield-checkmark-outline"
                   label="Manage Moderation"
-                  color="#7f2220"
+                  color={theme.primary}
                   onPress={() => router.push("/ManageModerationScreen" as any)}
                 />
               )}
@@ -982,7 +1002,7 @@ const handleYearLevelChange = useCallback(
                 <ActionButton
                   icon="library-outline"
                   label="Manage B.E.A. Memory"
-                  color="#e0a53d"
+                  color={theme.accent}
                   onPress={() => router.push("/AiMemoryScreen")}
                 />
               )}
@@ -998,7 +1018,7 @@ const handleYearLevelChange = useCallback(
                 <ActionButton
                   icon="book-outline"
                   label="Manage Campus FAQ"
-                  color="#5f0909"
+                  color={theme.primary}
                   onPress={() => router.push("/ManageCampusFaqScreen" as any)}
                 />
               )}
@@ -1033,13 +1053,13 @@ const handleYearLevelChange = useCallback(
                 activeOpacity={0.84}
               >
                 <View style={styles.registerUsersButtonIcon}>
-                  <Ionicons name="person-add-outline" size={18} color="#7a0020" />
+                  <Ionicons name="person-add-outline" size={18} color={theme.primary} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.registerUsersButtonTitle}>Register Users</Text>
                   <Text style={styles.registerUsersButtonText}>Add one account or import your campus CSV</Text>
                 </View>
-                <Ionicons name="chevron-forward" size={18} color="#a0786e" />
+                <Ionicons name="chevron-forward" size={18} color={theme.textMuted} />
               </TouchableOpacity>
             )}
 
@@ -1068,12 +1088,12 @@ const handleYearLevelChange = useCallback(
 
             <View style={styles.manageUsersControls}>
               <View style={styles.searchInputShell}>
-                <Ionicons name="search" size={18} color="#9b766c" />
+                <Ionicons name="search" size={18} color={theme.textMuted} />
                 <TextInput
                   value={managedUserSearch}
                   onChangeText={setManagedUserSearch}
                   placeholder="Search by name, ID, email, course, or role"
-                  placeholderTextColor="#b88f87"
+                  placeholderTextColor={theme.textMuted}
                   style={styles.searchInput}
                 />
                 {!!managedUserSearch.trim() && (
@@ -1102,7 +1122,7 @@ const handleYearLevelChange = useCallback(
                       <Ionicons
                         name={filter.icon}
                         size={14}
-                        color={selected ? "#fffaf7" : "#8f3a2b"}
+                        color={selected ? theme.onPrimary : theme.textSecondary}
                       />
                       <Text
                         style={[
@@ -1233,7 +1253,7 @@ const handleYearLevelChange = useCallback(
                         onPress={() => handleOpenManagedUser(managedUser)}
                         activeOpacity={0.82}
                       >
-                        <Ionicons name="person-circle-outline" size={16} color="#8a5a10" />
+                        <Ionicons name="person-circle-outline" size={16} color={theme.accent} />
                         <Text style={styles.manageUserActionText}>Open profile</Text>
                       </TouchableOpacity>
                     </View>
@@ -1348,7 +1368,7 @@ const handleYearLevelChange = useCallback(
                   </View>
                   {item.priority === "critical" && (
                     <View style={styles.reviewCriticalBadge}>
-                      <Ionicons name="warning" size={15} color="#7a1212" />
+                      <Ionicons name="warning" size={15} color={theme.danger} />
                       <Text style={styles.reviewCriticalText}>
                         PRIORITY SAFETY REVIEW · SELF-HARM / INTENT
                       </Text>
@@ -1472,7 +1492,7 @@ const handleYearLevelChange = useCallback(
 
         {/* Info Card */}
         <View style={styles.infoCard}>
-          <Ionicons name="information-circle" size={24} color="#e0a53d" />
+          <Ionicons name="information-circle" size={24} color={theme.accent} />
           <View style={styles.infoContent}>
             <Text style={styles.infoTitle}>Role Permissions</Text>
             <Text style={styles.infoText}>
@@ -1521,15 +1541,20 @@ interface StatCardProps {
   value: number;
 }
 
-const StatCard: React.FC<StatCardProps> = ({ icon, iconColor, label, value }) => (
-  <View style={styles.statCard}>
-    <View style={[styles.statIconContainer, { backgroundColor: iconColor + "20" }]}>
-      <Ionicons name={icon} size={24} color={iconColor} />
+const StatCard: React.FC<StatCardProps> = ({ icon, iconColor, label, value }) => {
+  const { styles, theme } = useStyles();
+  const tint = onSurface(iconColor, theme);
+
+  return (
+    <View style={styles.statCard}>
+      <View style={[styles.statIconContainer, { backgroundColor: tint + "20" }]}>
+        <Ionicons name={icon} size={24} color={tint} />
+      </View>
+      <Text style={styles.statValue}>{value.toLocaleString()}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
     </View>
-    <Text style={styles.statValue}>{value.toLocaleString()}</Text>
-    <Text style={styles.statLabel}>{label}</Text>
-  </View>
-);
+  );
+};
 
 // Action Button Component
 interface ActionButtonProps {
@@ -1539,19 +1564,24 @@ interface ActionButtonProps {
   onPress: () => void;
 }
 
-const ActionButton: React.FC<ActionButtonProps> = ({ icon, label, color, onPress }) => (
-  <TouchableOpacity 
-    style={[styles.actionButton, { borderLeftColor: color }]}
-    onPress={onPress}
-    activeOpacity={0.7}
-  >
-    <View style={[styles.actionIconContainer, { backgroundColor: color + "20" }]}>
-      <Ionicons name={icon} size={20} color={color} />
-    </View>
-    <Text style={styles.actionLabel}>{label}</Text>
-    <Ionicons name="chevron-forward" size={20} color="#9b766c" />
-  </TouchableOpacity>
-);
+const ActionButton: React.FC<ActionButtonProps> = ({ icon, label, color, onPress }) => {
+  const { styles, theme } = useStyles();
+  const tint = onSurface(color, theme);
+
+  return (
+    <TouchableOpacity 
+      style={[styles.actionButton, { borderLeftColor: tint }]}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
+      <View style={[styles.actionIconContainer, { backgroundColor: tint + "20" }]}>
+        <Ionicons name={icon} size={20} color={tint} />
+      </View>
+      <Text style={styles.actionLabel}>{label}</Text>
+      <Ionicons name="chevron-forward" size={20} color={theme.textMuted} />
+    </TouchableOpacity>
+  );
+};
 
 interface InsightPillProps {
   label: string;
@@ -1559,12 +1589,17 @@ interface InsightPillProps {
   color: string;
 }
 
-const InsightPill: React.FC<InsightPillProps> = ({ label, value, color }) => (
-  <View style={[styles.insightPill, { borderColor: color + "44" }]}>
-    <Text style={[styles.insightPillValue, { color }]}>{value}</Text>
-    <Text style={styles.insightPillLabel}>{label}</Text>
-  </View>
-);
+const InsightPill: React.FC<InsightPillProps> = ({ label, value, color }) => {
+  const { styles, theme } = useStyles();
+  const tint = onSurface(color, theme);
+
+  return (
+    <View style={[styles.insightPill, { borderColor: tint + "44" }]}>
+      <Text style={[styles.insightPillValue, { color: tint }]}>{value}</Text>
+      <Text style={styles.insightPillLabel}>{label}</Text>
+    </View>
+  );
+};
 
 function getManagedUserName(user: ManagedUserRecord) {
   return `${user.firstname || ""} ${user.lastname || ""}`.trim() || user.email || "Unknown user";
@@ -1607,14 +1642,15 @@ function getRoleDescription(role: string | null) {
   return descriptions[role || ""] || "Limited access.";
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
   },
   contentShell: {
     flex: 1,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
   scrollContent: {
     paddingHorizontal: 16,
@@ -1626,22 +1662,22 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 24,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
     borderRadius: 24,
     paddingHorizontal: 18,
     paddingVertical: 18,
     borderWidth: 1,
-    borderColor: "#8f3a2b",
+    borderColor: c.textSecondary,
   },
   title: {
     fontSize: 32,
     fontWeight: "bold",
-    color: "#fffaf7",
+    color: c.onChrome,
     marginBottom: 4,
   },
   subtitle: {
     fontSize: 14,
-    color: "#f0d2c2",
+    color: c.borderStrong,
     fontWeight: "500",
   },
   roleBadge: {
@@ -1659,12 +1695,12 @@ const styles = StyleSheet.create({
   },
   statCard: {
     width: (SCREEN_WIDTH - 44) / 2,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     padding: 16,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   statIconContainer: {
     width: 56,
@@ -1677,12 +1713,12 @@ const styles = StyleSheet.create({
   statValue: {
     fontSize: 28,
     fontWeight: "bold",
-    color: "#4d1b17",
+    color: c.textPrimary,
     marginBottom: 4,
   },
   statLabel: {
     fontSize: 13,
-    color: "#9b766c",
+    color: c.textMuted,
     textAlign: "center",
   },
   section: {
@@ -1691,19 +1727,19 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 18,
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
     marginBottom: 12,
   },
   actionButton: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 12,
     padding: 16,
     marginBottom: 10,
     borderLeftWidth: 4,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   actionIconContainer: {
     width: 40,
@@ -1715,7 +1751,7 @@ const styles = StyleSheet.create({
   },
   actionLabel: {
     flex: 1,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "600",
   },
@@ -1723,9 +1759,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#eadbd4",
+    borderColor: c.border,
     borderRadius: 16,
     padding: 14,
     marginTop: 12,
@@ -1735,28 +1771,28 @@ const styles = StyleSheet.create({
     width: 38,
     height: 38,
     borderRadius: 19,
-    backgroundColor: "#f6e8e7",
+    backgroundColor: c.dangerSoft,
     alignItems: "center",
     justifyContent: "center",
   },
   registerUsersButtonTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "800",
     fontSize: 14,
   },
   registerUsersButtonText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11.5,
     marginTop: 2,
   },
   manageUsersHero: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
     borderRadius: 18,
     padding: 18,
     flexDirection: "row",
     gap: 14,
     borderWidth: 1,
-    borderColor: "#8f3a2b",
+    borderColor: c.textSecondary,
     marginBottom: 14,
   },
   manageUsersHeroIcon: {
@@ -1771,13 +1807,13 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   manageUsersHeroTitle: {
-    color: "#fffaf7",
+    color: c.onChrome,
     fontSize: 19,
     fontWeight: "800",
     marginBottom: 4,
   },
   manageUsersHeroText: {
-    color: "#f0d2c2",
+    color: c.borderStrong,
     fontSize: 13,
     lineHeight: 20,
   },
@@ -1790,7 +1826,7 @@ const styles = StyleSheet.create({
   insightPill: {
     minWidth: (SCREEN_WIDTH - 64) / 2,
     flex: 1,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 14,
     paddingHorizontal: 14,
     paddingVertical: 12,
@@ -1802,15 +1838,15 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   insightPillLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     fontWeight: "600",
   },
   manageUsersControls: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
     padding: 14,
     marginBottom: 10,
     gap: 12,
@@ -1819,16 +1855,16 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    backgroundColor: "#f8f1ec",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#edd6cc",
+    borderColor: c.border,
     paddingHorizontal: 12,
     minHeight: 46,
   },
   searchInput: {
     flex: 1,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     paddingVertical: 10,
   },
@@ -1841,63 +1877,63 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: "#edd6cc",
+    borderColor: c.border,
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
   filterChipActive: {
-    backgroundColor: "#8f3a2b",
-    borderColor: "#8f3a2b",
+    backgroundColor: c.textSecondary,
+    borderColor: c.textSecondary,
   },
   filterChipText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "700",
   },
   filterChipTextActive: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   manageUsersCountText: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 12.5,
     fontWeight: "600",
     marginBottom: 10,
   },
   manageUsersEmptyCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     padding: 24,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   manageUsersEmptyTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 16,
     fontWeight: "700",
     marginTop: 10,
   },
   manageUsersEmptyText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13,
     marginTop: 6,
     textAlign: "center",
     lineHeight: 19,
   },
   manageUserCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     padding: 14,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
     marginBottom: 12,
   },
   manageUserCardExpanded: {
-    borderColor: "#ddb977",
-    shadowColor: "#5f0909",
+    borderColor: c.accent,
+    shadowColor: c.primary,
     shadowOpacity: 0.06,
     shadowRadius: 10,
     elevation: 2,
@@ -1918,7 +1954,7 @@ const styles = StyleSheet.create({
     width: 50,
     height: 50,
     borderRadius: 25,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
@@ -1928,7 +1964,7 @@ const styles = StyleSheet.create({
     height: "100%",
   },
   manageUserAvatarText: {
-    color: "#fffaf7",
+    color: c.onPrimary,
     fontSize: 18,
     fontWeight: "800",
   },
@@ -1943,23 +1979,23 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
   },
   manageUserName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "800",
   },
   selfBadge: {
-    backgroundColor: "#fff1d6",
+    backgroundColor: c.accentSoft,
     borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
   selfBadgeText: {
-    color: "#8a5a10",
+    color: c.accent,
     fontSize: 11,
     fontWeight: "800",
   },
   manageUserMeta: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12.5,
     lineHeight: 18,
   },
@@ -1990,7 +2026,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   manageUserStatusText: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 12,
     fontWeight: "700",
   },
@@ -2002,15 +2038,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#f8f1e5",
+    backgroundColor: c.accentSoft,
     borderWidth: 1,
-    borderColor: "#ddb977",
+    borderColor: c.accent,
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
   manageUserActionText: {
-    color: "#8a5a10",
+    color: c.accent,
     fontSize: 12.5,
     fontWeight: "700",
   },
@@ -2018,15 +2054,15 @@ const styles = StyleSheet.create({
     marginTop: 14,
     paddingTop: 14,
     borderTopWidth: 1,
-    borderTopColor: "#f0e7e2",
+    borderTopColor: c.border,
   },
   manageUserExpandedTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 14,
     fontWeight: "800",
   },
   manageUserExpandedText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12.5,
     lineHeight: 18,
     marginTop: 4,
@@ -2041,24 +2077,24 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#edd6cc",
+    borderColor: c.border,
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
   roleOptionButtonSelected: {
-    backgroundColor: "#5f0909",
-    borderColor: "#5f0909",
+    backgroundColor: c.primary,
+    borderColor: c.primary,
   },
   roleOptionText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 12.5,
     fontWeight: "800",
   },
   roleOptionTextSelected: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   manageUserBusyRow: {
     flexDirection: "row",
@@ -2067,63 +2103,63 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   manageUserBusyText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 12.5,
     fontWeight: "700",
   },
   manageUserHintText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     lineHeight: 18,
     marginTop: 12,
   },
   infoCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderLeftWidth: 4,
-    borderLeftColor: "#e0a53d",
+    borderLeftColor: c.accent,
     borderRadius: 12,
     padding: 16,
     marginBottom: 24,
     flexDirection: "row",
     gap: 12,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   infoContent: {
     flex: 1,
   },
   infoTitle: {
-    color: "#e0a53d",
+    color: c.accent,
     fontSize: 16,
     fontWeight: "700",
     marginBottom: 6,
   },
   infoText: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontSize: 13,
     lineHeight: 20,
   },
   comingSoonCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 12,
     padding: 40,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   comingSoonText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 14,
     marginTop: 12,
     fontWeight: "500",
   },
   reviewCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 14,
     padding: 14,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   reviewHeader: {
     flexDirection: "row",
@@ -2135,15 +2171,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 999,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
   },
   reviewTypeText: {
-    color: "#fffaf7",
+    color: c.onPrimary,
     fontSize: 11,
     fontWeight: "800",
   },
   reviewAuthor: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     fontWeight: "600",
   },
@@ -2156,12 +2192,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 9,
     paddingVertical: 6,
     borderRadius: 8,
-    backgroundColor: "#ffd8d8",
+    backgroundColor: c.dangerSoft,
     borderWidth: 1,
-    borderColor: "#e59a9a",
+    borderColor: c.danger,
   },
   reviewCriticalText: {
-    color: "#7a1212",
+    color: c.danger,
     fontSize: 11,
     fontWeight: "800",
   },
@@ -2169,7 +2205,7 @@ const styles = StyleSheet.create({
     opacity: 0.45,
   },
   reviewBody: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     lineHeight: 21,
   },
@@ -2178,10 +2214,10 @@ const styles = StyleSheet.create({
     height: 160,
     borderRadius: 10,
     marginTop: 8,
-    backgroundColor: "#f2dfd4",
+    backgroundColor: c.border,
   },
   reviewReason: {
-    color: "#a61f1f",
+    color: c.danger,
     fontSize: 12,
     marginTop: 8,
     lineHeight: 18,
@@ -2199,42 +2235,49 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   reviewApprove: {
-    backgroundColor: "#e7f8ec",
-    borderColor: "#8fd1a4",
+    backgroundColor: c.successSoft,
+    borderColor: c.success,
   },
   reviewProfile: {
-    backgroundColor: "#f8f1e5",
-    borderColor: "#ddb977",
+    backgroundColor: c.accentSoft,
+    borderColor: c.accent,
   },
   reviewDelete: {
-    backgroundColor: "#fff0ef",
-    borderColor: "#e6a2a0",
+    backgroundColor: c.dangerSoft,
+    borderColor: c.danger,
   },
   reviewApproveText: {
-    color: "#17663a",
+    color: c.success,
     fontWeight: "700",
   },
   reviewProfileText: {
-    color: "#8a5a10",
+    color: c.accent,
     fontWeight: "700",
   },
   reviewDeleteText: {
-    color: "#9b1f1c",
+    color: c.danger,
     fontWeight: "700",
   },
   offlineStatusBar: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#ffedd5",
+    backgroundColor: c.accentSoft,
     paddingHorizontal: 16,
     paddingVertical: 8,
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: "#fed7aa",
+    borderBottomColor: c.borderStrong,
   },
   offlineStatusText: {
     fontSize: 12,
-    color: "#9a3412",
+    color: c.warning,
     fontWeight: "600",
   },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

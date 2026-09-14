@@ -1,4 +1,6 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, FlatList, Keyboard, Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Image } from "expo-image";
@@ -8,6 +10,7 @@ import { ChatGif, fetchChatGifs } from "@/utils/giphy";
 export default function ChatGifPicker({ onClose, onSelect, color }: {
   onClose: () => void; onSelect: (gif: ChatGif) => void; color: string;
 }) {
+  const { styles, theme } = useStyles();
   const [search, setSearch] = useState("");
   const [gifs, setGifs] = useState<ChatGif[]>([]);
   const [loading, setLoading] = useState(true);
@@ -59,7 +62,7 @@ export default function ChatGifPicker({ onClose, onSelect, color }: {
         <Pressable style={[styles.select, { backgroundColor: color }]} onPress={() => onSelect(selected)}><Text style={styles.selectText}>Add to message</Text></Pressable>
         <Pressable style={styles.button} onPress={() => setSelected(null)}><Text style={{ color }}>Choose another GIF</Text></Pressable>
       </View> : <>
-        <TextInput value={search} onChangeText={setSearch} maxLength={50} style={styles.search} placeholder="Search GIPHY" placeholderTextColor="#92786f" returnKeyType="search" onSubmitEditing={Keyboard.dismiss} accessibilityLabel="Search GIFs" />
+        <TextInput value={search} onChangeText={setSearch} maxLength={50} style={styles.search} placeholder="Search GIPHY" placeholderTextColor={theme.textMuted} returnKeyType="search" onSubmitEditing={Keyboard.dismiss} accessibilityLabel="Search GIFs" />
         <Text style={styles.caption}>{search.trim() ? "Search results" : "Trending GIFs"}</Text>
         <FlatList data={gifs} numColumns={2} keyExtractor={(item) => item.id} keyboardShouldPersistTaps="handled"
           contentContainerStyle={styles.grid} onEndReached={() => void loadMore()} onEndReachedThreshold={0.4}
@@ -75,20 +78,28 @@ export default function ChatGifPicker({ onClose, onSelect, color }: {
     </SafeAreaView>
   </Modal>;
 }
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#fffaf7" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  screen: { flex: 1, backgroundColor: c.surface },
   header: { paddingLeft: 18, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  title: { color: "#40221d", fontSize: 22, fontWeight: "700" },
+  title: { color: c.textPrimary, fontSize: 22, fontWeight: "700" },
   button: { padding: 14, minHeight: 44, alignItems: "center" },
-  search: { marginHorizontal: 16, marginTop: 8, borderRadius: 22, backgroundColor: "#f3e9e3", padding: 13, color: "#40221d", fontSize: 16 },
-  caption: { padding: 16, color: "#85685f" },
+  search: { marginHorizontal: 16, marginTop: 8, borderRadius: 22, backgroundColor: c.surfaceSunken, padding: 13, color: c.textPrimary, fontSize: 16 },
+  caption: { padding: 16, color: c.textMuted },
   grid: { paddingHorizontal: 8 },
   tile: { width: "50%", padding: 4 },
-  image: { width: "100%", height: 145, backgroundColor: "#f0e8e3", borderRadius: 12 },
+  image: { width: "100%", height: 145, backgroundColor: c.surfaceSunken, borderRadius: 12 },
   preview: { flex: 1, justifyContent: "center", padding: 20, gap: 16 },
   largeImage: { width: "100%", height: 320 },
   select: { alignItems: "center", padding: 15, borderRadius: 24 },
-  selectText: { color: "#fff", fontWeight: "700", fontSize: 16 },
-  error: { color: "#8f2117", textAlign: "center" },
+  selectText: { color: c.onPrimary, fontWeight: "700", fontSize: 16 },
+  error: { color: c.primary, textAlign: "center" },
   attribution: { alignSelf: "center", margin: 10, paddingHorizontal: 8, borderRadius: 8, backgroundColor: "#181818" },
 });
+
+/** Themed stylesheet for this file. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

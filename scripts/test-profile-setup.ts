@@ -1,16 +1,25 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { COMMUNITY_RULES_VERSION, getSetupStep, profileEmail, validPersonalEmail } from "../utils/profileSetup";
+import { COMMUNITY_RULES_VERSION, getSetupStep, hasVerifiedProfileEmail, profileEmail, validPersonalEmail } from "../utils/profileSetup";
 
 async function main() {
-  const complete = { mustChangePassword: false, email: "member@example.com", profileImage: "https://example.com/avatar.jpg", communityRulesVersion: COMMUNITY_RULES_VERSION, communityRulesAcceptedAt: new Date() };
+  const complete = { mustChangePassword: false, email: "member@example.com", recoveryEmail: "member@example.com", recoveryEmailVerified: true, profileImage: "https://example.com/avatar.jpg", communityRulesVersion: COMMUNITY_RULES_VERSION, communityRulesAcceptedAt: new Date() };
   assert.equal(getSetupStep(complete), "complete");
   assert.equal(getSetupStep({ ...complete, mustChangePassword: true }), "password");
   assert.equal(getSetupStep({ ...complete, mustChangePassword: undefined }), "password-check");
   assert.equal(getSetupStep({ ...complete, profileImage: "file:///pending.jpg" }), "profile");
   assert.equal(getSetupStep({ ...complete, profileImage: "" }), "profile");
-  assert.equal(getSetupStep({ ...complete, email: "001@student.csap" }), "profile");
+  assert.equal(getSetupStep({ ...complete, email: "001@student.csap", recoveryEmail: "" }), "profile");
+  assert.equal(getSetupStep({ ...complete, recoveryEmailVerified: undefined }), "profile", "Older unverified setups must return to verification");
+  assert.equal(getSetupStep({ ...complete, recoveryEmailVerified: false }), "profile", "A well-formed email alone must not unlock Home");
+  assert.equal(getSetupStep({ ...complete, recoveryEmail: "old@example.com" }), "profile", "Verifying a different inbox must not verify the new profile email");
+  assert.equal(getSetupStep({ ...complete, email: " MEMBER@example.com " }), "complete", "Equivalent casing and whitespace do not require another code");
+  assert.equal(getSetupStep({ ...complete, email: "001@student.csap" }), "complete", "Existing verified recovery emails are recognized");
+  assert.equal(hasVerifiedProfileEmail(complete, "changed@example.com"), false, "Editing the email invalidates verification for the draft");
+  assert.equal(hasVerifiedProfileEmail(complete, " MEMBER@example.com "), true);
+  assert.equal(hasVerifiedProfileEmail({ ...complete, recoveryEmail: "" }), false);
+  assert.equal(hasVerifiedProfileEmail({ ...complete, recoveryEmailVerified: "true" } as unknown as Parameters<typeof hasVerifiedProfileEmail>[0]), false);
   assert.equal(getSetupStep({ ...complete, communityRulesAcceptedAt: null }), "profile");
   assert.equal(getSetupStep({ ...complete, communityRulesVersion: "old" }), "profile");
   assert.equal(profileEmail({ email: "001@student.csap", recoveryEmail: "member@example.com" }), "member@example.com");

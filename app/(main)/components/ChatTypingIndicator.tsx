@@ -1,9 +1,12 @@
-import React, { useEffect, useState } from "react";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
+import React, { useEffect, useMemo, useState } from "react";
 import { Animated, StyleSheet, Text, View } from "react-native";
 import { Image } from "expo-image";
 import { avatarThumb } from "@/utils/cloudinaryImages";
 
 export default function ChatTypingIndicator({ name, avatar }: { name: string; avatar?: string | null }) {
+  const { styles } = useStyles();
   const [dots] = useState(() => [new Animated.Value(0.3), new Animated.Value(0.3), new Animated.Value(0.3)]);
   useEffect(() => {
     const animation = Animated.loop(Animated.stagger(130, dots.map((value) => Animated.sequence([
@@ -20,10 +23,18 @@ export default function ChatTypingIndicator({ name, avatar }: { name: string; av
     <View style={styles.bubble}>{dots.map((opacity, index) => <Animated.View key={index} style={[styles.dot, { opacity }]} />)}</View>
   </View>;
 }
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 16, paddingVertical: 6 },
   avatar: { width: 28, height: 28, borderRadius: 14 },
-  initial: { alignItems: "center", justifyContent: "center", backgroundColor: "#f0e3dd" },
-  bubble: { flexDirection: "row", gap: 5, paddingHorizontal: 15, paddingVertical: 13, backgroundColor: "#f0e8e3", borderRadius: 18 },
-  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#92786f" },
+  initial: { alignItems: "center", justifyContent: "center", backgroundColor: c.surfaceSunken },
+  bubble: { flexDirection: "row", gap: 5, paddingHorizontal: 15, paddingVertical: 13, backgroundColor: c.surfaceSunken, borderRadius: 18 },
+  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: c.textMuted },
 });
+
+/** Themed stylesheet for this file. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

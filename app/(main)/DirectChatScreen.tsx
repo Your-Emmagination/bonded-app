@@ -2,7 +2,7 @@
 import { auth, db } from "@/Firebase_configure";
 import { resolveAvatarUri } from "@/utils/avatar";
 import { AVATAR_SIZE_SMALL, avatarThumb, feedImage, videoThumb } from "@/utils/cloudinaryImages";
-import { uploadToCloudinary } from "@/utils/cloudinaryUpload";
+import { readLastUploadSize, uploadToCloudinary } from "@/utils/cloudinaryUpload";
 import {
     DEFAULT_THEME_COLOR,
     DIRECT_MESSAGE_PAGE_SIZE,
@@ -27,13 +27,16 @@ import {
     updateConversationTheme,
 } from "@/utils/directMessages";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { DraftAttachment, insertEmojiInDraft, MESSAGE_MAX_LENGTH, prepareDraftAttachment, TextSelection } from "@/utils/messageComposer";
 import { replyPreviewMedia, replyPreviewText } from "@/utils/replyPreview";
 import { dismissConversationNotifications } from "@/utils/pushNotifications";
-import { getRoleColor, getRoleDisplayName, getUserDataByAuthUser, parseUserRole, type UserData } from "@/utils/rbac";
+import { getRoleColor, getRoleDisplayName, getUserDataByAuthUser, parseUserRole, subscribeToStudentProfile, type UserData } from "@/utils/rbac";
 import { getTimeAgo, useRelativeTimeNow } from "@/utils/relativeTime";
 import { getPresenceState, isMessageAfterDeletion, receiptCoversMessage, timestampMillis } from "@/utils/messengerState";
 import { messageLinks, splitMessageLinks } from "@/utils/chatLinks";
+import { findBlockedLink } from "@/utils/externalLinks";
 import { useDirectTyping } from "@/utils/directTyping";
 import { useAppActive, useUserPresence } from "@/utils/presence";
 import { useNetworkStatus } from "@/utils/networkUtils";
@@ -43,7 +46,7 @@ import {
 } from "@/utils/offlineStorage";
 import { Ionicons } from "@expo/vector-icons";
 import * as Clipboard from "expo-clipboard";
-import * as DocumentPicker from "expo-document-picker";
+import { pickUploadDocuments } from "@/utils/uploadAttachments";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
@@ -76,13 +79,26 @@ import ReanimatedAnimated, {
 } from "react-native-reanimated";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import ChatEmojiPicker from "./components/ChatEmojiPicker";
+import MessageImage from "./components/MessageImage";
+import ExternalLinkDialog, { prepareExternalLink } from "./components/ExternalLinkDialog";
 import ChatGifPicker from "./components/ChatGifPicker";
 import ChatTypingIndicator from "./components/ChatTypingIndicator";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
+// Width of a photo inside a bubble. Replaces the old hardcoded 220x160, which
+// was the same on every device and cropped whatever did not fit. Height now
+// follows the image's own ratio — see components/MessageImage.
+const CHAT_MEDIA_WIDTH = Math.min(260, SCREEN_WIDTH * 0.62);
+
 const EMOJI_REACTIONS = ["❤️", "😆", "😮", "😢", "😡", "👍"];
+
+// Double-tap to react, matching ServerChannelScreen. The reveal-timestamp tap
+// is held for this long so a fast second tap can cancel it and react instead;
+// without the delay the two gestures fight and the first tap always wins.
+const DOUBLE_TAP_MS = 260;
+const DEFAULT_REACTION = "❤️";
 
 function formatMessageDate(timestamp: any): string {
   if (!timestamp) return "Today";
@@ -125,6 +141,8 @@ interface DirectMessageBubbleProps {
   onToggleReveal: (id: string) => void;
   onSwipeReply: (messageId: string) => void;
   onJumpToMessage: (messageId: string) => void;
+  /** Routes every link through the confirmation dialog. */
+  onOpenLink: (url: string, label?: string) => void;
 }
 
 const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
@@ -147,7 +165,14 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
   onToggleReveal,
   onSwipeReply,
   onJumpToMessage,
+  onOpenLink,
 }) => {
+  // The bubble is memoised and lives at module level, so it reads the palette
+  // itself. Note this is the app's appearance — the per-conversation
+  // `themeColor` that tints your own bubbles is separate and unaffected.
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+
   const messageId = item.id;
   const swipeX = useSharedValue(0);
   const swipeDir = isOwn ? -1 : 1;
@@ -193,6 +218,44 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
     return (item.files || []).filter((f) => !f.mimeType.startsWith("image/"));
   }, [item.files]);
 
+  // Same pattern the server channel already uses: one tap reveals the time,
+  // two hearts the message. A stray timer is cleared on unmount so a bubble
+  // recycled out of the list cannot fire a reveal for a different message.
+  const lastTapRef = useRef(0);
+  const revealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (revealTimerRef.current) clearTimeout(revealTimerRef.current);
+    },
+    [],
+  );
+
+  const handleBubbleTap = useCallback(() => {
+    // A deleted message has nothing to react to.
+    if (item.deleted) {
+      onToggleReveal(item.id);
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastTapRef.current < DOUBLE_TAP_MS) {
+      lastTapRef.current = 0;
+      if (revealTimerRef.current) {
+        clearTimeout(revealTimerRef.current);
+        revealTimerRef.current = null;
+      }
+      onReactionPress(item, DEFAULT_REACTION);
+      return;
+    }
+
+    lastTapRef.current = now;
+    revealTimerRef.current = setTimeout(() => {
+      revealTimerRef.current = null;
+      onToggleReveal(item.id);
+    }, DOUBLE_TAP_MS);
+  }, [item, onReactionPress, onToggleReveal]);
+
   return (
     <View style={[styles.bubbleContainer, isOwn ? styles.bubbleContainerOwn : styles.bubbleContainerOther, reactionEntries.length > 0 && styles.bubbleContainerWithReactions]}>
       {!isOwn && showAvatar && <View style={styles.incomingAvatarWrap}>
@@ -205,6 +268,63 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
 
       <GestureDetector gesture={panGesture}>
         <ReanimatedAnimated.View style={rowSwipeStyle}>
+          {/* Messenger puts the reply marker OUTSIDE the bubble as one small
+              line — "You replied to Khen" — and leaves the bubble itself
+              alone. The quoted snippet used to sit inside the bubble, which
+              is what stretched a reply to a photo: the bubble had to hold a
+              quote box, a thumbnail and the photo. Tapping still jumps to the
+              original, so nothing is lost by not re-drawing it here. */}
+          {item.replyTo && !item.deleted && (
+            <Pressable
+              style={[styles.replyLabelRow, isOwn && styles.replyLabelRowOwn]}
+              accessibilityRole="button"
+              accessibilityLabel="Go to original message"
+              onPress={(event) => {
+                event.stopPropagation();
+                onJumpToMessage(item.replyTo!.id);
+              }}
+            >
+              <Ionicons name="arrow-undo" size={12} color={theme.textMuted} />
+              <Text style={styles.replyLabelText} numberOfLines={1}>
+                {isOwn
+                  ? item.replyTo.senderName === recipientName
+                    ? `You replied to ${recipientName}`
+                    : "You replied to yourself"
+                  : item.replyTo.senderName === recipientName
+                    ? `${recipientName} replied to themselves`
+                    : `${recipientName} replied to you`}
+              </Text>
+            </Pressable>
+          )}
+
+          {item.replyTo && !item.deleted && (
+            <Pressable
+              style={[styles.replyEcho, isOwn && styles.replyEchoOwn]}
+              accessibilityRole="button"
+              accessibilityLabel={`Replying to: ${item.replyTo.preview}`}
+              onPress={(event) => {
+                event.stopPropagation();
+                onJumpToMessage(item.replyTo!.id);
+              }}
+            >
+              {!!item.replyTo.mediaUrl && (
+                <Image
+                  source={{
+                    uri:
+                      item.replyTo.mediaType === "video"
+                        ? videoThumb(item.replyTo.mediaUrl, 64)
+                        : feedImage(item.replyTo.mediaUrl, 64),
+                  }}
+                  style={styles.replyEchoThumb}
+                  contentFit="cover"
+                  recyclingKey={`${item.id}:replyThumb`}
+                />
+              )}
+              <Text style={styles.replyEchoText} numberOfLines={1}>
+                {item.replyTo.preview}
+              </Text>
+            </Pressable>
+          )}
           <Pressable
             onLongPress={(event) => {
               if (!item.deleted) {
@@ -212,7 +332,7 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
                 onLongPress(item, pageY);
               }
             }}
-            onPress={() => onToggleReveal(item.id)}
+            onPress={handleBubbleTap}
             delayLongPress={260}
             style={[
               styles.bubbleBox,
@@ -220,49 +340,17 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
                 ? [styles.bubbleBoxOwn, { backgroundColor: themeColor }]
                 : styles.bubbleBoxOther,
               isHighlighted && styles.bubbleHighlighted,
+              item.deleted && styles.bubbleBoxDeleted,
             ]}
           >
             {/* Forwarded Tag */}
             {item.forwarded && !item.deleted && (
               <View style={styles.forwardedHeaderRow}>
-                <Ionicons name="arrow-redo" size={12} color={isOwn ? "rgba(255,255,255,0.8)" : "#8f766e"} />
+                <Ionicons name="arrow-redo" size={12} color={isOwn ? "rgba(255,255,255,0.8)" : theme.textMuted} />
                 <Text style={[styles.forwardedTagText, isOwn && styles.forwardedTagTextOwn]}>
                   Forwarded {item.forwardedFrom?.senderName ? `from ${item.forwardedFrom.senderName}` : ""}
                 </Text>
               </View>
-            )}
-
-            {/* Quoted Reply */}
-            {item.replyTo && !item.deleted && (
-              <Pressable style={[styles.replyQuoteWrap, isOwn && styles.replyQuoteWrapOwn]}
-                accessibilityRole="button" accessibilityLabel="Go to original message"
-                onPress={(event) => { event.stopPropagation(); onJumpToMessage(item.replyTo!.id); }}>
-                <View style={[styles.replyQuoteBar, { backgroundColor: isOwn ? "#fff" : themeColor }]} />
-                <View style={{ flex: 1, minWidth: 0 }}>
-                  <Text style={[styles.replyQuoteSender, isOwn && styles.replyQuoteTextOwn]} numberOfLines={1}>
-                    {item.replyTo.senderName}
-                  </Text>
-                  <Text style={[styles.replyQuotePreview, isOwn && styles.replyQuoteTextOwn]} numberOfLines={1}>
-                    {item.replyTo.preview}
-                  </Text>
-                </View>
-                {/* Thumbnail of the photo/video being replied to, like
-                    Messenger. Replies sent before this have none saved, so
-                    they just show the words. */}
-                {!!item.replyTo.mediaUrl && (
-                  <Image
-                    source={{
-                      uri:
-                        item.replyTo.mediaType === "video"
-                          ? videoThumb(item.replyTo.mediaUrl, 96)
-                          : feedImage(item.replyTo.mediaUrl, 96),
-                    }}
-                    style={styles.replyQuoteThumb}
-                    contentFit="cover"
-                    recyclingKey={`${item.id}:replyThumb`}
-                  />
-                )}
-              </Pressable>
             )}
 
             {/* Attached Images */}
@@ -274,7 +362,13 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
                     onPress={() => onOpenImage(img.url)}
                     activeOpacity={0.88}
                   >
-                    <Image source={{ uri: img.url }} style={styles.bubbleImage} contentFit="cover" />
+                    <MessageImage
+                      uri={img.url}
+                      width={CHAT_MEDIA_WIDTH}
+                      sourceWidth={img.width}
+                      sourceHeight={img.height}
+                      recyclingKey={`${item.id}:${img.url}`}
+                    />
                   </TouchableOpacity>
                 ))}
               </View>
@@ -287,7 +381,7 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
                 <TouchableOpacity
                   key={`${docItem.url}_${idx}`}
                   style={[styles.docChip, isOwn && styles.docChipOwn]}
-                  onPress={() => Linking.openURL(docItem.url).catch(() => null)}
+                  onPress={() => onOpenLink(docItem.url)}
                 >
                   <Ionicons name={details.icon as any} size={20} color={isOwn ? "#fff" : details.color} />
                   <Text style={[styles.docChipText, isOwn && styles.docChipTextOwn]} numberOfLines={1}>
@@ -298,11 +392,16 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
             })}
 
             {/* Message Text */}
-            {!!item.text && (
+            {item.deleted ? (
+              <View style={styles.deletedRow}>
+                <Ionicons name="ban-outline" size={12} color={theme.textMuted} />
+                <Text style={styles.deletedText}>Message deleted</Text>
+              </View>
+            ) : !!item.text && (
               <Text style={[styles.messageText, isOwn && styles.messageTextOwn]}>
-                {item.deleted ? item.text : splitMessageLinks(item.text).map((part, index) => part.url
+                {splitMessageLinks(item.text).map((part, index) => part.url
                   ? <Text key={index} style={{ textDecorationLine: "underline", fontWeight: "600" }} accessibilityRole="link"
-                    onPress={(event) => { event.stopPropagation(); void Linking.openURL(part.url!).catch(() => Alert.alert("Unable to open link", "Please copy the link and open it in your browser.")); }}>{part.text}</Text>
+                    onPress={(event) => { event.stopPropagation(); onOpenLink(part.url!); }}>{part.text}</Text>
                   : part.text)}
               </Text>
             )}
@@ -312,7 +411,7 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
             {item.link && !item.deleted && (
               <TouchableOpacity
                 style={[styles.linkPreviewBox, isOwn && styles.linkPreviewBoxOwn]}
-                onPress={() => Linking.openURL(item.link!.url).catch(() => null)}
+                onPress={() => onOpenLink(item.link!.url, item.link!.title)}
               >
                 <Ionicons name="link-outline" size={14} color={isOwn ? "#fff" : "#1d4ed8"} />
                 <Text style={[styles.linkPreviewText, isOwn && styles.linkPreviewTextOwn]} numberOfLines={1}>
@@ -354,39 +453,38 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
       {/* Pin Badge */}
       {item.pinned && (
         <View style={[styles.pinnedMarker, isOwn && { alignSelf: "flex-end" }]}>
-          <Ionicons name="pin" size={11} color="#e0a53d" />
+          <Ionicons name="pin" size={11} color={theme.accent} />
           <Text style={styles.pinnedMarkerText}>Pinned</Text>
         </View>
       )}
 
       {/* Messenger Sent / Delivered / Seen Status under latest own message */}
       {isOwn && isLastOwnMessage && (
-        <View style={styles.statusRow} accessible accessibilityLabel={isPending ? "Sending" : isSeenByRecipient ? `Seen by ${recipientName}` : isDelivered ? "Delivered" : "Sent"}>
-          {isPending ? (
-            <View style={styles.seenContainer}>
-              <Ionicons name="time-outline" size={15} color="#9b766c" />
-            </View>
-          ) : isSeenByRecipient ? (
-            <View style={styles.seenContainer}>
-              {recipientAvatar ? (
-                <Image
-                  source={{ uri: avatarThumb(recipientAvatar, 16) }}
-                  style={styles.seenMiniAvatar}
-                  contentFit="cover"
-                />
-              ) : (
-                <View style={[styles.seenMiniAvatar, styles.chatAvatarFallback]}><Text style={{ fontSize: 10, color: "#8f2117" }}>{recipientName[0]?.toUpperCase() || "?"}</Text></View>
-              )}
-            </View>
-          ) : isDelivered ? (
-            <View style={styles.seenContainer}>
-              <Ionicons name="checkmark-circle" size={16} color="#9b766c" />
-            </View>
-          ) : (
-            <View style={styles.seenContainer}>
-              <Ionicons name="checkmark-circle-outline" size={16} color="#9b766c" />
-            </View>
-          )}
+        // Words rather than icons, the way Messenger states it. A tick and a
+        // double tick are a vocabulary people have to be taught; "Delivered"
+        // and "Seen" are not.
+        <View
+          style={styles.statusRow}
+          accessible
+          accessibilityLabel={
+            isPending
+              ? "Sending"
+              : isSeenByRecipient
+                ? `Seen by ${recipientName}`
+                : isDelivered
+                  ? "Delivered"
+                  : "Sent"
+          }
+        >
+          <Text style={styles.statusText}>
+            {isPending
+              ? "Sending…"
+              : isSeenByRecipient
+                ? "Seen"
+                : isDelivered
+                  ? "Delivered"
+                  : "Sent"}
+          </Text>
         </View>
       )}
     </View>
@@ -402,6 +500,8 @@ export default function DirectChatScreen() {
 }
 
 function DirectChatContent() {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{
@@ -535,6 +635,13 @@ function DirectChatContent() {
 
   // Long press / Action Menu State
   const [actionMenuTarget, setActionMenuTarget] = useState<DirectMessage | null>(null);
+  const [pendingLink, setPendingLink] = useState<ReturnType<typeof prepareExternalLink>>(null);
+
+  // Every link tapped in this screen goes through here. Trusted destinations
+  // open immediately; everything else shows where it really leads first.
+  const handleOpenLink = useCallback((url: string, label?: string) => {
+    setPendingLink(prepareExternalLink(url, label));
+  }, []);
   const [actionMenuY, setActionMenuY] = useState<number>(300);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [reactionPickerTarget, setReactionPickerTarget] = useState<DirectMessage | null>(null);
@@ -593,13 +700,36 @@ function DirectChatContent() {
   }, [params.recipientId, conversation, currentUserId]);
 
   const recipientDetail = conversation?.participantDetails?.[recipientId];
+
+  // participantDetails is a copy taken when the conversation was created, so
+  // it shows whatever picture and name the other person had that day. This
+  // follows their profile document and overrides the stale copy below.
+  const [liveRecipient, setLiveRecipient] = useState<UserData | null>(null);
+
+  useEffect(() => {
+    const documentId =
+      recipientDetail?.studentID || params.recipientStudentID || recipientId;
+    if (!documentId) return;
+    return subscribeToStudentProfile(documentId, setLiveRecipient);
+  }, [recipientDetail?.studentID, params.recipientStudentID, recipientId]);
   const recipientPresence = useUserPresence(recipientId, recipientDetail?.studentID || params.recipientStudentID);
   const activity = getPresenceState(recipientPresence, nowMs);
   const recipientNickname = conversation?.nicknames?.[recipientId];
   const displayName = recipientNickname || recipientDetail?.displayName || params.recipientName || "Chat";
-  const realName = recipientDetail?.displayName || params.recipientName || "";
-  const recipientAvatar = recipientDetail?.profileImage || params.recipientAvatar || null;
-  const role = parseUserRole(recipientDetail?.role || params.recipientRole);
+  const liveName = liveRecipient
+    ? `${liveRecipient.firstname || ""} ${liveRecipient.lastname || ""}`.trim()
+    : "";
+  const realName = liveName || recipientDetail?.displayName || params.recipientName || "";
+  // Live first, stored copy second, route parameter last: the first renders
+  // correctly, the others render instantly.
+  const recipientAvatar =
+    resolveAvatarUri(liveRecipient) ||
+    recipientDetail?.profileImage ||
+    params.recipientAvatar ||
+    null;
+  const role = parseUserRole(
+    liveRecipient?.role || recipientDetail?.role || params.recipientRole,
+  );
   const roleColor = getRoleColor(role || "student");
   const themeColor = conversation?.themeColor || DEFAULT_THEME_COLOR;
   const quickEmoji = conversation?.quickEmoji || "👍";
@@ -846,6 +976,23 @@ function DirectChatContent() {
 
       if (!textToSend.trim() && !attachment) return;
       if (!conversationId || !currentUserId || sendInFlight.current || pickerInFlight.current) return;
+
+      // Direct messages are never read by moderation and never seen by staff,
+      // and that should stay true. The only thing checked here is the domain
+      // of any link: no message text is inspected, nothing is recorded, and
+      // only an outright blocked host stops the send. A phishing or adult
+      // link sent privately reaches somebody who trusts the sender, which is
+      // exactly why the narrowest possible check still earns its place.
+      const blockedLink = findBlockedLink(
+        splitMessageLinks(textToSend).flatMap((part) => (part.url ? [part.url] : [])),
+      );
+      if (blockedLink) {
+        Alert.alert(
+          "This link can't be sent",
+          `Links to ${blockedLink.host} aren't allowed on BondED. Remove it to send your message.`,
+        );
+        return;
+      }
       if (isOffline) {
         Alert.alert("You’re offline", "Your message is still here. Reconnect to send it.");
         return;
@@ -933,7 +1080,14 @@ function DirectChatContent() {
         if (attachment) {
           uploading = !attachment.uploaded;
           setIsUploading(uploading);
-          const uploaded = await prepareDraftAttachment(attachment, uploadToCloudinary);
+          // The third argument reports the uploaded image's pixel size, so the
+          // bubble is the right shape on first paint instead of settling into
+          // it after the image loads.
+          const uploaded = await prepareDraftAttachment(
+            attachment,
+            uploadToCloudinary,
+            readLastUploadSize,
+          );
           filesToSend.push(uploaded);
           // The draft is already cleared, so remember the uploaded result here
           // instead — a retry after a failed send then skips the re-upload.
@@ -1063,9 +1217,8 @@ function DirectChatContent() {
     setEmojiPickerVisible(false);
     Keyboard.dismiss();
     try {
-      const res = await DocumentPicker.getDocumentAsync({
+      const res = await pickUploadDocuments({
         type: "*/*",
-        copyToCacheDirectory: true,
       });
       if (res.canceled || !res.assets[0]?.uri) return;
 
@@ -1088,7 +1241,13 @@ function DirectChatContent() {
   // Emoji reaction handler
   const handleReactionPress = useCallback(
     (msg: DirectMessage, emoji: string) => {
-      void toggleDirectMessageReaction(conversationId, msg.id, currentUserId, emoji, msg.reactions);
+      // Nothing awaits this, so without a catch a rules refusal surfaces as a
+      // bare unhandled FirebaseError. EMOJI_REACTIONS above must stay in step
+      // with validReactions() in firestore.rules — when they drifted, two of
+      // the six buttons were refused and this was the only symptom.
+      void toggleDirectMessageReaction(
+        conversationId, msg.id, currentUserId, emoji, msg.reactions,
+      ).catch((error) => console.warn("Reaction not saved:", error?.message || error));
     },
     [conversationId, currentUserId],
   );
@@ -1196,7 +1355,7 @@ function DirectChatContent() {
       {isSearching ? (
         <View style={styles.searchHeader}>
           <TouchableOpacity onPress={() => setIsSearching(false)} style={styles.headerBackBtn}>
-            <Ionicons name="arrow-back" size={24} color="#5f0909" />
+            <Ionicons name="arrow-back" size={24} color={theme.primary} />
           </TouchableOpacity>
           <TextInput
             style={styles.searchHeaderInput}
@@ -1212,10 +1371,10 @@ function DirectChatContent() {
                 {currentMatchIndex + 1}/{searchMatches.length}
               </Text>
               <TouchableOpacity onPress={handlePrevSearchMatch} style={styles.searchNavBtn}>
-                <Ionicons name="chevron-up" size={20} color="#5f0909" />
+                <Ionicons name="chevron-up" size={20} color={theme.primary} />
               </TouchableOpacity>
               <TouchableOpacity onPress={handleNextSearchMatch} style={styles.searchNavBtn}>
-                <Ionicons name="chevron-down" size={20} color="#5f0909" />
+                <Ionicons name="chevron-down" size={20} color={theme.primary} />
               </TouchableOpacity>
             </View>
           )}
@@ -1223,7 +1382,7 @@ function DirectChatContent() {
       ) : (
         <View style={styles.header}>
           <TouchableOpacity onPress={() => router.back()} style={styles.headerBackBtn}>
-            <Ionicons name="arrow-back" size={24} color="#5f0909" />
+            <Ionicons name="arrow-back" size={24} color={theme.primary} />
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -1271,10 +1430,10 @@ function DirectChatContent() {
 
           <View style={styles.headerActions}>
             <TouchableOpacity onPress={() => setIsSearching(true)} style={styles.headerActionBtn}>
-              <Ionicons name="search" size={20} color="#5f0909" />
+              <Ionicons name="search" size={20} color={theme.primary} />
             </TouchableOpacity>
             <TouchableOpacity onPress={() => setInfoSheetVisible(true)} style={styles.headerActionBtn}>
-              <Ionicons name="information-circle-outline" size={22} color="#5f0909" />
+              <Ionicons name="information-circle-outline" size={22} color={theme.primary} />
             </TouchableOpacity>
           </View>
         </View>
@@ -1287,12 +1446,12 @@ function DirectChatContent() {
           onPress={() => handleJumpToMessage(latestPinnedMessage.id)}
           activeOpacity={0.85}
         >
-          <Ionicons name="pin" size={14} color="#e0a53d" />
+          <Ionicons name="pin" size={14} color={theme.accent} />
           <Text style={styles.pinnedBannerText} numberOfLines={1}>
             <Text style={{ fontWeight: "700" }}>Pinned: </Text>
             {latestPinnedMessage.text || "Attached content"}
           </Text>
-          <Ionicons name="arrow-down" size={14} color="#9b766c" />
+          <Ionicons name="arrow-down" size={14} color={theme.textMuted} />
         </TouchableOpacity>
       )}
 
@@ -1300,10 +1459,10 @@ function DirectChatContent() {
       <View style={{ flex: 1, minHeight: 0 }}>
         {(messageError || conversationError) && (
           <TouchableOpacity style={{ padding: 12 }} onPress={() => setRetryCount((value) => value + 1)}>
-            <Text style={{ color: "#8f2117", textAlign: "center" }}>{messageError || conversationError} Tap to retry.</Text>
+            <Text style={{ color: theme.primary, textAlign: "center" }}>{messageError || conversationError} Tap to retry.</Text>
           </TouchableOpacity>
         )}
-        {isOffline && <Text style={{ padding: 8, textAlign: "center", color: "#8f766e" }}>Offline · Reconnect to send messages</Text>}
+        {isOffline && <Text style={{ padding: 8, textAlign: "center", color: theme.textMuted }}>Offline · Reconnect to send messages</Text>}
         {loading && !isOffline ? (
           <View style={styles.centered}>
             <ActivityIndicator size="large" color={themeColor} />
@@ -1446,6 +1605,7 @@ function DirectChatContent() {
                       setActionMenuY(pageY);
                     }
                   }}
+                  onOpenLink={handleOpenLink}
                   onReactionPress={handleReactionPress}
                   onOpenImage={setViewerImage}
                   onToggleReveal={(id) => setRevealedTimestampId((prev) => (prev === id ? null : id))}
@@ -1478,14 +1638,18 @@ function DirectChatContent() {
             <View style={[styles.replyBannerBar, { backgroundColor: themeColor }]} />
             <Pressable style={{ flex: 1 }} onPress={() => { Keyboard.dismiss(); void handleJumpToMessage(replyingTo.id); }} accessibilityLabel="Go to original message" accessibilityRole="button">
               <Text style={styles.replyBannerSender} numberOfLines={1}>
-                Replying to {replyingTo.senderName}
+                {/* Replying to your own message named you back at yourself.
+                    replyingTo is the message, so the sender is known here. */}
+                {replyingTo.senderId === currentUserId
+                  ? "Replying to yourself"
+                  : `Replying to ${replyingTo.senderName}`}
               </Text>
               <Text style={styles.replyBannerText} numberOfLines={1}>
                 {replyPreviewText(replyingTo)}
               </Text>
             </Pressable>
             <TouchableOpacity disabled={composerBusy} onPress={() => setReplyingTo(null)} style={{ padding: 4 }}>
-              <Ionicons name="close" size={18} color="#9b766c" />
+              <Ionicons name="close" size={18} color={theme.textMuted} />
             </TouchableOpacity>
           </View>
         )}
@@ -1517,24 +1681,24 @@ function DirectChatContent() {
             </View>
             <TouchableOpacity disabled={composerBusy} onPress={() => setDraftAttachment(null)}
               accessibilityRole="button" accessibilityLabel="Remove attachment" style={styles.removeAttachmentButton}>
-              <Ionicons name="close-circle" size={24} color="#9b766c" />
+              <Ionicons name="close-circle" size={24} color={theme.textMuted} />
             </TouchableOpacity>
           </View>
         )}
         <View style={[styles.composerWrap, { paddingBottom: keyboardVisible || emojiPickerVisible ? 8 : Math.max(insets.bottom, 10) }]}>
           <TouchableOpacity disabled={composerBusy || !!editingMessage} onPress={() => void handlePickPhoto("camera")} style={styles.composerAttachBtn}
             accessibilityRole="button" accessibilityLabel="Take a photo">
-            <Ionicons name="camera-outline" size={23} color="#5f0909" />
+            <Ionicons name="camera-outline" size={23} color={theme.primary} />
           </TouchableOpacity>
 
           <TouchableOpacity disabled={composerBusy || !!editingMessage} onPress={() => void handlePickPhoto("gallery")} style={styles.composerAttachBtn}
             accessibilityRole="button" accessibilityLabel="Choose a photo">
-            <Ionicons name="image-outline" size={23} color="#5f0909" />
+            <Ionicons name="image-outline" size={23} color={theme.primary} />
           </TouchableOpacity>
 
           <TouchableOpacity disabled={composerBusy || !!editingMessage} onPress={handlePickDocument} style={styles.composerAttachBtn}
             accessibilityRole="button" accessibilityLabel="Attach a file">
-            <Ionicons name="attach-outline" size={23} color="#5f0909" />
+            <Ionicons name="attach-outline" size={23} color={theme.primary} />
           </TouchableOpacity>
 
           <View style={styles.composerInputWrap}>
@@ -1776,7 +1940,7 @@ function DirectChatContent() {
                 <Ionicons
                   name={actionMenuTarget.pinned ? "pin" : "pin-outline"}
                   size={20}
-                  color="#e0a53d"
+                  color={theme.accent}
                 />
                 <Text style={styles.moreMenuRowText}>
                   {actionMenuTarget.pinned ? "Unpin message" : "Pin message"}
@@ -1923,7 +2087,7 @@ function DirectChatContent() {
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Conversation Details</Text>
             <TouchableOpacity onPress={() => setInfoSheetVisible(false)} style={{ padding: 6 }}>
-              <Ionicons name="close" size={24} color="#5f0909" />
+              <Ionicons name="close" size={24} color={theme.primary} />
             </TouchableOpacity>
           </View>
 
@@ -1984,10 +2148,10 @@ function DirectChatContent() {
               }}
             >
               <View style={styles.actionSettingLeft}>
-                <Ionicons name="text-outline" size={20} color="#5f0909" />
+                <Ionicons name="text-outline" size={20} color={theme.primary} />
                 <Text style={styles.actionSettingTitle}>Edit Nicknames</Text>
               </View>
-              <Ionicons name="chevron-forward" size={18} color="#9b766c" />
+              <Ionicons name="chevron-forward" size={18} color={theme.textMuted} />
             </TouchableOpacity>
 
             {/* Notification Mute */}
@@ -1996,7 +2160,7 @@ function DirectChatContent() {
                 <Ionicons
                   name={isMuted ? "notifications-off-outline" : "notifications-outline"}
                   size={20}
-                  color="#5f0909"
+                  color={theme.primary}
                 />
                 <Text style={styles.actionSettingTitle}>Mute Notifications</Text>
               </View>
@@ -2074,7 +2238,7 @@ function DirectChatContent() {
                       <Text style={styles.fileRowText} numberOfLines={1}>
                         {item.name}
                       </Text>
-                      <Ionicons name="download-outline" size={18} color="#9b766c" />
+                      <Ionicons name="download-outline" size={18} color={theme.textMuted} />
                     </TouchableOpacity>
                   );
                 })}
@@ -2096,7 +2260,7 @@ function DirectChatContent() {
                     <Text style={styles.fileRowText} numberOfLines={1}>
                       {item.title}
                     </Text>
-                    <Ionicons name="open-outline" size={16} color="#9b766c" />
+                    <Ionicons name="open-outline" size={16} color={theme.textMuted} />
                   </TouchableOpacity>
                 ))}
                 {galleryItems.links.length === 0 && (
@@ -2131,7 +2295,7 @@ function DirectChatContent() {
                     onPress={() => void togglePinDirectMessage(conversationId, pMsg.id, false, currentUserId)}
                     style={styles.pinnedUnpinBtn}
                   >
-                    <Ionicons name="close" size={16} color="#8f766e" />
+                    <Ionicons name="close" size={16} color={theme.textMuted} />
                   </TouchableOpacity>
                 </View>
               </View>
@@ -2150,7 +2314,13 @@ function DirectChatContent() {
         animationType="fade"
         onRequestClose={() => setNicknameModalVisible(false)}
       >
-        <View style={styles.actionModalOverlay}>
+        {/* actionModalOverlay is shared with the action menu, which positions
+            itself absolutely and must not be centred — so this uses its own
+            centred overlay rather than changing the shared one. */}
+        <KeyboardAvoidingView
+          style={styles.centeredModalOverlay}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
           <View style={styles.nicknameModalCard}>
             <Text style={styles.nicknameModalTitle}>Edit Nickname</Text>
             <Text style={styles.nicknameModalSubtitle}>
@@ -2182,7 +2352,7 @@ function DirectChatContent() {
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ==================== FORWARD MODAL ==================== */}
@@ -2196,7 +2366,7 @@ function DirectChatContent() {
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Forward Message</Text>
             <TouchableOpacity onPress={() => setForwardTarget(null)} style={{ padding: 6 }}>
-              <Ionicons name="close" size={24} color="#5f0909" />
+              <Ionicons name="close" size={24} color={theme.primary} />
             </TouchableOpacity>
           </View>
 
@@ -2298,18 +2468,20 @@ function DirectChatContent() {
         showActions={false}
         onClose={() => setViewerImage(null)}
       />
+      <ExternalLinkDialog link={pendingLink} onClose={() => setPendingLink(null)} />
     </SafeAreaView>
     </KeyboardAvoidingView>
   );
 }
 
 /* ==================== STYLES ==================== */
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   activityRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   activityDot: { width: 7, height: 7, borderRadius: 4 },
   container: {
     flex: 1,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   header: {
     flexDirection: "row",
@@ -2318,7 +2490,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "rgba(95, 9, 9, 0.12)",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   headerBackBtn: {
     padding: 6,
@@ -2360,13 +2532,13 @@ const styles = StyleSheet.create({
   headerDisplayName: {
     fontSize: 15.5,
     fontWeight: "800",
-    color: "#2a0f0b",
+    color: c.textPrimary,
     marginRight: 6,
     flexShrink: 1,
   },
   headerSubstatus: {
     fontSize: 11.5,
-    color: "#8f766e",
+    color: c.textMuted,
   },
   headerActions: {
     flexDirection: "row",
@@ -2389,7 +2561,7 @@ const styles = StyleSheet.create({
   searchHeaderInput: {
     flex: 1,
     fontSize: 15,
-    color: "#2a0f0b",
+    color: c.textPrimary,
     paddingHorizontal: 8,
   },
   searchControlsRow: {
@@ -2399,7 +2571,7 @@ const styles = StyleSheet.create({
   },
   searchMatchCount: {
     fontSize: 12,
-    color: "#8f766e",
+    color: c.textMuted,
     fontWeight: "600",
   },
   searchNavBtn: {
@@ -2464,14 +2636,14 @@ const styles = StyleSheet.create({
   },
   incomingAvatarWrap: { position: "absolute", left: -34, bottom: 0 },
   incomingAvatar: { width: 28, height: 28, borderRadius: 14 },
-  chatAvatarFallback: { alignItems: "center", justifyContent: "center", backgroundColor: "#f0e3dd" },
-  chatAvatarInitial: { fontSize: 12, fontWeight: "600", color: "#8f2117" },
-  editedLabel: { fontSize: 10, color: "#93786f", marginTop: 4 },
-  chatNotice: { padding: 9, alignItems: "center", backgroundColor: "#f8efea" },
-  chatNoticeText: { fontSize: 12, color: "#85685f", textAlign: "center" },
+  chatAvatarFallback: { alignItems: "center", justifyContent: "center", backgroundColor: c.border },
+  chatAvatarInitial: { fontSize: 12, fontWeight: "600", color: c.primary },
+  editedLabel: { fontSize: 10, color: c.textMuted, marginTop: 4 },
+  chatNotice: { padding: 9, alignItems: "center", backgroundColor: c.surfaceSunken },
+  chatNoticeText: { fontSize: 12, color: c.textMuted, textAlign: "center" },
   revealedTimeText: {
     fontSize: 10.5,
-    color: "#9b766c",
+    color: c.textMuted,
     textAlign: "center",
     marginVertical: 4,
   },
@@ -2482,22 +2654,39 @@ const styles = StyleSheet.create({
   },
   bubbleBoxOwn: {
     borderBottomRightRadius: 4,
+    alignSelf: "flex-end",
   },
   bubbleBoxOther: {
-    backgroundColor: "#eee4df",
+    backgroundColor: c.surfaceSunken,
     borderBottomLeftRadius: 4,
+    alignSelf: "flex-start",
+  },
+  // A deleted message keeps its place in the thread but stops looking like
+  // one: no bubble, no colour, just a small grey note.
+  bubbleBoxDeleted: {
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderColor: c.border,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  deletedRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  deletedText: {
+    color: c.textMuted,
+    fontSize: 12.5,
+    fontStyle: "italic",
   },
   bubbleHighlighted: {
     borderWidth: 2,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
   messageText: {
     fontSize: 15,
-    color: "#2a0f0b",
+    color: c.textPrimary,
     lineHeight: 20.5,
   },
   messageTextOwn: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
 
   /* Forwarded Tag */
@@ -2509,7 +2698,7 @@ const styles = StyleSheet.create({
   },
   forwardedTagText: {
     fontSize: 11,
-    color: "#8f766e",
+    color: c.textMuted,
     fontStyle: "italic",
   },
   forwardedTagTextOwn: {
@@ -2529,11 +2718,46 @@ const styles = StyleSheet.create({
     // message and only the bar shows.
     minWidth: 150,
   },
-  replyQuoteThumb: {
-    width: 38,
-    height: 38,
+  // One small line above the bubble, the way Messenger marks a reply.
+  replyLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginBottom: 3,
+    paddingHorizontal: 4,
+  },
+  replyLabelRowOwn: { justifyContent: "flex-end" },
+  // The quoted message, muted and sitting above the reply the way Messenger
+  // shows it. Outside the bubble, so it never changes the bubble's width.
+  replyEcho: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    alignSelf: "flex-start",
+    maxWidth: "100%",
+    backgroundColor: "rgba(95,9,9,0.06)",
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 3,
+  },
+  replyEchoOwn: { alignSelf: "flex-end" },
+  replyEchoText: {
+    color: c.textMuted,
+    fontSize: 12.5,
+    flexShrink: 1,
+  },
+  replyEchoThumb: {
+    width: 26,
+    height: 26,
     borderRadius: 6,
     backgroundColor: "rgba(0,0,0,0.08)",
+  },
+  replyLabelText: {
+    color: c.textMuted,
+    fontSize: 11.5,
+    fontWeight: "600",
+    flexShrink: 1,
   },
   replyQuoteWrapOwn: {
     backgroundColor: "rgba(255,255,255,0.18)",
@@ -2545,15 +2769,15 @@ const styles = StyleSheet.create({
   replyQuoteSender: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
     marginBottom: 1,
   },
   replyQuotePreview: {
     fontSize: 12,
-    color: "#6e4b44",
+    color: c.textSecondary,
   },
   replyQuoteTextOwn: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
 
   /* Images in Bubble */
@@ -2562,11 +2786,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     marginBottom: 4,
   },
-  bubbleImage: {
-    width: 220,
-    height: 160,
-    borderRadius: 12,
-  },
+
 
   /* Doc attachment */
   docChip: {
@@ -2583,7 +2803,7 @@ const styles = StyleSheet.create({
   },
   docChipText: {
     fontSize: 13,
-    color: "#2a0f0b",
+    color: c.textPrimary,
     fontWeight: "600",
     flex: 1,
   },
@@ -2630,7 +2850,7 @@ const styles = StyleSheet.create({
   reactionPill: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#ffffff",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.08)",
     borderRadius: 14,
@@ -2653,7 +2873,7 @@ const styles = StyleSheet.create({
   reactionCountText: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#555555",
+    color: c.textMuted,
     marginLeft: 1,
   },
 
@@ -2666,7 +2886,7 @@ const styles = StyleSheet.create({
   },
   pinnedMarkerText: {
     fontSize: 10,
-    color: "#e0a53d",
+    color: c.accent,
     fontWeight: "700",
   },
 
@@ -2676,29 +2896,17 @@ const styles = StyleSheet.create({
     marginTop: 2,
     marginRight: 2,
   },
-  seenContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-  },
   statusText: {
     fontSize: 10,
-    color: "#9b766c",
+    color: c.textMuted,
     fontWeight: "600",
-  },
-  seenMiniAvatar: {
-    width: 15,
-    height: 15,
-    borderRadius: 7.5,
-    borderWidth: 1,
-    borderColor: "#fffaf7",
   },
 
   /* Reply Banner */
   replyBanner: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f2e7e1",
+    backgroundColor: c.surfaceSunken,
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -2713,11 +2921,11 @@ const styles = StyleSheet.create({
   replyBannerSender: {
     fontSize: 12,
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
   },
   replyBannerText: {
     fontSize: 12.5,
-    color: "#7a554e",
+    color: c.textMuted,
   },
 
   /* Composer */
@@ -2726,7 +2934,7 @@ const styles = StyleSheet.create({
     alignItems: "flex-end",
     paddingHorizontal: 8,
     paddingTop: 8,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: "rgba(95, 9, 9, 0.12)",
     gap: 4,
@@ -2755,7 +2963,7 @@ const styles = StyleSheet.create({
     maxHeight: 120,
     paddingVertical: 12,
     fontSize: 15,
-    color: "#2a0f0b",
+    color: c.textPrimary,
     lineHeight: 20,
   },
   composerSmileyBtn: { width: 36, height: 44, alignItems: "center", justifyContent: "center" },
@@ -2775,12 +2983,12 @@ const styles = StyleSheet.create({
   },
   attachmentPreview: {
     flexDirection: "row", alignItems: "center", gap: 12,
-    paddingHorizontal: 16, paddingVertical: 8, backgroundColor: "#f5ece7",
+    paddingHorizontal: 16, paddingVertical: 8, backgroundColor: c.surfaceSunken,
   },
   attachmentThumbnail: { width: 68, height: 68, borderRadius: 10 },
-  attachmentFileIcon: { backgroundColor: "#fffaf7", alignItems: "center", justifyContent: "center" },
-  attachmentName: { fontSize: 13, fontWeight: "600", color: "#2a0f0b" },
-  attachmentStatus: { fontSize: 12, color: "#8f766e", marginTop: 3 },
+  attachmentFileIcon: { backgroundColor: c.surface, alignItems: "center", justifyContent: "center" },
+  attachmentName: { fontSize: 13, fontWeight: "600", color: c.textPrimary },
+  attachmentStatus: { fontSize: 12, color: c.textMuted, marginTop: 3 },
   retakeButton: { alignSelf: "flex-start", paddingVertical: 7, paddingRight: 12 },
   removeAttachmentButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
 
@@ -2788,6 +2996,14 @@ const styles = StyleSheet.create({
   actionModalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0, 0, 0, 0.72)",
+  },
+  // Same dim, but centred — for dialogs rather than the anchored action menu.
+  centeredModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.72)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 24,
   },
   actionFloatingArea: {
     position: "absolute",
@@ -2909,7 +3125,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     overflow: "hidden",
@@ -2948,13 +3164,13 @@ const styles = StyleSheet.create({
   startDisplayName: {
     fontSize: 20,
     fontWeight: "800",
-    color: "#2a0f0b",
+    color: c.textPrimary,
     textAlign: "center",
     marginBottom: 2,
   },
   startRealName: {
     fontSize: 13,
-    color: "#8f766e",
+    color: c.textMuted,
     marginBottom: 6,
   },
   startRoleBadge: {
@@ -2973,12 +3189,12 @@ const styles = StyleSheet.create({
   startSubtitle: {
     fontSize: 14,
     fontWeight: "700",
-    color: "#3d1f19",
+    color: c.textPrimary,
     marginTop: 2,
   },
   startCaption: {
     fontSize: 12,
-    color: "#8f766e",
+    color: c.textMuted,
     textAlign: "center",
     marginTop: 3,
     maxWidth: 260,
@@ -3013,13 +3229,13 @@ const styles = StyleSheet.create({
   dateSeparatorText: {
     fontSize: 11.5,
     fontWeight: "600",
-    color: "#8f766e",
+    color: c.textMuted,
   },
 
   /* Info / Settings Sheet */
   modalContainer: {
     flex: 1,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   modalHeader: {
     flexDirection: "row",
@@ -3033,7 +3249,7 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 18,
     fontWeight: "800",
-    color: "#4d1510",
+    color: c.textPrimary,
   },
   infoHero: {
     alignItems: "center",
@@ -3060,24 +3276,24 @@ const styles = StyleSheet.create({
   infoHeroName: {
     fontSize: 20,
     fontWeight: "800",
-    color: "#2a0f0b",
+    color: c.textPrimary,
     marginBottom: 2,
   },
   infoHeroRealName: {
     fontSize: 14,
-    color: "#8f766e",
+    color: c.textMuted,
   },
   sectionHeader: {
     fontSize: 13,
     fontWeight: "800",
-    color: "#8f766e",
+    color: c.textMuted,
     textTransform: "uppercase",
     letterSpacing: 0.5,
     marginBottom: 10,
     marginLeft: 4,
   },
   settingCard: {
-    backgroundColor: "#f5ece7",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 16,
     padding: 14,
     marginBottom: 10,
@@ -3085,7 +3301,7 @@ const styles = StyleSheet.create({
   settingTitle: {
     fontSize: 14.5,
     fontWeight: "700",
-    color: "#2a0f0b",
+    color: c.textPrimary,
     marginBottom: 10,
   },
   themePaletteRow: {
@@ -3101,14 +3317,14 @@ const styles = StyleSheet.create({
   },
   themeCircleActive: {
     borderWidth: 2.5,
-    borderColor: "#fffaf7",
+    borderColor: c.surface,
     transform: [{ scale: 1.15 }],
   },
   actionSettingRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#f5ece7",
+    backgroundColor: c.surfaceSunken,
     paddingHorizontal: 14,
     paddingVertical: 14,
     borderRadius: 16,
@@ -3122,7 +3338,7 @@ const styles = StyleSheet.create({
   actionSettingTitle: {
     fontSize: 15,
     fontWeight: "600",
-    color: "#2a0f0b",
+    color: c.textPrimary,
   },
   toggleBtn: {
     backgroundColor: "rgba(143, 33, 23, 0.12)",
@@ -3131,21 +3347,21 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   toggleBtnActive: {
-    backgroundColor: "#8f2117",
+    backgroundColor: c.primary,
   },
   toggleBtnText: {
     fontSize: 12,
     fontWeight: "700",
-    color: "#8f2117",
+    color: c.primary,
   },
   toggleBtnTextActive: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
 
   /* Gallery Tabs */
   galleryTabsRow: {
     flexDirection: "row",
-    backgroundColor: "#eee4df",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 12,
     padding: 3,
     marginBottom: 12,
@@ -3157,15 +3373,15 @@ const styles = StyleSheet.create({
     borderRadius: 9,
   },
   galleryTabActive: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   galleryTabText: {
     fontSize: 12.5,
     fontWeight: "600",
-    color: "#8f766e",
+    color: c.textMuted,
   },
   galleryTabTextActive: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "800",
   },
   mediaGrid: {
@@ -3189,7 +3405,7 @@ const styles = StyleSheet.create({
   fileRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f5ece7",
+    backgroundColor: c.surfaceSunken,
     padding: 12,
     borderRadius: 12,
     gap: 10,
@@ -3197,12 +3413,12 @@ const styles = StyleSheet.create({
   fileRowText: {
     flex: 1,
     fontSize: 14,
-    color: "#2a0f0b",
+    color: c.textPrimary,
     fontWeight: "600",
   },
   galleryEmptyText: {
     textAlign: "center",
-    color: "#8f766e",
+    color: c.textMuted,
     fontSize: 13,
     paddingVertical: 16,
   },
@@ -3211,7 +3427,7 @@ const styles = StyleSheet.create({
   pinnedItemCard: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f5ece7",
+    backgroundColor: c.surfaceSunken,
     padding: 12,
     borderRadius: 14,
     marginBottom: 8,
@@ -3220,12 +3436,12 @@ const styles = StyleSheet.create({
   pinnedItemSender: {
     fontSize: 12,
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
     marginBottom: 2,
   },
   pinnedItemText: {
     fontSize: 13.5,
-    color: "#2a0f0b",
+    color: c.textPrimary,
   },
   pinnedItemActions: {
     flexDirection: "row",
@@ -3241,7 +3457,7 @@ const styles = StyleSheet.create({
   pinnedJumpBtnText: {
     fontSize: 11.5,
     fontWeight: "700",
-    color: "#8f2117",
+    color: c.primary,
   },
   pinnedUnpinBtn: {
     padding: 4,
@@ -3251,19 +3467,19 @@ const styles = StyleSheet.create({
   nicknameModalCard: {
     width: "100%",
     maxWidth: 320,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 20,
     padding: 20,
   },
   nicknameModalTitle: {
     fontSize: 18,
     fontWeight: "800",
-    color: "#4d1510",
+    color: c.textPrimary,
     marginBottom: 6,
   },
   nicknameModalSubtitle: {
     fontSize: 13,
-    color: "#8f766e",
+    color: c.textMuted,
     lineHeight: 18,
     marginBottom: 16,
   },
@@ -3273,7 +3489,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 15,
-    color: "#2a0f0b",
+    color: c.textPrimary,
     marginBottom: 16,
   },
   nicknameModalButtons: {
@@ -3288,7 +3504,7 @@ const styles = StyleSheet.create({
   nicknameCancelText: {
     fontSize: 14,
     fontWeight: "600",
-    color: "#8f766e",
+    color: c.textMuted,
   },
   nicknameSaveBtn: {
     paddingHorizontal: 16,
@@ -3304,7 +3520,7 @@ const styles = StyleSheet.create({
   /* Forward Modal Styles */
   forwardSnippetCard: {
     flexDirection: "row",
-    backgroundColor: "#f5ece7",
+    backgroundColor: c.surfaceSunken,
     marginHorizontal: 16,
     marginTop: 12,
     marginBottom: 8,
@@ -3319,12 +3535,12 @@ const styles = StyleSheet.create({
   forwardSnippetSender: {
     fontSize: 12,
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
     marginBottom: 2,
   },
   forwardSnippetText: {
     fontSize: 13,
-    color: "#2a0f0b",
+    color: c.textPrimary,
   },
   forwardRow: {
     flexDirection: "row",
@@ -3344,11 +3560,11 @@ const styles = StyleSheet.create({
   forwardRowName: {
     fontSize: 15,
     fontWeight: "600",
-    color: "#2a0f0b",
+    color: c.textPrimary,
     flex: 1,
   },
   forwardSendBtn: {
-    backgroundColor: "#8f2117",
+    backgroundColor: c.primary,
     paddingHorizontal: 16,
     paddingVertical: 7,
     borderRadius: 14,

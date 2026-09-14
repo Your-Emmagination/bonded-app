@@ -1,3 +1,5 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { isStaff, resolveUserRoleForAuthUser } from "@/utils/rbac";
 import { clusterUnansweredQuestions, type UnansweredQuestionCluster } from "@/utils/unansweredClustering";
 import { Ionicons } from "@expo/vector-icons";
@@ -35,6 +37,7 @@ const formatDate = (value?: Timestamp | null) => {
 };
 
 export default function UnansweredQuestionsScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [allowed, setAllowed] = useState(false);
@@ -131,7 +134,7 @@ export default function UnansweredQuestionsScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.centerState}>
-          <Ionicons name="lock-closed-outline" size={42} color="#e0a53d" />
+          <Ionicons name="lock-closed-outline" size={42} color={theme.accent} />
           <Text style={styles.emptyTitle}>Access Restricted</Text>
           <Text style={styles.emptyText}>
             Only admins, teachers, and moderators can view unanswered chatbot questions.
@@ -146,7 +149,7 @@ export default function UnansweredQuestionsScreen() {
       <View style={styles.contentShell}>
         <View style={styles.header}>
           <TouchableOpacity onPress={() => router.back()} style={styles.iconButton}>
-            <Ionicons name="arrow-back" size={22} color="#fffaf7" />
+            <Ionicons name="arrow-back" size={22} color={theme.onChrome} />
           </TouchableOpacity>
           <View style={{ flex: 1 }}>
             <Text style={styles.headerTitle}>Unanswered Questions</Text>
@@ -194,7 +197,7 @@ export default function UnansweredQuestionsScreen() {
                     activeOpacity={0.85}
                     onPress={() => openAiMemorySuggestion(cluster)}
                   >
-                    <Ionicons name="add-circle-outline" size={16} color="#fffaf7" />
+                    <Ionicons name="add-circle-outline" size={16} color={theme.onChrome} />
                     <Text style={styles.clusterAddButtonText}>Add to AI Memory</Text>
                   </TouchableOpacity>
                 </View>
@@ -204,7 +207,7 @@ export default function UnansweredQuestionsScreen() {
 
           {questions.length === 0 ? (
             <View style={styles.emptyCard}>
-              <Ionicons name="checkmark-circle-outline" size={42} color="#c59a8a" />
+              <Ionicons name="checkmark-circle-outline" size={42} color={theme.textMuted} />
               <Text style={styles.emptyTitle}>Nothing unanswered</Text>
               <Text style={styles.emptyText}>
                 B.E.A. hasn't logged any unanswered student questions yet.
@@ -222,9 +225,9 @@ export default function UnansweredQuestionsScreen() {
                     onPress={() => requestDeleteQuestion(question)}
                   >
                     {deletingId === question.id ? (
-                      <ActivityIndicator size="small" color="#9b1f1c" />
+                      <ActivityIndicator size="small" color={theme.danger} />
                     ) : (
-                      <Ionicons name="trash-outline" size={18} color="#9b1f1c" />
+                      <Ionicons name="trash-outline" size={18} color={theme.danger} />
                     )}
                   </TouchableOpacity>
                 </View>
@@ -258,14 +261,15 @@ export default function UnansweredQuestionsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
   },
   contentShell: {
     flex: 1,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
   centerState: {
     flex: 1,
@@ -278,7 +282,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 16,
     paddingVertical: 16,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     gap: 12,
   },
   iconButton: {
@@ -287,15 +291,15 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#7b1f17",
+    backgroundColor: c.primary,
   },
   headerTitle: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 21,
     fontWeight: "800",
   },
   headerSubtitle: {
-    color: "#f0d2c2",
+    color: c.borderStrong,
     marginTop: 2,
     fontSize: 12.5,
   },
@@ -304,15 +308,15 @@ const styles = StyleSheet.create({
     paddingBottom: 36,
   },
   helperCard: {
-    backgroundColor: "#fff8f4",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     padding: 14,
     marginBottom: 14,
   },
   helperText: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontSize: 13,
     lineHeight: 20,
   },
@@ -320,40 +324,40 @@ const styles = StyleSheet.create({
     marginBottom: 18,
   },
   clusterSectionTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 16,
     fontWeight: "800",
     marginBottom: 4,
   },
   clusterSectionHint: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12.5,
     lineHeight: 18,
     marginBottom: 12,
   },
   clusterCard: {
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
     padding: 14,
     marginBottom: 12,
   },
   clusterCountBadge: {
     alignSelf: "flex-start",
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 4,
     marginBottom: 8,
   },
   clusterCountText: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 11,
     fontWeight: "800",
   },
   clusterPrompt: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "700",
     lineHeight: 21,
@@ -366,15 +370,15 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   clusterTagChip: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     borderRadius: 999,
     paddingHorizontal: 9,
     paddingVertical: 3,
   },
   clusterTagText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     fontWeight: "700",
   },
@@ -383,40 +387,40 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 6,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderRadius: 12,
     paddingVertical: 9,
   },
   clusterAddButtonText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 13,
     fontWeight: "800",
   },
   emptyCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     padding: 28,
     alignItems: "center",
   },
   emptyTitle: {
     marginTop: 12,
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 18,
     fontWeight: "800",
   },
   emptyText: {
     marginTop: 8,
-    color: "#9b766c",
+    color: c.textMuted,
     textAlign: "center",
     lineHeight: 20,
   },
   questionCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     padding: 14,
     marginBottom: 12,
   },
@@ -435,7 +439,7 @@ const styles = StyleSheet.create({
   },
   promptText: {
     flex: 1,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "700",
     lineHeight: 21,
@@ -447,25 +451,32 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   intentBadge: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 4,
   },
   intentBadgeText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 11,
     fontWeight: "800",
   },
   confidenceText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     fontWeight: "600",
   },
   dateText: {
-    color: "#c07a34",
+    color: c.accent,
     marginTop: 8,
     fontSize: 12,
     fontWeight: "600",
   },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

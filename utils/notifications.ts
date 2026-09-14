@@ -26,7 +26,9 @@ export type NotificationType =
   | "emergency"
   | "moderation"
   | "moderation_approved"
-  | "server_deletion";
+  | "server_deletion"
+  // A staff reply on a Help & Support ticket.
+  | "support";
 
 export type NotificationEntityType =
   | "direct_message"
@@ -38,7 +40,8 @@ export type NotificationEntityType =
   | "comment"
   | "reply"
   | "event"
-  | "emergency";
+  | "emergency"
+  | "support_ticket";
 
 type NotificationActor = {
   id: string;
@@ -56,13 +59,16 @@ type CreateNotificationInput = {
   message: string;
   preview?: string | null;
   parentId?: string | null;
+  /** Community channel a thread_message notification points at, so tapping it
+   *  can open the right channel rather than only the server. */
+  channelId?: string | null;
   notificationId?: string;
 };
 
 type LikeNotificationInput = {
   recipientId?: string | null;
   actor: NotificationActor;
-  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message">;
+  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message" | "support_ticket">;
   entityId: string;
   preview?: string | null;
   parentId?: string | null;
@@ -76,6 +82,7 @@ type MentionNotificationInput = {
   message: string;
   preview?: string | null;
   parentId?: string | null;
+  channelId?: string | null;
   excludeUserIds?: string[];
 };
 
@@ -144,6 +151,7 @@ export const createNotification = async ({
   message,
   preview,
   parentId,
+  channelId,
   notificationId,
 }: CreateNotificationInput) => {
   if (!recipientId || !actor.id || recipientId === actor.id) {
@@ -160,6 +168,7 @@ export const createNotification = async ({
     entityType,
     entityId,
     parentId: parentId ?? null,
+    channelId: channelId ?? null,
     message,
     preview: sanitizePreview(preview),
     read: false,
@@ -244,7 +253,7 @@ export const upsertLikeNotification = async ({
   }
 
   const likeMessages: Record<
-    Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message">,
+    Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message" | "support_ticket">,
     string
   > = {
     post: "liked your post",
@@ -303,6 +312,7 @@ export const createMentionNotifications = async ({
   message,
   preview,
   parentId,
+  channelId,
   excludeUserIds = [],
 }: MentionNotificationInput) => {
   const excludedIds = new Set([...excludeUserIds, actor.id]);
@@ -319,6 +329,7 @@ export const createMentionNotifications = async ({
         entityType,
         entityId,
         parentId,
+        channelId,
         preview,
         message,
       }),
@@ -460,7 +471,7 @@ export const createEmergencyNotifications = async ({
 export type ModerationNotificationInput = {
   recipientId?: string | null;
   moderator: NotificationActor;
-  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message">;
+  entityType: Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message" | "support_ticket">;
   entityId: string;
   reasons?: string[];
   preview?: string | null;
@@ -468,7 +479,7 @@ export type ModerationNotificationInput = {
 };
 
 const MODERATION_ENTITY_LABEL: Record<
-  Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message">,
+  Exclude<NotificationEntityType, "event" | "emergency" | "direct_message" | "thread_message" | "support_ticket">,
   string
 > = {
   post: "post",

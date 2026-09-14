@@ -738,11 +738,16 @@ service cloud.firestore {
           return before == after || validOwnListToggle(before, after);
         }
 
+        // MUST match EMOJI_REACTIONS in DirectChatScreen exactly. When these
+        // drifted apart, the two reactions the picker offered but the rules
+        // did not know about were refused outright — the write is
+        // fire-and-forget, so it surfaced only as an unhandled
+        // "Missing or insufficient permissions" in the console.
         function validReactions() {
           return request.resource.data.get('reactions', {}).diff(resource.data.get('reactions', {}))
-              .affectedKeys().hasOnly(['👍', '❤️', '😂', '😮', '😢', '🙏']) &&
-            validReaction('👍') && validReaction('❤️') && validReaction('😂') &&
-            validReaction('😮') && validReaction('😢') && validReaction('🙏');
+              .affectedKeys().hasOnly(['❤️', '😆', '😮', '😢', '😡', '👍']) &&
+            validReaction('❤️') && validReaction('😆') && validReaction('😮') &&
+            validReaction('😢') && validReaction('😡') && validReaction('👍');
         }
 
         function validTextEdit() {
@@ -824,12 +829,17 @@ service cloud.firestore {
 
   // Identity, permissions, verified recovery data, and password state are
   // controlled by administrators/the trusted backend, never self-service edits.
+  // Academic standing is set by administrators and by the scheduled year
+  // level promotion, never by the student. Without yearlvl on this list a
+  // student could simply write their own promotion back the way it was.
   allow update: if signedIn() && (
     (isStudentOwner(studentId) &&
       !request.resource.data.diff(resource.data).affectedKeys().hasAny([
         'role', 'permissions', 'userId', 'uid', 'studentID', 'firstname', 'lastname',
         'mustChangePassword', 'passwordCheckedAt', 'recoveryEmail',
-        'recoveryEmailVerified', 'recoveryEmailVerifiedAt'
+        'recoveryEmailVerified', 'recoveryEmailVerifiedAt',
+        'yearlvl', 'promotionHold', 'previousYearlvl', 'promotedAt',
+        'lastPromotionRunId'
       ]) && validSetupChanges()) ||
     isAdmin()
   );
@@ -1296,12 +1306,14 @@ match /userNotificationSettings/{userId} {
 
       allow read, list: if signedIn();
 
+      // isStaff() accepts either the custom auth claim OR the student
+      // document. This rule used to trust the claim alone, and that claim is
+      // only ever written once, when the account is registered — so promoting
+      // someone to teacher in Manage Users gave them every other staff power
+      // while Firestore still refused their events. Update and delete below
+      // already used isStaff(); create was the odd one out.
       allow create: if signedIn() &&
-        request.auth.token.role in [
-          'moderator',
-          'teacher',
-          'admin'
-        ] &&
+        isStaff() &&
         request.resource.data.createdBy == request.auth.uid &&
         request.resource.data.title is string &&
         request.resource.data.date is string &&
@@ -1588,6 +1600,175 @@ match /userNotificationSettings/{userId} {
         request.resource.data.updatedAt is timestamp;
 
       allow delete: if isAdmin();
+    }
+
+    // =========================================================
+    // YEAR LEVEL PROMOTION
+    // =========================================================
+    //
+    // An admin writes a schedule here; the runYearLevelPromotions Cloud
+    // Function (functions/index.js) claims it and does the work. That job runs
+    // through the Admin SDK, which bypasses these rules entirely — so nothing
+    // below needs to grant the backend anything. Students never read or write
+    // either collection; they only see the result on their own profile.
+
+    match /promotionSchedules/{scheduleId} {
+
+      allow read, list: if isAdmin();
+
+      // A schedule may only ever be created in the pending state, so a client
+      // cannot skip the queue by writing one that claims to be finished.
+      allow create: if isAdmin() &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.runAt is timestamp &&
+        request.resource.data.createdBy == request.auth.uid;
+
+      allow update, delete: if isAdmin();
+    }
+
+    match /promotionRuns/{runId} {
+
+      allow read, list: if isAdmin();
+
+      // The audit trail is written only by the backend. Leaving it read-only
+      // here keeps the record of who was promoted, and from what, intact.
+      allow write: if false;
+
+      match /changes/{chunkId} {
+        allow read, list: if isAdmin();
+        allow write: if false;
+      }
+    }
+
+    // =========================================================
+    // HELP & SUPPORT TICKETS
+    // =========================================================
+    //
+    // A ticket is private between the person who filed it and the
+    // administrators. Everyone can file one and read their own; only admins
+    // read anyone else's.
+    //
+    // Administrators only, not staff generally, for two reasons. Moderators
+    // are students — they carry @student.csap accounts and a programme — so
+    // staff-wide access would let one student read another's account and
+    // records problems. And answering these needs someone who knows how the
+    // system actually works, which is the administrators.
+    //
+    // Status, priority and assignment are admin-only because a student who
+    // can set their own priority sets it to urgent, and one who can set their
+    // own status can close a problem that was never solved.
+
+    function ticketOwner() {
+      return resource.data.userId == request.auth.uid;
+    }
+
+    // Fields only staff may introduce or change.
+    // Triage decisions. An owner may never touch these.
+    //
+    // unreadForStaff is deliberately NOT here: every reply sets it, so
+    // listing it blocked a student from replying to their own request at all
+    // — the message was written but the ticket never updated, so it never
+    // rose into the administrators' queue and nobody knew they had answered.
+    // It is governed by ownerMayFlagStaff() below instead.
+    function ticketAdminFields() {
+      return ['status', 'priority', 'assignedTo', 'assignedToName'];
+    }
+
+    // An owner may raise the "waiting on us" flag by writing, but never lower
+    // it — clearing it would hide their own request from the queue.
+    function ownerMayFlagStaff() {
+      return !request.resource.data.diff(resource.data).affectedKeys()
+               .hasAny(['unreadForStaff']) ||
+             request.resource.data.unreadForStaff == true;
+    }
+
+    match /supportTickets/{ticketId} {
+
+      allow get: if signedIn() && (ticketOwner() || isAdmin());
+
+      // Students cannot list the collection — that would expose every other
+      // student's problems. Their own list is a query filtered to their uid,
+      // which `get` above already authorizes per document; staff list freely.
+      allow list: if signedIn() && (
+        isAdmin() ||
+        (request.auth != null && resource.data.userId == request.auth.uid)
+      );
+
+      // A ticket always starts unowned, unprioritized and open, whoever files
+      // it, and always belongs to the person filing it.
+      allow create: if signedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'open' &&
+        request.resource.data.priority == 'normal' &&
+        request.resource.data.assignedTo == null &&
+        request.resource.data.subject is string &&
+        request.resource.data.subject.size() > 0 &&
+        request.resource.data.subject.size() <= 200 &&
+        request.resource.data.description is string &&
+        request.resource.data.description.size() > 0 &&
+        request.resource.data.description.size() <= 4000;
+
+      allow update: if signedIn() && (
+        isAdmin() ||
+        (
+          ticketOwner() &&
+          // The owner may only ever mark their own copy read or push the
+          // conversation forward — never triage their own ticket.
+          !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(ticketAdminFields()) &&
+          ownerMayFlagStaff() &&
+          !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['userId', 'ticketNo', 'userRole', 'createdAt'])
+        )
+      );
+
+      // Tickets are a record. Staff close them; nobody deletes them.
+      allow delete: if false;
+
+      match /messages/{messageId} {
+
+        function parentTicket() {
+          return get(/databases/$(database)/documents/supportTickets/$(ticketId)).data;
+        }
+
+        allow read, list: if signedIn() && (
+          isAdmin() || parentTicket().userId == request.auth.uid
+        );
+
+        // `fromStaff` decides which side of the thread a message renders on
+        // and who the unread flag moves to, so a student must not be able to
+        // post one claiming to be support.
+        allow create: if signedIn() &&
+          request.resource.data.authorId == request.auth.uid &&
+          request.resource.data.body is string &&
+          request.resource.data.body.size() <= 4000 &&
+          // A screenshot on its own is a valid message, so an empty body is
+          // allowed only when there is an image to carry it.
+          (
+            request.resource.data.body.size() > 0 ||
+            request.resource.data.get('imageUrl', null) != null
+          ) &&
+          (
+            (isAdmin() && request.resource.data.fromStaff == true) ||
+            (
+              parentTicket().userId == request.auth.uid &&
+              request.resource.data.fromStaff == false
+            )
+          );
+
+        allow update, delete: if false;
+      }
+    }
+
+    // Running ticket number. Students need to increment it to file a ticket,
+    // so the rule pins the only legal change: exactly one more than it was.
+    // Anything else — a jump, a reset, a rewrite — is refused.
+    match /counters/supportTickets {
+      allow get: if signedIn();
+      allow create: if signedIn() && request.resource.data.value == 1;
+      allow update: if signedIn() &&
+        request.resource.data.value == resource.data.value + 1;
+      allow delete: if false;
     }
   }
 }

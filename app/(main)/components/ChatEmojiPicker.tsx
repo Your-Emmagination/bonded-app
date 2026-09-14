@@ -1,4 +1,6 @@
-import React, { useState } from "react";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
+import React, { useMemo, useState } from "react";
 import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -19,6 +21,7 @@ export default function ChatEmojiPicker({ onSelect, onClose, onOpenGifs, disable
   color: string;
   bottomInset: number;
 }) {
+  const { styles, theme } = useStyles();
   const [category, setCategory] = useState(0);
   return (
     <View style={[styles.panel, { paddingBottom: Math.max(bottomInset, 8) }]} accessibilityLabel="Emoji picker">
@@ -28,7 +31,7 @@ export default function ChatEmojiPicker({ onSelect, onClose, onOpenGifs, disable
           <Text style={[styles.title, { color }]}>GIF</Text>
         </Pressable>}
         <Pressable accessibilityRole="button" accessibilityLabel="Close emoji picker" onPress={onClose} style={styles.close}>
-          <Ionicons name="close" size={20} color="#7a554e" />
+          <Ionicons name="close" size={20} color={theme.textSecondary} />
         </Pressable>
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="always" style={styles.categories}>
@@ -52,10 +55,11 @@ export default function ChatEmojiPicker({ onSelect, onClose, onOpenGifs, disable
   );
 }
 
-const styles = StyleSheet.create({
-  panel: { backgroundColor: "#fffaf7", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#e4d5cd" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  panel: { backgroundColor: c.surface, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: c.border },
   heading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingLeft: 16 },
-  title: { fontSize: 13, fontWeight: "600", color: "#7a554e" },
+  title: { fontSize: 13, fontWeight: "600", color: c.textSecondary },
   close: { minWidth: 44, minHeight: 40, alignItems: "center", justifyContent: "center" },
   categories: { flexGrow: 0, height: 44 },
   category: { width: 52, height: 44, alignItems: "center", justifyContent: "center", borderBottomWidth: 2, borderBottomColor: "transparent" },
@@ -64,5 +68,12 @@ const styles = StyleSheet.create({
   gridContent: { paddingHorizontal: 8 },
   emoji: { width: "14.2857%", height: 44, alignItems: "center", justifyContent: "center", borderRadius: 12 },
   emojiText: { fontSize: 27 },
-  pressed: { backgroundColor: "#f2e7e1" },
+  pressed: { backgroundColor: c.surfaceSunken },
 });
+
+/** Themed stylesheet for this file. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

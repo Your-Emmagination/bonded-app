@@ -1,6 +1,8 @@
 // EventCalendarScreen.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useNetworkStatus } from "@/utils/networkUtils";
-import { getUserData, UserRole } from "@/utils/rbac";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
@@ -9,8 +11,10 @@ import {
     deleteDoc,
     doc,
     onSnapshot,
+    orderBy,
     query,
     where,
+    writeBatch,
 } from "firebase/firestore";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -42,6 +46,8 @@ type CalendarEvent = {
   createdAt: any;
   notifyUsers?: boolean;
   status?: "published" | "draft" | "archived";
+  /** The main event this one belongs to; null/missing means standalone. */
+  parentEventId?: string | null;
 };
 
 type GroupedEvents = {
@@ -86,6 +92,14 @@ const parseEventDate = (dateString: string) => {
   }
 
   return new Date(dateString);
+};
+
+/** Local YYYY-MM-DD. Dates are stored this way, so string order is date order. */
+const toDateKey = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 };
 
 const formatCompactDate = (dateString: string) =>
@@ -244,6 +258,7 @@ const groupEventsByMonth = (eventList: CalendarEvent[]) => {
 };
 
 const EventCalendarScreen = () => {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const { isOffline } = useNetworkStatus();
   const { eventId } = useLocalSearchParams<{ eventId?: string | string[] }>();
@@ -251,6 +266,16 @@ const EventCalendarScreen = () => {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [draftEvents, setDraftEvents] = useState<CalendarEvent[]>([]);
   const [showAllDrafts, setShowAllDrafts] = useState(false);
+  const [showPast, setShowPast] = useState(false);
+  // How far back to load. The recent past stays in memory so an event that is
+  // half finished still knows all of its parts — the day counter needs the
+  // finished ones too. Older history is only fetched when someone asks.
+  const [pastWindowDays, setPastWindowDays] = useState(60);
+  const windowStartKey = useMemo(() => {
+    const start = new Date();
+    start.setDate(start.getDate() - pastWindowDays);
+    return toDateKey(start);
+  }, [pastWindowDays]);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<CalendarEvent[]>([]);
   const [modalVisible, setModalVisible] = useState(false);
@@ -258,14 +283,35 @@ const EventCalendarScreen = () => {
     auth.currentUser?.uid || null,
   );
   const [authReady, setAuthReady] = useState(Boolean(auth.currentUser));
-  const [currentUserRole, setCurrentUserRole] = useState<
-    UserRole | undefined
-  >();
+  // Live, so an admin promoting or demoting this account is reflected without
+  // the screen being re-entered: staff buttons appear and vanish correctly.
+  const currentUserRole = useCurrentUserRole();
   const [loading, setLoading] = useState(true);
   const [currentTimeMs, setCurrentTimeMs] = useState(() => Date.now());
-  const groupedEvents = useMemo(() => groupEventsByMonth(events), [events]);
+  const todayKey = useMemo(() => toDateKey(new Date(currentTimeMs)), [currentTimeMs]);
+
+  // The main list starts at today, so the next thing that happens is the first
+  // thing on screen instead of the oldest event ever created.
+  const upcomingEvents = useMemo(
+    () => events.filter((event) => event.date >= todayKey),
+    [events, todayKey],
+  );
+  // Newest first: the recent past is what anyone actually looks for.
+  const pastEvents = useMemo(
+    () => events.filter((event) => event.date < todayKey).slice().reverse(),
+    [events, todayKey],
+  );
+  // Parts are folded into their main event here, so a finished Intramurals is
+  // one row in the history instead of six.
+  const pastTopLevel = useMemo(
+    () => pastEvents.filter((event) => !event.parentEventId),
+    [pastEvents],
+  );
+  const groupedEvents = useMemo(
+    () => groupEventsByMonth(upcomingEvents),
+    [upcomingEvents],
+  );
   const revealAnimation = useRef(new Animated.Value(0)).current;
-  const orbitAnimation = useRef(new Animated.Value(0)).current;
 
   const calendarInsights = useMemo(() => {
     const lifecycleCounts = events.reduce(
@@ -294,6 +340,98 @@ const EventCalendarScreen = () => {
     };
   }, [currentTimeMs, events]);
 
+  // Parts grouped under the main event they belong to. A part is an ordinary
+  // event carrying parentEventId, so it still appears on its own date in the
+  // timeline below — this only adds the roll-up view.
+  const partsByParent = useMemo(() => {
+    const grouped = new Map<string, CalendarEvent[]>();
+    events.forEach((event) => {
+      const parentId = String(event.parentEventId || "");
+      if (!parentId) return;
+      const existing = grouped.get(parentId);
+      if (existing) existing.push(event);
+      else grouped.set(parentId, [event]);
+    });
+
+    const sorted = new Map<string, CalendarEvent[]>();
+    grouped.forEach((list, parentId) => sorted.set(parentId, sortEvents(list)));
+    return sorted;
+  }, [events]);
+
+  // What is running inside each main event right now, and what follows it.
+  const partSummaries = useMemo(() => {
+    const summaries = new Map<
+      string,
+      { parts: CalendarEvent[]; now?: CalendarEvent; next?: CalendarEvent }
+    >();
+    partsByParent.forEach((parts, parentId) => {
+      summaries.set(parentId, {
+        parts,
+        now: parts.find(
+          (part) => getEventLifecycle(part, currentTimeMs) === "ongoing",
+        ),
+        next: parts.find(
+          (part) => getEventLifecycle(part, currentTimeMs) === "published",
+        ),
+      });
+    });
+    return summaries;
+  }, [partsByParent, currentTimeMs]);
+
+  const eventTitleById = useMemo(() => {
+    const titles = new Map<string, string>();
+    [...events, ...draftEvents].forEach((event) => titles.set(event.id, event.title));
+    return titles;
+  }, [events, draftEvents]);
+
+  // Everything on right now, parts included — the question a student opens
+  // this screen to answer.
+  const happeningNow = useMemo(
+    () =>
+      events.filter(
+        (event) =>
+          getEventLifecycle(event, currentTimeMs) === "ongoing" &&
+          // A main event is a container, not a session. During Intramurals the
+          // useful answer is the game, not the week — so only leaves appear
+          // here, and they name their parent as context.
+          !partsByParent.has(event.id),
+      ),
+    [events, currentTimeMs, partsByParent],
+  );
+
+  // Start, end and day-of-span for each main event, derived from its parts so
+  // there is no second copy of the range to keep in sync.
+  const umbrellaSpans = useMemo(() => {
+    const spans = new Map<
+      string,
+      { start: string; end: string; totalDays: number; dayIndex: number }
+    >();
+    partsByParent.forEach((parts, parentId) => {
+      const days = [...new Set(parts.map((part) => part.date))].sort();
+      if (days.length === 0) return;
+      spans.set(parentId, {
+        start: days[0],
+        end: days[days.length - 1],
+        totalDays: days.length,
+        dayIndex: days.indexOf(todayKey) + 1,
+      });
+    });
+    return spans;
+  }, [partsByParent, todayKey]);
+
+  // The main event a given day belongs to, so a student landing mid-week still
+  // sees "Intramurals" without another card to scroll past.
+  const parentTitleByDate = useMemo(() => {
+    const byDate = new Map<string, string>();
+    events.forEach((event) => {
+      const parentId = String(event.parentEventId || "");
+      if (!parentId || byDate.has(event.date)) return;
+      const title = eventTitleById.get(parentId);
+      if (title) byDate.set(event.date, title);
+    });
+    return byDate;
+  }, [events, eventTitleById]);
+
   useEffect(() => {
     if (loading) return;
 
@@ -305,28 +443,6 @@ const EventCalendarScreen = () => {
       useNativeDriver: true,
     }).start();
   }, [loading, revealAnimation]);
-
-  useEffect(() => {
-    const orbitLoop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(orbitAnimation, {
-          toValue: 1,
-          duration: 3200,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
-        }),
-        Animated.timing(orbitAnimation, {
-          toValue: 0,
-          duration: 3200,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-
-    orbitLoop.start();
-    return () => orbitLoop.stop();
-  }, [orbitAnimation]);
 
   useEffect(() => {
     let minuteTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -371,21 +487,10 @@ const EventCalendarScreen = () => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (!active) return;
 
+      // The role is tracked by useCurrentUserRole above; this only needs to
+      // know which account the event listeners belong to.
       setCurrentUserId(user?.uid || null);
       setAuthReady(true);
-      setCurrentUserRole(undefined);
-
-      if (user) {
-        getUserData(user.uid)
-          .then((userData) => {
-            if (active && auth.currentUser?.uid === user.uid) {
-              setCurrentUserRole(userData?.role);
-            }
-          })
-          .catch((error) => {
-            console.error("Error fetching user role:", error);
-          });
-      }
     });
 
     return () => {
@@ -414,9 +519,13 @@ const EventCalendarScreen = () => {
       }
     };
 
+    // Bounded by date rather than fetching every event ever created. A range
+    // filter and orderBy on the same field need no composite index, so status
+    // is filtered below instead of in the query.
     const publicEventsQuery = query(
       collection(db, "events"),
-      where("status", "in", ["published", "archived"]),
+      where("date", ">=", windowStartKey),
+      orderBy("date", "asc"),
     );
     const ownedEventsQuery = query(
       collection(db, "events"),
@@ -426,10 +535,13 @@ const EventCalendarScreen = () => {
     const unsubscribePublicEvents = onSnapshot(
       publicEventsQuery,
       (snapshot) => {
-        const fetchedEvents: CalendarEvent[] = snapshot.docs.map((doc) => ({
+        const fetchedEvents = (snapshot.docs.map((doc) => ({
           id: doc.id,
           ...doc.data(),
-        })) as CalendarEvent[];
+        })) as CalendarEvent[]).filter((event) => {
+          const status = String(event.status || "published");
+          return status === "published" || status === "archived";
+        });
 
         setEvents(sortEvents(fetchedEvents));
         publicEventsLoaded = true;
@@ -475,7 +587,7 @@ const EventCalendarScreen = () => {
       unsubscribePublicEvents();
       unsubscribeOwnedEvents();
     };
-  }, [authReady, currentUserId]);
+  }, [authReady, currentUserId, windowStartKey]);
 
   useEffect(() => {
     const accessibleEvents = [...events, ...draftEvents];
@@ -534,14 +646,31 @@ const EventCalendarScreen = () => {
       return;
     }
 
-    Alert.alert("Delete Event", "Are you sure you want to delete this event?", [
+    // Firestore has no cascade delete, so the parts have to go with the main
+    // event. Leaving them behind would strand sessions pointing at an event
+    // that no longer exists.
+    const parts = partsByParent.get(eventId) || [];
+    const message = parts.length
+      ? `This will also delete its ${parts.length} ${parts.length === 1 ? "part" : "parts"}. This can't be undone.`
+      : "Are you sure you want to delete this event?";
+
+    Alert.alert(parts.length ? "Delete event and its parts?" : "Delete Event", message, [
       { text: "Cancel", style: "cancel" },
       {
-        text: "Delete",
+        text: parts.length ? `Delete all ${parts.length + 1}` : "Delete",
         style: "destructive",
         onPress: async () => {
           try {
-            await deleteDoc(doc(db, "events", eventId));
+            if (parts.length) {
+              // One batch, so a failure part-way cannot leave orphans behind.
+              const batch = writeBatch(db);
+              batch.delete(doc(db, "events", eventId));
+              parts.forEach((part) => batch.delete(doc(db, "events", part.id)));
+              await batch.commit();
+            } else {
+              await deleteDoc(doc(db, "events", eventId));
+            }
+            setModalVisible(false);
             Alert.alert("Success", "Event deleted successfully");
           } catch (error) {
             console.error("Error deleting event:", error);
@@ -592,9 +721,9 @@ const EventCalendarScreen = () => {
         lifecycle,
         label: "DRAFT",
         icon: "create-outline" as const,
-        color: "#9b766c",
-        surfaceColor: "#fffdfb",
-        borderColor: "#eadbd4",
+        color: theme.textMuted,
+        surfaceColor: theme.surfaceRaised,
+        borderColor: theme.border,
       };
     }
 
@@ -603,9 +732,9 @@ const EventCalendarScreen = () => {
         lifecycle,
         label: "ARCHIVED",
         icon: "archive-outline" as const,
-        color: "#7a3b2e",
-        surfaceColor: "#f8efea",
-        borderColor: "#dfc5bc",
+        color: theme.textSecondary,
+        surfaceColor: theme.surfaceSunken,
+        borderColor: theme.borderStrong,
       };
     }
 
@@ -614,9 +743,9 @@ const EventCalendarScreen = () => {
         lifecycle,
         label: "ONGOING",
         icon: "radio-button-on" as const,
-        color: "#247a4d",
-        surfaceColor: "#edf8f1",
-        borderColor: "#b7ddc5",
+        color: theme.success,
+        surfaceColor: theme.successSoft,
+        borderColor: theme.success,
       };
     }
 
@@ -625,9 +754,9 @@ const EventCalendarScreen = () => {
         lifecycle,
         label: "FINISHED",
         icon: "checkmark-done-circle-outline" as const,
-        color: "#6f7479",
-        surfaceColor: "#f1f2f2",
-        borderColor: "#d5d8da",
+        color: theme.textMuted,
+        surfaceColor: theme.surfaceSunken,
+        borderColor: theme.border,
       };
     }
 
@@ -635,9 +764,9 @@ const EventCalendarScreen = () => {
       lifecycle,
       label: "PUBLISHED",
       icon: "checkmark-circle-outline" as const,
-      color: "#5f0909",
-      surfaceColor: "#fffdfb",
-      borderColor: "#eadbd4",
+      color: theme.primary,
+      surfaceColor: theme.surfaceRaised,
+      borderColor: theme.border,
     };
   };
 
@@ -654,85 +783,102 @@ const EventCalendarScreen = () => {
   };
 
   const renderListHeader = () => {
-    const visibleDraftEvents = showAllDrafts
-      ? draftEvents
-      : draftEvents.slice(0, 1);
     const nextEvent = calendarInsights.nextEvent;
 
     return (
       <>
-        <View style={styles.timelineHero}>
-          <View style={styles.heroGlow} />
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.heroOrbit,
-              {
-                opacity: orbitAnimation.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [0.3, 0.65],
-                }),
-                transform: [
-                  {
-                    scale: orbitAnimation.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0.92, 1.08],
-                    }),
-                  },
-                ],
-              },
-            ]}
-          />
-          <View style={styles.heroTopRow}>
-            <View style={styles.heroLabel}>
-              <View style={styles.heroLabelDot} />
-              <Text style={styles.heroLabelText}>YOUR CHRONICLE</Text>
-            </View>
-            {calendarInsights.live > 0 && (
-              <View style={styles.livePill}>
-                <View style={styles.liveDot} />
-                <Text style={styles.livePillText}>
-                  {calendarInsights.live} LIVE
-                </Text>
+        {/* The first thing on screen answers "what is on right now?" rather
+            than decorating the page. Parts count here too, so during
+            Intramurals a student sees the game, not just the week. */}
+        <View style={styles.nowPanel}>
+          <View style={styles.nowHeaderRow}>
+            <Text style={styles.nowHeading}>
+              {happeningNow.length > 0 ? "Happening now" : "Up next"}
+            </Text>
+            {happeningNow.length > 0 && (
+              <View style={styles.nowLivePill}>
+                <View style={styles.nowLiveDot} />
+                <Text style={styles.nowLiveText}>LIVE</Text>
               </View>
             )}
           </View>
 
-          <Text style={styles.heroTitle}>Time, beautifully{`\n`}in motion.</Text>
-          <Text style={styles.heroSubtitle} numberOfLines={2}>
-            {nextEvent
-              ? `Next: ${nextEvent.title} · ${formatCompactDate(nextEvent.date)}`
-              : "Your shared moments will unfold here."}
-          </Text>
+          {happeningNow.length > 0 ? (
+            happeningNow.slice(0, 3).map((event) => {
+              const parentTitle = event.parentEventId
+                ? eventTitleById.get(String(event.parentEventId))
+                : undefined;
+              const endsAt = formatTime(event.endTime);
 
-          <View style={styles.insightRail}>
-            <View style={styles.insightItem}>
-              <Text style={styles.insightNumber}>{calendarInsights.upcoming}</Text>
-              <Text style={styles.insightLabel}>UP NEXT</Text>
-            </View>
-            <View style={styles.insightDivider} />
-            <View style={styles.insightItem}>
-              <Text style={styles.insightNumber}>{events.length}</Text>
-              <Text style={styles.insightLabel}>MOMENTS</Text>
-            </View>
-            <View style={styles.insightDivider} />
-            <View style={styles.insightItem}>
-              <Text style={styles.insightNumber}>{draftEvents.length}</Text>
-              <Text style={styles.insightLabel}>PRIVATE</Text>
-            </View>
+              return (
+                <TouchableOpacity
+                  key={event.id}
+                  style={styles.nowRow}
+                  activeOpacity={0.75}
+                  onPress={() => handleViewMorePress(event.date, [event])}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Happening now: ${event.title}`}
+                >
+                  <View style={styles.nowDot} />
+                  <View style={styles.nowRowCopy}>
+                    <Text style={styles.nowTitle} numberOfLines={1}>
+                      {event.title}
+                    </Text>
+                    <Text style={styles.nowMeta} numberOfLines={1}>
+                      {parentTitle ? `${parentTitle} · ` : ""}
+                      {endsAt ? `until ${endsAt}` : "all day"}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })
+          ) : (
+            <Text style={styles.nowEmpty} numberOfLines={2}>
+              {nextEvent
+                ? `${nextEvent.title} · ${formatCompactDate(nextEvent.date)}`
+                : "Nothing scheduled yet."}
+            </Text>
+          )}
+
+          <View style={styles.nowStatsRow}>
+            <Text style={styles.nowStat}>{calendarInsights.upcoming} upcoming</Text>
+            <Text style={styles.nowStatDivider}>·</Text>
+            <Text style={styles.nowStat}>
+              {events.length} {events.length === 1 ? "event" : "events"}
+            </Text>
+            {draftEvents.length > 0 && (
+              <>
+                <Text style={styles.nowStatDivider}>·</Text>
+                <Text style={styles.nowStat}>
+                  {draftEvents.length} draft{draftEvents.length === 1 ? "" : "s"}
+                </Text>
+              </>
+            )}
           </View>
         </View>
 
-        {draftEvents.length > 0 && (
+      </>
+    );
+  };
+
+  // Drafts are staff-only and unpublished, so they sit below the timeline
+  // rather than above it, where they pushed real events off the screen.
+  const renderDrafts = () => {
+    if (draftEvents.length === 0) return null;
+    const visibleDraftEvents = showAllDrafts
+      ? draftEvents
+      : draftEvents.slice(0, 1);
+
+    return (
           <View style={styles.draftsSection}>
             <View style={styles.draftsHeader}>
               <View style={styles.draftTitleRow}>
                 <View style={styles.draftLockOrb}>
-                  <Ionicons name="lock-closed" size={13} color="#F4C873" />
+                  <Ionicons name="lock-closed" size={13} color={theme.textMuted} />
                 </View>
                 <View style={styles.draftsHeaderCopy}>
-                  <Text style={styles.draftsTitle}>Private studio</Text>
-                  <Text style={styles.draftsSubtitle}>Unpublished ideas</Text>
+                  <Text style={styles.draftsTitle}>Drafts</Text>
+                  <Text style={styles.draftsSubtitle}>Only you can see these</Text>
                 </View>
               </View>
               <View style={styles.draftCountBadge}>
@@ -760,7 +906,7 @@ const EventCalendarScreen = () => {
                       <Ionicons
                         name="sparkles-outline"
                         size={18}
-                        color="#F4C873"
+                        color={theme.textMuted}
                       />
                     </View>
                     <View style={styles.draftCopy}>
@@ -784,7 +930,7 @@ const EventCalendarScreen = () => {
                       <Ionicons
                         name="create-outline"
                         size={19}
-                        color="#F4C873"
+                        color={theme.textMuted}
                       />
                     </TouchableOpacity>
                   )}
@@ -813,222 +959,130 @@ const EventCalendarScreen = () => {
                 <Ionicons
                   name={showAllDrafts ? "chevron-up" : "chevron-down"}
                   size={18}
-                  color="#F4C873"
+                  color={theme.textMuted}
                 />
               </TouchableOpacity>
             )}
           </View>
-        )}
-
-        <View style={styles.calendarSectionHeader}>
-          <View style={styles.calendarSectionCopy}>
-            <Text style={styles.calendarSectionEyebrow}>THE TIMELINE</Text>
-            <Text style={styles.calendarSectionTitle}>Moments ahead</Text>
-            <Text style={styles.calendarSectionSubtitle}>
-              Follow the thread through every gathering
-            </Text>
-          </View>
-          <View style={styles.calendarCountBadge}>
-            <Ionicons name="infinite-outline" size={17} color="#7A1E18" />
-            <Text style={styles.calendarCountText}>{events.length}</Text>
-          </View>
-        </View>
-      </>
     );
   };
 
   const renderMonthSection = ({ item }: { item: string }) => {
     const dates = Object.keys(groupedEvents[item]).sort();
-    const monthEventCount = dates.reduce(
-      (total, date) => total + groupedEvents[item][date].length,
-      0,
-    );
 
     return (
       <View style={styles.monthSection}>
-        <View style={styles.monthHeaderRow}>
-          <View style={styles.monthMarker}>
-            <View style={styles.monthMarkerCore} />
-          </View>
-          <View style={styles.monthPill}>
-            <Text style={styles.monthHeader}>{item}</Text>
-            <Text style={styles.monthEventCount}>
-              {monthEventCount} {monthEventCount === 1 ? "moment" : "moments"}
-            </Text>
-          </View>
-          <View style={styles.monthAccent} />
-        </View>
+        <Text style={styles.monthLabel}>{item.toUpperCase()}</Text>
+
         {dates.map((date) => {
           const eventsForDate = groupedEvents[item][date];
           const calendarDate = parseEventDate(date);
-          const dateNum = calendarDate.getDate();
-          const monthShort = calendarDate.toLocaleDateString("en-US", {
-            month: "short",
-          });
-          const weekday = calendarDate.toLocaleDateString("en-US", {
-            weekday: "short",
-          });
-          const isToday = calendarDate.toDateString() === new Date().toDateString();
+          const isToday = date === todayKey;
+          // Naming the main event in the day heading means a student landing
+          // mid-week sees "Intramurals" without another card to scroll past.
+          const dayParent = parentTitleByDate.get(date);
 
           return (
-            <View key={date} style={styles.dateCard}>
-              <View style={styles.dateRail} />
-              <TouchableOpacity
-                style={[styles.dateTile, isToday && styles.dateTileToday]}
-                onPress={() => handleViewMorePress(date, eventsForDate)}
-                activeOpacity={0.75}
-                accessibilityRole="button"
-                accessibilityLabel={`View ${eventsForDate.length} ${
-                  eventsForDate.length === 1 ? "event" : "events"
-                } on ${formatDate(date)}`}
-                accessibilityHint="Opens event details"
+            <View key={date} style={styles.daySection}>
+              <Text
+                style={[styles.dayHeading, isToday && styles.dayHeadingToday]}
+                numberOfLines={2}
               >
-                <Text
-                  style={[styles.dateWeekday, isToday && styles.dateTextToday]}
-                >
-                  {weekday}
-                </Text>
-                <Text
-                  style={[styles.dateNumberText, isToday && styles.dateTextToday]}
-                >
-                  {dateNum}
-                </Text>
-                <Text style={[styles.dateMonth, isToday && styles.dateTextToday]}>
-                  {monthShort}
-                </Text>
-              </TouchableOpacity>
-
-              <View style={styles.eventPreviewSurface}>
-                {eventsForDate.slice(0, 2).map((event, index) => {
-                  const statusDetails = getStatusDetails(event);
-
-                  return (
-                    <View
-                      key={event.id}
-                      style={[
-                        styles.eventPreviewRow,
-                        index > 0 && styles.eventPreviewRowDivider,
-                      ]}
-                    >
-                      <TouchableOpacity
-                        style={styles.eventPreviewButton}
-                        onPress={() => handleViewMorePress(date, eventsForDate)}
-                        activeOpacity={0.7}
-                        accessibilityRole="button"
-                        accessibilityLabel={`View ${event.title}, ${formatEventTime(event)}`}
-                        accessibilityHint="Opens event details"
-                      >
-                        <View
-                          style={[
-                            styles.eventColorDot,
-                            {
-                              backgroundColor:
-                                statusDetails.lifecycle === "ongoing" ||
-                                statusDetails.lifecycle === "finished"
-                                  ? statusDetails.color
-                                  : getCategoryColor(event.category),
-                            },
-                          ]}
-                        />
-                        <View style={styles.eventPreviewCopy}>
-                          <Text style={styles.eventOrdinal}>
-                            {event.category === "all-day"
-                              ? "ALL DAY"
-                              : formatEventTime(event).split(" ")[0]}
-                          </Text>
-                          <Text
-                            style={[
-                              styles.eventTitle,
-                              (statusDetails.lifecycle === "ongoing" ||
-                                statusDetails.lifecycle === "finished") && {
-                                color: statusDetails.color,
-                              },
-                            ]}
-                            numberOfLines={1}
-                          >
-                            {event.title}
-                          </Text>
-                          <View style={styles.eventPreviewMeta}>
-                            <Text style={styles.eventPreviewTime} numberOfLines={1}>
-                              {formatEventTime(event)}
-                            </Text>
-                            <View
-                              style={[
-                                styles.previewStatus,
-                                {
-                                  backgroundColor: statusDetails.surfaceColor,
-                                  borderColor: statusDetails.borderColor,
-                                },
-                              ]}
-                            >
-                              <Ionicons
-                                name={statusDetails.icon}
-                                size={11}
-                                color={statusDetails.color}
-                              />
-                              <Text
-                                style={[
-                                  styles.previewStatusText,
-                                  { color: statusDetails.color },
-                                ]}
-                              >
-                                {statusDetails.label}
-                              </Text>
-                            </View>
-                          </View>
-                        </View>
-                      </TouchableOpacity>
-
-                      {canEditEvent(event) && (
-                        <TouchableOpacity
-                          style={[
-                            styles.editIconButton,
-                            styles.previewEditButton,
-                          ]}
-                          onPress={() => handleEditEvent(event)}
-                          activeOpacity={0.7}
-                          hitSlop={4}
-                          accessibilityRole="button"
-                          accessibilityLabel={`Edit published event ${event.title}`}
-                        >
-                          <Ionicons
-                            name="create-outline"
-                            size={18}
-                            color="#B67B2C"
-                          />
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  );
+                {isToday ? "Today · " : ""}
+                {calendarDate.toLocaleDateString("en-US", {
+                  weekday: "long",
+                  month: "long",
+                  day: "numeric",
                 })}
+                {dayParent ? ` · ${dayParent}` : ""}
+              </Text>
 
-                {eventsForDate.length > 2 && (
+              {eventsForDate.map((event) => {
+                const statusDetails = getStatusDetails(event);
+                const isLive = statusDetails.lifecycle === "ongoing";
+                const isDone = statusDetails.lifecycle === "finished";
+                // A main event has parts; it shows a date range rather than a
+                // clock, which is what tells a student it is the big one.
+                const span = umbrellaSpans.get(event.id);
+                const partCount = partSummaries.get(event.id)?.parts.length || 0;
+                const parentTitle = event.parentEventId
+                  ? eventTitleById.get(String(event.parentEventId))
+                  : undefined;
+
+                return (
                   <TouchableOpacity
-                    style={styles.moreEventsBadge}
+                    key={event.id}
+                    style={[
+                      styles.rowCard,
+                      isDone && styles.rowCardDone,
+                      !!span && styles.rowCardMain,
+                    ]}
+                    activeOpacity={0.75}
                     onPress={() => handleViewMorePress(date, eventsForDate)}
-                    activeOpacity={0.7}
                     accessibilityRole="button"
-                    accessibilityLabel={`View ${eventsForDate.length - 2} more events`}
+                    accessibilityLabel={`${event.title}, ${formatEventTime(event)}`}
+                    accessibilityHint="Opens event details"
                   >
-                    <Text style={styles.moreEvents}>
-                      +{eventsForDate.length - 2} more along this thread
-                    </Text>
-                    <Ionicons name="arrow-forward" size={13} color="#7A1E18" />
-                  </TouchableOpacity>
-                )}
+                    <View
+                      style={[
+                        styles.rowBar,
+                        { backgroundColor: getCategoryColor(event.category) },
+                      ]}
+                    />
 
-                <TouchableOpacity
-                  style={styles.dateChevron}
-                  onPress={() => handleViewMorePress(date, eventsForDate)}
-                  activeOpacity={0.7}
-                  hitSlop={4}
-                  accessibilityRole="button"
-                  accessibilityLabel={`View all events on ${formatDate(date)}`}
-                >
-                  <Text style={styles.dateChevronText}>OPEN DAY</Text>
-                  <Ionicons name="arrow-forward" size={14} color="#7A1E18" />
-                </TouchableOpacity>
-              </View>
+                    <View style={styles.rowBody}>
+                      <View style={styles.rowTopRow}>
+                        <Text style={styles.rowTime} numberOfLines={1}>
+                          {span
+                            ? `${formatCompactDate(span.start)} – ${formatCompactDate(span.end)}`
+                            : formatEventTime(event)}
+                        </Text>
+
+                        {isLive ? (
+                          <View style={styles.liveTag}>
+                            <View style={styles.liveTagDot} />
+                            <Text style={styles.liveTagText}>LIVE</Text>
+                          </View>
+                        ) : isDone ? (
+                          <Text style={styles.doneTag}>Finished</Text>
+                        ) : event.status === "draft" ? (
+                          <Text style={styles.draftTag}>Draft</Text>
+                        ) : null}
+                      </View>
+
+                      <Text style={styles.rowName} numberOfLines={2}>
+                        {event.title}
+                      </Text>
+
+                      {span ? (
+                        <Text style={styles.rowContext} numberOfLines={1}>
+                          {partCount} {partCount === 1 ? "part" : "parts"}
+                          {span.dayIndex > 0
+                            ? ` · in progress, day ${span.dayIndex} of ${span.totalDays}`
+                            : ``}
+                        </Text>
+                      ) : parentTitle ? (
+                        <Text style={styles.rowContext} numberOfLines={1}>
+                          {parentTitle}
+                        </Text>
+                      ) : null}
+                    </View>
+
+                    {canEditEvent(event) && (
+                      <TouchableOpacity
+                        style={styles.rowEdit}
+                        onPress={() => handleEditEvent(event)}
+                        activeOpacity={0.7}
+                        hitSlop={6}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Edit ${event.title}`}
+                      >
+                        <Ionicons name="create-outline" size={19} color={theme.textMuted} />
+                      </TouchableOpacity>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
             </View>
           );
         })}
@@ -1048,13 +1102,12 @@ const EventCalendarScreen = () => {
             accessibilityRole="button"
             accessibilityLabel="Go back"
           >
-            <Ionicons name="arrow-back" size={20} color="#F7EFE8" />
+            <Ionicons name="arrow-back" size={20} color={theme.textPrimary} />
           </TouchableOpacity>
 
           <View style={styles.headerCopy}>
-            <Text style={styles.headerEyebrow}>BONDED / TIME</Text>
             <Text style={styles.headerTitle} numberOfLines={1}>
-              Chronicle
+              Events
             </Text>
           </View>
 
@@ -1066,15 +1119,15 @@ const EventCalendarScreen = () => {
               accessibilityRole="button"
               accessibilityLabel="Create a new event"
             >
-              <Ionicons name="add" size={19} color="#2A0908" />
-              <Text style={styles.headerCreateText}>New moment</Text>
+              <Ionicons name="add" size={19} color={theme.onChrome} />
+              <Text style={styles.headerCreateText}>New event</Text>
             </TouchableOpacity>
           )}
         </View>
 
       {isOffline && (
         <View style={styles.offlineStatusBar}>
-          <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+          <Ionicons name="cloud-offline-outline" size={14} color={theme.warning} />
           <Text style={styles.offlineStatusText}>Offline mode</Text>
         </View>
       )}
@@ -1084,13 +1137,13 @@ const EventCalendarScreen = () => {
           forever — fall through to the empty state instead. */}
       {loading && !isOffline ? (
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#7d1d13" />
+          <ActivityIndicator size="large" color={theme.primary} />
           <Text style={styles.loadingText}>Loading your calendar...</Text>
         </View>
       ) : events.length === 0 && draftEvents.length === 0 ? (
         <View style={styles.emptyContainer}>
           <View style={styles.emptyIcon}>
-            <Ionicons name="calendar-outline" size={42} color="#7a3b2e" />
+            <Ionicons name="calendar-outline" size={42} color={theme.textSecondary} />
           </View>
           <Text style={styles.emptyText}>
             {isOffline ? "Offline mode" : "No events yet"}
@@ -1108,7 +1161,7 @@ const EventCalendarScreen = () => {
               accessibilityRole="button"
               accessibilityLabel="Create the first event"
             >
-              <Ionicons name="add" size={20} color="#4d1b17" />
+              <Ionicons name="add" size={20} color={theme.onChrome} />
               <Text style={styles.createButtonText}>Create event</Text>
             </TouchableOpacity>
           )}
@@ -1133,15 +1186,73 @@ const EventCalendarScreen = () => {
           showsVerticalScrollIndicator={false}
           ListHeaderComponent={renderListHeader}
           ListFooterComponent={
-            events.length > 0 ? (
-              <View style={styles.timelineEnd}>
-                <View style={styles.timelineEndLine} />
-                <View style={styles.timelineEndOrb}>
-                  <Ionicons name="infinite" size={17} color="#F4C873" />
-                </View>
-                <Text style={styles.timelineEndText}>THE THREAD CONTINUES</Text>
+            <>
+              {renderDrafts()}
+              {pastTopLevel.length > 0 ? (
+              <View style={styles.pastSection}>
+                <TouchableOpacity
+                  style={styles.pastToggle}
+                  onPress={() => setShowPast((value) => !value)}
+                  activeOpacity={0.75}
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: showPast }}
+                  accessibilityLabel={
+                    showPast ? "Hide past events" : "Show past events"
+                  }
+                >
+                  <Ionicons
+                    name={showPast ? "chevron-up" : "chevron-down"}
+                    size={17}
+                    color={theme.textMuted}
+                  />
+                  <Text style={styles.pastToggleText}>
+                    {showPast
+                      ? "Hide past events"
+                      : `Past events (${pastTopLevel.length})`}
+                  </Text>
+                </TouchableOpacity>
+
+                {showPast && (
+                  <>
+                    {pastTopLevel.map((event) => {
+                      const partCount =
+                        partSummaries.get(event.id)?.parts.length || 0;
+                      return (
+                        <TouchableOpacity
+                          key={event.id}
+                          style={styles.pastRow}
+                          activeOpacity={0.75}
+                          onPress={() => handleViewMorePress(event.date, [event])}
+                          accessibilityRole="button"
+                          accessibilityLabel={`${event.title}, ${formatCompactDate(event.date)}`}
+                        >
+                          <Text style={styles.pastRowTitle} numberOfLines={1}>
+                            {event.title}
+                          </Text>
+                          <Text style={styles.pastRowMeta} numberOfLines={1}>
+                            {formatCompactDate(event.date)}
+                            {partCount > 0
+                              ? ` · ${partCount} ${partCount === 1 ? "part" : "parts"}`
+                              : ""}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+
+                    <TouchableOpacity
+                      style={styles.pastLoadMore}
+                      onPress={() => setPastWindowDays((days) => days + 180)}
+                      activeOpacity={0.75}
+                      accessibilityRole="button"
+                      accessibilityLabel="Load older events"
+                    >
+                      <Text style={styles.pastLoadMoreText}>Load older events</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
               </View>
-            ) : null
+              ) : null}
+            </>
           }
           ListEmptyComponent={
             draftEvents.length > 0 ? (
@@ -1150,7 +1261,7 @@ const EventCalendarScreen = () => {
                   <Ionicons
                     name="calendar-outline"
                     size={26}
-                    color="#7a3b2e"
+                    color={theme.textSecondary}
                   />
                 </View>
                 <Text style={styles.publishedEmptyText}>
@@ -1167,7 +1278,7 @@ const EventCalendarScreen = () => {
                     accessibilityRole="button"
                     accessibilityLabel="Create another event"
                   >
-                    <Ionicons name="add" size={17} color="#7a3b2e" />
+                    <Ionicons name="add" size={17} color={theme.textSecondary} />
                     <Text style={styles.emptyCreateLinkText}>New event</Text>
                   </TouchableOpacity>
                 )}
@@ -1206,7 +1317,7 @@ const EventCalendarScreen = () => {
                 accessibilityRole="button"
                 accessibilityLabel="Close event details"
               >
-                <Ionicons name="close" size={23} color="#7a3b2e" />
+                <Ionicons name="close" size={23} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -1255,7 +1366,7 @@ const EventCalendarScreen = () => {
                           <Ionicons
                             name="create-outline"
                             size={19}
-                            color="#e0a53d"
+                            color={theme.accent}
                           />
                         </TouchableOpacity>
                       )}
@@ -1274,7 +1385,7 @@ const EventCalendarScreen = () => {
                             <Ionicons
                               name="trash-outline"
                               size={18}
-                              color="#9d2f24"
+                              color={theme.danger}
                             />
                           </TouchableOpacity>
                         )}
@@ -1291,7 +1402,7 @@ const EventCalendarScreen = () => {
                       <Ionicons
                         name={statusDetails.icon}
                         size={12}
-                        color="#fffaf7"
+                        color={theme.onChrome}
                       />
                       <Text style={styles.statusText}>{statusDetails.label}</Text>
                     </View>
@@ -1307,6 +1418,57 @@ const EventCalendarScreen = () => {
                     </View>
                   </View>
 
+                  {/* Every part of this event, in time order, so one tap on
+                      "Intramurals" shows the whole schedule. */}
+                  {(partSummaries.get(event.id)?.parts.length || 0) > 0 && (
+                    <View style={styles.modalPartsBox}>
+                      <Text style={styles.modalPartsHeading}>
+                        {partSummaries.get(event.id)!.parts.length} PARTS
+                      </Text>
+                      {partSummaries.get(event.id)!.parts.map((part) => {
+                        const partStatus = getStatusDetails(part);
+                        return (
+                          <View key={part.id} style={styles.modalPartRow}>
+                            <View
+                              style={[
+                                styles.modalPartDot,
+                                { backgroundColor: partStatus.color },
+                              ]}
+                            />
+                            <Text style={styles.modalPartTitle} numberOfLines={1}>
+                              {part.title}
+                            </Text>
+                            <Text style={styles.modalPartTime}>
+                              {partStatus.lifecycle === "ongoing"
+                                ? "NOW"
+                                : formatEventTime(part)}
+                            </Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
+
+                  {/* Only a main event can take parts — one level deep. */}
+                  {canManageEvents() && !event.parentEventId && (
+                    <TouchableOpacity
+                      style={styles.addPartButton}
+                      activeOpacity={0.75}
+                      onPress={() => {
+                        setModalVisible(false);
+                        router.push({
+                          pathname: "/CreateEventScreen",
+                          params: { parentId: event.id },
+                        });
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Add a part to ${event.title}`}
+                    >
+                      <Ionicons name="add-circle-outline" size={18} color={theme.primary} />
+                      <Text style={styles.addPartText}>Add a part</Text>
+                    </TouchableOpacity>
+                  )}
+
                   {event.description && (
                     <Text style={styles.eventDescription}>
                       {event.description}
@@ -1320,7 +1482,7 @@ const EventCalendarScreen = () => {
                           <Ionicons
                             name="sunny-outline"
                             size={16}
-                            color="#7a3b2e"
+                            color={theme.textSecondary}
                           />
                         </View>
                         <View style={styles.metaCopy}>
@@ -1335,7 +1497,7 @@ const EventCalendarScreen = () => {
                             <Ionicons
                               name="play-circle-outline"
                               size={16}
-                              color="#7a3b2e"
+                              color={theme.textSecondary}
                             />
                           </View>
                           <View style={styles.metaCopy}>
@@ -1351,7 +1513,7 @@ const EventCalendarScreen = () => {
                             <Ionicons
                               name="stop-circle-outline"
                               size={16}
-                              color="#7a3b2e"
+                              color={theme.textSecondary}
                             />
                           </View>
                           <View style={styles.metaCopy}>
@@ -1369,7 +1531,7 @@ const EventCalendarScreen = () => {
                         <Ionicons
                           name="person-outline"
                           size={16}
-                          color="#7a3b2e"
+                          color={theme.textSecondary}
                         />
                       </View>
                       <View style={styles.metaCopy}>
@@ -1390,29 +1552,201 @@ const EventCalendarScreen = () => {
   );
 };
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  monthSection: { marginBottom: 8 },
+  addPartButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    minHeight: 44,
+    marginTop: 12,
+    borderRadius: 12,
+    backgroundColor: c.surfaceSunken,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  addPartText: { color: c.primary, fontSize: 14, fontWeight: "700" },
+  pastSection: {
+    marginTop: 22,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: c.border,
+  },
+  pastToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 10,
+  },
+  pastToggleText: { color: c.textMuted, fontSize: 15, fontWeight: "700" },
+  pastRow: {
+    paddingVertical: 11,
+    paddingHorizontal: 13,
+    marginBottom: 8,
+    borderRadius: 12,
+    backgroundColor: c.surfaceSunken,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  pastRowTitle: { color: c.textSecondary, fontSize: 15, fontWeight: "600" },
+  pastRowMeta: { color: c.textMuted, fontSize: 13, marginTop: 2 },
+  pastLoadMore: { alignItems: "center", paddingVertical: 12 },
+  pastLoadMoreText: { color: c.primary, fontSize: 14, fontWeight: "700" },
+  monthLabel: {
+    color: c.textMuted,
+    fontSize: 13,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+    marginTop: 18,
+    marginBottom: 6,
+  },
+  daySection: { marginBottom: 16 },
+  dayHeading: {
+    color: c.textPrimary,
+    fontSize: 15,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
+  dayHeadingToday: { color: c.success },
+  rowCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    overflow: "hidden",
+    marginBottom: 8,
+    borderRadius: 14,
+    backgroundColor: c.surfaceRaised,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  // Finished events stay visible but step back, so today still reads as today.
+  rowCardDone: { backgroundColor: c.surfaceSunken, opacity: 0.72 },
+  // A main event is the container for a week; a heavier edge sets it apart
+  // from the sessions inside it.
+  rowCardMain: { borderColor: c.border, backgroundColor: c.surfaceRaised },
+  rowBar: { width: 4, alignSelf: "stretch" },
+  rowBody: { flex: 1, minWidth: 0, paddingVertical: 12, paddingHorizontal: 13 },
+  rowTopRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  rowTime: { flex: 1, color: c.textMuted, fontSize: 15, fontWeight: "600" },
+  rowName: {
+    color: c.textPrimary,
+    fontSize: 17,
+    fontWeight: "700",
+    lineHeight: 23,
+    marginTop: 3,
+  },
+  rowContext: { color: c.textMuted, fontSize: 13, marginTop: 3 },
+  rowEdit: { paddingHorizontal: 13, paddingVertical: 12 },
+  liveTag: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: c.successSoft,
+    borderWidth: 1,
+    borderColor: c.success,
+  },
+  liveTagDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: c.success },
+  liveTagText: { color: c.success, fontSize: 12, fontWeight: "800" },
+  doneTag: { color: c.textMuted, fontSize: 12, fontWeight: "600" },
+  draftTag: { color: c.textMuted, fontSize: 12, fontWeight: "700" },
+  nowPanel: {
+    marginBottom: 22,
+    padding: 18,
+    borderRadius: 22,
+    backgroundColor: c.surfaceRaised,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  nowHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  nowHeading: {
+    color: c.textPrimary,
+    fontSize: 18,
+    fontWeight: "800",
+    letterSpacing: -0.3,
+  },
+  nowLivePill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: c.successSoft,
+    borderWidth: 1,
+    borderColor: c.success,
+  },
+  nowLiveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: c.success },
+  nowLiveText: {
+    color: c.success,
+    fontSize: 12,
+    fontWeight: "900",
+    letterSpacing: 0.9,
+  },
+  nowRow: { flexDirection: "row", alignItems: "center", gap: 11, paddingVertical: 8 },
+  nowRowCopy: { flex: 1, minWidth: 0 },
+  nowDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: c.success },
+  nowTitle: { color: c.textPrimary, fontSize: 15, fontWeight: "700" },
+  nowMeta: { color: c.textMuted, fontSize: 12, marginTop: 2 },
+  nowEmpty: { color: c.textMuted, fontSize: 13, lineHeight: 19 },
+  nowStatsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: c.border,
+  },
+  nowStat: { color: c.textMuted, fontSize: 13, fontWeight: "600" },
+  nowStatDivider: { color: c.textMuted, fontSize: 13 },
+  modalPartsBox: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: c.border,
+    gap: 7,
+  },
+  modalPartsHeading: {
+    color: c.textMuted,
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  modalPartRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  modalPartDot: { width: 7, height: 7, borderRadius: 4 },
+  modalPartTitle: { flex: 1, color: c.textPrimary, fontSize: 13, fontWeight: "600" },
+  modalPartTime: { color: c.textMuted, fontSize: 13 },
   container: {
     flex: 1,
-    backgroundColor: "#250706",
+    backgroundColor: c.surface,
   },
   offlineStatusBar: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#ffedd5",
+    backgroundColor: c.accentSoft,
     paddingHorizontal: 16,
     paddingVertical: 8,
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: "#fed7aa",
+    borderBottomColor: c.borderStrong,
   },
   offlineStatusText: {
     fontSize: 12,
-    color: "#9a3412",
+    color: c.warning,
     fontWeight: "600",
   },
   contentShell: {
     flex: 1,
-    backgroundColor: "#F4EEE8",
+    backgroundColor: c.surface,
   },
   header: {
     flexDirection: "row",
@@ -1420,7 +1754,9 @@ const styles = StyleSheet.create({
     minHeight: 70,
     paddingHorizontal: 16,
     paddingVertical: 9,
-    backgroundColor: "#250706",
+    backgroundColor: c.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: c.border,
     zIndex: 1,
   },
   headerBackButton: {
@@ -1429,26 +1765,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 21,
-    backgroundColor: "rgba(255,255,255,0.07)",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
+    borderColor: c.border,
   },
   headerCopy: {
     flex: 1,
     minWidth: 0,
     marginHorizontal: 13,
   },
-  headerEyebrow: {
-    marginBottom: 2,
-    fontSize: 9,
-    fontWeight: "800",
-    color: "#D5A75B",
-    letterSpacing: 1.8,
-  },
   headerTitle: {
     fontSize: 20,
-    fontWeight: "700",
-    color: "#FFF8F1",
+    fontWeight: "800",
+    color: c.textPrimary,
     letterSpacing: -0.3,
   },
   headerCreateButton: {
@@ -1459,149 +1788,25 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 14,
     borderRadius: 21,
-    backgroundColor: "#F1C46B",
+    backgroundColor: c.primary,
   },
   headerCreateText: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "800",
-    color: "#2A0908",
+    color: c.surface,
   },
   listContent: {
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: 28,
   },
-  timelineHero: {
-    minHeight: 286,
-    justifyContent: "flex-end",
-    marginBottom: 22,
-    padding: 22,
-    borderRadius: 30,
-    overflow: "hidden",
-    backgroundColor: "#420D0B",
-    shadowColor: "#2A0908",
-    shadowOpacity: 0.24,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 12 },
-    elevation: 8,
-  },
-  heroGlow: {
-    position: "absolute",
-    top: -65,
-    right: -45,
-    width: 220,
-    height: 220,
-    borderRadius: 110,
-    backgroundColor: "rgba(217, 92, 63, 0.28)",
-  },
-  heroOrbit: {
-    position: "absolute",
-    top: -78,
-    right: -22,
-    width: 210,
-    height: 210,
-    borderRadius: 105,
-    borderWidth: 1,
-    borderColor: "rgba(241, 196, 107, 0.48)",
-  },
-  heroTopRow: {
-    position: "absolute",
-    top: 22,
-    left: 22,
-    right: 22,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  heroLabel: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 7,
-  },
-  heroLabelDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#F1C46B",
-  },
-  heroLabelText: {
-    fontSize: 9,
-    fontWeight: "800",
-    color: "#EBC98A",
-    letterSpacing: 1.8,
-  },
-  livePill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.09)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-  },
-  liveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#6FE1A8",
-  },
-  livePillText: {
-    fontSize: 9,
-    fontWeight: "900",
-    color: "#D8FFE9",
-    letterSpacing: 0.9,
-  },
-  heroTitle: {
-    maxWidth: 290,
-    fontSize: 38,
-    lineHeight: 40,
-    fontWeight: "700",
-    color: "#FFF8F1",
-    letterSpacing: -1.5,
-  },
-  heroSubtitle: {
-    maxWidth: "88%",
-    marginTop: 11,
-    fontSize: 12,
-    lineHeight: 18,
-    color: "#D7BDB5",
-  },
-  insightRail: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 20,
-    paddingTop: 15,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(255,255,255,0.1)",
-  },
-  insightItem: {
-    flex: 1,
-  },
-  insightNumber: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: "#FFF8F1",
-  },
-  insightLabel: {
-    marginTop: 2,
-    fontSize: 8,
-    fontWeight: "800",
-    color: "#CDAEA6",
-    letterSpacing: 1.2,
-  },
-  insightDivider: {
-    width: 1,
-    height: 27,
-    marginHorizontal: 13,
-    backgroundColor: "rgba(255,255,255,0.1)",
-  },
   draftsSection: {
     marginBottom: 28,
     padding: 16,
-    borderRadius: 24,
-    backgroundColor: "#28100F",
+    borderRadius: 20,
+    backgroundColor: c.surfaceRaised,
+    borderWidth: 1,
+    borderColor: c.border,
   },
   draftsHeader: {
     flexDirection: "row",
@@ -1621,22 +1826,22 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginRight: 10,
     borderRadius: 17,
-    backgroundColor: "rgba(241,196,107,0.12)",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "rgba(241,196,107,0.22)",
+    borderColor: c.border,
   },
   draftsHeaderCopy: {
     flex: 1,
   },
   draftsTitle: {
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: "800",
-    color: "#FFF8F1",
+    color: c.textPrimary,
   },
   draftsSubtitle: {
     marginTop: 2,
-    fontSize: 10,
-    color: "#AC918B",
+    fontSize: 13,
+    color: c.textMuted,
   },
   draftCountBadge: {
     minWidth: 31,
@@ -1644,22 +1849,22 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.08)",
+    backgroundColor: c.surfaceSunken,
   },
   draftCountText: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: "800",
-    color: "#F1C46B",
+    color: c.primary,
   },
   draftCard: {
     flexDirection: "row",
     alignItems: "center",
     marginTop: 8,
     padding: 10,
-    borderRadius: 17,
-    backgroundColor: "rgba(255,255,255,0.06)",
+    borderRadius: 14,
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
+    borderColor: c.border,
   },
   draftCardBody: {
     flex: 1,
@@ -1674,20 +1879,20 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginRight: 10,
     borderRadius: 18,
-    backgroundColor: "rgba(241,196,107,0.1)",
+    backgroundColor: c.surfaceSunken,
   },
   draftCopy: {
     flex: 1,
   },
   draftEventTitle: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "700",
-    color: "#FFF8F1",
+    color: c.textPrimary,
   },
   draftEventDate: {
     marginTop: 3,
-    fontSize: 10,
-    color: "#AC918B",
+    fontSize: 13,
+    color: c.textMuted,
   },
   editIconButton: {
     width: 36,
@@ -1695,9 +1900,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 18,
-    backgroundColor: "rgba(241,196,107,0.12)",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "rgba(241,196,107,0.25)",
+    borderColor: c.border,
   },
   draftsToggleButton: {
     flexDirection: "row",
@@ -1708,66 +1913,18 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   draftsToggleText: {
-    fontSize: 11,
+    fontSize: 14,
     fontWeight: "700",
-    color: "#F1C46B",
-  },
-  calendarSectionHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 18,
-    paddingHorizontal: 4,
-  },
-  calendarSectionCopy: {
-    flex: 1,
-    marginRight: 12,
-  },
-  calendarSectionEyebrow: {
-    marginBottom: 5,
-    fontSize: 9,
-    fontWeight: "900",
-    color: "#A66A32",
-    letterSpacing: 1.8,
-  },
-  calendarSectionTitle: {
-    fontSize: 26,
-    lineHeight: 30,
-    fontWeight: "700",
-    color: "#2B0C0A",
-    letterSpacing: -0.8,
-  },
-  calendarSectionSubtitle: {
-    marginTop: 5,
-    fontSize: 11,
-    color: "#846B65",
-  },
-  calendarCountBadge: {
-    minWidth: 52,
-    minHeight: 40,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    paddingHorizontal: 11,
-    borderRadius: 20,
-    backgroundColor: "#FFF9F3",
-    borderWidth: 1,
-    borderColor: "#E2D2C8",
-  },
-  calendarCountText: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: "#7A1E18",
+    color: c.accent,
   },
   publishedEmptyCard: {
     alignItems: "center",
     paddingVertical: 34,
     paddingHorizontal: 22,
     borderRadius: 26,
-    backgroundColor: "#FFF9F3",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#E6D9D0",
+    borderColor: c.border,
   },
   publishedEmptyIcon: {
     width: 52,
@@ -1775,20 +1932,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 26,
-    backgroundColor: "#F1E3D8",
+    backgroundColor: c.surfaceSunken,
   },
   publishedEmptyText: {
     marginTop: 12,
     fontSize: 16,
     fontWeight: "800",
-    color: "#2B0C0A",
+    color: c.textPrimary,
   },
   publishedEmptySubtitle: {
     marginTop: 6,
     fontSize: 13,
     lineHeight: 19,
     textAlign: "center",
-    color: "#846B65",
+    color: c.textMuted,
   },
   emptyCreateLink: {
     minHeight: 40,
@@ -1799,254 +1956,12 @@ const styles = StyleSheet.create({
     marginTop: 14,
     paddingHorizontal: 14,
     borderRadius: 999,
-    backgroundColor: "#F1E3D8",
+    backgroundColor: c.surfaceSunken,
   },
   emptyCreateLinkText: {
     fontSize: 13,
     fontWeight: "800",
-    color: "#7A1E18",
-  },
-  monthSection: {
-    marginBottom: 8,
-  },
-  monthHeaderRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  monthMarker: {
-    width: 56,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  monthMarkerCore: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: "#F1C46B",
-    borderWidth: 2,
-    borderColor: "#7A1E18",
-  },
-  monthPill: {
-    flexDirection: "row",
-    alignItems: "baseline",
-    gap: 8,
-  },
-  monthHeader: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: "#2B0C0A",
-    letterSpacing: -0.2,
-  },
-  monthEventCount: {
-    fontSize: 9,
-    fontWeight: "700",
-    color: "#A08881",
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
-  },
-  monthAccent: {
-    flex: 1,
-    height: 1,
-    marginLeft: 10,
-    backgroundColor: "#DCCDC4",
-  },
-  dateCard: {
-    position: "relative",
-    flexDirection: "row",
-    alignItems: "flex-start",
-    paddingBottom: 18,
-  },
-  dateRail: {
-    position: "absolute",
-    top: 66,
-    bottom: -18,
-    left: 27,
-    width: 1,
-    backgroundColor: "#D5C3B9",
-  },
-  dateTile: {
-    width: 56,
-    height: 78,
-    flexShrink: 0,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 28,
-    backgroundColor: "#E8DAD0",
-    borderWidth: 1,
-    borderColor: "#D5C3B9",
-  },
-  dateTileToday: {
-    backgroundColor: "#7A1E18",
-    borderColor: "#7A1E18",
-  },
-  dateTextToday: {
-    color: "#FFF8F1",
-  },
-  dateWeekday: {
-    fontSize: 8,
-    fontWeight: "900",
-    color: "#9A675A",
-    letterSpacing: 1.2,
-    textTransform: "uppercase",
-  },
-  dateNumberText: {
-    fontSize: 25,
-    lineHeight: 27,
-    fontWeight: "700",
-    color: "#2B0C0A",
-    letterSpacing: -0.7,
-  },
-  dateMonth: {
-    fontSize: 8,
-    fontWeight: "800",
-    color: "#9A675A",
-    letterSpacing: 0.8,
-    textTransform: "uppercase",
-  },
-  eventPreviewSurface: {
-    flex: 1,
-    minWidth: 0,
-    marginLeft: 13,
-    padding: 14,
-    borderRadius: 24,
-    backgroundColor: "#FFF9F3",
-    borderWidth: 1,
-    borderColor: "#E6D9D0",
-    shadowColor: "#3A1410",
-    shadowOpacity: 0.07,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 2,
-  },
-  eventPreviewRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  eventPreviewRowDivider: {
-    marginTop: 13,
-    paddingTop: 13,
-    borderTopWidth: 1,
-    borderTopColor: "#EFE4DC",
-  },
-  eventColorDot: {
-    width: 3,
-    height: 42,
-    flexShrink: 0,
-    marginRight: 10,
-    borderRadius: 2,
-  },
-  eventPreviewCopy: {
-    flex: 1,
-    minWidth: 0,
-  },
-  eventPreviewButton: {
-    flex: 1,
-    minWidth: 0,
-    flexDirection: "row",
-    alignItems: "flex-start",
-  },
-  previewEditButton: {
-    flexShrink: 0,
-    marginLeft: 6,
-    backgroundColor: "#F7EEDA",
-    borderColor: "#ECD9A9",
-  },
-  eventOrdinal: {
-    marginBottom: 3,
-    fontSize: 8,
-    fontWeight: "900",
-    color: "#B67B2C",
-    letterSpacing: 1.2,
-  },
-  eventTitle: {
-    fontSize: 15,
-    lineHeight: 19,
-    fontWeight: "700",
-    color: "#2B0C0A",
-  },
-  eventPreviewMeta: {
-    flexDirection: "row",
-    alignItems: "center",
-    flexWrap: "wrap",
-    columnGap: 6,
-    rowGap: 3,
-    marginTop: 4,
-  },
-  eventPreviewTime: {
-    maxWidth: "72%",
-    marginRight: 4,
-    fontSize: 10,
-    fontWeight: "600",
-    color: "#846B65",
-  },
-  previewStatus: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 3,
-    paddingHorizontal: 6,
-    paddingVertical: 3,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  previewStatusText: {
-    fontSize: 8,
-    fontWeight: "800",
-    letterSpacing: 0.4,
-  },
-  moreEventsBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 12,
-    paddingTop: 11,
-    borderTopWidth: 1,
-    borderTopColor: "#EFE4DC",
-  },
-  moreEvents: {
-    fontSize: 10,
-    fontWeight: "700",
-    color: "#7A1E18",
-  },
-  dateChevron: {
-    flexDirection: "row",
-    alignItems: "center",
-    alignSelf: "flex-end",
-    gap: 5,
-    marginTop: 12,
-    paddingLeft: 10,
-    paddingVertical: 4,
-  },
-  dateChevronText: {
-    fontSize: 8,
-    fontWeight: "900",
-    color: "#7A1E18",
-    letterSpacing: 1.1,
-  },
-  timelineEnd: {
-    alignItems: "center",
-    paddingTop: 4,
-    paddingBottom: 20,
-  },
-  timelineEndLine: {
-    width: 1,
-    height: 26,
-    backgroundColor: "#D5C3B9",
-  },
-  timelineEndOrb: {
-    width: 38,
-    height: 38,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 19,
-    backgroundColor: "#420D0B",
-  },
-  timelineEndText: {
-    marginTop: 9,
-    fontSize: 8,
-    fontWeight: "900",
-    color: "#9A7D74",
-    letterSpacing: 1.5,
+    color: c.primary,
   },
   modalOverlay: {
     flex: 1,
@@ -2057,7 +1972,7 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 640,
     alignSelf: "center",
-    backgroundColor: "#F4EEE8",
+    backgroundColor: c.surface,
     borderTopLeftRadius: 32,
     borderTopRightRadius: 32,
     paddingTop: 10,
@@ -2070,7 +1985,7 @@ const styles = StyleSheet.create({
     alignSelf: "center",
     marginBottom: 8,
     borderRadius: 999,
-    backgroundColor: "#C9A99D",
+    backgroundColor: c.borderStrong,
   },
   modalHeader: {
     flexDirection: "row",
@@ -2079,7 +1994,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 22,
     paddingBottom: 17,
     borderBottomWidth: 1,
-    borderBottomColor: "#E0D2C9",
+    borderBottomColor: c.border,
   },
   modalHeaderCopy: {
     flex: 1,
@@ -2090,14 +2005,14 @@ const styles = StyleSheet.create({
     fontSize: 22,
     lineHeight: 27,
     fontWeight: "700",
-    color: "#2B0C0A",
+    color: c.textPrimary,
     letterSpacing: -0.5,
   },
   modalSubtitle: {
     marginTop: 3,
     fontSize: 12,
     fontWeight: "600",
-    color: "#846B65",
+    color: c.textMuted,
   },
   modalCloseButton: {
     width: 44,
@@ -2105,7 +2020,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 22,
-    backgroundColor: "#E8DAD0",
+    backgroundColor: c.surfaceSunken,
   },
   eventsScrollView: {
     flexGrow: 0,
@@ -2116,13 +2031,13 @@ const styles = StyleSheet.create({
     paddingBottom: 36,
   },
   eventCard: {
-    backgroundColor: "#FFF9F3",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 24,
     padding: 18,
     marginBottom: 16,
     borderLeftWidth: 5,
     borderWidth: 1,
-    borderColor: "#E6D9D0",
+    borderColor: c.border,
     shadowColor: "#3A1410",
     shadowOpacity: 0.08,
     shadowRadius: 12,
@@ -2130,8 +2045,8 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   highlightedEventCard: {
-    backgroundColor: "#FFF4D9",
-    borderColor: "#D7A743",
+    backgroundColor: c.accentSoft,
+    borderColor: c.accent,
   },
   eventHeader: {
     flexDirection: "row",
@@ -2143,7 +2058,7 @@ const styles = StyleSheet.create({
     fontSize: 20,
     lineHeight: 25,
     fontWeight: "700",
-    color: "#2B0C0A",
+    color: c.textPrimary,
     flex: 1,
     minWidth: 0,
     marginRight: 10,
@@ -2158,13 +2073,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 21,
-    backgroundColor: "#E8DAD0",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#DBC8BD",
+    borderColor: c.border,
   },
   deleteActionButton: {
-    backgroundColor: "#FCE7E2",
-    borderColor: "#EBC6BD",
+    backgroundColor: c.dangerSoft,
+    borderColor: c.danger,
   },
   badgesRow: {
     flexDirection: "row",
@@ -2183,14 +2098,14 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   statusText: {
-    color: "#fffaf7",
-    fontSize: 10,
+    color: c.surface,
+    fontSize: 12,
     fontWeight: "800",
     letterSpacing: 0.5,
   },
   eventDescription: {
     fontSize: 14,
-    color: "#6E514B",
+    color: c.textSecondary,
     marginBottom: 14,
     lineHeight: 21,
   },
@@ -2210,7 +2125,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 15,
-    backgroundColor: "#E8DAD0",
+    backgroundColor: c.surfaceSunken,
   },
   metaCopy: {
     flex: 1,
@@ -2219,16 +2134,16 @@ const styles = StyleSheet.create({
   },
   metaLabel: {
     marginBottom: 1,
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: "800",
-    color: "#9A746A",
+    color: c.textMuted,
     letterSpacing: 0.4,
     textTransform: "uppercase",
   },
   metaText: {
     fontSize: 13,
     fontWeight: "600",
-    color: "#5E3B35",
+    color: c.textSecondary,
   },
   categoryBadge: {
     alignSelf: "flex-start",
@@ -2237,22 +2152,22 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   categoryText: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "700",
-    color: "#fff",
+    color: c.onPrimary,
     letterSpacing: 0.5,
   },
   loadingContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#F4EEE8",
+    backgroundColor: c.surface,
   },
   loadingText: {
     marginTop: 12,
     fontSize: 14,
     fontWeight: "600",
-    color: "#7A1E18",
+    color: c.primary,
   },
   emptyContainer: {
     flex: 1,
@@ -2261,8 +2176,10 @@ const styles = StyleSheet.create({
     margin: 16,
     paddingHorizontal: 28,
     paddingVertical: 42,
-    borderRadius: 30,
-    backgroundColor: "#420D0B",
+    borderRadius: 24,
+    backgroundColor: c.surfaceRaised,
+    borderWidth: 1,
+    borderColor: c.border,
   },
   emptyIcon: {
     width: 78,
@@ -2270,13 +2187,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 39,
-    backgroundColor: "rgba(241,196,107,0.12)",
+    backgroundColor: c.surfaceSunken,
   },
   emptyText: {
     marginTop: 18,
     fontSize: 21,
     fontWeight: "800",
-    color: "#FFF8F1",
+    color: c.textPrimary,
   },
   emptySubtitle: {
     maxWidth: 300,
@@ -2284,7 +2201,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 21,
     textAlign: "center",
-    color: "#CBAFA7",
+    color: c.textMuted,
   },
   createButton: {
     minHeight: 48,
@@ -2293,15 +2210,21 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 6,
     marginTop: 22,
-    backgroundColor: "#F1C46B",
+    backgroundColor: c.primary,
     paddingHorizontal: 20,
     borderRadius: 15,
   },
   createButtonText: {
     fontSize: 15,
     fontWeight: "800",
-    color: "#2A0908",
+    color: c.surface,
   },
 });
 
 export default EventCalendarScreen;
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

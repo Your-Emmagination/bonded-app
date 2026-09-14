@@ -1,7 +1,9 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { doc, getDoc } from "firebase/firestore";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Linking,
@@ -43,6 +45,7 @@ const timeAgo = (timestamp: any) => {
 };
 
 export default function NotificationTargetScreen() {
+  const { styles, theme } = useStyles();
   const params = useLocalSearchParams<TargetParams>();
   const router = useRouter();
   const [target, setTarget] = useState<ResolvedTarget | null>(null);
@@ -159,7 +162,7 @@ export default function NotificationTargetScreen() {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton} hitSlop={8}>
-          <Ionicons name="arrow-back" size={23} color="#5f0909" />
+          <Ionicons name="arrow-back" size={23} color={theme.primary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Notification</Text>
         <View style={styles.headerSpacer} />
@@ -168,7 +171,7 @@ export default function NotificationTargetScreen() {
       {!target ? (
         <View style={styles.center}>
           <View style={styles.loadingCard}>
-            <ActivityIndicator size="large" color="#8f3a2b" />
+            <ActivityIndicator size="large" color={theme.textSecondary} />
             <Text style={styles.loadingText}>Opening content…</Text>
           </View>
         </View>
@@ -179,7 +182,7 @@ export default function NotificationTargetScreen() {
               <Ionicons
                 name={target.replyId ? "return-up-back-outline" : target.commentId ? "chatbubble-outline" : "document-text-outline"}
                 size={16}
-                color="#8f3a2b"
+                color={theme.textSecondary}
               />
             </View>
             <Text style={styles.contextBannerText}>
@@ -221,8 +224,9 @@ export default function NotificationTargetScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f6f1ed" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.surfaceSunken },
   header: {
     height: 56,
     flexDirection: "row",
@@ -230,7 +234,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "#e5cfc5",
     paddingHorizontal: 12,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     shadowColor: "#000",
     shadowOpacity: 0.04,
     shadowRadius: 6,
@@ -238,16 +242,16 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   backButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
-  headerTitle: { flex: 1, textAlign: "center", fontSize: 18, fontWeight: "700", color: "#5f0909" },
+  headerTitle: { flex: 1, textAlign: "center", fontSize: 18, fontWeight: "700", color: c.primary },
   headerSpacer: { width: 42 },
   content: { padding: 12, paddingBottom: 32 },
   contextBanner: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#f0d2c2",
+    borderColor: c.borderStrong,
     borderRadius: 14,
     paddingVertical: 10,
     paddingHorizontal: 12,
@@ -261,14 +265,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  contextBannerText: { flex: 1, color: "#7a3b2e", fontSize: 13, fontWeight: "600" },
+  contextBannerText: { flex: 1, color: c.textSecondary, fontSize: 13, fontWeight: "600" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
   loadingCard: {
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     paddingVertical: 32,
     paddingHorizontal: 28,
     width: "100%",
@@ -276,3 +280,10 @@ const styles = StyleSheet.create({
   },
   loadingText: { marginTop: 12, color: "#805e56", fontSize: 15, fontWeight: "600" },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

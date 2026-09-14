@@ -1,3 +1,5 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { validateNewPassword } from "@/utils/passwordPolicy";
 import {
     confirmPasswordReset,
@@ -25,6 +27,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 const RESEND_COOLDOWN_SECONDS = 60;
 
 export default function ForgotPasswordScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
 
@@ -131,7 +134,7 @@ export default function ForgotPasswordScreen() {
           onPress={() => router.replace("/LoginScreen")}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
         >
-          <Ionicons name="chevron-back" size={26} color="#f5d8d3" />
+          <Ionicons name="chevron-back" size={26} color={theme.onChrome} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Reset password</Text>
         <View style={{ width: 26 }} />
@@ -158,7 +161,7 @@ export default function ForgotPasswordScreen() {
                 value={studentID}
                 onChangeText={setStudentID}
                 placeholder="e.g. 2021-00123"
-                placeholderTextColor="#8a655e"
+                placeholderTextColor={theme.textMuted}
                 autoCapitalize="none"
                 autoCorrect={false}
                 editable={!loading}
@@ -171,7 +174,7 @@ export default function ForgotPasswordScreen() {
                 activeOpacity={0.85}
               >
                 {loading ? (
-                  <ActivityIndicator color="#5e0a09" />
+                  <ActivityIndicator color={theme.onAccent} />
                 ) : (
                   <Text style={styles.primaryBtnText}>Send reset code</Text>
                 )}
@@ -195,7 +198,7 @@ export default function ForgotPasswordScreen() {
                 value={code}
                 onChangeText={(t) => setCode(t.replace(/\D/g, "").slice(0, 6))}
                 placeholder="123456"
-                placeholderTextColor="#8a655e"
+                placeholderTextColor={theme.textMuted}
                 keyboardType="number-pad"
                 maxLength={6}
                 editable={!loading}
@@ -208,7 +211,7 @@ export default function ForgotPasswordScreen() {
                   value={newPassword}
                   onChangeText={setNewPassword}
                   placeholder="8+ chars, incl. a number & symbol"
-                  placeholderTextColor="#8a655e"
+                  placeholderTextColor={theme.textMuted}
                   secureTextEntry={!showPassword}
                   autoCapitalize="none"
                   autoCorrect={false}
@@ -222,7 +225,7 @@ export default function ForgotPasswordScreen() {
                   <Ionicons
                     name={showPassword ? "eye-off-outline" : "eye-outline"}
                     size={20}
-                    color="#b88f87"
+                    color={theme.textMuted}
                   />
                 </TouchableOpacity>
               </View>
@@ -233,7 +236,7 @@ export default function ForgotPasswordScreen() {
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
                 placeholder="Re-enter the new password"
-                placeholderTextColor="#8a655e"
+                placeholderTextColor={theme.textMuted}
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -247,7 +250,7 @@ export default function ForgotPasswordScreen() {
                 activeOpacity={0.85}
               >
                 {loading ? (
-                  <ActivityIndicator color="#5e0a09" />
+                  <ActivityIndicator color={theme.onAccent} />
                 ) : (
                   <Text style={styles.primaryBtnText}>Reset password</Text>
                 )}
@@ -272,7 +275,7 @@ export default function ForgotPasswordScreen() {
 
           {error && (
             <View style={styles.errorBox}>
-              <Ionicons name="alert-circle" size={18} color="#ffb4ab" />
+              <Ionicons name="alert-circle" size={18} color={theme.danger} />
               <Text style={styles.errorText}>{error}</Text>
             </View>
           )}
@@ -282,8 +285,9 @@ export default function ForgotPasswordScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#3d0606" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.primary },
   flex: { flex: 1 },
   header: {
     flexDirection: "row",
@@ -291,13 +295,13 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingHorizontal: 16,
     paddingVertical: 14,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
   },
-  headerTitle: { color: "#f5d8d3", fontSize: 18, fontWeight: "700" },
+  headerTitle: { color: c.onChrome, fontSize: 18, fontWeight: "700" },
   content: { padding: 20, paddingBottom: 48 },
-  lead: { color: "#d8b3ab", fontSize: 14, lineHeight: 20, marginBottom: 20 },
+  lead: { color: c.onChromeMuted, fontSize: 14, lineHeight: 20, marginBottom: 20 },
   label: {
-    color: "#e0aa42",
+    color: c.accent,
     fontSize: 13,
     fontWeight: "600",
     marginBottom: 6,
@@ -310,25 +314,25 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     paddingHorizontal: 14,
     paddingVertical: Platform.OS === "ios" ? 14 : 10,
-    color: "#f5d8d3",
+    color: c.onChrome,
     fontSize: 15,
   },
   codeInput: { letterSpacing: 6, fontSize: 20, textAlign: "center" },
   passwordRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   eyeBtn: { padding: 8 },
   primaryBtn: {
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderRadius: 10,
     paddingVertical: 14,
     alignItems: "center",
     marginTop: 22,
   },
   btnDisabled: { opacity: 0.6 },
-  primaryBtnText: { color: "#5e0a09", fontSize: 16, fontWeight: "700" },
-  hint: { color: "#b88f87", fontSize: 12, lineHeight: 18, marginTop: 18 },
+  primaryBtnText: { color: c.onAccent, fontSize: 16, fontWeight: "700" },
+  hint: { color: c.textMuted, fontSize: 12, lineHeight: 18, marginTop: 18 },
   resendBtn: { alignSelf: "center", marginTop: 16, padding: 6 },
-  resendText: { color: "#e0a53d", fontSize: 14, fontWeight: "600" },
-  resendTextDisabled: { color: "#8a655e" },
+  resendText: { color: c.accent, fontSize: 14, fontWeight: "600" },
+  resendTextDisabled: { color: c.textMuted },
   errorBox: {
     flexDirection: "row",
     alignItems: "center",
@@ -338,5 +342,12 @@ const styles = StyleSheet.create({
     padding: 12,
     marginTop: 20,
   },
-  errorText: { color: "#ffb4ab", fontSize: 13, flex: 1 },
+  errorText: { color: c.danger, fontSize: 13, flex: 1 },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

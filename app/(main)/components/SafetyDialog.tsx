@@ -15,8 +15,10 @@
 //
 // Used by Create Post, Create Poll, the server channel, comments and replies
 // so the same words reach a student wherever they were typing.
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
-import React from "react";
+import React, { useMemo } from "react";
 import { Linking, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { SELF_HARM_SAFETY_MESSAGE, SELF_HARM_TRUSTED_ADULT_MESSAGE } from "@/utils/contentModeration";
@@ -42,72 +44,84 @@ const SafetyDialog: React.FC<SafetyDialogProps> = ({
   visible,
   onClose,
   contentLabel = "message",
-}) => (
-  <Modal
-    visible={visible}
-    transparent
-    animationType="fade"
-    statusBarTranslucent
-    onRequestClose={onClose}
-  >
-    <View style={styles.backdrop}>
-      <View style={styles.card}>
-        <View style={styles.iconCircle}>
-          <Ionicons name="heart-outline" size={28} color={ACCENT} />
+}) => {
+  const { styles, theme } = useStyles();
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      statusBarTranslucent
+      onRequestClose={onClose}
+    >
+      <View style={styles.backdrop}>
+        <View style={styles.card}>
+          <View style={styles.iconCircle}>
+            <Ionicons name="heart-outline" size={28} color={ACCENT} />
+          </View>
+
+          <Text style={styles.title}>You&rsquo;re not alone</Text>
+
+          <Text style={styles.primaryMessage}>{SELF_HARM_TRUSTED_ADULT_MESSAGE}</Text>
+
+          <Text style={styles.secondaryMessage}>
+            Your {contentLabel} wasn&rsquo;t posted. {SELF_HARM_SAFETY_MESSAGE}
+          </Text>
+
+          <View style={styles.helpSection}>
+            <Text style={styles.helpHeading}>If you need help right now</Text>
+            {HELPLINES.map((line) => (
+              <Pressable
+                key={line.number}
+                style={({ pressed }) => [styles.helpRow, pressed && styles.helpRowPressed]}
+                onPress={() => {
+                  Linking.openURL(`tel:${line.number}`).catch(() => {
+                    // A device with no dialer (tablet, emulator) shouldn't throw
+                    // an error at someone in this moment — the number is on
+                    // screen either way.
+                  });
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={`Call ${line.label} at ${line.number}`}
+              >
+                <Ionicons name="call-outline" size={16} color={ACCENT} />
+                <View style={styles.helpTextWrap}>
+                  <Text style={styles.helpLabel}>{line.label}</Text>
+                  <Text style={styles.helpDetail}>{line.detail}</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
+              </Pressable>
+            ))}
+          </View>
+
+          <Pressable
+            style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
+            onPress={onClose}
+            accessibilityRole="button"
+          >
+            <Text style={styles.buttonText}>OK</Text>
+          </Pressable>
         </View>
-
-        <Text style={styles.title}>You&rsquo;re not alone</Text>
-
-        <Text style={styles.primaryMessage}>{SELF_HARM_TRUSTED_ADULT_MESSAGE}</Text>
-
-        <Text style={styles.secondaryMessage}>
-          Your {contentLabel} wasn&rsquo;t posted. {SELF_HARM_SAFETY_MESSAGE}
-        </Text>
-
-        <View style={styles.helpSection}>
-          <Text style={styles.helpHeading}>If you need help right now</Text>
-          {HELPLINES.map((line) => (
-            <Pressable
-              key={line.number}
-              style={({ pressed }) => [styles.helpRow, pressed && styles.helpRowPressed]}
-              onPress={() => {
-                Linking.openURL(`tel:${line.number}`).catch(() => {
-                  // A device with no dialer (tablet, emulator) shouldn't throw
-                  // an error at someone in this moment — the number is on
-                  // screen either way.
-                });
-              }}
-              accessibilityRole="button"
-              accessibilityLabel={`Call ${line.label} at ${line.number}`}
-            >
-              <Ionicons name="call-outline" size={16} color={ACCENT} />
-              <View style={styles.helpTextWrap}>
-                <Text style={styles.helpLabel}>{line.label}</Text>
-                <Text style={styles.helpDetail}>{line.detail}</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color="#c2a49c" />
-            </Pressable>
-          ))}
-        </View>
-
-        <Pressable
-          style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
-          onPress={onClose}
-          accessibilityRole="button"
-        >
-          <Text style={styles.buttonText}>OK</Text>
-        </Pressable>
       </View>
-    </View>
-  </Modal>
-);
+    </Modal>
+  );
+};
 
 const ACCENT = "#9c5a6d";
 
-const styles = StyleSheet.create({
+/** Themed stylesheet for this component. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: c.scrim,
     justifyContent: "center",
     alignItems: "center",
     paddingHorizontal: 28,
@@ -115,14 +129,14 @@ const styles = StyleSheet.create({
   card: {
     width: "100%",
     maxWidth: 360,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 20,
     paddingTop: 24,
     paddingHorizontal: 20,
     paddingBottom: 18,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   iconCircle: {
     width: 56,
@@ -134,13 +148,13 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   title: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 19,
     fontWeight: "700",
     textAlign: "center",
   },
   primaryMessage: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15.5,
     fontWeight: "600",
     textAlign: "center",
@@ -148,7 +162,7 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   secondaryMessage: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13,
     textAlign: "center",
     lineHeight: 19,
@@ -159,11 +173,11 @@ const styles = StyleSheet.create({
     marginTop: 18,
     paddingTop: 14,
     borderTopWidth: 1,
-    borderTopColor: "#f0e7e2",
+    borderTopColor: c.border,
     gap: 8,
   },
   helpHeading: {
-    color: "#7d5d55",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "700",
     textTransform: "uppercase",
@@ -173,15 +187,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    backgroundColor: "#f7efec",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 12,
     paddingVertical: 10,
     paddingHorizontal: 12,
   },
   helpRowPressed: { opacity: 0.75 },
   helpTextWrap: { flex: 1, minWidth: 0 },
-  helpLabel: { color: "#4d1b17", fontSize: 14, fontWeight: "600" },
-  helpDetail: { color: "#9b766c", fontSize: 12, marginTop: 1 },
+  helpLabel: { color: c.textPrimary, fontSize: 14, fontWeight: "600" },
+  helpDetail: { color: c.textMuted, fontSize: 12, marginTop: 1 },
   button: {
     width: "100%",
     height: 46,
@@ -192,7 +206,7 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
   buttonPressed: { opacity: 0.85 },
-  buttonText: { color: "#fffaf7", fontSize: 15, fontWeight: "700" },
+  buttonText: { color: c.onPrimary, fontSize: 15, fontWeight: "700" },
 });
 
 export default SafetyDialog;

@@ -1,3 +1,5 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import {
     VIDEO_QUALITY_TIERS,
     videoUrl,
@@ -77,6 +79,7 @@ export default function VideoPostMedia({
   captionStatus,
   captions,
 }: Props) {
+  const { styles, theme } = useStyles();
   const { tier, preference } = useVideoQuality();
 
   const captionsReady =
@@ -436,7 +439,7 @@ export default function VideoPostMedia({
                     <Text style={styles.menuHint}>{option.hint}</Text>
                   </View>
                   {selected && (
-                    <Ionicons name="checkmark" size={18} color="#5f0909" />
+                    <Ionicons name="checkmark" size={18} color={theme.primary} />
                   )}
                 </TouchableOpacity>
               );
@@ -454,7 +457,8 @@ export default function VideoPostMedia({
 const tierLabel = (tier: VideoQualityTier) =>
   VIDEO_QUALITY_TIERS.find((t) => t.tier === tier)?.label ?? tier;
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: {
     height: 260,
     marginVertical: 10,
@@ -554,7 +558,7 @@ const styles = StyleSheet.create({
   },
   progressFill: {
     height: "100%",
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
   },
   fsRoot: {
     flex: 1,
@@ -608,14 +612,14 @@ const styles = StyleSheet.create({
   },
   menuCard: {
     width: "100%",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#ecd6bf",
+    borderColor: c.borderStrong,
     paddingVertical: 8,
   },
   menuTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 13,
     fontWeight: "800",
     letterSpacing: 0.3,
@@ -643,3 +647,10 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
   },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

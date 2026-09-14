@@ -3,6 +3,7 @@
 
 import * as FileSystem from "expo-file-system/legacy";
 import { Platform } from "react-native";
+import { assertReadableUpload, isAttachmentUnavailableError } from "./uploadAttachments";
 import {
     AVATAR_SIZE_LARGE,
     AVATAR_SIZE_SMALL,
@@ -59,6 +60,7 @@ if (!CLOUDINARY_UPLOAD_PRESET) {
     let data: any;
 
     if (Platform.OS !== "web" && (uri.startsWith("file://") || uri.startsWith("content://"))) {
+      assertReadableUpload(uri);
       const uploadResult = await FileSystem.uploadAsync(endpoint, uri, {
         uploadType: FileSystem.FileSystemUploadType.MULTIPART,
         fieldName: "file",
@@ -116,6 +118,10 @@ if (!CLOUDINARY_UPLOAD_PRESET) {
       }
     }
 
+    if (typeof data?.secure_url !== "string" || !data.secure_url.startsWith("https://")) {
+      throw new Error("Upload failed: no secure attachment URL was returned. Please try again.");
+    }
+
     if (__DEV__) console.log(`✅ Upload successful: ${data.secure_url}`);
 
     // Eagerly warm the CDN cache for the sizes this image will actually be
@@ -124,17 +130,28 @@ if (!CLOUDINARY_UPLOAD_PRESET) {
     // never delay the upload response the caller is waiting on.
     warmCloudinaryCache(data.secure_url, folder);
 
+    lastUploadDimensions = {
+      url: data.secure_url,
+      width: Number(data.width) || null,
+      height: Number(data.height) || null,
+    };
+
     return data.secure_url;
   } catch (error: any) {
-    console.error("❌ Cloudinary upload error:", error.message);
+    const message = error?.message || "Upload failed. Please try again.";
+    console.error("❌ Cloudinary upload error:", message);
+
+    if (isAttachmentUnavailableError(error)) {
+      throw new Error("The selected attachment cannot be read. Remove it and select it again.");
+    }
     
-    if (error.message.includes("Network request failed")) {
+    if (message.includes("Network request failed")) {
       throw new Error("Network error. Please check your internet connection.");
     }
-    if (error.message.includes("Upload preset")) {
+    if (message.includes("Upload preset")) {
       throw new Error("Invalid upload preset. Check your Cloudinary configuration.");
     }
-    if (error.message.includes("Invalid image file")) {
+    if (message.includes("Invalid image file")) {
       throw new Error("Invalid file format. Please select a valid image.");
     }
     
@@ -321,6 +338,57 @@ export const uploadPostImage = async (uri: string): Promise<string> => {
     folder: "post_images",
     resourceType: "image",
   });
+};
+
+export type UploadedImage = { url: string; width: number | null; height: number | null };
+
+/**
+ * The pixel size of the most recent successful upload.
+ *
+ * Cloudinary reports width and height on every image upload and this module
+ * used to throw them away, so a chat bubble had no idea what shape the
+ * picture was and had to guess with a fixed height — which is why photos were
+ * cropped top and bottom. Recorded here rather than changed into
+ * uploadToCloudinary's return type, which eight callers rely on being a
+ * plain string.
+ */
+let lastUploadDimensions: UploadedImage | null = null;
+
+/**
+ * Uploads a chat image and reports its real dimensions, so the bubble can be
+ * shaped to the picture instead of cropping it to fit.
+ *
+ * Dimensions are best-effort: a provider that omits them yields nulls and the
+ * caller falls back to measuring the image as it loads.
+ */
+/**
+ * Pixel size of the upload that just finished, or nulls if the provider did
+ * not report one. Call immediately after an upload resolves — it describes
+ * only the most recent one.
+ */
+export const readLastUploadSize = (
+  url: string,
+): { width: number | null; height: number | null } | null => {
+  if (!lastUploadDimensions || lastUploadDimensions.url !== url) return null;
+  return {
+    width: lastUploadDimensions.width,
+    height: lastUploadDimensions.height,
+  };
+};
+
+export const uploadChatImage = async (uri: string): Promise<UploadedImage> => {
+  const url = await uploadToCloudinary({
+    uri,
+    folder: "post_images",
+    resourceType: "image",
+  });
+
+  const measured =
+    lastUploadDimensions && lastUploadDimensions.url === url
+      ? lastUploadDimensions
+      : null;
+
+  return { url, width: measured?.width ?? null, height: measured?.height ?? null };
 };
 
 /**

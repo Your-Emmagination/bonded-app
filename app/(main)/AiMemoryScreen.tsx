@@ -1,9 +1,12 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import {
     type AiMemoryEntry,
     type AiMemoryScopeType,
     makeAiMemoryChannelScopeId,
 } from "@/utils/aiMemory";
-import { canManageAiMemory, resolveUserRoleForAuthUser } from "@/utils/rbac";
+import { canManageAiMemory } from "@/utils/rbac";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
@@ -55,6 +58,7 @@ const emptyDraft: DraftState = {
 };
 
 export default function AiMemoryScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   // Optional pre-fill coming from UnansweredQuestionsScreen's clustered
   // suggestions — title and tags only, never content. Staff always write
@@ -64,29 +68,16 @@ export default function AiMemoryScreen() {
     prefillTitle?: string;
     prefillTags?: string;
   }>();
-  const [loading, setLoading] = useState(true);
-  const [allowed, setAllowed] = useState(false);
+  // Live, so losing AI-memory access closes this screen without a reopen.
+  const role = useCurrentUserRole();
+  const allowed = canManageAiMemory(role);
+  // An unresolved role still counts as loading, so the "no access" state is
+  // never shown before the answer is actually known.
+  const loading = !!auth.currentUser && role === undefined;
   const [entries, setEntries] = useState<AiMemoryEntry[]>([]);
   const [showEditor, setShowEditor] = useState(false);
   const [draft, setDraft] = useState<DraftState>(emptyDraft);
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    const bootstrap = async () => {
-      const authUser = auth.currentUser;
-      if (!authUser) {
-        setAllowed(false);
-        setLoading(false);
-        return;
-      }
-
-      const role = await resolveUserRoleForAuthUser(authUser);
-      setAllowed(canManageAiMemory(role));
-      setLoading(false);
-    };
-
-    bootstrap();
-  }, []);
 
   useEffect(() => {
     if (!allowed) return;
@@ -293,7 +284,7 @@ export default function AiMemoryScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.centerState}>
-          <Ionicons name="lock-closed-outline" size={42} color="#e0a53d" />
+          <Ionicons name="lock-closed-outline" size={42} color={theme.accent} />
           <Text style={styles.emptyTitle}>Access Restricted</Text>
           <Text style={styles.emptyText}>
             Only admins, teachers, and moderators can manage B.E.A. memory.
@@ -308,7 +299,7 @@ export default function AiMemoryScreen() {
       <View style={styles.contentShell}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconButton}>
-          <Ionicons name="arrow-back" size={22} color="#fffaf7" />
+          <Ionicons name="arrow-back" size={22} color={theme.onChrome} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>B.E.A. Memory</Text>
@@ -317,7 +308,7 @@ export default function AiMemoryScreen() {
           </Text>
         </View>
         <TouchableOpacity onPress={openCreate} style={styles.addButton}>
-          <Ionicons name="add" size={22} color="#5f0909" />
+          <Ionicons name="add" size={22} color={theme.primary} />
         </TouchableOpacity>
       </View>
 
@@ -373,17 +364,17 @@ export default function AiMemoryScreen() {
       </View>
 
       <View style={styles.searchBox}>
-        <Ionicons name="search-outline" size={18} color="#9b766c" />
+        <Ionicons name="search-outline" size={18} color={theme.textMuted} />
         <TextInput
           value={search}
           onChangeText={setSearch}
           placeholder="Search title, content, or tags..."
-          placeholderTextColor="#b99c93"
+          placeholderTextColor={theme.textMuted}
           style={styles.searchInput}
         />
         {!!search && (
           <TouchableOpacity onPress={() => setSearch("")} hitSlop={8}>
-            <Ionicons name="close-circle" size={17} color="#9b766c" />
+            <Ionicons name="close-circle" size={17} color={theme.textMuted} />
           </TouchableOpacity>
         )}
       </View>
@@ -402,7 +393,7 @@ export default function AiMemoryScreen() {
 
         {entries.length === 0 ? (
           <View style={styles.emptyCard}>
-            <Ionicons name="library-outline" size={42} color="#c59a8a" />
+            <Ionicons name="library-outline" size={42} color={theme.textMuted} />
             <Text style={styles.emptyTitle}>No memory yet</Text>
             <Text style={styles.emptyText}>
               Add facts like developers, project history, rules, FAQ answers, or server-specific knowledge.
@@ -410,7 +401,7 @@ export default function AiMemoryScreen() {
           </View>
         ) : visibleEntries.length === 0 ? (
           <View style={styles.emptyCard}>
-            <Ionicons name="search-outline" size={42} color="#c59a8a" />
+            <Ionicons name="search-outline" size={42} color={theme.textMuted} />
             <Text style={styles.emptyTitle}>No matches</Text>
             <Text style={styles.emptyText}>
               Nothing matches this filter or search. Try clearing the search or picking a different scope.
@@ -439,7 +430,7 @@ export default function AiMemoryScreen() {
                   onPress={() => openEdit(entry)}
                   disabled={deletingId === entry.id}
                 >
-                  <Ionicons name="create-outline" size={16} color="#5f0909" />
+                  <Ionicons name="create-outline" size={16} color={theme.primary} />
                   <Text style={styles.cardActionText}>Edit</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -448,11 +439,11 @@ export default function AiMemoryScreen() {
                   disabled={deletingId === entry.id}
                 >
                   {deletingId === entry.id ? (
-                    <ActivityIndicator size="small" color="#9b1f1c" />
+                    <ActivityIndicator size="small" color={theme.danger} />
                   ) : (
-                    <Ionicons name="trash-outline" size={16} color="#9b1f1c" />
+                    <Ionicons name="trash-outline" size={16} color={theme.danger} />
                   )}
-                  <Text style={[styles.cardActionText, { color: "#9b1f1c" }]}>Delete</Text>
+                  <Text style={[styles.cardActionText, { color: theme.danger }]}>Delete</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -466,7 +457,7 @@ export default function AiMemoryScreen() {
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>{draft.id ? "Edit Memory" : "New Memory"}</Text>
             <TouchableOpacity onPress={() => setShowEditor(false)}>
-              <Ionicons name="close" size={24} color="#5f0909" />
+              <Ionicons name="close" size={24} color={theme.primary} />
             </TouchableOpacity>
           </View>
 
@@ -477,7 +468,7 @@ export default function AiMemoryScreen() {
               onChangeText={(value) => setDraft((current) => ({ ...current, title: value }))}
               style={styles.input}
               placeholder="Developers of this system"
-              placeholderTextColor="#9b766c"
+              placeholderTextColor={theme.textMuted}
             />
 
             <Text style={styles.fieldLabel}>Content</Text>
@@ -488,7 +479,7 @@ export default function AiMemoryScreen() {
               multiline
               textAlignVertical="top"
               placeholder="Write the long-term fact or instruction here..."
-              placeholderTextColor="#9b766c"
+              placeholderTextColor={theme.textMuted}
             />
 
             <Text style={styles.fieldLabel}>Scope</Text>
@@ -535,7 +526,7 @@ export default function AiMemoryScreen() {
                   placeholder={
                     draft.scopeType === "server" ? "bsis" : makeAiMemoryChannelScopeId("bsis", "bsis_general")
                   }
-                  placeholderTextColor="#9b766c"
+                  placeholderTextColor={theme.textMuted}
                   autoCapitalize="none"
                 />
               </>
@@ -547,7 +538,7 @@ export default function AiMemoryScreen() {
               onChangeText={(value) => setDraft((current) => ({ ...current, tags: value }))}
               style={styles.input}
               placeholder="developers, project, rules"
-              placeholderTextColor="#9b766c"
+              placeholderTextColor={theme.textMuted}
             />
 
             <Text style={styles.fieldLabel}>Priority</Text>
@@ -557,7 +548,7 @@ export default function AiMemoryScreen() {
               style={styles.input}
               keyboardType="numeric"
               placeholder="0"
-              placeholderTextColor="#9b766c"
+              placeholderTextColor={theme.textMuted}
             />
 
             <View style={styles.toggleRow}>
@@ -565,8 +556,8 @@ export default function AiMemoryScreen() {
               <Switch
                 value={draft.active}
                 onValueChange={(value) => setDraft((current) => ({ ...current, active: value }))}
-                trackColor={{ false: "#d7c0b6", true: "#d7a94f" }}
-                thumbColor={draft.active ? "#5f0909" : "#fffaf7"}
+                trackColor={{ false: theme.borderStrong, true: theme.accent }}
+                thumbColor={draft.active ? theme.primary : theme.surfaceRaised}
               />
             </View>
 
@@ -597,14 +588,15 @@ export default function AiMemoryScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
   },
   contentShell: {
     flex: 1,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
   centerState: {
     flex: 1,
@@ -617,7 +609,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 16,
     paddingVertical: 16,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     gap: 12,
   },
   iconButton: {
@@ -626,15 +618,15 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#7b1f17",
+    backgroundColor: c.primary,
   },
   headerTitle: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 21,
     fontWeight: "800",
   },
   headerSubtitle: {
-    color: "#f0d2c2",
+    color: c.borderStrong,
     marginTop: 2,
     fontSize: 12.5,
   },
@@ -644,7 +636,7 @@ const styles = StyleSheet.create({
     borderRadius: 21,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
   },
   statsRow: {
     flexDirection: "row",
@@ -654,32 +646,32 @@ const styles = StyleSheet.create({
   },
   statPill: {
     flex: 1,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 14,
     paddingVertical: 12,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
   },
   statPillActive: {
-    backgroundColor: "#5f0909",
-    borderColor: "#5f0909",
+    backgroundColor: c.primary,
+    borderColor: c.primary,
   },
   statValue: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 18,
     fontWeight: "800",
   },
   statValueActive: {
-    color: "#fffaf7",
+    color: c.surface,
   },
   statLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     marginTop: 2,
   },
   statLabelActive: {
-    color: "#f0d2c2",
+    color: c.borderStrong,
   },
   searchBox: {
     flexDirection: "row",
@@ -687,16 +679,16 @@ const styles = StyleSheet.create({
     gap: 8,
     marginHorizontal: 16,
     marginTop: 12,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     paddingHorizontal: 12,
     height: 42,
   },
   searchInput: {
     flex: 1,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     height: "100%",
   },
@@ -705,48 +697,48 @@ const styles = StyleSheet.create({
     paddingBottom: 36,
   },
   helperCard: {
-    backgroundColor: "#fff8f4",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     padding: 14,
     marginBottom: 14,
   },
   helperTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "800",
     marginBottom: 8,
   },
   helperText: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontSize: 13,
     lineHeight: 20,
   },
   emptyCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     padding: 28,
     alignItems: "center",
   },
   emptyTitle: {
     marginTop: 12,
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 18,
     fontWeight: "800",
   },
   emptyText: {
     marginTop: 8,
-    color: "#9b766c",
+    color: c.textMuted,
     textAlign: "center",
     lineHeight: 20,
   },
   memoryCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     padding: 14,
     marginBottom: 12,
   },
@@ -757,23 +749,23 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   scopeBadge: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 4,
   },
   scopeBadgeText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 11,
     fontWeight: "800",
   },
   priorityText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     fontWeight: "600",
   },
   memoryTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 16,
     fontWeight: "800",
   },
@@ -784,13 +776,13 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   memoryBody: {
-    color: "#68423b",
+    color: c.textSecondary,
     fontSize: 14,
     marginTop: 8,
     lineHeight: 21,
   },
   tagsText: {
-    color: "#c07a34",
+    color: c.accent,
     marginTop: 10,
     fontSize: 12,
     fontWeight: "600",
@@ -806,12 +798,12 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   cardActionText: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "700",
   },
   modalContainer: {
     flex: 1,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
   modalHeader: {
     flexDirection: "row",
@@ -820,10 +812,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#ead7cf",
+    borderBottomColor: c.borderStrong,
   },
   modalTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 20,
     fontWeight: "800",
   },
@@ -832,18 +824,18 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
   },
   fieldLabel: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "700",
     marginBottom: 8,
   },
   input: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     paddingHorizontal: 12,
     paddingVertical: 12,
-    color: "#4d1b17",
+    color: c.textPrimary,
     marginBottom: 14,
   },
   textArea: {
@@ -859,21 +851,21 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 10,
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
   },
   scopeSwitchActive: {
-    backgroundColor: "#5f0909",
-    borderColor: "#5f0909",
+    backgroundColor: c.primary,
+    borderColor: c.primary,
   },
   scopeSwitchText: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "700",
     textTransform: "capitalize",
   },
   scopeSwitchTextActive: {
-    color: "#fffaf7",
+    color: c.surface,
   },
   toggleRow: {
     flexDirection: "row",
@@ -882,14 +874,21 @@ const styles = StyleSheet.create({
     marginBottom: 22,
   },
   saveButton: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderRadius: 14,
     paddingVertical: 14,
     alignItems: "center",
   },
   saveButtonText: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 15,
     fontWeight: "800",
   },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

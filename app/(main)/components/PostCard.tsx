@@ -25,6 +25,8 @@ import {
     type CaptionSegment,
     type CaptionStatus,
 } from "@/utils/videoCaptions";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
@@ -34,7 +36,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Dimensions,
-    Linking,
     Modal,
     NativeScrollEvent,
     NativeSyntheticEvent,
@@ -56,6 +57,7 @@ import CommentModal from "../components/CommentModal";
 import ExpandableText from "../components/ExpandableText";
 import VideoPostMedia from "../components/VideoPostMedia";
 import ConfirmDialog from "./ConfirmDialog";
+import ExternalLinkDialog, { prepareExternalLink } from "./ExternalLinkDialog";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const AVATAR_COLUMN_WIDTH = 40;
@@ -212,6 +214,7 @@ const ActionToggleIcon = React.memo(function ActionToggleIcon({
   inactiveColor,
   withHaptic = false,
 }: ActionToggleIconProps) {
+  const { styles, theme } = useStyles();
   const scale = useSharedValue(1);
   const fill = useSharedValue(active ? 1 : 0);
   const IconSet = family === "ionicons" ? Ionicons : MaterialIcons;
@@ -289,6 +292,7 @@ const PostCard = React.memo<PostCardProps>(({
   compact = false,
   videoCardVisible,
 }) => {
+  const { styles, theme } = useStyles();
   const [showCommentsModal, setShowCommentsModal] = useState(false);
   const [showLikesModal, setShowLikesModal] = useState(false);
   const [authorData, setAuthorData] = useState<UserData | null>(null);
@@ -742,6 +746,7 @@ const LikeUserRow = React.memo(
     currentUserId?: string;
     onProfileClick: (userId?: string) => void;
   }) => {
+  const { styles, theme } = useStyles();
     const [user, setUser] = useState<UserData | null>(null);
 
     useEffect(() => {
@@ -788,6 +793,7 @@ const TaggedUsersDisplay = ({
   taggedUsers: TaggedUser[];
   onTagClick: (taggedUserId: string) => void;
 }) => {
+  const { styles, theme } = useStyles();
   const [expanded, setExpanded] = useState(false);
 
   const MAX_VISIBLE = 1;
@@ -846,6 +852,7 @@ const PostAvatar: React.FC<{
   currentUserId?: string;
   onProfileClick: (userId?: string) => void;
 }> = ({ post, authorData, authorLoading, currentUserId, onProfileClick }) => {
+  const { styles, theme } = useStyles();
   const authorRole = parseUserRole(authorData?.role) ?? parseUserRole(post.role);
   const roleColor = getRoleColor(authorRole || "student");
   const isIdentityVisible = !post.isAnonymous;
@@ -921,6 +928,7 @@ const PostHeader: React.FC<{
   onDelete,
   onEdit,
 }) => {
+  const { styles, theme } = useStyles();
   const [revealed, setRevealed] = useState(false);
   const [showPostActions, setShowPostActions] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
@@ -1403,6 +1411,7 @@ const FilesList: React.FC<{
   files: FileAttachment[];
   onFilePress: (url: string, mimeType: string) => void;
 }> = ({ files, onFilePress }) => {
+  const { styles, theme } = useStyles();
   const getFileNameFromUrl = (url: string) => {
     try {
       const parts = url.split("/");
@@ -1446,15 +1455,19 @@ const FilesList: React.FC<{
 const LinkPreview: React.FC<{ link: { url: string; title: string } }> = ({
   link,
 }) => {
+  const { styles, theme } = useStyles();
   const [linkError, setLinkError] = useState(false);
+  const [pendingLink, setPendingLink] =
+    useState<ReturnType<typeof prepareExternalLink>>(null);
 
   return (
     <>
       <TouchableOpacity
         style={styles.linkPreview}
-        onPress={() =>
-          Linking.openURL(link.url).catch(() => setLinkError(true))
-        }
+        // The title is typed by whoever wrote the post and is never checked
+        // against the destination, so "CSAP Enrollment Portal" can point
+        // anywhere. Passing it in lets the dialog say so when they disagree.
+        onPress={() => setPendingLink(prepareExternalLink(link.url, link.title))}
         activeOpacity={0.7}
       >
         <Ionicons name="link" size={14} color="#c28724" />
@@ -1478,23 +1491,38 @@ const LinkPreview: React.FC<{ link: { url: string; title: string } }> = ({
         onConfirm={() => setLinkError(false)}
         onCancel={() => setLinkError(false)}
       />
+      <ExternalLinkDialog link={pendingLink} onClose={() => setPendingLink(null)} />
     </>
   );
 };
 
-const styles = StyleSheet.create({
+/**
+ * The themed stylesheet for this component.
+ *
+ * Declared once because several memoised sub-components here render chrome,
+ * and each must read the palette itself — handing them a styles object as a
+ * prop would change its identity every render and defeat the memo.
+ */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   postCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     paddingVertical: 14,
     paddingHorizontal: FEED_HORIZONTAL_PADDING,
     borderBottomWidth: 1,
-    borderBottomColor: "#ead8cf",
+    borderBottomColor: c.border,
     overflow: "visible",
   },
   highlightedPostCard: {
     borderLeftWidth: 4,
-    borderLeftColor: "#a61f1f",
-    backgroundColor: "#fff4ee",
+    borderLeftColor: c.danger,
+    backgroundColor: c.surface,
   },
   // Trailing divider only makes sense in the vertical feed; the trending
   // scroller wraps each card in its own bordered container.
@@ -1509,24 +1537,24 @@ const styles = StyleSheet.create({
   avatarColumn: { width: AVATAR_COLUMN_WIDTH, marginRight: AVATAR_COLUMN_GAP },
   contentColumn: { flex: 1, overflow: "visible" },
 
-  postFlairBadge: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 5, marginTop: 5, marginBottom: 5, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, backgroundColor: "#f3ece8", borderWidth: 1, borderColor: "#e5d5cd" },
-  postFlairBadgeOfficial: { backgroundColor: "#fff1cf", borderColor: "#e6c36f" },
+  postFlairBadge: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 5, marginTop: 5, marginBottom: 5, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, backgroundColor: c.surfaceSunken, borderWidth: 1, borderColor: c.border },
+  postFlairBadgeOfficial: { backgroundColor: c.accentSoft, borderColor: c.accentSoft },
   postFlairEmoji: { fontSize: 12 },
-  postFlairText: { color: "#6d463c", fontSize: 11, fontWeight: "800" },
-  postFlairTextOfficial: { color: "#7a5411" },
+  postFlairText: { color: c.textSecondary, fontSize: 11, fontWeight: "800" },
+  postFlairTextOfficial: { color: c.accent },
   postContentContainer: { marginTop: 4, marginBottom: 8 },
-  postContent: { color: "#4f1c17", fontSize: 15, lineHeight: 21 },
+  postContent: { color: c.textPrimary, fontSize: 15, lineHeight: 21 },
   toggleContainer: { alignSelf: "flex-start", marginTop: 4 },
-  toggleText: { color: "#a61f1f", fontSize: 14, fontWeight: "600" },
+  toggleText: { color: c.danger, fontSize: 14, fontWeight: "600" },
 
   taggedBox: {
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 12,
     paddingVertical: 8,
     paddingHorizontal: 12,
     marginVertical: 8,
     borderWidth: 1,
-    borderColor: "#ecd2b0",
+    borderColor: c.accentSoft,
   },
   taggedContent: {
     flexDirection: "row",
@@ -1535,25 +1563,25 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   taggedLabel: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 13,
   },
   taggedName: {
-    color: "#a61f1f",
+    color: c.danger,
     fontWeight: "600",
     fontSize: 13.5,
   },
   taggedSeparator: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 13,
   },
   moreCount: {
-    color: "#c28724",
+    color: c.accent,
     fontWeight: "600",
     fontSize: 13.5,
   },
   showLessText: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 13,
     fontStyle: "italic",
   },
@@ -1565,19 +1593,19 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   actionButton: { padding: 4 },
-  reportActionText: { color: "#a61f1f" },
+  reportActionText: { color: c.danger },
   reportModalContainer: {
     width: "88%",
     maxHeight: "80%",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
     overflow: "hidden",
     paddingBottom: 8,
   },
   reportModalSubtitle: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 13,
     marginTop: 3,
   },
@@ -1587,20 +1615,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 13,
     borderTopWidth: 1,
-    borderTopColor: "#f0e3dc",
+    borderTopColor: c.border,
     gap: 12,
   },
   reportReasonIcon: {
     width: 34,
     height: 34,
     borderRadius: 17,
-    backgroundColor: "#fff0ec",
+    backgroundColor: c.surface,
     alignItems: "center",
     justifyContent: "center",
   },
   reportReasonText: {
     flex: 1,
-    color: "#4f1c17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "600",
   },
@@ -1612,7 +1640,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   reportSubmittingText: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 13,
   },
 
@@ -1622,8 +1650,8 @@ const styles = StyleSheet.create({
     gap: 14,
     marginTop: 4,
   },
-  statText: { color: "#8f6a60", fontSize: 13, fontWeight: "500" },
-  statLink: { color: "#a61f1f", fontSize: 13, fontWeight: "600" },
+  statText: { color: c.textMuted, fontSize: 13, fontWeight: "500" },
+  statLink: { color: c.danger, fontSize: 13, fontWeight: "600" },
 
   // Likes modal
   modalOverlay: {
@@ -1635,10 +1663,10 @@ const styles = StyleSheet.create({
   likesModalContainer: {
     width: "86%",
     maxHeight: "68%",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
     overflow: "hidden",
   },
   modalHeader: {
@@ -1648,9 +1676,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 14,
     borderBottomWidth: 1,
-    borderBottomColor: "#ead8cf",
+    borderBottomColor: c.border,
   },
-  modalTitle: { color: "#4f1c17", fontSize: 17, fontWeight: "700" },
+  modalTitle: { color: c.textPrimary, fontSize: 17, fontWeight: "700" },
   likesScroll: { paddingHorizontal: 12, paddingVertical: 8 },
   likeRow: {
     flexDirection: "row",
@@ -1662,17 +1690,17 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#f2dfd4",
+    backgroundColor: c.border,
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
   },
   likeAvatarImage: { width: "100%", height: "100%" },
-  likeAvatarText: { color: "#a61f1f", fontSize: 16, fontWeight: "bold" },
-  likeName: { color: "#4f1c17", fontSize: 15 },
-  youBadge: { color: "#8f6a60", fontSize: 13, fontStyle: "italic" },
+  likeAvatarText: { color: c.danger, fontSize: 16, fontWeight: "bold" },
+  likeName: { color: c.textPrimary, fontSize: 15 },
+  youBadge: { color: c.textMuted, fontSize: 13, fontStyle: "italic" },
   noLikesText: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 15,
     textAlign: "center",
     paddingVertical: 40,
@@ -1681,11 +1709,11 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#f2dfd4",
+    backgroundColor: c.border,
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1.5,
-    borderColor: "#e3c3b8",
+    borderColor: c.borderStrong,
     overflow: "hidden",
   },
   avatarImage: { width: "100%", height: "100%" },
@@ -1712,7 +1740,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   username: {
-    color: "#4f1c17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "700",
   },
@@ -1750,12 +1778,12 @@ const styles = StyleSheet.create({
   actionMenuContainer: {
     width: "100%",
     maxWidth: 360,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
     overflow: "hidden",
-    shadowColor: "#4f1c17",
+    shadowColor: c.textPrimary,
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.18,
     shadowRadius: 14,
@@ -1769,7 +1797,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
   },
   actionMenuTitle: {
-    color: "#4f1c17",
+    color: c.textPrimary,
     fontSize: 17,
     fontWeight: "700",
   },
@@ -1777,13 +1805,13 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 17,
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
     alignItems: "center",
     justifyContent: "center",
   },
   actionMenuDivider: {
     height: 1,
-    backgroundColor: "#ead8cf",
+    backgroundColor: c.border,
   },
   actionMenuItem: {
     minHeight: 52,
@@ -1797,21 +1825,21 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 10,
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
     alignItems: "center",
     justifyContent: "center",
   },
   actionMenuItemText: {
     flex: 1,
-    color: "#4f1c17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "600",
   },
   deleteActionIcon: {
-    backgroundColor: "#fbe9e5",
+    backgroundColor: c.dangerSoft,
   },
   deleteActionText: {
-    color: "#a61f1f",
+    color: c.danger,
   },
   cancelActionItem: {
     paddingBottom: 12,
@@ -1820,18 +1848,18 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    backgroundColor: "#8f3a2b",
+    backgroundColor: c.textSecondary,
     borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 5,
   },
   pinnedBadgeText: {
-    color: "#fffaf7",
+    color: c.onPrimary,
     fontSize: 10.5,
     fontWeight: "700",
   },
   timestamp: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 12.5,
     marginTop: 3,
     letterSpacing: -0.1,
@@ -1843,7 +1871,7 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
   },
   seeMoreText: {
-    color: "#a61f1f",
+    color: c.danger,
     fontSize: 14,
     fontWeight: "600",
   },
@@ -1857,7 +1885,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   taggedText: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 13,
   },
   carouselContainer: {
@@ -1887,7 +1915,7 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   activeDot: {
-    backgroundColor: "#ffffff",
+    backgroundColor: c.surfaceRaised,
     width: 8,
     height: 8,
     borderRadius: 4,
@@ -1913,35 +1941,35 @@ const styles = StyleSheet.create({
   fileCard: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
     padding: 10,
     borderRadius: 10,
     gap: 8,
     borderWidth: 1,
-    borderColor: "#ecd2b0",
+    borderColor: c.accentSoft,
   },
   fileName: {
     flex: 1,
-    color: "#4f1c17",
+    color: c.textPrimary,
     fontSize: 13,
   },
 
   linkPreview: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 10,
     padding: 10,
     marginVertical: 10,
     borderWidth: 1,
-    borderColor: "#ecd2b0",
+    borderColor: c.accentSoft,
   },
   linkTitle: {
-    color: "#4f1c17",
+    color: c.textPrimary,
     fontSize: 13,
   },
   linkUrl: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 11.5,
     marginTop: 1,
   },

@@ -1,3 +1,5 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import React, { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   FlatList,
@@ -23,6 +25,7 @@ import {
   onSnapshot,
   serverTimestamp,
   updateDoc,
+  writeBatch,
 } from "firebase/firestore";
 import { auth, db } from "../../Firebase_configure";
 import ConfirmDialog from "./components/ConfirmDialog";
@@ -60,6 +63,22 @@ type ReportRecord = {
   originalModerationModel?: string | null;
 };
 
+/**
+ * Every report filed against one piece of content, collapsed into a single
+ * row. Twelve students flagging the same post is one decision for a
+ * moderator, not twelve — and reading it twelve times is how the thirteenth,
+ * different report gets missed.
+ */
+type ReportGroup = {
+  key: string;
+  primary: ReportRecord;
+  reports: ReportRecord[];
+  /** Distinct reasons with their counts, most-cited first. */
+  reasons: { label: string; count: number }[];
+  reporterNames: string[];
+  pendingCount: number;
+};
+
 const FILTERS: { value: ReportFilter; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { value: "all", label: "All", icon: "apps-outline" },
   { value: "pending", label: "Pending", icon: "time-outline" },
@@ -92,6 +111,18 @@ function formatDate(value: any) {
   }
 }
 
+/** Sort key for a Firestore timestamp, Date, or millis number. 0 if absent. */
+function timestampMs(value: any): number {
+  if (!value) return 0;
+  try {
+    const date = value?.toDate ? value.toDate() : new Date(value);
+    const ms = date.getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+  } catch {
+    return 0;
+  }
+}
+
 function normalizeReason(reason: string) {
   return reason
     .replace(/[_-]/g, " ")
@@ -109,14 +140,14 @@ function getContentTypeLabel(type: string) {
   return labels[type] || type.replace(/[_-]/g, " ");
 }
 
-function getStatusMeta(status: ReportStatus) {
+function getStatusMeta(status: ReportStatus, theme: ThemeTokens) {
   if (status === "resolved") {
-    return { label: "Resolved", icon: "checkmark-circle" as const, color: "#2e8b57", bg: "#e9f6ee" };
+    return { label: "Resolved", icon: "checkmark-circle" as const, color: theme.success, bg: theme.successSoft };
   }
   if (status === "dismissed") {
-    return { label: "Dismissed", icon: "close-circle" as const, color: "#8f6a60", bg: "#f4eeea" };
+    return { label: "Dismissed", icon: "close-circle" as const, color: theme.textMuted, bg: theme.surfaceSunken };
   }
-  return { label: "Pending", icon: "time" as const, color: "#c27b16", bg: "#fff4dc" };
+  return { label: "Pending", icon: "time" as const, color: theme.warning, bg: theme.accentSoft };
 }
 
 // One report in the list. Memoized so a report whose details finish loading
@@ -124,15 +155,23 @@ function getStatusMeta(status: ReportStatus) {
 const ReportCard = memo(function ReportCard({
   report,
   isBusy,
+  duplicateCount,
+  reasons,
+  reporterNames,
   onOpen,
   onChangeStatus,
 }: {
   report: ReportRecord;
   isBusy: boolean;
+  /** How many reports this one row stands for. 1 means an ordinary report. */
+  duplicateCount: number;
+  reasons: { label: string; count: number }[];
+  reporterNames: string[];
   onOpen: (report: ReportRecord) => void;
   onChangeStatus: (report: ReportRecord, nextStatus: "resolved" | "dismissed" | "pending") => void;
 }) {
-  const status = getStatusMeta(report.status);
+  const { styles, theme } = useStyles();
+  const status = getStatusMeta(report.status, theme);
   return (
     <TouchableOpacity
       style={styles.reportCard}
@@ -141,23 +180,47 @@ const ReportCard = memo(function ReportCard({
     >
       <View style={styles.reportTopRow}>
         <View style={styles.typeBadge}>
-          <Ionicons name="flag-outline" size={14} color="#7b2a21" />
+          <Ionicons name="flag-outline" size={14} color={theme.danger} />
           <Text style={styles.typeBadgeText}>{getContentTypeLabel(report.contentType)}</Text>
         </View>
+        {duplicateCount > 1 && (
+          <View style={styles.duplicateBadge}>
+            <Ionicons name="layers-outline" size={13} color={theme.accent} />
+            <Text style={styles.duplicateBadgeText}>{duplicateCount} reports</Text>
+          </View>
+        )}
         <View style={[styles.statusBadge, { backgroundColor: status.bg }]}>
           <Ionicons name={status.icon} size={14} color={status.color} />
           <Text style={[styles.statusText, { color: status.color }]}>{status.label}</Text>
         </View>
       </View>
 
-      <Text style={styles.reportReason}>{normalizeReason(report.reason)}</Text>
+      {duplicateCount > 1 ? (
+        <View style={styles.reasonList}>
+          {reasons.map((entry) => (
+            <View key={entry.label} style={styles.reasonChip}>
+              <Text style={styles.reasonChipText}>{entry.label}</Text>
+              <Text style={styles.reasonChipCount}>{entry.count}</Text>
+            </View>
+          ))}
+        </View>
+      ) : (
+        <Text style={styles.reportReason}>{normalizeReason(report.reason)}</Text>
+      )}
+
       <Text style={styles.reportPreview} numberOfLines={3}>
         {report.contentText || "Loading content preview..."}
       </Text>
 
       <View style={styles.metaRow}>
-        <Text style={styles.metaText}>
-          Reported by {report.reporterName || report.reportedBy || "Unknown user"}
+        <Text style={styles.metaText} numberOfLines={1}>
+          {duplicateCount > 1
+            ? `Reported by ${reporterNames.slice(0, 2).join(", ")}${
+                reporterNames.length > 2
+                  ? ` and ${reporterNames.length - 2} other${reporterNames.length - 2 === 1 ? "" : "s"}`
+                  : ""
+              }`
+            : `Reported by ${report.reporterName || report.reportedBy || "Unknown user"}`}
         </Text>
         <Text style={styles.metaText}>{formatDate(report.createdAt)}</Text>
       </View>
@@ -172,7 +235,7 @@ const ReportCard = memo(function ReportCard({
               onChangeStatus(report, "dismissed");
             }}
           >
-            <Ionicons name="close-circle-outline" size={17} color="#7d5c53" />
+            <Ionicons name="close-circle-outline" size={17} color={theme.textSecondary} />
             <Text style={styles.dismissButtonText}>Dismiss</Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -183,7 +246,7 @@ const ReportCard = memo(function ReportCard({
               onChangeStatus(report, "resolved");
             }}
           >
-            <Ionicons name="checkmark-circle-outline" size={17} color="#fffaf7" />
+            <Ionicons name="checkmark-circle-outline" size={17} color={theme.onPrimary} />
             <Text style={styles.resolveButtonText}>Resolve</Text>
           </TouchableOpacity>
         </View>
@@ -193,6 +256,7 @@ const ReportCard = memo(function ReportCard({
 });
 
 export default function ReportManagementScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const [userRole, setUserRole] = useState<UserRole | undefined>();
   const [authLoading, setAuthLoading] = useState(true);
@@ -359,6 +423,65 @@ export default function ReportManagementScreen() {
     });
   }, [filter, reports, search]);
 
+  // Reports are grouped by the content they target. A report with no
+  // resolvable contentId cannot be matched to anything, so it stays its own
+  // row rather than being lumped into a meaningless bucket.
+  const reportGroups = useMemo<ReportGroup[]>(() => {
+    const groups = new Map<string, ReportRecord[]>();
+
+    filteredReports.forEach((report) => {
+      const key =
+        report.contentId && report.contentType
+          ? `${report.contentType}:${report.contentId}`
+          : `report:${report.id}`;
+      const existing = groups.get(key);
+      if (existing) existing.push(report);
+      else groups.set(key, [report]);
+    });
+
+    const built = Array.from(groups.entries()).map(([key, items]) => {
+      // Newest first inside a group, so the primary report carries the most
+      // recent context and the preview is the freshest snapshot.
+      const ordered = [...items].sort(
+        (a, b) => timestampMs(b.createdAt) - timestampMs(a.createdAt),
+      );
+
+      const reasonCounts = new Map<string, number>();
+      ordered.forEach((item) => {
+        const label = normalizeReason(item.reason);
+        reasonCounts.set(label, (reasonCounts.get(label) || 0) + 1);
+      });
+
+      const reporterNames = Array.from(
+        new Set(
+          ordered
+            .map((item) => item.reporterName || item.reportedBy)
+            .filter((name): name is string => !!name),
+        ),
+      );
+
+      return {
+        key,
+        primary: ordered[0],
+        reports: ordered,
+        reasons: Array.from(reasonCounts.entries())
+          .map(([label, count]) => ({ label, count }))
+          .sort((a, b) => b.count - a.count),
+        reporterNames,
+        pendingCount: ordered.filter((item) => item.status === "pending").length,
+      };
+    });
+
+    // Most-reported first: the post twelve people flagged is the one that
+    // should not be sitting three screens down a chronological list.
+    return built.sort((a, b) => {
+      if (b.reports.length !== a.reports.length) {
+        return b.reports.length - a.reports.length;
+      }
+      return timestampMs(b.primary.createdAt) - timestampMs(a.primary.createdAt);
+    });
+  }, [filteredReports]);
+
   const counts = useMemo(
     () => ({
       all: reports.length,
@@ -461,6 +584,34 @@ export default function ReportManagementScreen() {
         reviewedBy: currentUser.uid,
         reviewedAt: serverTimestamp(),
       });
+
+      // One decision closes every report filed against the same content.
+      // Only the report above records moderationFeedback and deletes the
+      // content; the rest are marked reviewed so they stop reappearing as
+      // separate work. Doing it the other way would file one training record
+      // per reporter and attempt the same delete a dozen times.
+      const siblings = reports.filter(
+        (candidate) =>
+          candidate.id !== report.id &&
+          candidate.status === "pending" &&
+          candidate.contentId &&
+          candidate.contentId === report.contentId &&
+          candidate.contentType === report.contentType,
+      );
+
+      if (siblings.length) {
+        const batch = writeBatch(db);
+        siblings.forEach((sibling) => {
+          batch.update(doc(db, "reports", sibling.id), {
+            status: nextStatus,
+            reviewedBy: currentUser.uid,
+            reviewedAt: serverTimestamp(),
+            resolvedWithReportId: report.id,
+          });
+        });
+        await batch.commit();
+      }
+
       setSelectedReport(null);
       setConfirm(null);
     } catch (error) {
@@ -506,10 +657,13 @@ export default function ReportManagementScreen() {
   }, []);
 
   const renderReport = useCallback(
-    ({ item }: { item: ReportRecord }) => (
+    ({ item }: { item: ReportGroup }) => (
       <ReportCard
-        report={item}
-        isBusy={busyReportId === item.id}
+        report={item.primary}
+        isBusy={busyReportId === item.primary.id}
+        duplicateCount={item.reports.length}
+        reasons={item.reasons}
+        reporterNames={item.reporterNames}
         onOpen={setSelectedReport}
         onChangeStatus={openStatusConfirm}
       />
@@ -544,7 +698,7 @@ export default function ReportManagementScreen() {
     <View style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()} activeOpacity={0.8}>
-          <Ionicons name="arrow-back" size={22} color="#fffaf7" />
+          <Ionicons name="arrow-back" size={22} color={theme.onPrimary} />
         </TouchableOpacity>
         <View style={styles.headerTextWrap}>
           <Text style={styles.headerTitle}>Reports Management</Text>
@@ -559,19 +713,19 @@ export default function ReportManagementScreen() {
       <FlatList
         style={styles.content}
         contentContainerStyle={styles.contentContainer}
-        data={filteredReports}
-        keyExtractor={(report) => report.id}
+        data={reportGroups}
+        keyExtractor={(group) => group.key}
         renderItem={renderReport}
         initialNumToRender={6}
         maxToRenderPerBatch={6}
         windowSize={7}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor="#e0a53d" />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={theme.accent} />}
         keyboardShouldPersistTaps="handled"
         ListHeaderComponent={
           <>
             <View style={styles.summaryCard}>
               <View style={styles.summaryIcon}>
-                <Ionicons name="flag" size={24} color="#e0a53d" />
+                <Ionicons name="flag" size={24} color={theme.accent} />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.summaryTitle}>Moderation Queue</Text>
@@ -591,7 +745,7 @@ export default function ReportManagementScreen() {
                     onPress={() => setFilter(item.value)}
                     activeOpacity={0.8}
                   >
-                    <Ionicons name={item.icon} size={16} color={active ? "#fffaf7" : "#7d5c53"} />
+                    <Ionicons name={item.icon} size={16} color={active ? theme.onPrimary : theme.textMuted} />
                     <Text style={[styles.filterText, active && styles.filterTextActive]}>
                       {item.label} {counts[item.value]}
                     </Text>
@@ -601,17 +755,17 @@ export default function ReportManagementScreen() {
             </View>
 
             <View style={styles.searchBox}>
-              <Ionicons name="search-outline" size={20} color="#9b766c" />
+              <Ionicons name="search-outline" size={20} color={theme.textSecondary} />
               <TextInput
                 value={search}
                 onChangeText={setSearch}
                 placeholder="Search reports, users, reasons..."
-                placeholderTextColor="#b99c93"
+                placeholderTextColor={theme.textMuted}
                 style={styles.searchInput}
               />
               {!!search && (
                 <TouchableOpacity onPress={() => setSearch("")}>
-                  <Ionicons name="close-circle" size={19} color="#9b766c" />
+                  <Ionicons name="close-circle" size={19} color={theme.textSecondary} />
                 </TouchableOpacity>
               )}
             </View>
@@ -620,7 +774,7 @@ export default function ReportManagementScreen() {
         ListEmptyComponent={
           <View style={styles.emptyCard}>
             <View style={styles.emptyIcon}>
-              <Ionicons name="checkmark-done-outline" size={34} color="#e0a53d" />
+              <Ionicons name="checkmark-done-outline" size={34} color={theme.accent} />
             </View>
             <Text style={styles.emptyTitle}>No reports found</Text>
             <Text style={styles.emptyText}>
@@ -639,19 +793,19 @@ export default function ReportManagementScreen() {
         <Pressable style={styles.modalBackdrop} onPress={() => setSelectedReport(null)}>
           <Pressable style={styles.detailCard} onPress={(event) => event.stopPropagation()}>
             {selectedReport && (() => {
-              const status = getStatusMeta(selectedReport.status);
+              const status = getStatusMeta(selectedReport.status, theme);
               return (
                 <>
                   <View style={styles.detailHeader}>
                     <View style={styles.detailIcon}>
-                      <Ionicons name="flag" size={24} color="#e0a53d" />
+                      <Ionicons name="flag" size={24} color={theme.accent} />
                     </View>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.detailTitle}>Report Details</Text>
                       <Text style={styles.detailSubtitle}>{getContentTypeLabel(selectedReport.contentType)}</Text>
                     </View>
                     <TouchableOpacity onPress={() => setSelectedReport(null)}>
-                      <Ionicons name="close" size={24} color="#7d5c53" />
+                      <Ionicons name="close" size={24} color={theme.textSecondary} />
                     </TouchableOpacity>
                   </View>
 
@@ -698,7 +852,7 @@ export default function ReportManagementScreen() {
                         onPress={() => openStatusConfirm(selectedReport, "dismissed")}
                         disabled={!!busyReportId}
                       >
-                        <Ionicons name="close-circle-outline" size={19} color="#7d5c53" />
+                        <Ionicons name="close-circle-outline" size={19} color={theme.textSecondary} />
                         <Text style={styles.detailDismissText}>Dismiss</Text>
                       </TouchableOpacity>
                       <TouchableOpacity
@@ -706,7 +860,7 @@ export default function ReportManagementScreen() {
                         onPress={() => openStatusConfirm(selectedReport, "resolved")}
                         disabled={!!busyReportId}
                       >
-                        <Ionicons name="checkmark-circle-outline" size={19} color="#fffaf7" />
+                        <Ionicons name="checkmark-circle-outline" size={19} color={theme.onPrimary} />
                         <Text style={styles.detailResolveText}>Resolve</Text>
                       </TouchableOpacity>
                     </View>
@@ -716,7 +870,7 @@ export default function ReportManagementScreen() {
                       onPress={() => openStatusConfirm(selectedReport, "pending")}
                       disabled={!!busyReportId}
                     >
-                      <Ionicons name="refresh-outline" size={19} color="#5f0909" />
+                      <Ionicons name="refresh-outline" size={19} color={theme.primary} />
                       <Text style={styles.reopenText}>Reopen Report</Text>
                     </TouchableOpacity>
                   )}
@@ -748,12 +902,13 @@ export default function ReportManagementScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f6f1ed" },
-  centered: { flex: 1, backgroundColor: "#5f0909", justifyContent: "center", alignItems: "center" },
-  loadingText: { color: "#f5e8df", marginTop: 10, fontSize: 14 },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.surfaceSunken },
+  centered: { flex: 1, backgroundColor: c.primary, justifyContent: "center", alignItems: "center" },
+  loadingText: { color: c.onPrimary, marginTop: 10, fontSize: 14 },
   header: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     paddingHorizontal: 16,
     paddingTop: 18,
     paddingBottom: 18,
@@ -770,15 +925,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   headerTextWrap: { flex: 1 },
-  headerTitle: { color: "#fffaf7", fontSize: 22, fontWeight: "800" },
-  headerSubtitle: { color: "#e7cdbf", fontSize: 12.5, marginTop: 3 },
+  headerTitle: { color: c.surface, fontSize: 22, fontWeight: "800" },
+  headerSubtitle: { color: c.onPrimary, fontSize: 12.5, marginTop: 3 },
   content: { flex: 1 },
   contentContainer: { padding: 16, paddingBottom: 100 },
   summaryCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#eadbd3",
+    borderColor: c.borderStrong,
     padding: 16,
     flexDirection: "row",
     alignItems: "center",
@@ -793,8 +948,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
   },
-  summaryTitle: { color: "#4d1b17", fontSize: 16, fontWeight: "800" },
-  summaryText: { color: "#9b766c", fontSize: 13, marginTop: 3, lineHeight: 18 },
+  summaryTitle: { color: c.textPrimary, fontSize: 16, fontWeight: "800" },
+  summaryText: { color: c.textMuted, fontSize: 13, marginTop: 3, lineHeight: 18 },
   filterRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 },
   filterChip: {
     flexDirection: "row",
@@ -803,18 +958,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 11,
     height: 38,
     borderRadius: 12,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#eadbd3",
+    borderColor: c.borderStrong,
   },
-  filterChipActive: { backgroundColor: "#5f0909", borderColor: "#5f0909" },
-  filterText: { color: "#7d5c53", fontSize: 12.5, fontWeight: "700" },
-  filterTextActive: { color: "#fffaf7" },
+  filterChipActive: { backgroundColor: c.primary, borderColor: c.primary },
+  filterText: { color: c.textMuted, fontSize: 12.5, fontWeight: "700" },
+  filterTextActive: { color: c.surface },
   searchBox: {
     minHeight: 48,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#eadbd3",
+    borderColor: c.borderStrong,
     borderRadius: 14,
     paddingHorizontal: 13,
     flexDirection: "row",
@@ -822,21 +977,21 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 14,
   },
-  searchInput: { flex: 1, color: "#4d1b17", fontSize: 14, paddingVertical: 8 },
+  searchInput: { flex: 1, color: c.textPrimary, fontSize: 14, paddingVertical: 8 },
   reportCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#eadbd3",
+    borderColor: c.borderStrong,
     padding: 15,
     marginBottom: 12,
   },
   skeletonContent: { padding: 16 },
   skeletonCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#eadbd3",
+    borderColor: c.borderStrong,
     padding: 16,
     marginBottom: 12,
   },
@@ -845,48 +1000,82 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 5,
-    backgroundColor: "#f8e9e3",
+    backgroundColor: c.surface,
     borderRadius: 9,
     paddingHorizontal: 9,
     paddingVertical: 6,
   },
-  typeBadgeText: { color: "#7b2a21", fontSize: 11.5, fontWeight: "800" },
+  typeBadgeText: { color: c.danger, fontSize: 11.5, fontWeight: "800" },
   statusBadge: { flexDirection: "row", alignItems: "center", gap: 5, borderRadius: 9, paddingHorizontal: 9, paddingVertical: 6 },
   statusText: { fontSize: 11.5, fontWeight: "800" },
-  reportReason: { color: "#4d1b17", fontSize: 16, fontWeight: "800", marginTop: 12 },
-  reportPreview: { color: "#745b53", fontSize: 13.5, lineHeight: 19, marginTop: 6 },
+  reportReason: { color: c.textPrimary, fontSize: 16, fontWeight: "800", marginTop: 12 },
+  duplicateBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: c.accentSoft,
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+  },
+  duplicateBadgeText: { color: c.primary, fontSize: 11.5, fontWeight: "900" },
+  reasonList: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginBottom: 6,
+  },
+  reasonChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: c.surface,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  reasonChipText: { color: c.danger, fontSize: 12, fontWeight: "800" },
+  reasonChipCount: { color: c.textMuted, fontSize: 11.5, fontWeight: "900" },
+  reportPreview: { color: c.textSecondary, fontSize: 13.5, lineHeight: 19, marginTop: 6 },
   metaRow: { marginTop: 12, flexDirection: "row", justifyContent: "space-between", gap: 8 },
-  metaText: { flex: 1, color: "#a0847a", fontSize: 10.5 },
+  metaText: { flex: 1, color: c.textMuted, fontSize: 10.5 },
   quickActions: { flexDirection: "row", gap: 8, marginTop: 13 },
-  dismissButton: { flex: 1, height: 40, borderRadius: 11, backgroundColor: "#f5efeb", borderWidth: 1, borderColor: "#eadbd3", justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 6 },
-  dismissButtonText: { color: "#7d5c53", fontSize: 13, fontWeight: "700" },
-  resolveButton: { flex: 1, height: 40, borderRadius: 11, backgroundColor: "#5f0909", justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 6 },
-  resolveButtonText: { color: "#fffaf7", fontSize: 13, fontWeight: "700" },
-  emptyCard: { backgroundColor: "#fffaf7", borderRadius: 18, borderWidth: 1, borderColor: "#eadbd3", padding: 30, alignItems: "center", marginTop: 8 },
+  dismissButton: { flex: 1, height: 40, borderRadius: 11, backgroundColor: c.surfaceSunken, borderWidth: 1, borderColor: c.borderStrong, justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 6 },
+  dismissButtonText: { color: c.textMuted, fontSize: 13, fontWeight: "700" },
+  resolveButton: { flex: 1, height: 40, borderRadius: 11, backgroundColor: c.primary, justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 6 },
+  resolveButtonText: { color: c.surface, fontSize: 13, fontWeight: "700" },
+  emptyCard: { backgroundColor: c.surface, borderRadius: 18, borderWidth: 1, borderColor: c.borderStrong, padding: 30, alignItems: "center", marginTop: 8 },
   emptyIcon: { width: 64, height: 64, borderRadius: 22, backgroundColor: "rgba(224,165,61,0.12)", justifyContent: "center", alignItems: "center" },
-  emptyTitle: { color: "#4d1b17", fontSize: 18, fontWeight: "800", marginTop: 13 },
-  emptyText: { color: "#9b766c", fontSize: 13, textAlign: "center", marginTop: 5, lineHeight: 19 },
+  emptyTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "800", marginTop: 13 },
+  emptyText: { color: c.textMuted, fontSize: 13, textAlign: "center", marginTop: 5, lineHeight: 19 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "center", paddingHorizontal: 18 },
-  detailCard: { maxHeight: "88%", backgroundColor: "#fffaf7", borderRadius: 22, borderWidth: 1, borderColor: "#eadbd3", padding: 18 },
+  detailCard: { maxHeight: "88%", backgroundColor: c.surface, borderRadius: 22, borderWidth: 1, borderColor: c.borderStrong, padding: 18 },
   detailHeader: { flexDirection: "row", alignItems: "center", gap: 11 },
   detailScroll: { flexShrink: 1 },
   detailScrollContent: { paddingBottom: 4 },
   detailIcon: { width: 46, height: 46, borderRadius: 15, backgroundColor: "rgba(224,165,61,0.14)", justifyContent: "center", alignItems: "center" },
-  detailTitle: { color: "#4d1b17", fontSize: 18, fontWeight: "800" },
-  detailSubtitle: { color: "#9b766c", fontSize: 12, marginTop: 2 },
+  detailTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "800" },
+  detailSubtitle: { color: c.textMuted, fontSize: 12, marginTop: 2 },
   statusLarge: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 10, marginTop: 15 },
   statusLargeText: { fontSize: 12, fontWeight: "800" },
-  detailLabel: { color: "#9b766c", fontSize: 11, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.6, marginTop: 15, marginBottom: 4 },
-  detailValue: { color: "#4d1b17", fontSize: 14, lineHeight: 19 },
-  contentPreviewCard: { backgroundColor: "#f8eee8", borderRadius: 14, borderWidth: 1, borderColor: "#ecd9ce", padding: 12 },
-  contentAuthor: { color: "#5f0909", fontSize: 13, fontWeight: "800", marginBottom: 5 },
-  contentPreviewText: { color: "#5f514c", fontSize: 13.5, lineHeight: 19 },
-  deletedHint: { color: "#a86f66", fontSize: 11.5, marginTop: 8, fontStyle: "italic" },
+  detailLabel: { color: c.textMuted, fontSize: 11, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.6, marginTop: 15, marginBottom: 4 },
+  detailValue: { color: c.textPrimary, fontSize: 14, lineHeight: 19 },
+  contentPreviewCard: { backgroundColor: c.surfaceSunken, borderRadius: 14, borderWidth: 1, borderColor: c.borderStrong, padding: 12 },
+  contentAuthor: { color: c.primary, fontSize: 13, fontWeight: "800", marginBottom: 5 },
+  contentPreviewText: { color: c.textSecondary, fontSize: 13.5, lineHeight: 19 },
+  deletedHint: { color: c.textMuted, fontSize: 11.5, marginTop: 8, fontStyle: "italic" },
   detailActions: { flexDirection: "row", gap: 9, marginTop: 20 },
-  detailDismissButton: { flex: 1, height: 45, borderRadius: 12, backgroundColor: "#f5efeb", borderWidth: 1, borderColor: "#eadbd3", justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 6 },
-  detailDismissText: { color: "#7d5c53", fontSize: 14, fontWeight: "700" },
-  detailResolveButton: { flex: 1, height: 45, borderRadius: 12, backgroundColor: "#5f0909", justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 6 },
-  detailResolveText: { color: "#fffaf7", fontSize: 14, fontWeight: "700" },
-  reopenButton: { height: 45, borderRadius: 12, backgroundColor: "#f4e5bf", justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 7, marginTop: 20 },
-  reopenText: { color: "#5f0909", fontSize: 14, fontWeight: "800" },
+  detailDismissButton: { flex: 1, height: 45, borderRadius: 12, backgroundColor: c.surfaceSunken, borderWidth: 1, borderColor: c.borderStrong, justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 6 },
+  detailDismissText: { color: c.textMuted, fontSize: 14, fontWeight: "700" },
+  detailResolveButton: { flex: 1, height: 45, borderRadius: 12, backgroundColor: c.primary, justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 6 },
+  detailResolveText: { color: c.surface, fontSize: 14, fontWeight: "700" },
+  reopenButton: { height: 45, borderRadius: 12, backgroundColor: c.accentSoft, justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 7, marginTop: 20 },
+  reopenText: { color: c.primary, fontSize: 14, fontWeight: "800" },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

@@ -12,8 +12,11 @@
 //  - Every handler passed down is useCallback-stable.
 //  - The one animation (the selection bar) runs on the native driver.
 //  - The editor lives in a separate Modal, so typing never re-renders the list.
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { CAMPUS_KNOWLEDGE_INDEX } from "@/utils/campusKnowledgeIndex";
-import { isAdmin, resolveUserRoleForAuthUser, type UserRole } from "@/utils/rbac";
+import { isAdmin } from "@/utils/rbac";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
@@ -26,13 +29,7 @@ import {
     updateDoc,
     writeBatch,
 } from "firebase/firestore";
-import React, {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-} from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Animated,
@@ -107,6 +104,7 @@ const FaqRow = React.memo(
     onToggle,
     onLongPress,
   }: RowProps) {
+    const { styles, theme } = useStyles();
     const handlePress = useCallback(() => {
       if (selectionMode) onToggle(id);
       else onOpen(id);
@@ -127,7 +125,7 @@ const FaqRow = React.memo(
             style={[styles.checkbox, isSelected && styles.checkboxOn]}
           >
             {isSelected && (
-              <Ionicons name="checkmark" size={15} color="#fffaf6" />
+              <Ionicons name="checkmark" size={15} color={theme.onPrimary} />
             )}
           </View>
         )}
@@ -143,7 +141,7 @@ const FaqRow = React.memo(
           </Text>
         </View>
         {!selectionMode && (
-          <Ionicons name="chevron-forward" size={18} color="#c2a79d" />
+          <Ionicons name="chevron-forward" size={18} color={theme.textMuted} />
         )}
       </TouchableOpacity>
     );
@@ -162,9 +160,11 @@ const FaqRow = React.memo(
 // ---------------------------------------------------------------------------
 
 export default function ManageCampusFaqScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const [loading, setLoading] = useState(true);
-  const [role, setRole] = useState<UserRole | undefined>(undefined);
+  // Live, so losing admin access closes this screen without a reopen.
+  const role = useCurrentUserRole();
   const [entries, setEntries] = useState<FaqRecord[]>([]);
   const [search, setSearch] = useState("");
 
@@ -190,27 +190,22 @@ export default function ManageCampusFaqScreen() {
 
   // --- auth gate ---------------------------------------------------------
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setLoading(false);
       if (!user) {
-        setLoading(false);
         router.replace("/(main)/(tabs)/HomeScreen");
-        return;
-      }
-      try {
-        const nextRole = await resolveUserRoleForAuthUser(user);
-        setRole(nextRole);
-        if (!isAdmin(nextRole)) {
-          router.replace("/(main)/(tabs)/DashboardScreen");
-        }
-      } catch (error) {
-        console.error("Error loading manage-campus-faq role:", error);
-        router.replace("/(main)/(tabs)/DashboardScreen");
-      } finally {
-        setLoading(false);
       }
     });
     return unsubscribe;
   }, [router]);
+
+  // The role is tracked live above. undefined means it has not resolved yet,
+  // which must not trigger a redirect.
+  useEffect(() => {
+    if (role !== undefined && !isAdmin(role)) {
+      router.replace("/(main)/(tabs)/DashboardScreen");
+    }
+  }, [role, router]);
 
   // --- live data -------------------------------------------------------
   useEffect(() => {
@@ -524,7 +519,7 @@ export default function ManageCampusFaqScreen() {
           <Ionicons
             name={selectionMode ? "close" : "arrow-back"}
             size={21}
-            color="#fffaf6"
+            color={theme.onPrimary}
           />
         </TouchableOpacity>
         <View style={styles.topBarCopy}>
@@ -547,7 +542,7 @@ export default function ManageCampusFaqScreen() {
           <Ionicons
             name={selectionMode ? "checkmark-done" : "checkbox-outline"}
             size={20}
-            color="#5f0909"
+            color={theme.primary}
           />
         </TouchableOpacity>
       </View>
@@ -578,7 +573,7 @@ export default function ManageCampusFaqScreen() {
             <Ionicons
               name={allVisibleSelected ? "checkbox" : "square-outline"}
               size={18}
-              color="#5f0909"
+              color={theme.primary}
             />
             <Text style={styles.selectionActionText}>
               {allVisibleSelected ? "Clear all" : "Select all"}
@@ -593,7 +588,7 @@ export default function ManageCampusFaqScreen() {
             disabled={selectedCount === 0}
             activeOpacity={0.85}
           >
-            <Ionicons name="trash-outline" size={17} color="#fffaf6" />
+            <Ionicons name="trash-outline" size={17} color={theme.onPrimary} />
             <Text style={styles.selectionDeleteText}>
               Delete{selectedCount > 0 ? ` ${selectedCount}` : ""}
             </Text>
@@ -620,7 +615,7 @@ export default function ManageCampusFaqScreen() {
           <View>
             <View style={styles.heroCard}>
               <View style={styles.heroIcon}>
-                <Ionicons name="book-outline" size={26} color="#d39a32" />
+                <Ionicons name="book-outline" size={26} color={theme.accent} />
               </View>
               <View style={styles.heroCopy}>
                 <Text style={styles.heroTitle}>Campus FAQ library</Text>
@@ -644,12 +639,12 @@ export default function ManageCampusFaqScreen() {
             </View>
 
             <View style={styles.searchShell}>
-              <Ionicons name="search" size={18} color="#8c6d65" />
+              <Ionicons name="search" size={18} color={theme.textSecondary} />
               <TextInput
                 value={search}
                 onChangeText={setSearch}
                 placeholder="Search questions and answers"
-                placeholderTextColor="#b89a91"
+                placeholderTextColor={theme.textMuted}
                 style={styles.searchInput}
                 autoCapitalize="none"
                 returnKeyType="search"
@@ -659,7 +654,7 @@ export default function ManageCampusFaqScreen() {
                   onPress={() => setSearch("")}
                   hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 >
-                  <Ionicons name="close-circle" size={18} color="#b89a91" />
+                  <Ionicons name="close-circle" size={18} color={theme.textMuted} />
                 </TouchableOpacity>
               )}
             </View>
@@ -670,7 +665,7 @@ export default function ManageCampusFaqScreen() {
                   <Ionicons
                     name="cloud-download-outline"
                     size={20}
-                    color="#8a5a10"
+                    color={theme.accent}
                   />
                 </View>
                 <View style={styles.importCopy}>
@@ -702,7 +697,7 @@ export default function ManageCampusFaqScreen() {
             <Ionicons
               name={search.trim() ? "search-outline" : "book-outline"}
               size={40}
-              color="#cbb0a6"
+              color={theme.textMuted}
             />
             <Text style={styles.emptyTitle}>
               {search.trim() ? "Nothing matches that search" : "No FAQ answers yet"}
@@ -718,7 +713,7 @@ export default function ManageCampusFaqScreen() {
                 onPress={openCreate}
                 activeOpacity={0.85}
               >
-                <Ionicons name="add" size={18} color="#5f0909" />
+                <Ionicons name="add" size={18} color={theme.primary} />
                 <Text style={styles.emptyCtaText}>Add an answer</Text>
               </TouchableOpacity>
             )}
@@ -741,7 +736,7 @@ export default function ManageCampusFaqScreen() {
           accessibilityRole="button"
           accessibilityLabel="Add FAQ entry"
         >
-          <Ionicons name="add" size={26} color="#fffaf6" />
+          <Ionicons name="add" size={26} color={theme.onPrimary} />
         </TouchableOpacity>
       </Animated.View>
 
@@ -769,7 +764,7 @@ export default function ManageCampusFaqScreen() {
                 hitSlop={8}
                 accessibilityRole="button"
               >
-                <Ionicons name="close" size={20} color="#7a3b2e" />
+                <Ionicons name="close" size={20} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -789,7 +784,7 @@ export default function ManageCampusFaqScreen() {
                 value={draftQuestion}
                 onChangeText={setDraftQuestion}
                 placeholder="Phrase it the way a student would ask"
-                placeholderTextColor="#b89a91"
+                placeholderTextColor={theme.textMuted}
                 style={styles.inputQuestion}
                 multiline
               />
@@ -811,7 +806,7 @@ export default function ManageCampusFaqScreen() {
                 value={draftAnswer}
                 onChangeText={setDraftAnswer}
                 placeholder="The assistant will give this wording exactly"
-                placeholderTextColor="#b89a91"
+                placeholderTextColor={theme.textMuted}
                 style={styles.inputAnswer}
                 multiline
                 textAlignVertical="top"
@@ -820,7 +815,7 @@ export default function ManageCampusFaqScreen() {
 
             {editorError && (
               <View style={styles.editorErrorRow}>
-                <Ionicons name="alert-circle" size={15} color="#a5271f" />
+                <Ionicons name="alert-circle" size={15} color={theme.danger} />
                 <Text style={styles.editorErrorText}>{editorError}</Text>
               </View>
             )}
@@ -841,7 +836,7 @@ export default function ManageCampusFaqScreen() {
                 activeOpacity={0.88}
               >
                 {saving ? (
-                  <ActivityIndicator color="#fffaf6" size="small" />
+                  <ActivityIndicator color={theme.onPrimary} size="small" />
                 ) : (
                   <Text style={styles.editorSaveText}>Save entry</Text>
                 )}
@@ -892,16 +887,17 @@ export default function ManageCampusFaqScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#5f0909" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: c.primary },
   loadingState: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f8f3ef",
+    backgroundColor: c.surfaceSunken,
     gap: 12,
   },
-  loadingText: { color: "#87685f", fontSize: 13, fontWeight: "600" },
+  loadingText: { color: c.textMuted, fontSize: 13, fontWeight: "600" },
 
   topBar: {
     minHeight: 66,
@@ -909,9 +905,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderBottomWidth: 1,
-    borderBottomColor: "#7e2724",
+    borderBottomColor: c.primary,
   },
   iconBtnDark: {
     width: 40,
@@ -927,7 +923,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#e2aa45",
+    backgroundColor: c.accent,
   },
   iconBtnGoldOff: { opacity: 0.45 },
   iconBtnLight: {
@@ -936,17 +932,17 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f5e9e3",
+    backgroundColor: c.surfaceSunken,
   },
   topBarCopy: { flex: 1 },
   topBarEyebrow: {
-    color: "#d9b27a",
+    color: c.accent,
     fontSize: 10,
     fontWeight: "900",
     letterSpacing: 1.1,
   },
   topBarTitle: {
-    color: "#fffaf6",
+    color: c.background,
     fontSize: 21,
     fontWeight: "900",
     marginTop: 2,
@@ -958,9 +954,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingHorizontal: 16,
     paddingVertical: 10,
-    backgroundColor: "#fbefd9",
+    backgroundColor: c.accentSoft,
     borderBottomWidth: 1,
-    borderBottomColor: "#efdcc0",
+    borderBottomColor: c.accent,
   },
   selectionAction: {
     flexDirection: "row",
@@ -969,20 +965,20 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     paddingHorizontal: 4,
   },
-  selectionActionText: { color: "#5f0909", fontSize: 13, fontWeight: "800" },
+  selectionActionText: { color: c.primary, fontSize: 13, fontWeight: "800" },
   selectionDelete: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    backgroundColor: "#a5271f",
+    backgroundColor: c.primary,
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 12,
   },
-  selectionDeleteOff: { backgroundColor: "#d3b3af" },
-  selectionDeleteText: { color: "#fffaf6", fontSize: 13, fontWeight: "800" },
+  selectionDeleteOff: { backgroundColor: c.borderStrong },
+  selectionDeleteText: { color: c.background, fontSize: 13, fontWeight: "800" },
 
-  list: { flex: 1, backgroundColor: "#f8f3ef" },
+  list: { flex: 1, backgroundColor: c.surfaceSunken },
   listContent: {
     padding: 16,
     paddingBottom: 140,
@@ -994,23 +990,23 @@ const styles = StyleSheet.create({
     gap: 14,
     padding: 16,
     borderRadius: 20,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#ead8ce",
+    borderColor: c.borderStrong,
     marginBottom: 14,
   },
   heroIcon: {
     width: 48,
     height: 48,
     borderRadius: 16,
-    backgroundColor: "#f7ead4",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
   },
   heroCopy: { flex: 1 },
-  heroTitle: { color: "#4c1b14", fontSize: 17, fontWeight: "900" },
+  heroTitle: { color: c.textPrimary, fontSize: 17, fontWeight: "900" },
   heroText: {
-    color: "#87685f",
+    color: c.textMuted,
     fontSize: 12.5,
     lineHeight: 19,
     marginTop: 5,
@@ -1023,16 +1019,16 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     paddingHorizontal: 2,
   },
-  summaryText: { color: "#6f4a40", fontSize: 12.5, fontWeight: "800" },
-  summaryMuted: { color: "#9b776d", fontSize: 12, fontWeight: "700" },
+  summaryText: { color: c.textSecondary, fontSize: 12.5, fontWeight: "800" },
+  summaryMuted: { color: c.textMuted, fontSize: 12, fontWeight: "700" },
 
   searchShell: {
     flexDirection: "row",
     alignItems: "center",
     gap: 9,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#e8d6cc",
+    borderColor: c.borderStrong,
     borderRadius: 14,
     paddingHorizontal: 13,
     paddingVertical: Platform.OS === "ios" ? 12 : 4,
@@ -1040,7 +1036,7 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    color: "#4c1b14",
+    color: c.textPrimary,
     fontSize: 14,
     padding: 0,
   },
@@ -1049,9 +1045,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#fff4e0",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#f0d9b3",
+    borderColor: c.accent,
     borderRadius: 16,
     padding: 13,
     marginBottom: 14,
@@ -1060,34 +1056,34 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 13,
-    backgroundColor: "#fbe7c6",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
   },
   importCopy: { flex: 1 },
-  importTitle: { color: "#6b3f13", fontSize: 13, fontWeight: "800" },
+  importTitle: { color: c.accent, fontSize: 13, fontWeight: "800" },
   importText: {
-    color: "#93704a",
+    color: c.textSecondary,
     fontSize: 11.5,
     lineHeight: 16,
     marginTop: 3,
   },
   importBtn: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 9,
   },
-  importBtnText: { color: "#fffaf6", fontSize: 12.5, fontWeight: "800" },
+  importBtnText: { color: c.background, fontSize: 12.5, fontWeight: "800" },
 
-  skeletonContent: { flex: 1, backgroundColor: "#f8f3ef", padding: 16 },
+  skeletonContent: { flex: 1, backgroundColor: c.surfaceSunken, padding: 16 },
   skeletonCard: {
     height: 108,
     marginBottom: 10,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ece0d9",
+    borderColor: c.border,
     paddingHorizontal: 14,
     paddingVertical: 12,
   },
@@ -1097,27 +1093,27 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#ece0d9",
+    borderColor: c.border,
     paddingHorizontal: 14,
     paddingVertical: 12,
   },
   cardSelected: {
-    borderColor: "#e2aa45",
-    backgroundColor: "#fff6e9",
+    borderColor: c.accent,
+    backgroundColor: c.surface,
   },
   cardBody: { flex: 1 },
-  cardQuestion: { color: "#4c1b14", fontSize: 14.5, fontWeight: "800" },
+  cardQuestion: { color: c.textPrimary, fontSize: 14.5, fontWeight: "800" },
   cardAnswer: {
-    color: "#7c6058",
+    color: c.textSecondary,
     fontSize: 12.5,
     lineHeight: 17,
     marginTop: 3,
   },
   cardMeta: {
-    color: "#a98f86",
+    color: c.textMuted,
     fontSize: 11,
     fontWeight: "600",
     marginTop: 5,
@@ -1127,13 +1123,13 @@ const styles = StyleSheet.create({
     height: 24,
     borderRadius: 8,
     borderWidth: 2,
-    borderColor: "#d8bfb6",
+    borderColor: c.borderStrong,
     alignItems: "center",
     justifyContent: "center",
   },
   checkboxOn: {
-    backgroundColor: "#5f0909",
-    borderColor: "#5f0909",
+    backgroundColor: c.primary,
+    borderColor: c.primary,
   },
 
   emptyState: {
@@ -1143,13 +1139,13 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   emptyTitle: {
-    color: "#4c1b14",
+    color: c.textPrimary,
     fontSize: 16,
     fontWeight: "900",
     marginTop: 4,
   },
   emptyText: {
-    color: "#87685f",
+    color: c.textMuted,
     fontSize: 13,
     lineHeight: 19,
     textAlign: "center",
@@ -1158,13 +1154,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    backgroundColor: "#e2aa45",
+    backgroundColor: c.accent,
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 13,
     marginTop: 10,
   },
-  emptyCtaText: { color: "#5f0909", fontSize: 13, fontWeight: "800" },
+  emptyCtaText: { color: c.primary, fontSize: 13, fontWeight: "800" },
 
   fabWrap: {
     position: "absolute",
@@ -1175,7 +1171,7 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 20,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#3a0606",
@@ -1192,7 +1188,7 @@ const styles = StyleSheet.create({
   },
   editorBackdrop: { ...StyleSheet.absoluteFill },
   editorSheet: {
-    backgroundColor: "#f8f3ef",
+    backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingHorizontal: 18,
@@ -1204,7 +1200,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: "#d8c7bf",
+    backgroundColor: c.borderStrong,
     marginBottom: 10,
   },
   editorHeader: {
@@ -1213,7 +1209,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginBottom: 14,
   },
-  editorTitle: { color: "#4c1b14", fontSize: 18, fontWeight: "900" },
+  editorTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "900" },
   field: { marginBottom: 14 },
   fieldLabelRow: {
     flexDirection: "row",
@@ -1222,33 +1218,33 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   fieldLabel: {
-    color: "#6f4a40",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "900",
     letterSpacing: 0.4,
     textTransform: "uppercase",
   },
-  counter: { color: "#a98f86", fontSize: 11, fontWeight: "700" },
-  counterOver: { color: "#a5271f" },
+  counter: { color: c.textMuted, fontSize: 11, fontWeight: "700" },
+  counterOver: { color: c.danger },
   inputQuestion: {
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#e8d6cc",
+    borderColor: c.borderStrong,
     borderRadius: 13,
     paddingHorizontal: 13,
     paddingVertical: 11,
-    color: "#4c1b14",
+    color: c.textPrimary,
     fontSize: 14,
     minHeight: 52,
   },
   inputAnswer: {
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#e8d6cc",
+    borderColor: c.borderStrong,
     borderRadius: 13,
     paddingHorizontal: 13,
     paddingVertical: 11,
-    color: "#4c1b14",
+    color: c.textPrimary,
     fontSize: 14,
     minHeight: 128,
     lineHeight: 20,
@@ -1259,25 +1255,32 @@ const styles = StyleSheet.create({
     gap: 6,
     marginBottom: 12,
   },
-  editorErrorText: { color: "#a5271f", fontSize: 12.5, fontWeight: "700", flex: 1 },
+  editorErrorText: { color: c.danger, fontSize: 12.5, fontWeight: "700", flex: 1 },
   editorButtons: { flexDirection: "row", gap: 10, marginTop: 2 },
   editorCancel: {
     flex: 1,
     borderRadius: 13,
     paddingVertical: 13,
     alignItems: "center",
-    backgroundColor: "#f0e4dd",
+    backgroundColor: c.surfaceSunken,
   },
-  editorCancelText: { color: "#7a3b2e", fontSize: 14, fontWeight: "800" },
+  editorCancelText: { color: c.textSecondary, fontSize: 14, fontWeight: "800" },
   editorSave: {
     flex: 1.4,
     borderRadius: 13,
     paddingVertical: 13,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
   },
-  editorSaveOff: { backgroundColor: "#c2a79d" },
-  editorSaveText: { color: "#fffaf6", fontSize: 14, fontWeight: "800" },
+  editorSaveOff: { backgroundColor: c.borderStrong },
+  editorSaveText: { color: c.background, fontSize: 14, fontWeight: "800" },
 
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

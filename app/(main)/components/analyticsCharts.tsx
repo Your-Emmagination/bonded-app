@@ -3,6 +3,9 @@
 // data loading, and each source is either getCountFromServer (a snapshot) or
 // the dailyStats rollup (a trend). Charts render via react-native-gifted-charts
 // (line/bar/donut) over react-native-svg + expo-linear-gradient.
+import { useMemo } from "react";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Dimensions, StyleSheet, Text, View } from "react-native";
 import { BarChart, LineChart, PieChart } from "react-native-gifted-charts";
 
@@ -26,6 +29,7 @@ export type LinePoint = { value: number; label?: string };
 export type NamedValue = { label: string; value: number };
 
 function EmptyChart({ note }: { note: string }) {
+  const { styles } = useStyles();
   return (
     <View style={styles.emptyBox}>
       <Text style={styles.emptyText}>{note}</Text>
@@ -41,6 +45,7 @@ export function DailyActiveUsersLine({
   data: LinePoint[];
   rangeDays: number;
 }) {
+  const { styles, theme } = useStyles();
   if (!data.some((point) => point.value > 0)) {
     return <EmptyChart note="No rollup data for this range yet." />;
   }
@@ -55,15 +60,15 @@ export function DailyActiveUsersLine({
         width={CHART_WIDTH}
         height={170}
         thickness={2.5}
-        color="#356a59"
+        color={theme.success}
         areaChart
         curved
-        startFillColor="#356a59"
-        endFillColor="#356a59"
+        startFillColor={theme.success}
+        endFillColor={theme.success}
         startOpacity={0.18}
         endOpacity={0.02}
         hideDataPoints={rangeDays > 10}
-        dataPointsColor="#356a59"
+        dataPointsColor={theme.success}
         dataPointsRadius={3}
         initialSpacing={12}
         endSpacing={8}
@@ -71,8 +76,8 @@ export function DailyActiveUsersLine({
         noOfSections={4}
         maxValue={Math.ceil(maxValue * 1.15)}
         yAxisThickness={0}
-        xAxisColor="#e5d4cc"
-        rulesColor="#efe1da"
+        xAxisColor={theme.onPrimary}
+        rulesColor={theme.onPrimary}
         yAxisTextStyle={styles.axisText}
         xAxisLabelTextStyle={styles.axisTextSmall}
       />
@@ -90,6 +95,7 @@ export function CategoryBar({
   color?: string;
   emptyNote?: string;
 }) {
+  const { styles, theme } = useStyles();
   const rows = data.filter((row) => row.value > 0);
   if (rows.length === 0) return <EmptyChart note={emptyNote} />;
 
@@ -111,8 +117,8 @@ export function CategoryBar({
         noOfSections={3}
         maxValue={Math.ceil(maxValue * 1.15)}
         yAxisThickness={0}
-        xAxisColor="#e5d4cc"
-        rulesColor="#efe1da"
+        xAxisColor={theme.onPrimary}
+        rulesColor={theme.onPrimary}
         yAxisLabelWidth={84}
         yAxisTextStyle={styles.axisTextSmall}
         xAxisLabelTextStyle={styles.axisTextSmall}
@@ -130,6 +136,7 @@ export function DistributionDonut({
   data: NamedValue[];
   emptyNote?: string;
 }) {
+  const { styles, theme } = useStyles();
   const rows = data
     .map((row, index) => ({
       ...row,
@@ -147,7 +154,7 @@ export function DistributionDonut({
         radius={64}
         innerRadius={40}
         data={rows.map((row) => ({ value: row.value, color: row.color }))}
-        innerCircleColor="#fffaf6"
+        innerCircleColor={theme.onPrimary}
         centerLabelComponent={() => (
           <View style={styles.donutCenter}>
             <Text style={styles.donutCenterValue}>{total}</Text>
@@ -172,15 +179,16 @@ export function DistributionDonut({
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   chartClip: { overflow: "hidden", marginTop: 6 },
-  axisText: { color: "#98766d", fontSize: 10 },
-  axisTextSmall: { color: "#98766d", fontSize: 9.5 },
+  axisText: { color: c.textMuted, fontSize: 10 },
+  axisTextSmall: { color: c.textMuted, fontSize: 9.5 },
   emptyBox: {
     paddingVertical: 26,
     alignItems: "center",
   },
-  emptyText: { color: "#a08a82", fontSize: 12, fontStyle: "italic" },
+  emptyText: { color: c.textMuted, fontSize: 12, fontStyle: "italic" },
   donutRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -188,15 +196,22 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   donutCenter: { alignItems: "center" },
-  donutCenterValue: { color: "#4c1b14", fontSize: 18, fontWeight: "900" },
-  donutCenterLabel: { color: "#98766d", fontSize: 10 },
+  donutCenterValue: { color: c.textPrimary, fontSize: 18, fontWeight: "900" },
+  donutCenterLabel: { color: c.textMuted, fontSize: 10 },
   legend: { flex: 1, gap: 7 },
   legendRow: { flexDirection: "row", alignItems: "center", gap: 7 },
   legendSwatch: { width: 11, height: 11, borderRadius: 3 },
-  legendLabel: { flex: 1, color: "#4c1b14", fontSize: 12, fontWeight: "600" },
-  legendValue: { color: "#8a6a60", fontSize: 11, fontWeight: "700" },
+  legendLabel: { flex: 1, color: c.textPrimary, fontSize: 12, fontWeight: "600" },
+  legendValue: { color: c.textMuted, fontSize: 11, fontWeight: "700" },
 });
 
 export default function AnalyticsChartsRoutePlaceholder() {
   return null;
 }
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

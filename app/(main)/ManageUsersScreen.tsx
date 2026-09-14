@@ -1,4 +1,6 @@
 // app/(main)/ManageUsersScreen.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import { onSurface, type ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
@@ -31,6 +33,7 @@ import {
 } from "react-native";
 import { Image } from "expo-image";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import AlumniBadge from "./components/AlumniBadge";
 import ConfirmDialog from "./components/ConfirmDialog";
 import { ListSkeleton } from "./components/Skeleton";
 import { auth, db } from "../../Firebase_configure";
@@ -42,17 +45,12 @@ import {
   getRoleDisplayName,
   getRoleHierarchyLevel,
   parseUserRole,
-  resolveUserRoleForAuthUser,
   type UserRole,
 } from "@/utils/rbac";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
+import { isAlumni, isPromotableRole, YEAR_LEVELS } from "@/utils/yearLevels";
 
-const YEAR_LEVEL_OPTIONS = [
-  "1st Year",
-  "2nd Year",
-  "3rd Year",
-  "4th Year",
-  "Graduated",
-];
+const YEAR_LEVEL_OPTIONS = YEAR_LEVELS;
 
 // Fix 2: the students listener is bounded to this many rows and grown by
 // "Load more" (same single-tier limit pattern as ManageModerationScreen's
@@ -66,7 +64,8 @@ type ManagedUserFilter =
   | "admin"
   | "teacher"
   | "moderator"
-  | "student";
+  | "student"
+  | "alumni";
 
 type ManagedUserRecord = {
   id: string;
@@ -80,6 +79,12 @@ type ManagedUserRecord = {
   role?: string;
   isOnline?: boolean;
   profileImage?: string | null;
+  /**
+   * Excludes this account from the scheduled year level promotion — for a
+   * student repeating a year while everyone else moves up. See
+   * YearPromotionScreen and runYearLevelPromotions in functions/index.js.
+   */
+  promotionHold?: boolean;
 };
 
 // Mirrors the `programs` collection shape used by the registration program
@@ -109,6 +114,9 @@ const FILTERS: {
   { value: "teacher", label: "Teachers", icon: "school-outline" },
   { value: "moderator", label: "Moderators", icon: "shield-outline" },
   { value: "student", label: "Students", icon: "people-outline" },
+  // Graduates are still students by role, so without their own chip the
+  // Students filter and the Students metric would disagree about who counts.
+  { value: "alumni", label: "Alumni", icon: "ribbon-outline" },
 ];
 
 const ROLE_OPTIONS: {
@@ -143,14 +151,15 @@ function getMeta(user: ManagedUserRecord) {
   );
 }
 
-function getRoleColor(role: string | null) {
+function getRoleColor(role: string | null, tokens?: ThemeTokens) {
   const colors: Record<string, string> = {
     admin: "#8f1d2c",
     teacher: "#b86b1d",
     moderator: "#6e4aa3",
     student: "#356a59",
   };
-  return colors[role || ""] || "#356a59";
+  const picked = colors[role || ""] || "#356a59";
+  return tokens ? onSurface(picked, tokens) : picked;
 }
 
 // Fix 2: extracted from the inline .map() and memoized so a students-collection
@@ -169,6 +178,7 @@ type UserRowProps = {
   onOpenEdit: (user: ManagedUserRecord) => void;
   onChangeYear: (user: ManagedUserRecord, year: string) => void;
   onChangeRole: (user: ManagedUserRecord, role: UserRole) => void;
+  onTogglePromotionHold: (user: ManagedUserRecord) => void;
 };
 
 function UserRowComponent({
@@ -182,7 +192,9 @@ function UserRowComponent({
   onOpenEdit,
   onChangeYear,
   onChangeRole,
+  onTogglePromotionHold,
 }: UserRowProps) {
+  const { styles, theme } = useStyles();
   const normalizedRole = parseUserRole(user.role) || "student";
 
   return (
@@ -211,7 +223,7 @@ function UserRowComponent({
             <View
               style={[
                 styles.presenceDot,
-                { backgroundColor: user.isOnline ? "#2e8b68" : "#c7aaa0" },
+                { backgroundColor: user.isOnline ? "#2e8b68" : theme.textMuted },
               ]}
             />
           </View>
@@ -228,7 +240,7 @@ function UserRowComponent({
               )}
               {isRecentlyUpdated && (
                 <View style={styles.updatedBadge}>
-                  <Ionicons name="checkmark-circle" size={11} color="#8a5a10" />
+                  <Ionicons name="checkmark-circle" size={11} color={theme.accent} />
                   <Text style={styles.updatedBadgeText}>Updated</Text>
                 </View>
               )}
@@ -240,18 +252,19 @@ function UserRowComponent({
               <View
                 style={[
                   styles.roleBadge,
-                  { backgroundColor: getRoleColor(normalizedRole) + "14" },
+                  { backgroundColor: getRoleColor(normalizedRole, theme) + "14" },
                 ]}
               >
                 <Text
                   style={[
                     styles.roleBadgeText,
-                    { color: getRoleColor(normalizedRole) },
+                    { color: getRoleColor(normalizedRole, theme) },
                   ]}
                 >
                   {getRoleDisplayName(normalizedRole)}
                 </Text>
               </View>
+              <AlumniBadge yearlvl={user.yearlvl} />
               <Text style={styles.statusText}>
                 {user.isOnline ? "Online now" : "Offline"}
               </Text>
@@ -261,7 +274,7 @@ function UserRowComponent({
         <Ionicons
           name={expanded ? "chevron-up" : "chevron-down"}
           size={18}
-          color="#7a3b2e"
+          color={theme.textSecondary}
         />
       </TouchableOpacity>
 
@@ -270,9 +283,9 @@ function UserRowComponent({
         onPress={() => onOpenProfile(user)}
         activeOpacity={0.82}
       >
-        <Ionicons name="person-circle-outline" size={17} color="#8a5a10" />
+        <Ionicons name="person-circle-outline" size={17} color={theme.accent} />
         <Text style={styles.openProfileText}>Open profile</Text>
-        <Ionicons name="arrow-forward" size={15} color="#8a5a10" />
+        <Ionicons name="arrow-forward" size={15} color={theme.accent} />
       </TouchableOpacity>
 
       {expanded && (
@@ -287,7 +300,7 @@ function UserRowComponent({
             disabled={busy}
             activeOpacity={0.82}
           >
-            <Ionicons name="create-outline" size={15} color="#8a5a10" />
+            <Ionicons name="create-outline" size={15} color={theme.accent} />
             <Text style={styles.editDetailsText}>Edit name, email &amp; program</Text>
           </TouchableOpacity>
 
@@ -314,7 +327,7 @@ function UserRowComponent({
                   <Ionicons
                     name="school-outline"
                     size={15}
-                    color={selected ? "#fffaf6" : "#5f0909"}
+                    color={selected ? theme.onPrimary : theme.primary}
                   />
                   <Text
                     style={[
@@ -328,6 +341,56 @@ function UserRowComponent({
               );
             })}
           </View>
+
+          {/* Only students climb the ladder, so the hold is meaningless on a
+              staff account and would just be a switch that does nothing. */}
+          {isPromotableRole(user.role) && (
+            <TouchableOpacity
+              style={[
+                styles.holdRow,
+                user.promotionHold && styles.holdRowActive,
+              ]}
+              onPress={() => onTogglePromotionHold(user)}
+              disabled={busy}
+              activeOpacity={0.84}
+            >
+              <Ionicons
+                name={user.promotionHold ? "pause-circle" : "pause-circle-outline"}
+                size={19}
+                color={user.promotionHold ? theme.danger : theme.textMuted}
+              />
+              <View style={styles.holdCopy}>
+                <Text
+                  style={[
+                    styles.holdTitle,
+                    user.promotionHold && styles.holdTitleActive,
+                  ]}
+                >
+                  {user.promotionHold
+                    ? "Held back from promotion"
+                    : "Hold back from promotion"}
+                </Text>
+                <Text style={styles.holdHelp}>
+                  {user.promotionHold
+                    ? "Scheduled promotions skip this student. You can still change the year level by hand."
+                    : "Use this for a student repeating the year."}
+                </Text>
+              </View>
+              <View
+                style={[
+                  styles.holdSwitch,
+                  user.promotionHold && styles.holdSwitchOn,
+                ]}
+              >
+                <View
+                  style={[
+                    styles.holdKnob,
+                    user.promotionHold && styles.holdKnobOn,
+                  ]}
+                />
+              </View>
+            </TouchableOpacity>
+          )}
 
           <View style={styles.divider} />
 
@@ -352,7 +415,7 @@ function UserRowComponent({
                   <Ionicons
                     name={roleOption.icon}
                     size={15}
-                    color={selected ? "#fffaf6" : getRoleColor(roleOption.value)}
+                    color={selected ? theme.onPrimary : getRoleColor(roleOption.value, theme)}
                   />
                   <Text
                     style={[
@@ -369,7 +432,7 @@ function UserRowComponent({
 
           {busy ? (
             <View style={styles.busyRow}>
-              <ActivityIndicator size="small" color="#8f3a2b" />
+              <ActivityIndicator size="small" color={theme.textSecondary} />
               <Text style={styles.busyText}>Updating account…</Text>
             </View>
           ) : (
@@ -387,11 +450,14 @@ function UserRowComponent({
 const UserRow = React.memo(UserRowComponent);
 
 export default function ManageUsersScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const flatListRef = useRef<FlatList<ManagedUserRecord>>(null);
   const [loading, setLoading] = useState(true);
-  const [role, setRole] = useState<UserRole | undefined>(undefined);
+  // Live, so an account that loses user-management access is turned out of
+  // this screen rather than keeping it open.
+  const role = useCurrentUserRole();
   const [users, setUsers] = useState<ManagedUserRecord[]>([]);
   const [usersLoading, setUsersLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -412,6 +478,7 @@ export default function ManageUsersScreen() {
     teacher: 0,
     moderator: 0,
     student: 0,
+    alumni: 0,
   });
 
   // Managed program catalog — the same `programs` collection the registration
@@ -492,29 +559,24 @@ export default function ManageUsersScreen() {
   const currentStudentDocId = auth.currentUser?.email?.split("@")[0] || null;
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setLoading(false);
       if (!user) {
-        setLoading(false);
         router.replace("/(main)/(tabs)/HomeScreen");
-        return;
-      }
-
-      try {
-        const nextRole = await resolveUserRoleForAuthUser(user);
-        setRole(nextRole);
-        if (!canManageUsers(nextRole)) {
-          router.replace("/(main)/(tabs)/DashboardScreen");
-        }
-      } catch (error) {
-        console.error("Error loading manage-users role:", error);
-        router.replace("/(main)/(tabs)/DashboardScreen");
-      } finally {
-        setLoading(false);
       }
     });
 
     return unsubscribe;
   }, [router]);
+
+  // The role is tracked live above, so losing access closes this screen
+  // straight away. undefined means it has not resolved yet, which must not
+  // trigger a redirect.
+  useEffect(() => {
+    if (role !== undefined && !canManageUsers(role)) {
+      router.replace("/(main)/(tabs)/DashboardScreen");
+    }
+  }, [role, router]);
 
   useEffect(() => {
     if (!canManage || !auth.currentUser) {
@@ -546,6 +608,7 @@ export default function ManageUsersScreen() {
               role: data.role || "student",
               isOnline: data.isOnline === true,
               profileImage: data.profileImage || null,
+              promotionHold: data.promotionHold === true,
             };
           }),
         );
@@ -591,16 +654,22 @@ export default function ManageUsersScreen() {
     if (!canManage || !auth.currentUser) return;
     try {
       const students = collection(db, "students");
-      const [all, online, admin, teacher, moderator] = await Promise.all([
+      const [all, online, admin, teacher, moderator, alumni] = await Promise.all([
         getCountFromServer(students),
         getCountFromServer(query(students, where("isOnline", "==", true))),
         getCountFromServer(query(students, where("role", "==", "admin"))),
         getCountFromServer(query(students, where("role", "==", "teacher"))),
         getCountFromServer(query(students, where("role", "==", "moderator"))),
+        // Filtered on yearlvl alone so it stays a single-field query needing
+        // no deployed composite index. Only students and student-moderators
+        // are ever promoted to Graduated, so staff cannot land in this count
+        // unless an administrator sets a teacher's year level by hand.
+        getCountFromServer(query(students, where("yearlvl", "==", "Graduated"))),
       ]);
       const allCount = all.data().count;
       const staffCount =
         admin.data().count + teacher.data().count + moderator.data().count;
+      const alumniCount = alumni.data().count;
       setRoleCounts({
         all: allCount,
         online: online.data().count,
@@ -608,8 +677,10 @@ export default function ManageUsersScreen() {
         teacher: teacher.data().count,
         moderator: moderator.data().count,
         // Anyone who isn't admin/teacher/moderator (covers "student" plus any
-        // legacy role value), matching the old client-side derivation.
-        student: Math.max(0, allCount - staffCount),
+        // legacy role value), minus those who have already graduated — so the
+        // student body does not quietly grow by a class every June.
+        student: Math.max(0, allCount - staffCount - alumniCount),
+        alumni: alumniCount,
       });
     } catch (error) {
       console.error("Error loading user counts:", error);
@@ -638,12 +709,19 @@ export default function ManageUsersScreen() {
     return [...users]
       .filter((item) => {
         const normalizedRole = parseUserRole(item.role) || "student";
+        const alumni = isAlumni(item.yearlvl);
         const isCurrentlyActive =
           item.id === expandedId || item.id === recentlyUpdatedId;
+        // Alumni are matched by year level rather than role, and are held out
+        // of Students, so the chip counts agree with the metric cards above.
         const matchesFilter =
           filter === "all" ||
           (filter === "online" && item.isOnline === true) ||
-          normalizedRole === filter ||
+          (filter === "alumni" && alumni) ||
+          (filter === "student" && normalizedRole === "student" && !alumni) ||
+          (filter !== "student" &&
+            filter !== "alumni" &&
+            normalizedRole === filter) ||
           isCurrentlyActive;
 
         if (!matchesFilter) return false;
@@ -757,6 +835,41 @@ export default function ManageUsersScreen() {
           } catch (error) {
             console.error("Error updating year level:", error);
             showInfo("Error", "Failed to update year level.");
+          } finally {
+            setBusyId(null);
+          }
+        },
+      });
+    },
+    [canManage],
+  );
+
+  const togglePromotionHold = useCallback(
+    (managedUser: ManagedUserRecord) => {
+      if (!canManage) return;
+
+      const nextHold = managedUser.promotionHold !== true;
+
+      showConfirm({
+        title: nextHold ? "Hold back this student?" : "Remove the hold?",
+        description: nextHold
+          ? `${getName(managedUser)} will be skipped by scheduled year level promotions until you remove the hold.`
+          : `${getName(managedUser)} will be included in scheduled year level promotions again.`,
+        confirmText: nextHold ? "Hold back" : "Remove hold",
+        cancelText: "Cancel",
+        destructive: false,
+        onConfirm: async () => {
+          try {
+            setBusyId(managedUser.id);
+            await updateDoc(doc(db, "students", managedUser.id), {
+              promotionHold: nextHold,
+              updatedAt: serverTimestamp(),
+            });
+            setRecentlyUpdatedId(managedUser.id);
+            setExpandedId(managedUser.id);
+          } catch (error) {
+            console.error("Error updating promotion hold:", error);
+            showInfo("Error", "Failed to update the promotion hold.");
           } finally {
             setBusyId(null);
           }
@@ -982,6 +1095,7 @@ export default function ManageUsersScreen() {
           onOpenEdit={openEditProfile}
           onChangeYear={changeYearLevel}
           onChangeRole={changeRole}
+          onTogglePromotionHold={togglePromotionHold}
         />
       );
     },
@@ -993,6 +1107,7 @@ export default function ManageUsersScreen() {
       expandedId,
       openEditProfile,
       openProfile,
+      togglePromotionHold,
       recentlyUpdatedId,
       toggleExpand,
     ],
@@ -1016,7 +1131,7 @@ export default function ManageUsersScreen() {
           onPress={() => router.back()}
           activeOpacity={0.8}
         >
-          <Ionicons name="arrow-back" size={21} color="#fffaf6" />
+          <Ionicons name="arrow-back" size={21} color={theme.onPrimary} />
         </TouchableOpacity>
         <View style={styles.topBarCopy}>
           <Text style={styles.topBarEyebrow}>ADMIN WORKSPACE</Text>
@@ -1027,7 +1142,7 @@ export default function ManageUsersScreen() {
           onPress={() => router.push("/AdminRegisterUserScreen")}
           activeOpacity={0.82}
         >
-          <Ionicons name="person-add" size={20} color="#5f0909" />
+          <Ionicons name="person-add" size={20} color={theme.primary} />
         </TouchableOpacity>
       </View>
 
@@ -1060,6 +1175,8 @@ export default function ManageUsersScreen() {
             shownCount={filteredUsers.length}
             loadedCount={users.length}
             onRegister={() => router.push("/AdminRegisterUserScreen")}
+            onOpenPromotion={() => router.push("/YearPromotionScreen")}
+            canPromote={role === "admin"}
           />
         }
         ListEmptyComponent={
@@ -1068,7 +1185,7 @@ export default function ManageUsersScreen() {
           ) : (
             <View style={styles.emptyCard}>
               <View style={styles.emptyIcon}>
-                <Ionicons name="search-outline" size={28} color="#8f6a60" />
+                <Ionicons name="search-outline" size={28} color={theme.textSecondary} />
               </View>
               <Text style={styles.emptyTitle}>No users matched</Text>
               <Text style={styles.emptyText}>
@@ -1086,13 +1203,13 @@ export default function ManageUsersScreen() {
               activeOpacity={0.85}
             >
               {loadingMore ? (
-                <ActivityIndicator size="small" color="#5f0909" />
+                <ActivityIndicator size="small" color={theme.primary} />
               ) : (
                 <>
                   <Ionicons
                     name="chevron-down-circle-outline"
                     size={17}
-                    color="#5f0909"
+                    color={theme.primary}
                   />
                   <Text style={styles.loadMoreButtonText}>Load more</Text>
                 </>
@@ -1152,7 +1269,7 @@ export default function ManageUsersScreen() {
                 disabled={savingEdit}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
-                <Ionicons name="close" size={20} color="#7a3b2e" />
+                <Ionicons name="close" size={20} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -1172,7 +1289,7 @@ export default function ManageUsersScreen() {
                       setEditError("");
                     }}
                     placeholder="Juan"
-                    placeholderTextColor="#b88f87"
+                    placeholderTextColor={theme.textMuted}
                     style={styles.editInput}
                   />
                 </View>
@@ -1185,7 +1302,7 @@ export default function ManageUsersScreen() {
                       setEditError("");
                     }}
                     placeholder="Dela Cruz"
-                    placeholderTextColor="#b88f87"
+                    placeholderTextColor={theme.textMuted}
                     style={styles.editInput}
                   />
                 </View>
@@ -1201,7 +1318,7 @@ export default function ManageUsersScreen() {
                   setEditError("");
                 }}
                 placeholder="Optional email (e.g. name@student.csap)"
-                placeholderTextColor="#b88f87"
+                placeholderTextColor={theme.textMuted}
                 style={styles.editInput}
                 autoCapitalize="none"
                 keyboardType="email-address"
@@ -1219,7 +1336,7 @@ export default function ManageUsersScreen() {
                 accessibilityRole="button"
                 accessibilityLabel="Choose program"
               >
-                <Ionicons name="school-outline" size={18} color="#9b766c" />
+                <Ionicons name="school-outline" size={18} color={theme.textSecondary} />
                 <Text
                   style={
                     editCourse
@@ -1240,25 +1357,25 @@ export default function ManageUsersScreen() {
                     }}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   >
-                    <Ionicons name="close-circle" size={17} color="#b89a91" />
+                    <Ionicons name="close-circle" size={17} color={theme.textMuted} />
                   </TouchableOpacity>
                 )}
                 <Ionicons
                   name={editProgramPickerOpen ? "chevron-up" : "chevron-down"}
                   size={19}
-                  color="#7a3b2e"
+                  color={theme.textSecondary}
                 />
               </TouchableOpacity>
 
               {editProgramPickerOpen && (
                 <View style={styles.editDropdown}>
                   <View style={styles.dropdownSearchShell}>
-                    <Ionicons name="search-outline" size={15} color="#9b766c" />
+                    <Ionicons name="search-outline" size={15} color={theme.textSecondary} />
                     <TextInput
                       value={editProgramSearch}
                       onChangeText={setEditProgramSearch}
                       placeholder="Search by program name or code…"
-                      placeholderTextColor="#b88f87"
+                      placeholderTextColor={theme.textMuted}
                       style={styles.dropdownSearchInput}
                       autoCapitalize="none"
                     />
@@ -1267,7 +1384,7 @@ export default function ManageUsersScreen() {
                         onPress={() => setEditProgramSearch("")}
                         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                       >
-                        <Ionicons name="close-circle" size={15} color="#b89a91" />
+                        <Ionicons name="close-circle" size={15} color={theme.textMuted} />
                       </TouchableOpacity>
                     )}
                   </View>
@@ -1325,7 +1442,7 @@ export default function ManageUsersScreen() {
                               <Ionicons
                                 name="checkmark-circle"
                                 size={19}
-                                color="#8a5a10"
+                                color={theme.accent}
                               />
                             )}
                           </TouchableOpacity>
@@ -1354,7 +1471,7 @@ export default function ManageUsersScreen() {
                   activeOpacity={0.85}
                 >
                   {savingEdit ? (
-                    <ActivityIndicator size="small" color="#fffaf6" />
+                    <ActivityIndicator size="small" color={theme.onPrimary} />
                   ) : (
                     <Text style={styles.editSaveText}>Review &amp; save</Text>
                   )}
@@ -1385,12 +1502,16 @@ function MetricCard({
   value,
   icon,
   color,
+  sublabel,
 }: {
   label: string;
   value: number;
   icon: keyof typeof Ionicons.glyphMap;
   color: string;
+  /** Secondary count shown under the label, e.g. "+ 87 alumni". */
+  sublabel?: string;
 }) {
+  const { styles } = useStyles();
   return (
     <View style={styles.metricCard}>
       <View style={[styles.metricIcon, { backgroundColor: color + "12" }]}>
@@ -1398,6 +1519,7 @@ function MetricCard({
       </View>
       <Text style={styles.metricValue}>{value}</Text>
       <Text style={styles.metricLabel}>{label}</Text>
+      {!!sublabel && <Text style={styles.metricSublabel}>{sublabel}</Text>}
     </View>
   );
 }
@@ -1415,6 +1537,8 @@ type ManageUsersListHeaderProps = {
   shownCount: number;
   loadedCount: number;
   onRegister: () => void;
+  onOpenPromotion: () => void;
+  canPromote: boolean;
 };
 
 function ManageUsersListHeader({
@@ -1426,12 +1550,15 @@ function ManageUsersListHeader({
   shownCount,
   loadedCount,
   onRegister,
+  onOpenPromotion,
+  canPromote,
 }: ManageUsersListHeaderProps) {
+  const { styles, theme } = useStyles();
   return (
     <View>
       <View style={styles.heroCard}>
         <View style={styles.heroIcon}>
-          <Ionicons name="people-circle-outline" size={30} color="#d39a32" />
+          <Ionicons name="people-circle-outline" size={30} color={theme.accent} />
         </View>
         <View style={styles.heroCopy}>
           <Text style={styles.heroTitle}>Campus user control</Text>
@@ -1443,15 +1570,21 @@ function ManageUsersListHeader({
       </View>
 
       <View style={styles.metricGrid}>
-        <MetricCard label="Total" value={counts.all} icon="people" color="#5f0909" />
-        <MetricCard label="Online" value={counts.online} icon="ellipse" color="#2e8b68" />
+        <MetricCard label="Total" value={counts.all} icon="people" color={theme.primary} />
+        <MetricCard label="Online" value={counts.online} icon="ellipse" color={theme.success} />
         <MetricCard
           label="Staff"
           value={counts.admin + counts.teacher + counts.moderator}
           icon="shield-checkmark"
-          color="#b86b1d"
+          color={theme.accent}
         />
-        <MetricCard label="Students" value={counts.student} icon="school" color="#6e4aa3" />
+        <MetricCard
+          label="Students"
+          value={counts.student}
+          icon="school"
+          color="#6e4aa3"
+          sublabel={counts.alumni ? `+ ${counts.alumni} alumni` : undefined}
+        />
       </View>
 
       <TouchableOpacity
@@ -1460,7 +1593,7 @@ function ManageUsersListHeader({
         activeOpacity={0.84}
       >
         <View style={styles.registerIcon}>
-          <Ionicons name="person-add-outline" size={19} color="#8a5a10" />
+          <Ionicons name="person-add-outline" size={19} color={theme.accent} />
         </View>
         <View style={styles.registerCopy}>
           <Text style={styles.registerTitle}>Register users</Text>
@@ -1468,17 +1601,36 @@ function ManageUsersListHeader({
             Add one account or import your campus CSV.
           </Text>
         </View>
-        <Ionicons name="chevron-forward" size={19} color="#9b776d" />
+        <Ionicons name="chevron-forward" size={19} color={theme.textSecondary} />
       </TouchableOpacity>
+
+      {canPromote && (
+        <TouchableOpacity
+          style={styles.registerCard}
+          onPress={onOpenPromotion}
+          activeOpacity={0.84}
+        >
+          <View style={styles.registerIcon}>
+            <Ionicons name="school-outline" size={19} color={theme.accent} />
+          </View>
+          <View style={styles.registerCopy}>
+            <Text style={styles.registerTitle}>Year level promotion</Text>
+            <Text style={styles.registerText}>
+              Move every student up a year on a date you choose.
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={19} color={theme.textSecondary} />
+        </TouchableOpacity>
+      )}
 
       <View style={styles.controlsCard}>
         <View style={styles.searchShell}>
-          <Ionicons name="search" size={18} color="#8c6d65" />
+          <Ionicons name="search" size={18} color={theme.textSecondary} />
           <TextInput
             value={search}
             onChangeText={onSearchChange}
             placeholder="Search name, ID, email, course, or role"
-            placeholderTextColor="#b89a91"
+            placeholderTextColor={theme.textMuted}
             style={styles.searchInput}
             autoCapitalize="none"
           />
@@ -1487,7 +1639,7 @@ function ManageUsersListHeader({
               onPress={() => onSearchChange("")}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
-              <Ionicons name="close-circle" size={19} color="#b89a91" />
+              <Ionicons name="close-circle" size={19} color={theme.textMuted} />
             </TouchableOpacity>
           )}
         </View>
@@ -1510,7 +1662,7 @@ function ManageUsersListHeader({
                 <Ionicons
                   name={item.icon}
                   size={14}
-                  color={selected ? "#fffaf6" : "#7a3b2e"}
+                  color={selected ? theme.onPrimary : theme.textSecondary}
                 />
                 <Text
                   style={[styles.filterText, selected && styles.filterTextSelected]}
@@ -1545,23 +1697,24 @@ function ManageUsersListHeader({
             Showing {shownCount} of {loadedCount}
           </Text>
         </View>
-        <Ionicons name="options-outline" size={20} color="#8f6a60" />
+        <Ionicons name="options-outline" size={20} color={theme.textSecondary} />
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#5f0909" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: c.primary },
   topBar: {
     minHeight: 66,
     paddingHorizontal: 16,
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderBottomWidth: 1,
-    borderBottomColor: "#7e2724",
+    borderBottomColor: c.primary,
   },
   backButton: {
     width: 40,
@@ -1573,13 +1726,13 @@ const styles = StyleSheet.create({
   },
   topBarCopy: { flex: 1 },
   topBarEyebrow: {
-    color: "#d9b27a",
+    color: c.accent,
     fontSize: 10,
     fontWeight: "900",
     letterSpacing: 1.1,
   },
   topBarTitle: {
-    color: "#fffaf6",
+    color: c.background,
     fontSize: 22,
     fontWeight: "900",
     marginTop: 2,
@@ -1590,32 +1743,32 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#e2aa45",
+    backgroundColor: c.accent,
   },
-  body: { flex: 1, backgroundColor: "#f8f3ef" },
+  body: { flex: 1, backgroundColor: c.surfaceSunken },
   content: { padding: 16, paddingBottom: 80 },
   heroCard: {
     flexDirection: "row",
     gap: 14,
     padding: 18,
     borderRadius: 22,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#ead8ce",
+    borderColor: c.borderStrong,
     marginBottom: 14,
   },
   heroIcon: {
     width: 52,
     height: 52,
     borderRadius: 18,
-    backgroundColor: "#f7ead4",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
   },
   heroCopy: { flex: 1 },
-  heroTitle: { color: "#4c1b14", fontSize: 18, fontWeight: "900" },
+  heroTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "900" },
   heroText: {
-    color: "#87685f",
+    color: c.textMuted,
     fontSize: 12.5,
     lineHeight: 19,
     marginTop: 5,
@@ -1629,10 +1782,10 @@ const styles = StyleSheet.create({
   metricCard: {
     width: "48%",
     flexGrow: 1,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 17,
     borderWidth: 1,
-    borderColor: "#eee1da",
+    borderColor: c.border,
     padding: 14,
   },
   metricIcon: {
@@ -1643,9 +1796,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 10,
   },
-  metricValue: { color: "#4c1b14", fontSize: 22, fontWeight: "900" },
+  metricValue: { color: c.textPrimary, fontSize: 22, fontWeight: "900" },
+  metricSublabel: {
+    color: "#6e4aa3",
+    fontSize: 10.5,
+    fontWeight: "800",
+    marginTop: 2,
+  },
   metricLabel: {
-    color: "#92736a",
+    color: c.textSecondary,
     fontSize: 11.5,
     fontWeight: "700",
     marginTop: 2,
@@ -1654,10 +1813,10 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 17,
     borderWidth: 1,
-    borderColor: "#e6d3c8",
+    borderColor: c.borderStrong,
     padding: 14,
     marginBottom: 14,
   },
@@ -1665,18 +1824,18 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 14,
-    backgroundColor: "#f8efdf",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
   },
   registerCopy: { flex: 1 },
-  registerTitle: { color: "#5f0909", fontSize: 14, fontWeight: "900" },
-  registerText: { color: "#96766d", fontSize: 11.5, marginTop: 3 },
+  registerTitle: { color: c.primary, fontSize: 14, fontWeight: "900" },
+  registerText: { color: c.textSecondary, fontSize: 11.5, marginTop: 3 },
   controlsCard: {
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 19,
     borderWidth: 1,
-    borderColor: "#eadbd4",
+    borderColor: c.border,
     padding: 13,
     marginBottom: 18,
   },
@@ -1685,15 +1844,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 9,
-    backgroundColor: "#f8f1ed",
+    backgroundColor: c.surface,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#ead8ce",
+    borderColor: c.borderStrong,
     paddingHorizontal: 12,
   },
   searchInput: {
     flex: 1,
-    color: "#4c1b14",
+    color: c.textPrimary,
     fontSize: 13.5,
     paddingVertical: 10,
   },
@@ -1704,15 +1863,15 @@ const styles = StyleSheet.create({
     gap: 6,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: "#e7d5cc",
-    backgroundColor: "#fff8f4",
+    borderColor: c.borderStrong,
+    backgroundColor: c.surfaceRaised,
     paddingLeft: 11,
     paddingRight: 8,
     paddingVertical: 8,
   },
-  filterChipSelected: { backgroundColor: "#6e1717", borderColor: "#6e1717" },
-  filterText: { color: "#70483e", fontSize: 11.5, fontWeight: "800" },
-  filterTextSelected: { color: "#fffaf6" },
+  filterChipSelected: { backgroundColor: c.primary, borderColor: c.primary },
+  filterText: { color: c.textSecondary, fontSize: 11.5, fontWeight: "800" },
+  filterTextSelected: { color: c.background },
   filterCount: {
     minWidth: 22,
     height: 22,
@@ -1720,39 +1879,39 @@ const styles = StyleSheet.create({
     paddingHorizontal: 5,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f0e3dc",
+    backgroundColor: c.border,
   },
   filterCountSelected: { backgroundColor: "rgba(255,255,255,0.18)" },
-  filterCountText: { color: "#7a3b2e", fontSize: 10.5, fontWeight: "900" },
-  filterCountTextSelected: { color: "#fffaf6" },
+  filterCountText: { color: c.textSecondary, fontSize: 10.5, fontWeight: "900" },
+  filterCountTextSelected: { color: c.background },
   sectionHeading: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 10,
   },
-  sectionTitle: { color: "#4c1b14", fontSize: 17, fontWeight: "900" },
-  sectionSubtitle: { color: "#98766d", fontSize: 11.5, marginTop: 3 },
+  sectionTitle: { color: c.textPrimary, fontSize: 17, fontWeight: "900" },
+  sectionSubtitle: { color: c.textMuted, fontSize: 11.5, marginTop: 3 },
   userCard: {
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 19,
     borderWidth: 1,
-    borderColor: "#eadfd9",
+    borderColor: c.border,
     padding: 14,
     marginBottom: 11,
   },
-  skeletonContent: { flex: 1, backgroundColor: "#f8f3ef", padding: 16 },
+  skeletonContent: { flex: 1, backgroundColor: c.surfaceSunken, padding: 16 },
   skeletonCard: {
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderRadius: 19,
     borderWidth: 1,
-    borderColor: "#eadfd9",
+    borderColor: c.border,
     padding: 16,
     marginBottom: 11,
   },
   userCardExpanded: {
-    borderColor: "#d7b56d",
-    shadowColor: "#5f0909",
+    borderColor: c.accent,
+    shadowColor: c.primary,
     shadowOpacity: 0.06,
     shadowRadius: 10,
     elevation: 2,
@@ -1768,12 +1927,12 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 17,
-    backgroundColor: "#6e1717",
+    backgroundColor: c.primary,
     alignItems: "center",
     justifyContent: "center",
   },
   avatarImage: { width: "100%", height: "100%", borderRadius: 17 },
-  avatarText: { color: "#fffaf6", fontSize: 17, fontWeight: "900" },
+  avatarText: { color: c.background, fontSize: 17, fontWeight: "900" },
   presenceDot: {
     position: "absolute",
     right: -2,
@@ -1782,45 +1941,45 @@ const styles = StyleSheet.create({
     height: 13,
     borderRadius: 7,
     borderWidth: 2,
-    borderColor: "#fffaf6",
+    borderColor: c.background,
   },
   identityCopy: { flex: 1 },
   nameRow: { flexDirection: "row", alignItems: "center", gap: 7 },
-  userName: { flexShrink: 1, color: "#4c1b14", fontSize: 14.5, fontWeight: "900" },
+  userName: { flexShrink: 1, color: c.textPrimary, fontSize: 14.5, fontWeight: "900" },
   youBadge: {
-    backgroundColor: "#fff1d6",
+    backgroundColor: c.accentSoft,
     borderRadius: 999,
     paddingHorizontal: 7,
     paddingVertical: 3,
   },
-  youBadgeText: { color: "#8a5a10", fontSize: 9.5, fontWeight: "900" },
-  userMeta: { color: "#97766d", fontSize: 11.5, lineHeight: 17, marginTop: 3 },
+  youBadgeText: { color: c.accent, fontSize: 9.5, fontWeight: "900" },
+  userMeta: { color: c.textSecondary, fontSize: 11.5, lineHeight: 17, marginTop: 3 },
   badgeRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 7 },
   roleBadge: { borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4 },
   roleBadgeText: { fontSize: 10.5, fontWeight: "900" },
-  statusText: { color: "#92736a", fontSize: 10.5, fontWeight: "700" },
+  statusText: { color: c.textSecondary, fontSize: 10.5, fontWeight: "700" },
   openProfileButton: {
     marginTop: 12,
     flexDirection: "row",
     alignSelf: "flex-start",
     alignItems: "center",
     gap: 7,
-    backgroundColor: "#faf0de",
+    backgroundColor: c.accentSoft,
     borderRadius: 11,
     borderWidth: 1,
-    borderColor: "#e0bf80",
+    borderColor: c.accent,
     paddingHorizontal: 11,
     paddingVertical: 8,
   },
-  openProfileText: { color: "#8a5a10", fontSize: 11.5, fontWeight: "800" },
+  openProfileText: { color: c.accent, fontSize: 11.5, fontWeight: "800" },
   expandedPanel: {
     marginTop: 14,
     paddingTop: 14,
     borderTopWidth: 1,
-    borderTopColor: "#efe1da",
+    borderTopColor: c.border,
   },
-  controlTitle: { color: "#5f0909", fontSize: 13, fontWeight: "900" },
-  controlHelp: { color: "#98766d", fontSize: 11.5, lineHeight: 17, marginTop: 3, marginBottom: 10 },
+  controlTitle: { color: c.primary, fontSize: 13, fontWeight: "900" },
+  controlHelp: { color: c.textMuted, fontSize: 11.5, lineHeight: 17, marginTop: 3, marginBottom: 10 },
   optionGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   optionButton: {
     flexDirection: "row",
@@ -1828,38 +1987,71 @@ const styles = StyleSheet.create({
     gap: 7,
     borderRadius: 11,
     borderWidth: 1,
-    borderColor: "#e5d4cc",
-    backgroundColor: "#fff8f4",
+    borderColor: c.border,
+    backgroundColor: c.surfaceRaised,
     paddingHorizontal: 10,
     paddingVertical: 9,
   },
-  optionButtonSelected: { backgroundColor: "#5f0909", borderColor: "#5f0909" },
-  optionText: { color: "#5f0909", fontSize: 11.5, fontWeight: "800" },
-  optionTextSelected: { color: "#fffaf6" },
-  divider: { height: 1, backgroundColor: "#efe1da", marginVertical: 15 },
+  optionButtonSelected: { backgroundColor: c.primary, borderColor: c.primary },
+  optionText: { color: c.primary, fontSize: 11.5, fontWeight: "800" },
+  optionTextSelected: { color: c.background },
+  divider: { height: 1, backgroundColor: c.border, marginVertical: 15 },
+
+  holdRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 11,
+    backgroundColor: c.surfaceSunken,
+    borderWidth: 1,
+    borderColor: c.border,
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 12,
+  },
+  holdRowActive: { backgroundColor: c.dangerSoft, borderColor: c.danger },
+  holdCopy: { flex: 1 },
+  holdTitle: { color: c.primary, fontSize: 12.5, fontWeight: "900" },
+  holdTitleActive: { color: c.danger },
+  holdHelp: { color: c.textMuted, fontSize: 11, lineHeight: 16, marginTop: 2 },
+  holdSwitch: {
+    width: 40,
+    height: 23,
+    borderRadius: 999,
+    backgroundColor: c.borderStrong,
+    padding: 3,
+    justifyContent: "center",
+  },
+  holdSwitchOn: { backgroundColor: c.primary },
+  holdKnob: {
+    width: 17,
+    height: 17,
+    borderRadius: 999,
+    backgroundColor: c.background,
+  },
+  holdKnobOn: { alignSelf: "flex-end" },
   busyRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12 },
-  busyText: { color: "#8f3a2b", fontSize: 11.5, fontWeight: "800" },
-  hintText: { color: "#9a7970", fontSize: 10.75, lineHeight: 16, marginTop: 12 },
+  busyText: { color: c.textSecondary, fontSize: 11.5, fontWeight: "800" },
+  hintText: { color: c.textMuted, fontSize: 10.75, lineHeight: 16, marginTop: 12 },
   loadMoreButton: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#e7d5cc",
+    borderColor: c.borderStrong,
     borderRadius: 14,
     paddingVertical: 13,
     marginTop: 12,
   },
-  loadMoreButtonText: { color: "#5f0909", fontSize: 13, fontWeight: "800" },
+  loadMoreButtonText: { color: c.primary, fontSize: 13, fontWeight: "800" },
   emptyCard: {
     alignItems: "center",
     padding: 28,
     borderRadius: 19,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#eadfd9",
+    borderColor: c.border,
   },
   emptyIcon: {
     width: 52,
@@ -1867,12 +2059,12 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f5e9e3",
+    backgroundColor: c.surfaceSunken,
   },
-  emptyTitle: { color: "#5f0909", fontSize: 15, fontWeight: "900", marginTop: 12 },
-  emptyText: { color: "#98766d", fontSize: 11.5, lineHeight: 17, textAlign: "center", marginTop: 5 },
+  emptyTitle: { color: c.primary, fontSize: 15, fontWeight: "900", marginTop: 12 },
+  emptyText: { color: c.textMuted, fontSize: 11.5, lineHeight: 17, textAlign: "center", marginTop: 5 },
   loadingState: { flex: 1, alignItems: "center", justifyContent: "center" },
-  loadingText: { color: "#f2d7c8", fontSize: 12.5, fontWeight: "700", marginTop: 12 },
+  loadingText: { color: c.onPrimary, fontSize: 12.5, fontWeight: "700", marginTop: 12 },
 
   // Profile-details editor (expanded-panel trigger + bottom-sheet form).
   editDetailsButton: {
@@ -1880,25 +2072,25 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     alignItems: "center",
     gap: 7,
-    backgroundColor: "#faf0de",
+    backgroundColor: c.accentSoft,
     borderRadius: 11,
     borderWidth: 1,
-    borderColor: "#e0bf80",
+    borderColor: c.accent,
     paddingHorizontal: 11,
     paddingVertical: 9,
   },
-  editDetailsText: { color: "#8a5a10", fontSize: 11.5, fontWeight: "800" },
+  editDetailsText: { color: c.accent, fontSize: 11.5, fontWeight: "800" },
   userCardRecentlyUpdated: {
-    borderColor: "#d39a32",
+    borderColor: c.accent,
     borderWidth: 1.5,
-    backgroundColor: "#fffdf9",
+    backgroundColor: c.surfaceRaised,
   },
   updatedBadge: {
     flexDirection: "row",
     alignItems: "center",
     gap: 3,
-    backgroundColor: "#faeed6",
-    borderColor: "#e0bf80",
+    backgroundColor: c.accentSoft,
+    borderColor: c.accent,
     borderWidth: 1,
     borderRadius: 8,
     paddingHorizontal: 6,
@@ -1906,7 +2098,7 @@ const styles = StyleSheet.create({
     marginLeft: 6,
   },
   updatedBadgeText: {
-    color: "#8a5a10",
+    color: c.accent,
     fontSize: 10,
     fontWeight: "900",
   },
@@ -1920,7 +2112,7 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
   },
   editModalCard: {
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     borderBottomLeftRadius: 0,
@@ -1944,13 +2136,13 @@ const styles = StyleSheet.create({
     width: 42,
     height: 4.5,
     borderRadius: 999,
-    backgroundColor: "#dfcbbe",
+    backgroundColor: c.borderStrong,
   },
   modalCloseButton: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: "#f2e4dc",
+    backgroundColor: c.surfaceSunken,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1963,53 +2155,53 @@ const styles = StyleSheet.create({
     gap: 12,
     marginBottom: 14,
   },
-  editModalTitle: { color: "#4c1b14", fontSize: 19, fontWeight: "900" },
-  editModalSubtitle: { color: "#9b766c", fontSize: 12, marginTop: 3 },
+  editModalTitle: { color: c.textPrimary, fontSize: 19, fontWeight: "900" },
+  editModalSubtitle: { color: c.textMuted, fontSize: 12, marginTop: 3 },
   editFieldRow: { flexDirection: "row", gap: 12 },
   editFieldHalf: { flex: 1 },
   editLabel: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontSize: 12.5,
     fontWeight: "800",
     marginBottom: 6,
     marginTop: 12,
   },
   editLabelOptional: {
-    color: "#a8857c",
+    color: c.textMuted,
     fontSize: 11.5,
     fontWeight: "600",
   },
   editInput: {
-    backgroundColor: "#fff",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#e5d4cc",
+    borderColor: c.border,
     borderRadius: 12,
     paddingHorizontal: 13,
     paddingVertical: 11,
-    color: "#4c1b14",
+    color: c.textPrimary,
     fontSize: 14,
   },
-  editHelp: { color: "#9a7970", fontSize: 10.75, lineHeight: 16, marginTop: 6 },
+  editHelp: { color: c.textMuted, fontSize: 10.75, lineHeight: 16, marginTop: 6 },
   editSearchShell: {
     minHeight: 48,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#fff",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#e5d4cc",
+    borderColor: c.border,
     borderRadius: 12,
     paddingHorizontal: 12,
   },
   editCourseValueText: {
     flex: 1,
-    color: "#4c1b14",
+    color: c.textPrimary,
     fontSize: 13.5,
     fontWeight: "700",
   },
   editCoursePlaceholderText: {
     flex: 1,
-    color: "#b88f87",
+    color: c.textMuted,
     fontSize: 13.5,
     fontWeight: "500",
   },
@@ -2017,22 +2209,22 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#fdf8f5",
+    backgroundColor: c.surfaceRaised,
     borderBottomWidth: 1,
-    borderBottomColor: "#ebdcd3",
+    borderBottomColor: c.borderStrong,
     paddingHorizontal: 12,
     paddingVertical: 9,
   },
   dropdownSearchInput: {
     flex: 1,
-    color: "#4c1b14",
+    color: c.textPrimary,
     fontSize: 13,
     paddingVertical: 2,
   },
   editDropdown: {
     borderWidth: 1,
-    borderColor: "#ead9d2",
-    backgroundColor: "#fff",
+    borderColor: c.borderStrong,
+    backgroundColor: c.surfaceRaised,
     borderRadius: 12,
     overflow: "hidden",
     marginTop: 8,
@@ -2046,30 +2238,30 @@ const styles = StyleSheet.create({
     gap: 10,
     padding: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#f1e5e0",
+    borderBottomColor: c.border,
   },
   editDropdownItemSelected: {
-    backgroundColor: "#fcf5ee",
+    backgroundColor: c.surfaceRaised,
   },
-  editDropdownEmpty: { padding: 14, color: "#8f6c63", fontSize: 12 },
-  editDropdownName: { fontWeight: "800", color: "#4c1b14", fontSize: 13 },
-  editDropdownNameSelected: { color: "#5f0909", fontWeight: "900" },
-  editDropdownCode: { marginTop: 2, color: "#9b766c", fontSize: 11.5 },
+  editDropdownEmpty: { padding: 14, color: c.textSecondary, fontSize: 12 },
+  editDropdownName: { fontWeight: "800", color: c.textPrimary, fontSize: 13 },
+  editDropdownNameSelected: { color: c.primary, fontWeight: "900" },
+  editDropdownCode: { marginTop: 2, color: c.textMuted, fontSize: 11.5 },
   editProgramBadge: {
     width: 42,
     height: 42,
     borderRadius: 12,
-    backgroundColor: "#f1dfd7",
+    backgroundColor: c.surfaceSunken,
     alignItems: "center",
     justifyContent: "center",
   },
   editProgramBadgeSelected: {
-    backgroundColor: "#ebd1b7",
+    backgroundColor: c.accentSoft,
   },
-  editProgramBadgeText: { color: "#7a3b2e", fontWeight: "900", fontSize: 10.5 },
-  editProgramBadgeTextSelected: { color: "#5f0909" },
+  editProgramBadgeText: { color: c.textSecondary, fontWeight: "900", fontSize: 10.5 },
+  editProgramBadgeTextSelected: { color: c.primary },
   editErrorText: {
-    color: "#b3261e",
+    color: c.danger,
     fontSize: 12,
     fontWeight: "700",
     marginTop: 14,
@@ -2083,11 +2275,18 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   editCancelButton: {
-    backgroundColor: "#f5efeb",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#e5d4cc",
+    borderColor: c.border,
   },
-  editCancelText: { color: "#5f0909", fontSize: 14, fontWeight: "700" },
-  editSaveButton: { backgroundColor: "#5f0909" },
-  editSaveText: { color: "#fffaf6", fontSize: 14, fontWeight: "800" },
+  editCancelText: { color: c.primary, fontSize: 14, fontWeight: "700" },
+  editSaveButton: { backgroundColor: c.primary },
+  editSaveText: { color: c.background, fontSize: 14, fontWeight: "800" },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

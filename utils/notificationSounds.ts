@@ -66,7 +66,10 @@ export const NOTIFICATION_SOUND_OPTIONS: NotificationSoundOption[] = [
     label: "Silent",
     description: "Vibration only, no sound",
     iosFileName: null,
-    androidChannelId: "sound_silent",
+    // Bumped to _v2 deliberately: Android freezes a channel's sound at
+    // creation, so the original "sound_silent" channel keeps the default tone
+    // it was wrongly created with. A new id is the only way to ship the fix.
+    androidChannelId: "sound_silent_v2",
     previewAsset: null,
   },
 ];

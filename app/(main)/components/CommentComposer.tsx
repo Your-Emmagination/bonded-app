@@ -1,4 +1,6 @@
 // components/CommentComposer.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import {
     AI_ASSISTANT_NAME,
     AI_ASSISTANT_STUDENT,
@@ -23,13 +25,13 @@ import {
 } from "@/utils/cloudinaryUpload";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { Ionicons } from "@expo/vector-icons";
-import * as DocumentPicker from "expo-document-picker";
+import { pickUploadDocuments, isAttachmentUnavailableError } from "@/utils/uploadAttachments";
 import { Image } from "expo-image";
 import {
     collection,
     getDocs,
 } from "firebase/firestore";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     FlatList,
@@ -103,6 +105,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
   onCancelReply,
   onTypingChange,
 }) => {
+  const { composerStyles, theme } = useStyles();
   const [commentText, setCommentText] = useState("");
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [optionsExpanded, setOptionsExpanded] = useState(false);
@@ -196,10 +199,9 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         return;
       }
 
-      const result = await DocumentPicker.getDocumentAsync({
+      const result = await pickUploadDocuments({
         type: "image/*",
         multiple: true,
-        copyToCacheDirectory: true,
       });
 
       if (!result.canceled && result.assets?.length > 0) {
@@ -219,6 +221,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       }
     } catch (error) {
       console.error("Error picking photos:", error);
+      showInfo("Attachment unavailable", "Could not prepare the selected photo. Please select it again.");
     }
   };
 
@@ -229,10 +232,9 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         return;
       }
 
-      const result = await DocumentPicker.getDocumentAsync({
+      const result = await pickUploadDocuments({
         type: "*/*",
         multiple: true,
-        copyToCacheDirectory: true,
       });
 
       if (!result.canceled && result.assets?.length > 0) {
@@ -252,6 +254,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       }
     } catch (error) {
       console.error("Error picking documents:", error);
+      showInfo("Attachment unavailable", "Could not prepare the selected file. Please select it again.");
     }
   };
 
@@ -492,7 +495,9 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       restoreDraft();
 
       const errorMessage = error?.message?.toLowerCase() || "";
-      if (
+      if (isAttachmentUnavailableError(error)) {
+        showInfo("Attachment unavailable", "The selected attachment cannot be read. Remove it and select it again before posting your comment.");
+      } else if (
         errorMessage.includes("network") ||
         errorMessage.includes("connection") ||
         errorMessage.includes("timeout") ||
@@ -606,7 +611,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         {replyingTo && (
           <View style={composerStyles.replyingToBar}>
             <View style={composerStyles.replyingToContent}>
-              <Ionicons name="chevron-forward" size={14} color="#e0a53d" />
+              <Ionicons name="chevron-forward" size={14} color={theme.accent} />
               <Text style={composerStyles.replyingToText} numberOfLines={1}>
                 Replying to <Text style={composerStyles.replyingToName}>{replyingTo.name}</Text>
                 {" · "}
@@ -617,7 +622,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
             </View>
             {onCancelReply && (
               <TouchableOpacity onPress={onCancelReply} style={composerStyles.cancelReplyBtn}>
-                <Ionicons name="close" size={16} color="#9b766c" />
+                <Ionicons name="close" size={16} color={theme.textMuted} />
               </TouchableOpacity>
             )}
           </View>
@@ -634,7 +639,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
       style={composerStyles.removeGifBtn} 
       onPress={() => setSelectedGif(null)}
     >
-      <Ionicons name="close-circle" size={16} color="#e0a53d" />
+      <Ionicons name="close-circle" size={16} color={theme.accent} />
     </TouchableOpacity>
   </View>
 )}
@@ -646,7 +651,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               <Text style={composerStyles.toolsTitle}>Options</Text>
               <TouchableOpacity onPress={() => setOptionsExpanded(false)} style={composerStyles.barIconButton}
                 accessibilityRole="button" accessibilityLabel="Close composer options">
-                <Ionicons name="chevron-down" size={20} color="#8f2117" />
+                <Ionicons name="chevron-down" size={20} color={theme.primary} />
               </TouchableOpacity>
             </View>
             <View style={composerStyles.optionsRow}>
@@ -665,15 +670,15 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                   setSelection({ start: cursor, end: cursor });
                 }}
               >
-                <Ionicons name="at-outline" size={20} color="#8f2117" />
+                <Ionicons name="at-outline" size={20} color={theme.primary} />
                 <Text style={composerStyles.optionLabel}>Mention</Text>
               </TouchableOpacity>
               <TouchableOpacity style={composerStyles.optionBtn} onPress={() => setShowTagModal(true)} accessibilityRole="button" accessibilityLabel="Tag people">
-                <Ionicons name="people-outline" size={20} color="#8f2117" />
+                <Ionicons name="people-outline" size={20} color={theme.primary} />
                 <Text style={composerStyles.optionLabel}>Tag people</Text>
               </TouchableOpacity>
               <TouchableOpacity style={composerStyles.optionBtn} onPress={() => setShowLinkModal(true)} accessibilityRole="button" accessibilityLabel="Attach a link">
-                <Ionicons name="link-outline" size={20} color="#8f2117" />
+                <Ionicons name="link-outline" size={20} color={theme.primary} />
                 <Text style={composerStyles.optionLabel}>Link</Text>
               </TouchableOpacity>
               <TouchableOpacity style={composerStyles.optionBtn} onPress={() => setShowGifModal(true)} accessibilityRole="button" accessibilityLabel="Choose a GIF">
@@ -687,7 +692,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                 accessibilityRole="switch" accessibilityState={{ checked: isAnonymous }} accessibilityLabel="Post anonymously"
               >
                 <View style={composerStyles.userAvatarSmall}>
-                  {isAnonymous ? <Ionicons name="eye-off-outline" size={18} color="#8f2117" />
+                  {isAnonymous ? <Ionicons name="eye-off-outline" size={18} color={theme.primary} />
                     : resolveAvatarUri(currentUser) ? <Image source={{ uri: avatarThumb(resolveAvatarUri(currentUser), AVATAR_SIZE_SMALL) }} style={composerStyles.avatarImage} />
                     : <Text style={composerStyles.avatarTextSmall}>{currentUser?.firstname?.[0]?.toUpperCase() || "U"}</Text>}
                 </View>
@@ -695,7 +700,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                   {isAnonymous ? "Anonymous" : "Public"}
                 </Text>
                 <Text style={composerStyles.modeHint}>Tap to switch</Text>
-                <Ionicons name="swap-horizontal-outline" size={18} color="#8f2117" />
+                <Ionicons name="swap-horizontal-outline" size={18} color={theme.primary} />
               </TouchableOpacity>
             </View>}
 
@@ -720,7 +725,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                         style={composerStyles.removeFileBtn}
                         onPress={() => setFiles(files.filter((_, idx) => idx !== i))}
                       >
-                        <Ionicons name="close-circle" size={14} color="#e0a53d" />
+                        <Ionicons name="close-circle" size={14} color={theme.accent} />
                       </TouchableOpacity>
                     </View>
                   );
@@ -734,14 +739,14 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                 <Ionicons name="link" size={12} color="#4f9cff" />
                 <Text style={composerStyles.linkPreviewText} numberOfLines={1}>{attachedLink.title}</Text>
                 <TouchableOpacity onPress={() => setAttachedLink(null)}>
-                  <Ionicons name="close-circle" size={14} color="#e0a53d" />
+                  <Ionicons name="close-circle" size={14} color={theme.accent} />
                 </TouchableOpacity>
               </View>
             )}
 
             {effectiveTaggedUsers.length > 0 && (
               <View style={composerStyles.taggedPreviewRow}>
-                <Ionicons name="people" size={11} color="#e0a53d" />
+                <Ionicons name="people" size={11} color={theme.accent} />
                 <Text style={composerStyles.taggedPreviewText}>
                   {effectiveTaggedUsers.length} tagged
                   {effectiveTaggedUsers.some((taggedUser) => isAiAssistantId(taggedUser.id))
@@ -788,23 +793,23 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
             {/* Input row */}
             {isAnonymous && !optionsExpanded && <TouchableOpacity style={composerStyles.anonymousIndicator}
               onPress={() => setOptionsExpanded(true)} accessibilityLabel="Posting anonymously. Open options to change">
-              <Ionicons name="eye-off-outline" size={14} color="#8f2117" />
+              <Ionicons name="eye-off-outline" size={14} color={theme.primary} />
               <Text style={composerStyles.anonymousIndicatorText}>Anonymous</Text>
             </TouchableOpacity>}
             <View style={composerStyles.inputRow}>
               <TouchableOpacity style={composerStyles.barIconButton} onPress={pickPhotos} disabled={files.length >= maxFiles}
                 accessibilityRole="button" accessibilityLabel="Attach photos">
-                <Ionicons name="image-outline" size={23} color={files.length >= maxFiles ? "#cbb7b0" : "#8f2117"} />
+                <Ionicons name="image-outline" size={23} color={files.length >= maxFiles ? theme.textMuted : theme.primary} />
               </TouchableOpacity>
               <TouchableOpacity style={composerStyles.barIconButton} onPress={pickDocuments} disabled={files.length >= maxFiles}
                 accessibilityRole="button" accessibilityLabel="Attach files">
-                <Ionicons name="attach-outline" size={24} color={files.length >= maxFiles ? "#cbb7b0" : "#8f2117"} />
+                <Ionicons name="attach-outline" size={24} color={files.length >= maxFiles ? theme.textMuted : theme.primary} />
               </TouchableOpacity>
               <View style={composerStyles.inputPill}>
               <TextInput
                 ref={textInputRef}
                 placeholder={placeholder}
-                placeholderTextColor="#af928b"
+                placeholderTextColor={theme.textMuted}
                 style={composerStyles.input}
                 value={commentText}
                 onChangeText={handleChangeText}
@@ -816,7 +821,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
               <TouchableOpacity style={composerStyles.moreButton} onPress={() => setOptionsExpanded(!optionsExpanded)}
                 accessibilityRole="button" accessibilityLabel={optionsExpanded ? "Close composer options" : "More options: GIFs, links, tags and anonymous mode"}
                 accessibilityState={{ expanded: optionsExpanded }}>
-                <Ionicons name={optionsExpanded ? "close-circle-outline" : "ellipsis-horizontal-circle-outline"} size={25} color="#8f2117" />
+                <Ionicons name={optionsExpanded ? "close-circle-outline" : "ellipsis-horizontal-circle-outline"} size={25} color={theme.primary} />
               </TouchableOpacity>
               </View>
               <TouchableOpacity
@@ -830,12 +835,12 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                 ]}
               >
                 {uploading ? (
-                  <ActivityIndicator size="small" color="#fff" />
+                  <ActivityIndicator size="small" color={theme.onPrimary} />
                 ) : (
                   <Ionicons
                     name="arrow-up"
                     size={21}
-                    color={(commentText.trim() || files.length > 0 || attachedLink || selectedGif) ? "#fff" : "#9b766c"}
+                    color={(commentText.trim() || files.length > 0 || attachedLink || selectedGif) ? theme.onPrimary : theme.textMuted}
                   />
                 )}
               </TouchableOpacity>
@@ -863,7 +868,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                 Tag People & AI {effectiveTaggedUsers.length > 0 && `(${effectiveTaggedUsers.length})`}
               </Text>
               <TouchableOpacity onPress={() => setShowTagModal(false)}>
-                <Ionicons name="close" size={24} color="#9b766c" />
+                <Ionicons name="close" size={24} color={theme.textMuted} />
               </TouchableOpacity>
             </View>
 
@@ -876,14 +881,14 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                   setTaggedUsers([...taggedUsers, ...allTagged]);
                 }}
               >
-                <Ionicons name="people-circle" size={18} color="#fff" />
+                <Ionicons name="people-circle" size={18} color={theme.onAccent} />
                 <Text style={composerStyles.tagAllText}>Tag All</Text>
               </TouchableOpacity>
             )}
 
             <TextInput
               placeholder="Search people or AI..."
-              placeholderTextColor="#9b766c"
+              placeholderTextColor={theme.textMuted}
               value={searchQuery}
               onChangeText={setSearchQuery}
               style={composerStyles.searchInput}
@@ -918,7 +923,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                         {isAiAssistant ? "Assistant bot" : item.studentID}
                       </Text>
                     </View>
-                    {tagged && <Ionicons name="checkmark-circle" size={18} color="#e0a53d" />}
+                    {tagged && <Ionicons name="checkmark-circle" size={18} color={theme.accent} />}
                   </TouchableOpacity>
                 );
               }}
@@ -939,7 +944,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
             <Text style={composerStyles.linkModalTitle}>Add Link</Text>
             <TextInput
               placeholder="https://example.com"
-              placeholderTextColor="#9b766c"
+              placeholderTextColor={theme.textMuted}
               value={linkUrl}
               onChangeText={setLinkUrl}
               style={composerStyles.linkInput}
@@ -948,24 +953,24 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
             />
             <TextInput
               placeholder="Link title (optional)"
-              placeholderTextColor="#9b766c"
+              placeholderTextColor={theme.textMuted}
               value={linkTitle}
               onChangeText={setLinkTitle}
               style={composerStyles.linkInput}
             />
             <View style={composerStyles.linkModalButtons}>
               <TouchableOpacity
-                style={[composerStyles.linkModalButton, { backgroundColor: "#fffaf7" }]}
+                style={[composerStyles.linkModalButton, { backgroundColor: theme.surface }]}
                 onPress={() => { setShowLinkModal(false); setLinkUrl(""); setLinkTitle(""); }}
               >
                 <Text
-                  style={[composerStyles.linkModalButtonText, { color: "#5f0909" }]}
+                  style={[composerStyles.linkModalButtonText, { color: theme.primary }]}
                 >
                   Cancel
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[composerStyles.linkModalButton, { backgroundColor: "#e0a53d" }]}
+                style={[composerStyles.linkModalButton, { backgroundColor: theme.accent }]}
                 onPress={handleAddLink}
               >
                 <Text style={composerStyles.linkModalButtonText}>Add Link</Text>
@@ -987,14 +992,14 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
             <View style={composerStyles.modalHeader}>
               <Text style={composerStyles.modalTitle}>Choose a GIF</Text>
               <TouchableOpacity onPress={() => { setShowGifModal(false); setGifError(null); }}>
-                <Ionicons name="close" size={24} color="#9b766c" />
+                <Ionicons name="close" size={24} color={theme.textMuted} />
               </TouchableOpacity>
             </View>
 
             <View style={composerStyles.gifSearchContainer}>
               <TextInput
                 placeholder="Search GIFs..."
-                placeholderTextColor="#9b766c"
+                placeholderTextColor={theme.textMuted}
                 value={gifSearchQuery}
                 onChangeText={setGifSearchQuery}
                 onSubmitEditing={() => searchGifs(gifSearchQuery)}
@@ -1002,22 +1007,22 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
                 returnKeyType="search"
               />
               <TouchableOpacity style={composerStyles.gifSearchButton} onPress={() => searchGifs(gifSearchQuery)}>
-                <Ionicons name="search" size={18} color="#fff" />
+                <Ionicons name="search" size={18} color={theme.onAccent} />
               </TouchableOpacity>
             </View>
 
             {loadingGifs ? (
               <View style={composerStyles.gifLoadingContainer}>
-                <ActivityIndicator size="large" color="#e0a53d" />
+                <ActivityIndicator size="large" color={theme.accent} />
                 <Text style={composerStyles.gifLoadingText}>Searching GIFs...</Text>
               </View>
             ) : gifError ? (
               <View style={composerStyles.gifErrorContainer}>
-                <Ionicons name="cloud-offline-outline" size={48} color="#e0a53d" />
+                <Ionicons name="cloud-offline-outline" size={48} color={theme.accent} />
                 <Text style={composerStyles.gifErrorTitle}>Connection Error</Text>
                 <Text style={composerStyles.gifErrorText}>{gifError}</Text>
                 <TouchableOpacity style={composerStyles.gifRetryButton} onPress={() => searchGifs(gifSearchQuery)}>
-                  <Ionicons name="refresh" size={18} color="#fff" />
+                  <Ionicons name="refresh" size={18} color={theme.onPrimary} />
                   <Text style={composerStyles.gifRetryText}>Try Again</Text>
                 </TouchableOpacity>
               </View>
@@ -1053,7 +1058,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
 />
             ) : (
               <View style={composerStyles.gifEmptyContainer}>
-                <Ionicons name="images-outline" size={48} color="#f0e7e2" />
+                <Ionicons name="images-outline" size={48} color={theme.border} />
                 <Text style={composerStyles.emptyText}>
                   {gifSearchQuery ? "No GIFs found" : "Search for GIFs to get started"}
                 </Text>
@@ -1077,27 +1082,35 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
   );
 };
 
-const composerStyles = StyleSheet.create({
+/** Themed stylesheet for this component. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const composerStyles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ composerStyles, theme }), [composerStyles, theme]);
+};
+
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   inputWrapper: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     paddingVertical: 8,
     paddingHorizontal: 4,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "#eee1da",
+    borderTopColor: c.border,
   },
 
   replyingToBar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#f6ede8",
+    backgroundColor: c.surfaceSunken,
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderRadius: 12,
     marginBottom: 8,
     marginHorizontal: 8,
     borderLeftWidth: 3,
-    borderLeftColor: "#8f2117",
+    borderLeftColor: c.primary,
   },
   replyingToContent: {
     flexDirection: "row",
@@ -1106,16 +1119,16 @@ const composerStyles = StyleSheet.create({
     flex: 1,
   },
   replyingToText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     flex: 1,
   },
   replyingToName: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "600",
   },
   replyingToSnippet: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontStyle: "italic",
   },
   cancelReplyBtn: {
@@ -1149,7 +1162,7 @@ const composerStyles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#fff8f4",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 20,
     paddingHorizontal: 12,
     paddingVertical: 9,
@@ -1158,24 +1171,24 @@ const composerStyles = StyleSheet.create({
   },
   placeholderText: {
     flex: 1,
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 14,
   },
 
   expandedInputContainer: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
-  toolsPanel: { backgroundColor: "#f8f0eb", borderRadius: 18, padding: 10, marginHorizontal: 8, marginBottom: 10 },
+  toolsPanel: { backgroundColor: c.surfaceSunken, borderRadius: 18, padding: 10, marginHorizontal: 8, marginBottom: 10 },
   toolsHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingLeft: 6 },
-  toolsTitle: { color: "#79554c", fontSize: 13, fontWeight: "600" },
-  optionLabel: { color: "#79554c", fontSize: 11, fontWeight: "500", textAlign: "center" },
-  gifToolLabel: { color: "#8f2117", fontSize: 15, lineHeight: 20, fontWeight: "800" },
-  anonymousBtnActive: { backgroundColor: "#eeded6", borderColor: "#bb9183" },
-  modeHint: { flex: 1, color: "#95786e", fontSize: 11, textAlign: "right" },
-  anonymousIndicator: { flexDirection: "row", alignItems: "center", alignSelf: "flex-start", gap: 5, paddingHorizontal: 10, paddingVertical: 5, marginLeft: 8, marginBottom: 4, borderRadius: 12, backgroundColor: "#f4e7df" },
-  anonymousIndicatorText: { color: "#8f2117", fontSize: 11, fontWeight: "600" },
+  toolsTitle: { color: c.textSecondary, fontSize: 13, fontWeight: "600" },
+  optionLabel: { color: c.textSecondary, fontSize: 11, fontWeight: "500", textAlign: "center" },
+  gifToolLabel: { color: c.primary, fontSize: 15, lineHeight: 20, fontWeight: "800" },
+  anonymousBtnActive: { backgroundColor: c.surfaceSunken, borderColor: c.borderStrong },
+  modeHint: { flex: 1, color: c.textMuted, fontSize: 11, textAlign: "right" },
+  anonymousIndicator: { flexDirection: "row", alignItems: "center", alignSelf: "flex-start", gap: 5, paddingHorizontal: 10, paddingVertical: 5, marginLeft: 8, marginBottom: 4, borderRadius: 12, backgroundColor: c.surfaceSunken },
+  anonymousIndicatorText: { color: c.primary, fontSize: 11, fontWeight: "600" },
   barIconButton: { width: 40, height: 44, alignItems: "center", justifyContent: "center" },
-  inputPill: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "flex-end", backgroundColor: "#f5eae5", borderRadius: 24, paddingLeft: 14 },
+  inputPill: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "flex-end", backgroundColor: c.surfaceSunken, borderRadius: 24, paddingLeft: 14 },
   moreButton: { width: 40, height: 46, alignItems: "center", justifyContent: "center" },
   optionsRow: {
     flexDirection: "row",
@@ -1192,13 +1205,13 @@ const composerStyles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 13,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
   },
   optionBadge: {
     position: "absolute",
     top: -1,
     right: -1,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderRadius: 6,
     minWidth: 11,
     height: 11,
@@ -1207,7 +1220,7 @@ const composerStyles = StyleSheet.create({
     paddingHorizontal: 1,
   },
   optionBadgeText: {
-    color: "#fff",
+    color: c.onAccent,
     fontSize: 7,
     fontWeight: "bold",
   },
@@ -1218,13 +1231,13 @@ const composerStyles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8,
     minHeight: 44,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: "rgba(95,9,9,0.12)",
   },
   anonymousBtnText: {
-    color: "#79554c",
+    color: c.textSecondary,
     fontSize: 13,
     fontWeight: "600",
   },
@@ -1254,12 +1267,12 @@ const composerStyles = StyleSheet.create({
   previewDoc: {
     width: "100%",
     height: "100%",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     justifyContent: "center",
     alignItems: "center",
   },
   previewDocName: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 9,
     marginTop: 1,
   },
@@ -1272,7 +1285,7 @@ const composerStyles = StyleSheet.create({
     padding: 1,
   },
   fileLimitText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 10,
   },
 
@@ -1280,7 +1293,7 @@ const composerStyles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 5,
-    backgroundColor: "#f6ede8",
+    backgroundColor: c.surfaceSunken,
     padding: 10,
     borderRadius: 12,
     marginBottom: 8,
@@ -1288,7 +1301,7 @@ const composerStyles = StyleSheet.create({
   },
   linkPreviewText: {
     flex: 1,
-    color: "#8f2117",
+    color: c.primary,
     fontSize: 12,
   },
   taggedPreviewRow: {
@@ -1300,7 +1313,7 @@ const composerStyles = StyleSheet.create({
     paddingVertical: 4,
   },
   taggedPreviewText: {
-    color: "#79554c",
+    color: c.textSecondary,
     fontSize: 11,
     fontWeight: "500",
   },
@@ -1309,13 +1322,13 @@ const composerStyles = StyleSheet.create({
     marginBottom: 8,
     marginHorizontal: 8,
     borderRadius: 14,
-    backgroundColor: "#fff7f1",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#f0d2c2",
+    borderColor: c.borderStrong,
     overflow: "hidden",
   },
   mentionSheetLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     fontWeight: "700",
     letterSpacing: 0.3,
@@ -1330,7 +1343,7 @@ const composerStyles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderTopWidth: 1,
-    borderTopColor: "#f6e3d8",
+    borderTopColor: c.border,
   },
   mentionAvatar: {
     width: 34,
@@ -1338,21 +1351,21 @@ const composerStyles = StyleSheet.create({
     borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fff0ea",
+    backgroundColor: c.surfaceSunken,
     marginRight: 10,
   },
   mentionAvatarText: {
-    color: "#7d1d13",
+    color: c.primary,
     fontSize: 12,
     fontWeight: "800",
   },
   mentionName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 13,
     fontWeight: "700",
   },
   mentionMeta: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     marginTop: 2,
   },
@@ -1366,26 +1379,26 @@ const composerStyles = StyleSheet.create({
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   avatarImage: {
     width: "100%",
     height: "100%",
   },
   avatarTextSmall: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 10,
     fontWeight: "700",
   },
   input: {
     flex: 1,
     minWidth: 0,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     minHeight: 46,
     maxHeight: 120,
@@ -1398,34 +1411,34 @@ const composerStyles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#8f2117",
+    backgroundColor: c.primary,
     justifyContent: "center",
     alignItems: "center",
     marginBottom: 3,
     marginLeft: 5,
   },
   sendButtonDisabled: {
-    backgroundColor: "#f0d2c2",
-    borderColor: "#f0d2c2",
+    backgroundColor: c.borderStrong,
+    borderColor: c.borderStrong,
     shadowOpacity: 0,
     elevation: 0,
   },
   charCountText: {
     alignSelf: "flex-end",
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 10,
     fontWeight: "700",
     textAlign: "right",
     marginTop: 4,
-    backgroundColor: "#fbeee5",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 2,
     overflow: "hidden",
   },
   charCountTextWarning: {
-    color: "#a61f1f",
-    backgroundColor: "#fbe0da",
+    color: c.danger,
+    backgroundColor: c.dangerSoft,
   },
 
   modalOverlay: {
@@ -1435,11 +1448,11 @@ const composerStyles = StyleSheet.create({
   },
   tagModalContainer: {
     flex: 0.8,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     borderWidth: 1,
-    borderColor: "#e8d3b2",
+    borderColor: c.borderStrong,
   },
   modalHeader: {
     flexDirection: "row",
@@ -1447,11 +1460,11 @@ const composerStyles = StyleSheet.create({
     alignItems: "center",
     padding: 14,
     borderBottomWidth: 1,
-    borderBottomColor: "#e8d3b2",
-    backgroundColor: "#fff4ee",
+    borderBottomColor: c.borderStrong,
+    backgroundColor: c.surface,
   },
   modalTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 16,
     fontWeight: "700",
   },
@@ -1459,7 +1472,7 @@ const composerStyles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     marginHorizontal: 14,
     marginVertical: 8,
     paddingVertical: 8,
@@ -1467,31 +1480,31 @@ const composerStyles = StyleSheet.create({
     gap: 6,
   },
   tagAllText: {
-    color: "#fff",
+    color: c.onAccent,
     fontWeight: "600",
     fontSize: 13,
   },
   searchInput: {
-    backgroundColor: "#fffaf7",
-    color: "#4d1b17",
+    backgroundColor: c.surface,
+    color: c.textPrimary,
     borderRadius: 8,
     padding: 10,
     marginHorizontal: 14,
     marginBottom: 8,
     fontSize: 14,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   studentItem: {
     flexDirection: "row",
     alignItems: "center",
     padding: 12,
     marginHorizontal: 14,
-    borderBottomColor: "#fffaf7",
+    borderBottomColor: c.surface,
     borderBottomWidth: 1,
   },
   studentAvatar: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     width: 36,
     height: 36,
     borderRadius: 18,
@@ -1499,30 +1512,30 @@ const composerStyles = StyleSheet.create({
     justifyContent: "center",
     marginRight: 10,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   aiAvatar: {
     backgroundColor: "#efe3ff",
     borderColor: "#d1b2ff",
   },
   studentAvatarText: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "bold",
     fontSize: 13,
   },
   studentInfo: { flex: 1 },
   studentName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "500",
   },
   studentMetaText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     marginTop: 2,
   },
   emptyText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13,
     textAlign: "center",
     marginTop: 20,
@@ -1536,27 +1549,27 @@ const composerStyles = StyleSheet.create({
   },
   linkModalContent: {
     width: "85%",
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 14,
     padding: 18,
     borderWidth: 1,
-    borderColor: "#e8d3b2",
+    borderColor: c.borderStrong,
   },
   linkModalTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 16,
     fontWeight: "700",
     marginBottom: 14,
     textAlign: "center",
   },
   linkInput: {
-    backgroundColor: "#fffaf7",
-    color: "#4d1b17",
+    backgroundColor: c.surface,
+    color: c.textPrimary,
     borderRadius: 8,
     padding: 10,
     marginBottom: 10,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
     fontSize: 14,
   },
   linkModalButtons: {
@@ -1571,7 +1584,7 @@ const composerStyles = StyleSheet.create({
     alignItems: "center",
   },
   linkModalButtonText: {
-    color: "#fff",
+    color: c.onAccent,
     fontSize: 14,
     fontWeight: "600",
   },
@@ -1584,7 +1597,7 @@ const composerStyles = StyleSheet.create({
     marginBottom: 8,
   },
   gifSearchButton: {
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     padding: 10,
     borderRadius: 8,
   },
@@ -1595,7 +1608,7 @@ const composerStyles = StyleSheet.create({
     paddingVertical: 40,
   },
   gifLoadingText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13,
     marginTop: 10,
   },
@@ -1607,14 +1620,14 @@ const composerStyles = StyleSheet.create({
     paddingHorizontal: 28,
   },
   gifErrorTitle: {
-    color: "#e0a53d",
+    color: c.accent,
     fontSize: 16,
     fontWeight: "700",
     marginTop: 12,
     marginBottom: 6,
   },
   gifErrorText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13,
     textAlign: "center",
     lineHeight: 18,
@@ -1623,14 +1636,14 @@ const composerStyles = StyleSheet.create({
   gifRetryButton: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 8,
     gap: 6,
   },
   gifRetryText: {
-    color: "#fff",
+    color: c.onPrimary,
     fontSize: 14,
     fontWeight: "600",
   },

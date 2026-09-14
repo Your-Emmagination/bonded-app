@@ -1,7 +1,8 @@
 // app/(main)/(tabs)/_layout.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
 import { emitHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
 import { subscribeToUnreadNotificationCount } from "@/utils/notifications";
-import { resolveUserRoleForAuthUser } from "@/utils/rbac";
+import { resolveUserRoleForAuthUser, subscribeToCurrentUserProfile } from "@/utils/rbac";
 import { emitTabScrollToTop } from "@/utils/tabScrollEvents";
 import { Ionicons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
@@ -34,6 +35,7 @@ function TabItem({
   showBadge = false,
   badgeCount = 0,
 }: any) {
+  const theme = useThemeColors();
   const fadeAnim = useRef(new Animated.Value(isFocused ? 1 : 0)).current;
   const scaleAnim = useRef(new Animated.Value(isFocused ? 1.05 : 1)).current;
 
@@ -86,9 +88,7 @@ function TabItem({
           borderRadius: 12,
           justifyContent: "center",
           alignItems: "center",
-          backgroundColor: isFocused
-            ? "rgba(224, 165, 61, 0.22)"
-            : "transparent",
+          backgroundColor: isFocused ? theme.accentSoft : "transparent",
           transform: [{ scale: scaleAnim }],
           opacity: fadeAnim.interpolate({
             inputRange: [0, 1],
@@ -99,7 +99,13 @@ function TabItem({
         <View style={{ position: "relative" }}>
           <Ionicons name={iconName} size={24} color={color} />
           {showBadge && (
-            <Reanimated.View style={[styles.notificationBadge, badgeStyle]} />
+            <Reanimated.View
+              style={[
+                styles.notificationBadge,
+                { backgroundColor: theme.accent, borderColor: theme.chrome },
+                badgeStyle,
+              ]}
+            />
           )}
         </View>
 
@@ -136,12 +142,18 @@ const privilegedRoutes = [
 ];
 
 export default function TabLayout() {
+  const theme = useThemeColors();
   const [userRole, setUserRole] = useState<string | null>(null);
   const [authUserId, setAuthUserId] = useState<string | null>(null);
   const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
 
   useEffect(() => {
+    let unsubscribeProfile: (() => void) | undefined;
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      unsubscribeProfile?.();
+      unsubscribeProfile = undefined;
+
       if (!user) {
         setAuthUserId(null);
         setUserRole("student");
@@ -151,8 +163,22 @@ export default function TabLayout() {
       setAuthUserId(user.uid);
       const role = await resolveUserRoleForAuthUser(user);
       setUserRole(role?.toLowerCase() || "student");
+
+      // An admin can change this account's role at any moment. onAuthStateChanged
+      // only fires on sign-in, so without this the tab bar kept whatever role was
+      // read then: a promotion never revealed its Dashboard, and a demotion went
+      // on offering one the server would refuse.
+      unsubscribeProfile = subscribeToCurrentUserProfile(user, (profile) => {
+        if (profile?.role) {
+          setUserRole(profile.role.toLowerCase());
+        }
+      });
     });
-    return unsubscribe;
+
+    return () => {
+      unsubscribeProfile?.();
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -161,8 +187,8 @@ export default function TabLayout() {
 
   if (userRole === null) {
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#5f0909", justifyContent: "center", alignItems: "center" }}>
-        <ActivityIndicator size="large" color="#e0a53d" />
+      <SafeAreaView style={{ flex: 1, backgroundColor: theme.chrome, justifyContent: "center", alignItems: "center" }}>
+        <ActivityIndicator size="large" color={theme.accent} />
       </SafeAreaView>
     );
   }
@@ -171,7 +197,7 @@ export default function TabLayout() {
   const visibleRoutes = isPrivileged ? privilegedRoutes : studentRoutes;
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#5f0909" }} edges={["bottom"]}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: theme.chrome }} edges={["bottom"]}>
       <Tabs
         screenOptions={{ headerShown: false, tabBarStyle: { display: "none" } }}
         initialRouteName="HomeScreen"
@@ -184,9 +210,9 @@ export default function TabLayout() {
       right: 0,
       flexDirection: "row",
       alignItems: "center",
-      backgroundColor: "#5f0909",
+      backgroundColor: theme.chrome,
       borderTopWidth: 1,
-      borderTopColor: "#7f2220",
+      borderTopColor: theme.chromeBorder,
       height: 70,
       paddingBottom: Platform.OS === "android" ? 5 : 15,
     }}
@@ -208,7 +234,7 @@ export default function TabLayout() {
       // not the visibleRoutes index.
       const isFocused = state.index === routeIndex;
 
-      const color = isFocused ? "#e0a53d" : "#e7cdbf";
+      const color = isFocused ? theme.accent : theme.onChromeMuted;
 
       const onPress = () => {
         const event = navigation.emit({
@@ -283,8 +309,6 @@ const styles = {
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: "#ffcf5a",
     borderWidth: 2,
-    borderColor: "#5f0909",
   },
 };

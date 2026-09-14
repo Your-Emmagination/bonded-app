@@ -255,6 +255,9 @@ const readNotification = async (env, notificationId) => {
     entityType: read("entityType") || "post",
     entityId: read("entityId") || "",
     parentId: read("parentId"),
+    // Only fields named here reach the push, so a channel mention needs its
+    // channel carried explicitly or the tap has nowhere to go.
+    channelId: read("channelId"),
     message: read("message") || "sent you a notification",
     preview: read("preview"),
   };
@@ -295,7 +298,7 @@ const soundForNotification = (soundId) => {
     pop: { file: "notif_pop.wav", channel: "sound_pop" },
     bubble: { file: "notif_bubble.wav", channel: "sound_bubble" },
     alert: { file: "notif_alert.wav", channel: "sound_alert" },
-    silent: { file: null, channel: "sound_silent" },
+    silent: { file: null, channel: "sound_silent_v2" },
   };
   return options[soundId] || options.default;
 };
@@ -306,6 +309,7 @@ const buildPushData = (notification) => ({
   entityType: String(notification.entityType),
   entityId: String(notification.entityId),
   ...(notification.parentId ? { parentId: String(notification.parentId) } : {}),
+  ...(notification.channelId ? { channelId: String(notification.channelId) } : {}),
 });
 
 // ── Notification content ──────────────────────────────────────────────────
@@ -353,11 +357,19 @@ const notificationKind = (notification) => {
       : "mention_post";
   }
   if (type === "announcement") return "announcement";
+  // A staff reply on a Help & Support ticket.
+  if (entity === "support_ticket" || type === "support") return "support_reply";
   return null;
 };
 
 const NOTIFICATION_TEMPLATES = {
   direct_message: (n) => ({ title: n.actorName, body: truncateSnippet(n.preview, 100) || "Sent you a message" }),
+  // Names the queue, not the person: a student who filed a request is waiting
+  // on "support", and the individual staff member is not the point.
+  support_reply: (n) => ({
+    title: "Support replied",
+    body: truncateSnippet(n.preview, 100) || "Your request has an update.",
+  }),
   post_like: (n) => ({
     title: "New Like ❤️",
     body: `${n.actorName} liked your post.`,
@@ -459,23 +471,30 @@ export const sendNotificationPush = async (env, notification) => {
     return { sent: 0 };
   }
 
-  // One notification per conversation until it is opened, the way Messenger
-  // behaves. The unread count already includes this message, so a count above
-  // one means an earlier message was already announced and still has not been
-  // read — announcing again would just stack another row for the same chat.
-  if (notificationKind(notification) === "direct_message" && notification.parentId) {
+  // One row per conversation, the way Messenger behaves. `tag` makes a new
+  // message REPLACE the row that chat already has rather than stacking under
+  // it, so the tray always shows the newest message instead of the oldest.
+  //
+  // Earlier this skipped later messages entirely, which kept the tray on the
+  // first message forever and meant a follow-up never alerted at all. Now it
+  // always sends, and the unread count only decides whether it makes a sound.
+  const pushKind = notificationKind(notification);
+  let threadTag = null;
+  let quiet = false;
+
+  if (pushKind === "direct_message" && notification.parentId) {
+    threadTag = String(notification.parentId);
     const unread = await readConversationUnread(
       env,
-      String(notification.parentId),
+      threadTag,
       String(notification.recipientId),
     );
-    if (unread > 1) {
-      console.log("Push skipped: conversation already has an unopened notification.", {
-        notificationId: notification.id,
-        unread,
-      });
-      return { sent: 0, skipped: "conversation-already-notified" };
-    }
+    // Above one means this chat already has a notification the recipient has
+    // not opened: refresh that row silently instead of buzzing again for
+    // every message in a burst.
+    quiet = unread > 1;
+  } else if (pushKind === "mention_thread" && notification.channelId) {
+    threadTag = `channel:${String(notification.channelId)}`;
   }
 
   const tokens = await readUserPushToken(env, notification.recipientId);
@@ -494,9 +513,14 @@ export const sendNotificationPush = async (env, notification) => {
     to: token,
     title,
     body,
-    sound: sound.file,
+    // Android takes its sound from the channel, so a quiet update has to be
+    // routed to the silent channel as well as dropping the sound field.
+    sound: quiet ? null : sound.file,
     priority: "high",
-    channelId: sound.channel,
+    channelId: quiet ? "sound_silent_v2" : sound.channel,
+    // tag replaces an already-displayed notification (Android); collapseId
+    // coalesces in transit and does the same job on iOS.
+    ...(threadTag ? { tag: threadTag, collapseId: threadTag } : {}),
     data: { ...buildPushData(notification), kind },
   }));
 

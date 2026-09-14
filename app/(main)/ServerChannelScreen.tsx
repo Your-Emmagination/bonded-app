@@ -89,7 +89,10 @@ import ReanimatedAnimated, {
 } from "react-native-reanimated";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
-import CommentComposer from "./components/CommentComposer";
+import MessageImage from "./components/MessageImage";
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
+import ServerMessageComposer from "./components/ServerMessageComposer";
 import ConfirmDialog from "./components/ConfirmDialog";
 import ExpandableText from "./components/ExpandableText";
 import ImageZoomViewer from "./components/ImageZoomViewer";
@@ -122,7 +125,17 @@ type ThreadMessage = {
   profileImage?: string | null;
   profilePic?: string | null;
   isAnonymous?: boolean;
-  files?: { url: string; mimeType: string; name?: string }[];
+  // width/height are the original's pixel size when the sender's client
+  // recorded it at upload, so the bubble can be shaped to the picture rather
+  // than cropping it into a fixed box. Absent on older messages, which are
+  // measured as they load instead.
+  files?: {
+    url: string;
+    mimeType: string;
+    name?: string;
+    width?: number | null;
+    height?: number | null;
+  }[];
   link?: { url: string; title: string };
   taggedUsers?: TaggedUser[];
   createdAt?: any;
@@ -189,6 +202,21 @@ const DEFAULT_REACTION = "❤️";
 // tap can cancel it.
 const DOUBLE_TAP_MS = 260;
 
+/**
+ * The themed stylesheet for this screen.
+ *
+ * Nine components here render chrome, and each is memoised at module level,
+ * so they read the palette themselves rather than being handed a styles
+ * object that would change identity on every render.
+ */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  // Both, because chrome needs the stylesheet and icon tints need the raw
+  // tokens — two hooks per component would be the same work twice.
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
 // A user has at most one reaction per message (Messenger-style). Returns the
 // emoji they're currently reacting with on this message, or null.
 const getMyReaction = (
@@ -227,6 +255,7 @@ function ReactionPill({
   messageId: string;
   onPress: () => void;
 }) {
+  const { styles, theme } = useStyles();
   const scale = useSharedValue(1);
 
   useEffect(() => {
@@ -499,6 +528,7 @@ const buildAiContextMessages = (
 // RN Animated driver staggered across the three dots — cheap, non-worklet, and
 // self-cleaning on unmount.
 function TypingDots({ color }: { color: string }) {
+  const { styles, theme } = useStyles();
   const progress = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -557,6 +587,7 @@ const MessageTimestamp = React.memo(function MessageTimestamp({
   isGroupEnd: boolean;
   isOwnMessage: boolean;
 }) {
+  const { styles, theme } = useStyles();
   const hookNowMs = useRelativeTimeNow();
   const nowMs = propNowMs ?? hookNowMs;
 
@@ -632,6 +663,7 @@ function MessageBubbleComponent({
   liveAvatarUri?: string | null;
   isStaffViewer?: boolean;
 }) {
+  const { styles, theme } = useStyles();
   // Task 5: shared classification (also used by the Media/Files gallery).
   const imageFiles = messageImageFiles(item);
   const gifFiles = messageGifFiles(item);
@@ -738,7 +770,7 @@ function MessageBubbleComponent({
         ]}
         pointerEvents="none"
       >
-        <Ionicons name="arrow-undo" size={16} color="#8f3a2b" />
+        <Ionicons name="arrow-undo" size={16} color={theme.textSecondary} />
       </ReanimatedAnimated.View>
 
       {!isOwnMessage &&
@@ -767,6 +799,53 @@ function MessageBubbleComponent({
         ))}
 
       <View style={styles.messageContentWrap}>
+          {/* Same one-line marker Messenger uses, outside the bubble — see
+              DirectChatScreen. Keeping the quote inside meant a reply to a
+              photo had to hold a quote box, a thumbnail and the photo, which
+              is what stretched the bubble. Tap still jumps to the original. */}
+          {item.replyTo && (
+            <View
+              style={[styles.replyLabelRow, isOwnMessage && styles.replyLabelRowOwn]}
+            >
+              <Ionicons name="arrow-undo" size={12} color={theme.textMuted} />
+              <Text style={styles.replyLabelText} numberOfLines={1}>
+                {/* Replying to your own message should say so, rather than
+                    naming you back at yourself. Matched against the message
+                    author, since a channel has many people in it. */}
+                {item.replyTo.senderName === item.username
+                  ? isOwnMessage
+                    ? "You replied to yourself"
+                    : `${item.username || "Someone"} replied to themselves`
+                  : isOwnMessage
+                    ? `You replied to ${item.replyTo.senderName}`
+                    : `${item.username || "Someone"} replied to ${item.replyTo.senderName}`}
+              </Text>
+            </View>
+          )}
+
+          {/* What was replied to. The label alone says somebody replied but
+              not to what, which is no use in a busy channel. Muted, outside
+              the bubble so it cannot change the bubble's width. */}
+          {item.replyTo && (
+            <View style={[styles.replyEcho, isOwnMessage && styles.replyEchoOwn]}>
+              {!!item.replyTo.mediaUrl && (
+                <Image
+                  source={{
+                    uri:
+                      item.replyTo.mediaType === "video"
+                        ? videoThumb(item.replyTo.mediaUrl, 64)
+                        : feedImage(item.replyTo.mediaUrl, 64),
+                  }}
+                  style={styles.replyEchoThumb}
+                  contentFit="cover"
+                  recyclingKey={`${item.id}:replyThumb`}
+                />
+              )}
+              <Text style={styles.replyEchoText} numberOfLines={1}>
+                {item.replyTo.preview}
+              </Text>
+            </View>
+          )}
         <Pressable
           style={bubbleStyle}
           onPress={handleBubbleTap}
@@ -780,58 +859,13 @@ function MessageBubbleComponent({
               <Ionicons
                 name="pin"
                 size={11}
-                color={isOwnMessage ? "#fffaf7" : accent}
+                color={isOwnMessage ? theme.surface : accent}
               />
               <Text
                 style={[styles.pinnedTagText, isOwnMessage && styles.pinnedTagTextOwn]}
               >
                 Pinned
               </Text>
-            </View>
-          )}
-          {item.replyTo && (
-            // Feature 4: quoted snapshot of the message this one replies to.
-            <View
-              style={[
-                styles.replyQuote,
-                isOwnMessage && styles.replyQuoteOwn,
-              ]}
-            >
-              <View
-                style={[
-                  styles.replyQuoteBar,
-                  { backgroundColor: isOwnMessage ? "#fffaf7" : accent },
-                ]}
-              />
-              <View style={{ flex: 1, minWidth: 0 }}>
-                <Text
-                  style={[styles.replyQuoteName, isOwnMessage && styles.replyQuoteTextOwn]}
-                  numberOfLines={1}
-                >
-                  {item.replyTo.senderName}
-                </Text>
-                <Text
-                  style={[styles.replyQuotePreview, isOwnMessage && styles.replyQuoteTextOwn]}
-                  numberOfLines={1}
-                >
-                  {item.replyTo.preview}
-                </Text>
-              </View>
-              {/* Thumbnail of the photo/video being replied to, like
-                  Messenger. Older replies have none saved. */}
-              {!!item.replyTo.mediaUrl && (
-                <Image
-                  source={{
-                    uri:
-                      item.replyTo.mediaType === "video"
-                        ? videoThumb(item.replyTo.mediaUrl, 96)
-                        : feedImage(item.replyTo.mediaUrl, 96),
-                  }}
-                  style={styles.replyQuoteThumb}
-                  contentFit="cover"
-                  recyclingKey={`${item.id}:replyThumb`}
-                />
-              )}
             </View>
           )}
           {(item.forwarded || item.isForwarded) && (
@@ -884,7 +918,7 @@ function MessageBubbleComponent({
 
           {item.aiAssistant && item.aiStatus === "generating" && !item.text ? (
             <View style={styles.aiPendingRow}>
-              <ActivityIndicator size="small" color={isOwnMessage ? "#fffaf7" : "#8f2117"} />
+              <ActivityIndicator size="small" color={isOwnMessage ? theme.surface : "#8f2117"} />
               <Text style={[styles.aiPendingText, isOwnMessage && styles.aiPendingTextOwn]}>
                 {AI_ASSISTANT_NAME} is generating...
               </Text>
@@ -895,12 +929,20 @@ function MessageBubbleComponent({
             <Pressable
               key={file.url}
               onPress={() => onOpenImage(all.map((entry) => entry.url), index)}
+              // Without this the nested pressable swallows the gesture and the
+              // bubble's own long-press never fires, so an image could not be
+              // reacted to. Tap still opens the viewer; hold reacts.
+              onLongPress={() => onLongPress(item.id)}
+              delayLongPress={250}
               style={({ pressed }) => (pressed ? styles.messageImagePressed : undefined)}
             >
-              <Image
+              <MessageImage
+                uri={feedImage(file.url, FEED_IMAGE_WIDTH) || file.url}
+                width={MESSAGE_MEDIA_WIDTH}
+                sourceWidth={file.width}
+                sourceHeight={file.height}
+                style={styles.messageImageSpacing}
                 recyclingKey={`${item.id}:${file.url}`}
-                source={{ uri: feedImage(file.url, FEED_IMAGE_WIDTH) }}
-                style={styles.messageImage}
               />
             </Pressable>
           ))}
@@ -912,12 +954,16 @@ function MessageBubbleComponent({
                 key={file.url}
                 style={styles.fileChip}
                 onPress={() => Linking.openURL(file.url).catch(() => null)}
+                // Same capture problem as the image above: without this a
+                // message that is only an attachment cannot be reacted to.
+                onLongPress={() => onLongPress(item.id)}
+                delayLongPress={250}
                 activeOpacity={0.8}
               >
                 <Ionicons
                   name={details.icon}
                   size={16}
-                  color={isOwnMessage ? "#fffaf7" : details.color}
+                  color={isOwnMessage ? theme.surface : details.color}
                 />
                 <Text
                   style={[styles.fileChipText, isOwnMessage && styles.fileChipTextOwn]}
@@ -938,7 +984,7 @@ function MessageBubbleComponent({
               <Ionicons
                 name="link-outline"
                 size={16}
-                color={isOwnMessage ? "#fffaf7" : "#5f0909"}
+                color={isOwnMessage ? theme.surface : theme.primary}
               />
               <View style={{ flex: 1 }}>
                 <Text
@@ -962,7 +1008,7 @@ function MessageBubbleComponent({
               <Ionicons
                 name="people-outline"
                 size={13}
-                color={isOwnMessage ? "#fffaf7" : "#a86fff"}
+                color={isOwnMessage ? theme.surface : "#a86fff"}
               />
               <Text style={[styles.tagText, isOwnMessage && styles.tagTextOwn]}>
                 with {item.taggedUsers.map((tag) => tag.name).join(", ")}
@@ -1073,6 +1119,7 @@ function PinnedMessageRowComponent({
   isOwn?: boolean;
   isStaffViewer?: boolean;
 }) {
+  const { styles, theme } = useStyles();
   const avatarUri = liveAvatarUri || resolveAvatarUri(item);
   const senderName = item.isAnonymous
     ? (isOwn && isStaffViewer ? "Anonymous (You)" : "Anonymous")
@@ -1126,7 +1173,7 @@ function PinnedMessageRowComponent({
         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
         accessibilityLabel="Jump to message in thread"
       >
-        <Ionicons name="arrow-forward" size={16} color="#8f3a2b" />
+        <Ionicons name="arrow-forward" size={16} color={theme.textSecondary} />
       </Pressable>
     </View>
   );
@@ -1146,6 +1193,7 @@ function GalleryListRowComponent({
   nowMs: number;
   onOpen: (url: string) => void;
 }) {
+  const { styles, theme } = useStyles();
   const ago = msTimeAgo(entry.createdAtMs, nowMs);
   return (
     <Pressable style={styles.galleryRow} onPress={() => onOpen(entry.url)}>
@@ -1160,7 +1208,7 @@ function GalleryListRowComponent({
           {[entry.subtitle, entry.senderName, ago].filter(Boolean).join(" · ")}
         </Text>
       </View>
-      <Ionicons name="open-outline" size={16} color="#8f3a2b" />
+      <Ionicons name="open-outline" size={16} color={theme.textSecondary} />
     </Pressable>
   );
 }
@@ -1174,6 +1222,7 @@ function GalleryMediaTileComponent({
   entry: GalleryEntry;
   onOpen: (url: string) => void;
 }) {
+  const { styles, theme } = useStyles();
   return (
     <Pressable style={styles.mediaTile} onPress={() => onOpen(entry.url)}>
       <Image
@@ -1203,6 +1252,7 @@ function SearchResultRowComponent({
   isOwn?: boolean;
   isStaffViewer?: boolean;
 }) {
+  const { styles, theme } = useStyles();
   const senderName = item.isAnonymous
     ? (isOwn && isStaffViewer ? "Anonymous (You)" : "Anonymous")
     : item.username || "User";
@@ -1219,13 +1269,14 @@ function SearchResultRowComponent({
           {item.text}
         </Text>
       </View>
-      <Ionicons name="arrow-forward" size={16} color="#8f3a2b" />
+      <Ionicons name="arrow-forward" size={16} color={theme.textSecondary} />
     </Pressable>
   );
 }
 const SearchResultRow = React.memo(SearchResultRowComponent);
 
 export default function ServerChannelScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { serverId, channelId, serverName, channelLabel, serverAccent } =
@@ -1235,7 +1286,7 @@ export default function ServerChannelScreen() {
   const resolvedChannelId = getSingleParam(channelId) || null;
   const resolvedServerName = getSingleParam(serverName) || "Server";
   const resolvedChannelLabel = getSingleParam(channelLabel) || "general";
-  const resolvedServerAccent = getSingleParam(serverAccent) || "#5f0909";
+  const resolvedServerAccent = getSingleParam(serverAccent) || theme.primary;
   const relativeTimeNow = useRelativeTimeNow();
 
   const [user, setUser] = useState<User | null>(auth.currentUser);
@@ -2676,6 +2727,8 @@ export default function ServerChannelScreen() {
     preview: string;
     mediaUrl?: string;
     mediaType?: "image" | "video";
+    /** Set when replying to your own message, so the bar can say "yourself". */
+    isOwn?: boolean;
   } | null>(null);
   const handleSwipeReply = useCallback(
     (messageId: string) => {
@@ -2686,6 +2739,7 @@ export default function ServerChannelScreen() {
       const media = replyPreviewMedia(message);
       setReplyingTo({
         id: message.id,
+        isOwn: isOwnMsg,
         senderName: message.isAnonymous
           ? (isOwnMsg && isStaffUser ? "Anonymous (You)" : "Anonymous")
           : message.username || "User",
@@ -2947,6 +3001,9 @@ export default function ServerChannelScreen() {
               entityType: "thread_message",
               entityId: messageRef.id,
               parentId: resolvedServerId,
+              // Without the channel, a tapped mention can only find the server
+              // and has nowhere to open.
+              channelId: resolvedChannelId,
               message: `mentioned you in #${resolvedChannelLabel}`,
               preview: messageData.text,
             });
@@ -3127,7 +3184,7 @@ export default function ServerChannelScreen() {
                 />
                 <Text style={styles.channelName} numberOfLines={1}>#{resolvedChannelLabel}</Text>
                 {isStaffOnly && (
-                  <Ionicons name="lock-closed" size={12} color="#9b766c" />
+                  <Ionicons name="lock-closed" size={12} color={theme.textMuted} />
                 )}
               </View>
             </View>
@@ -3172,7 +3229,7 @@ export default function ServerChannelScreen() {
                 <Ionicons
                   name={channelMuted ? "notifications-off" : "notifications-outline"}
                   size={17}
-                  color={channelMuted ? "#9b766c" : resolvedServerAccent}
+                  color={channelMuted ? theme.textMuted : resolvedServerAccent}
                 />
               </TouchableOpacity>
 
@@ -3192,7 +3249,7 @@ export default function ServerChannelScreen() {
                 onPress={closeToDrawer}
                 activeOpacity={0.82}
               >
-                <Ionicons name="close" size={18} color="#fffaf7" />
+                <Ionicons name="close" size={18} color={theme.onPrimary} />
               </TouchableOpacity>
             </View>
           </View>
@@ -3286,13 +3343,15 @@ export default function ServerChannelScreen() {
             <TouchableOpacity
               style={[
                 styles.scrollToBottomBtn,
-                { backgroundColor: resolvedServerAccent },
+                // The reply bar grows the composer, and at the fixed offset
+                // this button landed on top of it.
+                replyingTo && styles.scrollToBottomBtnRaised,
               ]}
               onPress={scrollToBottom}
               activeOpacity={0.85}
               accessibilityLabel="Scroll to latest messages"
             >
-              <Ionicons name="chevron-down" size={20} color="#fff" />
+              <Ionicons name="chevron-down" size={20} color={theme.primary} />
             </TouchableOpacity>
           )}
 
@@ -3316,7 +3375,9 @@ export default function ServerChannelScreen() {
                     <View style={[styles.replyQuoteBar, { backgroundColor: resolvedServerAccent }]} />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.replyBarName} numberOfLines={1}>
-                        Replying to {replyingTo.senderName}
+                        {replyingTo.isOwn
+                          ? "Replying to yourself"
+                          : `Replying to ${replyingTo.senderName}`}
                       </Text>
                       <Text style={styles.replyBarPreview} numberOfLines={1}>
                         {replyingTo.preview}
@@ -3327,11 +3388,11 @@ export default function ServerChannelScreen() {
                       hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                       accessibilityLabel="Cancel reply"
                     >
-                      <Ionicons name="close" size={18} color="#8f3a2b" />
+                      <Ionicons name="close" size={18} color={theme.textSecondary} />
                     </TouchableOpacity>
                   </View>
                 )}
-                <CommentComposer
+                <ServerMessageComposer
                   currentUser={currentUserProfile}
                   onSend={handleSend}
                   onTypingChange={handleTyping}
@@ -3419,7 +3480,7 @@ export default function ServerChannelScreen() {
                 <Ionicons
                   name={reactionTargetMessage?.pinned ? "pin" : "pin-outline"}
                   size={17}
-                  color="#5f0909"
+                  color={theme.primary}
                 />
                 <Text style={styles.reactionPickerActionText}>
                   {reactionTargetMessage?.pinned ? "Unpin message" : "Pin message"}
@@ -3441,7 +3502,7 @@ export default function ServerChannelScreen() {
                   }, 180);
                 }}
               >
-                <Ionicons name="arrow-redo-outline" size={17} color="#5f0909" />
+                <Ionicons name="arrow-redo-outline" size={17} color={theme.primary} />
                 <Text style={styles.reactionPickerActionText}>Forward message</Text>
               </Pressable>
             )}
@@ -3482,7 +3543,7 @@ export default function ServerChannelScreen() {
                         setTimeout(() => openMessageEditor(target), 180);
                       }}
                     >
-                      <Ionicons name="create-outline" size={17} color="#5f0909" />
+                      <Ionicons name="create-outline" size={17} color={theme.primary} />
                       <Text style={styles.reactionPickerActionText}>Edit message</Text>
                     </Pressable>
                   )}
@@ -3586,7 +3647,7 @@ export default function ServerChannelScreen() {
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 accessibilityLabel="Close pinned messages"
               >
-                <Ionicons name="close" size={20} color="#8f3a2b" />
+                <Ionicons name="close" size={20} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
             <FlatList
@@ -3645,7 +3706,7 @@ export default function ServerChannelScreen() {
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 accessibilityLabel="Close"
               >
-                <Ionicons name="close" size={20} color="#8f3a2b" />
+                <Ionicons name="close" size={20} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -3679,7 +3740,7 @@ export default function ServerChannelScreen() {
             {contentTab === "search" ? (
               <>
                 <View style={styles.searchInputWrap}>
-                  <Ionicons name="search" size={16} color="#9b766c" />
+                  <Ionicons name="search" size={16} color={theme.textMuted} />
                   <TextInput
                     style={styles.searchInput}
                     value={searchQuery}
@@ -3775,7 +3836,7 @@ export default function ServerChannelScreen() {
                       <Ionicons
                         name="chevron-down-circle-outline"
                         size={17}
-                        color="#5f0909"
+                        color={theme.primary}
                       />
                       <Text style={styles.loadMoreText}>Load more</Text>
                     </TouchableOpacity>
@@ -3808,7 +3869,7 @@ export default function ServerChannelScreen() {
                 onPress={() => setEditChannelModalVisible(false)}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
-                <Ionicons name="close" size={22} color="#8f3a2b" />
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -3829,8 +3890,8 @@ export default function ServerChannelScreen() {
                     style={[
                       styles.channelSettingsTypeCard,
                       isSelected && {
-                        borderColor: resolvedServerAccent || "#5f0909",
-                        backgroundColor: `${resolvedServerAccent || "#5f0909"}14`,
+                        borderColor: resolvedServerAccent || theme.primary,
+                        backgroundColor: `${resolvedServerAccent || theme.primary}14`,
                       },
                     ]}
                     onPress={() => {
@@ -3842,13 +3903,13 @@ export default function ServerChannelScreen() {
                     <Ionicons
                       name={iconName as any}
                       size={18}
-                      color={isSelected ? resolvedServerAccent || "#5f0909" : "#7d3b30"}
+                      color={isSelected ? resolvedServerAccent || theme.primary : "#7d3b30"}
                     />
                     <View style={{ flex: 1, marginLeft: 8 }}>
                       <Text
                         style={[
                           styles.channelSettingsTypeTitle,
-                          isSelected && { color: resolvedServerAccent || "#5f0909", fontWeight: "700" },
+                          isSelected && { color: resolvedServerAccent || theme.primary, fontWeight: "700" },
                         ]}
                       >
                         {title}
@@ -3908,7 +3969,7 @@ export default function ServerChannelScreen() {
                 <Text style={styles.channelSettingsCancelText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.channelSettingsSaveBtn, { backgroundColor: resolvedServerAccent || "#5f0909" }]}
+                style={[styles.channelSettingsSaveBtn, { backgroundColor: resolvedServerAccent || theme.primary }]}
                 onPress={handleSaveChannelChanges}
                 disabled={!editChannelName.trim()}
               >
@@ -3942,7 +4003,7 @@ export default function ServerChannelScreen() {
                 style={styles.forwardModalCloseBtn}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
-                <Ionicons name="close" size={22} color="#9b766c" />
+                <Ionicons name="close" size={22} color={theme.textMuted} />
               </TouchableOpacity>
             </View>
 
@@ -3965,7 +4026,7 @@ export default function ServerChannelScreen() {
                   )}
                   {!!forwardTargetMessage.files?.length && (
                     <View style={styles.forwardSnippetMetaRow}>
-                      <Ionicons name="attach" size={13} color="#e0a53d" />
+                      <Ionicons name="attach" size={13} color={theme.accent} />
                       <Text style={styles.forwardSnippetMetaText}>
                         {forwardTargetMessage.files.length} attachment
                         {forwardTargetMessage.files.length > 1 ? "s" : ""}
@@ -3986,18 +4047,18 @@ export default function ServerChannelScreen() {
 
             {/* Search Input */}
             <View style={styles.forwardSearchContainer}>
-              <Ionicons name="search" size={17} color="#9b766c" />
+              <Ionicons name="search" size={17} color={theme.textMuted} />
               <TextInput
                 style={styles.forwardSearchInput}
                 placeholder="Search channels or servers..."
-                placeholderTextColor="#9b766c"
+                placeholderTextColor={theme.textMuted}
                 value={forwardSearchQuery}
                 onChangeText={setForwardSearchQuery}
                 autoCapitalize="none"
               />
               {!!forwardSearchQuery && (
                 <TouchableOpacity onPress={() => setForwardSearchQuery("")}>
-                  <Ionicons name="close-circle" size={17} color="#9b766c" />
+                  <Ionicons name="close-circle" size={17} color={theme.textMuted} />
                 </TouchableOpacity>
               )}
             </View>
@@ -4077,7 +4138,8 @@ export default function ServerChannelScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: "transparent",
@@ -4088,14 +4150,14 @@ const styles = StyleSheet.create({
   },
   sheet: {
     flex: 1,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     overflow: "hidden",
   },
   container: {
     flex: 1,
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
   },
   dragZone: {
     alignItems: "center",
@@ -4106,11 +4168,11 @@ const styles = StyleSheet.create({
     width: 44,
     height: 5,
     borderRadius: 999,
-    backgroundColor: "#c9b0a8",
+    backgroundColor: c.textMuted,
   },
   dragText: {
     marginTop: 6,
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     fontWeight: "600",
   },
@@ -4127,12 +4189,12 @@ const styles = StyleSheet.create({
     paddingRight: 12,
   },
   serverName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 18,
     fontWeight: "800",
   },
   channelName: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13,
     marginTop: 4,
     fontWeight: "600",
@@ -4156,7 +4218,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
   },
   headerIconBadge: {
@@ -4170,10 +4232,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1.5,
-    borderColor: "#f6f1ed",
+    borderColor: c.surfaceSunken,
   },
   headerIconBadgeText: {
-    color: "#fffaf7",
+    color: c.onPrimary,
     fontSize: 10,
     fontWeight: "800",
   },
@@ -4193,6 +4255,13 @@ const styles = StyleSheet.create({
     width: 38,
     height: 38,
     borderRadius: 19,
+    // Neutral rather than the server accent. It used to be the same gold as
+    // the send button, two circles of the same weight a few points apart, so
+    // a glance could not tell them apart. Keeping the accent for sending only
+    // lets the colour mean one thing.
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderStrong,
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#000",
@@ -4201,6 +4270,10 @@ const styles = StyleSheet.create({
     shadowRadius: 3.84,
     elevation: 5,
     zIndex: 20,
+  },
+  // Clears the "Replying to …" bar, which adds roughly this much height.
+  scrollToBottomBtnRaised: {
+    bottom: 128,
   },
   messageRow: {
     marginBottom: 14,
@@ -4220,6 +4293,10 @@ const styles = StyleSheet.create({
   },
   avatarWrap: {
     marginRight: 8,
+    // Pinned to the same width as avatarSpacer below. It previously had none
+    // and sized to its child, so anything unexpected in the avatar column
+    // stole width from the message beside it.
+    width: 34,
   },
   // Empty stand-in that keeps non-last grouped bubbles aligned with the one
   // that actually shows the avatar.
@@ -4232,7 +4309,7 @@ const styles = StyleSheet.create({
     borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#ead7cf",
+    backgroundColor: c.borderStrong,
     overflow: "hidden",
   },
   avatarImage: {
@@ -4240,24 +4317,67 @@ const styles = StyleSheet.create({
     height: "100%",
   },
   avatarText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "800",
   },
+  // One small line above the bubble marking a reply, the way Messenger does.
+  replyLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginBottom: 3,
+    paddingHorizontal: 4,
+  },
+  replyLabelRowOwn: { justifyContent: "flex-end" },
+  replyEcho: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    alignSelf: "flex-start",
+    maxWidth: "100%",
+    backgroundColor: "rgba(95,9,9,0.06)",
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 3,
+  },
+  replyEchoOwn: { alignSelf: "flex-end" },
+  replyEchoText: { color: c.textMuted, fontSize: 12.5, flexShrink: 1 },
+  replyEchoThumb: {
+    width: 26,
+    height: 26,
+    borderRadius: 6,
+    backgroundColor: "rgba(0,0,0,0.08)",
+  },
+  replyLabelText: {
+    color: c.textMuted,
+    fontSize: 11.5,
+    fontWeight: "600",
+    flexShrink: 1,
+  },
   messageContentWrap: {
     maxWidth: SCREEN_WIDTH * 0.74,
+    // maxWidth caps the widest this may get; these stop it being crushed to
+    // nothing when a sibling in the row measures wider than expected. Without
+    // them the bubble could collapse to a few pixels and the text wrapped one
+    // character per line, which is what made messages look stretched
+    // vertically. minWidth: 0 is what actually lets the text wrap normally
+    // inside a flex row.
+    flexShrink: 1,
+    minWidth: 0,
   },
   messageBubble: {
     // Size to content and stay left-aligned — without this the bubble would
     // stretch to whatever the widest sibling below it is (e.g. a reaction
     // pill), which made own-message bubbles look "stretched".
     alignSelf: "flex-start",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 20,
     paddingHorizontal: 14,
     paddingVertical: 12,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
   },
   messageBubbleOwn: {
     alignSelf: "flex-end",
@@ -4265,28 +4385,28 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 8,
   },
   messageAuthor: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "700",
     marginBottom: 4,
   },
   messageText: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     lineHeight: 21,
   },
   messageTextOwn: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   // Task 4A: "(edited)" marker under the text of an edited message.
   editedTag: {
     marginTop: 3,
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     fontStyle: "italic",
   },
   editedTagOwn: {
-    color: "#f6ddd2",
+    color: c.onPrimary,
   },
   // Task 3: "Pinned" badge shown at the top of a pinned message's bubble.
   pinnedTag: {
@@ -4296,21 +4416,21 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   pinnedTagText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 11,
     fontWeight: "800",
     letterSpacing: 0.3,
   },
   pinnedTagTextOwn: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   messageToggleText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 13,
     fontWeight: "700",
   },
   messageToggleTextOwn: {
-    color: "#fff2c9",
+    color: c.accentSoft,
   },
   aiPendingRow: {
     flexDirection: "row",
@@ -4318,12 +4438,12 @@ const styles = StyleSheet.create({
   },
   aiPendingText: {
     marginLeft: 8,
-    color: "#7d3b30",
+    color: c.textSecondary,
     fontSize: 12.5,
     fontWeight: "600",
   },
   aiPendingTextOwn: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   forwardedRow: {
     flexDirection: "row",
@@ -4335,18 +4455,15 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontStyle: "italic",
     fontWeight: "500",
-    color: "#8f766e",
+    color: c.textMuted,
   },
   forwardedTextOwn: {
     color: "rgba(255,250,247,0.75)",
   },
-  messageImage: {
-    width: MESSAGE_MEDIA_WIDTH,
-    maxWidth: "100%",
-    height: 180,
-    borderRadius: 14,
+  // Only spacing now — the size comes from the image's own ratio. The old
+  // fixed 180pt height with a cover fit is what cropped photos top and bottom.
+  messageImageSpacing: {
     marginTop: 10,
-    backgroundColor: "#efe1d6",
   },
   messageImagePressed: {
     opacity: 0.85,
@@ -4363,12 +4480,12 @@ const styles = StyleSheet.create({
   },
   fileChipText: {
     flex: 1,
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 12.5,
     fontWeight: "600",
   },
   fileChipTextOwn: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   linkCard: {
     flexDirection: "row",
@@ -4380,15 +4497,15 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,250,247,0.18)",
   },
   linkTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "700",
   },
   linkTitleOwn: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   linkUrl: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11.5,
     marginTop: 2,
   },
@@ -4402,16 +4519,16 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   tagText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 12.5,
     fontWeight: "600",
     flex: 1,
   },
   tagTextOwn: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   messageMeta: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11.5,
     marginTop: 5,
     marginLeft: 4,
@@ -4421,7 +4538,7 @@ const styles = StyleSheet.create({
     marginRight: 4,
   },
   messageMetaRevealed: {
-    color: "#7a3b2e",
+    color: c.textSecondary,
     fontWeight: "600",
   },
   // Feature 4: swipe-to-reply.
@@ -4433,7 +4550,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f6e2d8",
+    backgroundColor: c.surfaceSunken,
   },
   replyHintOther: {
     left: 0,
@@ -4441,42 +4558,10 @@ const styles = StyleSheet.create({
   replyHintOwn: {
     right: 0,
   },
-  replyQuote: {
-    flexDirection: "row",
-    gap: 8,
-    marginBottom: 6,
-    paddingRight: 4,
-    opacity: 0.95,
-    // Same reason as the message image width above: this bubble is sized by
-    // its content, so the quote needs a width of its own or it collapses.
-    minWidth: 150,
-  },
-  replyQuoteThumb: {
-    width: 38,
-    height: 38,
-    borderRadius: 6,
-    backgroundColor: "rgba(0,0,0,0.08)",
-  },
-  replyQuoteOwn: {
-    opacity: 0.85,
-  },
   replyQuoteBar: {
     width: 3,
     borderRadius: 2,
     alignSelf: "stretch",
-  },
-  replyQuoteName: {
-    color: "#8f3a2b",
-    fontSize: 11.5,
-    fontWeight: "800",
-  },
-  replyQuotePreview: {
-    color: "#7c6058",
-    fontSize: 12,
-    marginTop: 1,
-  },
-  replyQuoteTextOwn: {
-    color: "#fffaf7",
   },
   replyBar: {
     flexDirection: "row",
@@ -4485,16 +4570,16 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 4,
     borderBottomWidth: 1,
-    borderBottomColor: "#efdcd2",
+    borderBottomColor: c.border,
     marginBottom: 6,
   },
   replyBarName: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 12,
     fontWeight: "800",
   },
   replyBarPreview: {
-    color: "#7c6058",
+    color: c.textMuted,
     fontSize: 12.5,
     marginTop: 1,
   },
@@ -4508,7 +4593,7 @@ const styles = StyleSheet.create({
   },
   typingIndicatorText: {
     flex: 1,
-    color: "#7c6058",
+    color: c.textMuted,
     fontSize: 12,
     fontStyle: "italic",
   },
@@ -4541,9 +4626,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#ead7cf",
+    backgroundColor: c.borderStrong,
     borderWidth: 1,
-    borderColor: "#fff4ee",
+    borderColor: c.surface,
     overflow: "hidden",
   },
   readAvatarStacked: {
@@ -4554,13 +4639,13 @@ const styles = StyleSheet.create({
     height: "100%",
   },
   readAvatarText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 8,
     fontWeight: "800",
   },
   readOverflow: {
     marginLeft: 4,
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 10.5,
     fontWeight: "700",
   },
@@ -4572,9 +4657,9 @@ const styles = StyleSheet.create({
     gap: 3,
     marginTop: 4,
     marginLeft: 4,
-    backgroundColor: "#fff2ec",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#f0d9cf",
+    borderColor: c.border,
     borderRadius: 12,
     paddingHorizontal: 7,
     paddingVertical: 2,
@@ -4585,8 +4670,8 @@ const styles = StyleSheet.create({
     marginRight: 4,
   },
   reactionPillMine: {
-    backgroundColor: "#ffe3d6",
-    borderColor: "#e0a53d",
+    backgroundColor: c.accentSoft,
+    borderColor: c.accent,
   },
   reactionPillEmoji: {
     fontSize: 12,
@@ -4594,10 +4679,10 @@ const styles = StyleSheet.create({
   reactionPillCount: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#7a3b2e",
+    color: c.textSecondary,
   },
   reactionPillCountMine: {
-    color: "#5f0909",
+    color: c.primary,
   },
   reactionPickerOverlay: {
     flex: 1,
@@ -4610,12 +4695,12 @@ const styles = StyleSheet.create({
     // beneath the emoji row.
     alignItems: "stretch",
     gap: 4,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 26,
     paddingHorizontal: 8,
     paddingVertical: 6,
     borderWidth: 1,
-    borderColor: "#ecd6bf",
+    borderColor: c.accentSoft,
   },
   reactionPickerEmojiRow: {
     flexDirection: "row",
@@ -4632,10 +4717,10 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 12,
     borderTopWidth: 1,
-    borderTopColor: "#f0e0d0",
+    borderTopColor: c.accentSoft,
   },
   reactionPickerActionText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 14,
     fontWeight: "700",
   },
@@ -4650,7 +4735,7 @@ const styles = StyleSheet.create({
     borderRadius: 22,
   },
   reactionPickerButtonActive: {
-    backgroundColor: "#ffe3d6",
+    backgroundColor: c.accentSoft,
   },
   reactionPickerEmoji: {
     fontSize: 24,
@@ -4661,20 +4746,20 @@ const styles = StyleSheet.create({
   },
   emptyTitle: {
     marginTop: 14,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 20,
     fontWeight: "800",
   },
   emptyText: {
     marginTop: 8,
-    color: "#9b766c",
+    color: c.textMuted,
     textAlign: "center",
     lineHeight: 20,
   },
   composerShell: {
     borderTopWidth: 0,
-    borderTopColor: "#ead7cf",
-    backgroundColor: "#fffaf7",
+    borderTopColor: c.borderStrong,
+    backgroundColor: c.surface,
     paddingHorizontal: 8,
     paddingTop: 0,
     paddingBottom: Platform.OS === "android" ? 8 : 0,
@@ -4689,7 +4774,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(10,2,2,0.45)",
   },
   pinnedSheet: {
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
     paddingHorizontal: 16,
@@ -4703,7 +4788,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 5,
     borderRadius: 999,
-    backgroundColor: "#c9b0a8",
+    backgroundColor: c.textMuted,
     marginBottom: 10,
   },
   pinnedSheetHeader: {
@@ -4712,11 +4797,11 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingBottom: 10,
     borderBottomWidth: 1,
-    borderBottomColor: "#e7d5ca",
+    borderBottomColor: c.border,
   },
   pinnedSheetTitle: {
     flex: 1,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "800",
   },
@@ -4733,7 +4818,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   pinnedEmptyText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 14,
     fontWeight: "600",
   },
@@ -4743,7 +4828,7 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: "#ece0d9",
+    borderBottomColor: c.border,
   },
   pinnedRowMain: {
     flex: 1,
@@ -4760,7 +4845,7 @@ const styles = StyleSheet.create({
     borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#ead7cf",
+    backgroundColor: c.borderStrong,
     overflow: "hidden",
   },
   pinnedAvatarImage: {
@@ -4768,12 +4853,12 @@ const styles = StyleSheet.create({
     height: "100%",
   },
   pinnedAvatarText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "800",
   },
   pinnedSender: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 13.5,
     fontWeight: "800",
   },
@@ -4785,13 +4870,13 @@ const styles = StyleSheet.create({
   },
   pinnedPreview: {
     flex: 1,
-    color: "#5f4038",
+    color: c.textSecondary,
     fontSize: 13,
     lineHeight: 18,
   },
   pinnedMeta: {
     marginTop: 4,
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11.5,
     fontWeight: "600",
   },
@@ -4801,9 +4886,9 @@ const styles = StyleSheet.create({
     borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fff2ec",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#f0d9cf",
+    borderColor: c.border,
   },
   // Task 4A: edit-message dialog.
   editOverlay: {
@@ -4815,14 +4900,14 @@ const styles = StyleSheet.create({
   },
   editCard: {
     width: "100%",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 20,
     padding: 16,
     borderWidth: 1,
-    borderColor: "#ecd6bf",
+    borderColor: c.accentSoft,
   },
   editTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "800",
     marginBottom: 10,
@@ -4831,13 +4916,13 @@ const styles = StyleSheet.create({
     minHeight: 88,
     maxHeight: 200,
     borderWidth: 1,
-    borderColor: "#e7d5ca",
+    borderColor: c.border,
     borderRadius: 14,
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
     paddingHorizontal: 12,
     paddingTop: 10,
     paddingBottom: 10,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     lineHeight: 21,
     textAlignVertical: "top",
@@ -4854,7 +4939,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   editButtonGhostText: {
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 14,
     fontWeight: "700",
   },
@@ -4862,10 +4947,10 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     paddingHorizontal: 20,
     borderRadius: 999,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
   },
   editButtonPrimaryText: {
-    color: "#fffaf7",
+    color: c.onPrimary,
     fontSize: 14,
     fontWeight: "800",
   },
@@ -4883,18 +4968,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 7,
     borderRadius: 999,
-    backgroundColor: "#efe3db",
+    backgroundColor: c.border,
   },
   segmentActive: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
   },
   segmentText: {
-    color: "#7c6058",
+    color: c.textMuted,
     fontSize: 12.5,
     fontWeight: "800",
   },
   segmentTextActive: {
-    color: "#fffaf7",
+    color: c.onPrimary,
   },
   galleryList: {
     maxHeight: SCREEN_HEIGHT * 0.56,
@@ -4910,7 +4995,7 @@ const styles = StyleSheet.create({
     width: "100%",
     height: "100%",
     borderRadius: 12,
-    backgroundColor: "#efe1d6",
+    backgroundColor: c.surfaceSunken,
   },
   galleryRow: {
     flexDirection: "row",
@@ -4918,7 +5003,7 @@ const styles = StyleSheet.create({
     gap: 12,
     paddingVertical: 11,
     borderBottomWidth: 1,
-    borderBottomColor: "#ece0d9",
+    borderBottomColor: c.border,
   },
   galleryRowIcon: {
     width: 34,
@@ -4926,50 +5011,50 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fff2ec",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#f0d9cf",
+    borderColor: c.border,
   },
   galleryRowBody: {
     flex: 1,
   },
   galleryRowTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 13.5,
     fontWeight: "700",
   },
   galleryRowMeta: {
     marginTop: 2,
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11.5,
   },
   searchInputWrap: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#fff4ee",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#e7d5ca",
+    borderColor: c.border,
     borderRadius: 14,
     paddingHorizontal: 12,
     paddingVertical: Platform.OS === "ios" ? 10 : 4,
   },
   searchInput: {
     flex: 1,
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     padding: 0,
   },
   searchScopeNote: {
     marginTop: 8,
     marginBottom: 2,
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11.5,
     fontStyle: "italic",
   },
   searchResultSnippet: {
     marginTop: 2,
-    color: "#5f4038",
+    color: c.textSecondary,
     fontSize: 13,
     lineHeight: 18,
   },
@@ -4979,7 +5064,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   contentEmptyText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 13.5,
     fontWeight: "600",
     textAlign: "center",
@@ -4990,15 +5075,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#e7d5cc",
+    borderColor: c.border,
     borderRadius: 14,
     paddingVertical: 13,
     marginTop: 8,
   },
   loadMoreText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "800",
   },
@@ -5011,7 +5096,7 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFill,
   },
   forwardModalCard: {
-    backgroundColor: "#f6f1ed",
+    backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     maxHeight: SCREEN_HEIGHT * 0.82,
@@ -5033,24 +5118,24 @@ const styles = StyleSheet.create({
   forwardModalTitle: {
     fontSize: 18,
     fontWeight: "800",
-    color: "#5f0909",
+    color: c.primary,
   },
   forwardModalSubtitle: {
     fontSize: 12,
-    color: "#9b766c",
+    color: c.textMuted,
     marginTop: 2,
   },
   forwardModalCloseBtn: {
     width: 34,
     height: 34,
     borderRadius: 17,
-    backgroundColor: "#eee4dc",
+    backgroundColor: c.border,
     alignItems: "center",
     justifyContent: "center",
   },
   forwardSnippetCard: {
     flexDirection: "row",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 12,
     padding: 10,
     marginBottom: 12,
@@ -5060,18 +5145,18 @@ const styles = StyleSheet.create({
   },
   forwardSnippetAccent: {
     width: 3,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderRadius: 2,
   },
   forwardSnippetAuthor: {
     fontSize: 12.5,
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
     marginBottom: 2,
   },
   forwardSnippetText: {
     fontSize: 12,
-    color: "#7b6f69",
+    color: c.textMuted,
     lineHeight: 16,
   },
   forwardSnippetMetaRow: {
@@ -5082,13 +5167,13 @@ const styles = StyleSheet.create({
   },
   forwardSnippetMetaText: {
     fontSize: 11,
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontWeight: "500",
   },
   forwardSearchContainer: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 9,
@@ -5100,7 +5185,7 @@ const styles = StyleSheet.create({
   forwardSearchInput: {
     flex: 1,
     fontSize: 13.5,
-    color: "#4d1b17",
+    color: c.textPrimary,
     padding: 0,
   },
   forwardList: {
@@ -5120,14 +5205,14 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: "#f4e7df",
+    backgroundColor: c.surfaceSunken,
     alignItems: "center",
     justifyContent: "center",
   },
   forwardDestEmoji: {
     fontSize: 16,
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
   },
   forwardDestInfo: {
     flex: 1,
@@ -5135,15 +5220,15 @@ const styles = StyleSheet.create({
   forwardDestName: {
     fontSize: 14,
     fontWeight: "700",
-    color: "#4d1b17",
+    color: c.textPrimary,
   },
   forwardDestServer: {
     fontSize: 11.5,
-    color: "#9b766c",
+    color: c.textMuted,
     marginTop: 2,
   },
   forwardSendBtn: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     paddingHorizontal: 13,
     paddingVertical: 7,
     borderRadius: 16,
@@ -5185,17 +5270,17 @@ const styles = StyleSheet.create({
   },
   forwardEmptyText: {
     fontSize: 13,
-    color: "#9b766c",
+    color: c.textMuted,
     textAlign: "center",
   },
   readOnlyBanner: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     paddingHorizontal: 16,
     paddingVertical: 14,
     borderTopWidth: 1,
-    borderTopColor: "#eddcd6",
+    borderTopColor: c.border,
     gap: 12,
   },
   readOnlyIconWrap: {
@@ -5207,7 +5292,7 @@ const styles = StyleSheet.create({
   },
   readOnlyText: {
     flex: 1,
-    color: "#8f3a2b",
+    color: c.textSecondary,
     fontSize: 13,
     fontWeight: "600",
     lineHeight: 18,
@@ -5222,11 +5307,11 @@ const styles = StyleSheet.create({
   channelSettingsModalCard: {
     width: "100%",
     maxWidth: 440,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 20,
     padding: 20,
     borderWidth: 1,
-    borderColor: "#e8dbd5",
+    borderColor: c.border,
   },
   channelSettingsModalHeader: {
     flexDirection: "row",
@@ -5237,17 +5322,17 @@ const styles = StyleSheet.create({
   channelSettingsModalTitle: {
     fontSize: 17,
     fontWeight: "800",
-    color: "#4d1b17",
+    color: c.textPrimary,
   },
   channelSettingsModalSubtitle: {
     fontSize: 12,
-    color: "#9b766c",
+    color: c.textMuted,
     marginTop: 2,
   },
   channelSettingsFieldLabel: {
     fontSize: 12,
     fontWeight: "700",
-    color: "#5f0909",
+    color: c.primary,
     marginBottom: 5,
     marginTop: 8,
   },
@@ -5261,27 +5346,27 @@ const styles = StyleSheet.create({
     padding: 8,
     borderRadius: 10,
     borderWidth: 1.5,
-    borderColor: "#e8dbd5",
-    backgroundColor: "#fffdfb",
+    borderColor: c.border,
+    backgroundColor: c.surfaceRaised,
   },
   channelSettingsTypeTitle: {
     fontSize: 13,
     fontWeight: "600",
-    color: "#4d1b17",
+    color: c.textPrimary,
   },
   channelSettingsTypeHint: {
     fontSize: 10.5,
-    color: "#9b766c",
+    color: c.textMuted,
   },
   channelSettingsInput: {
-    backgroundColor: "#fffdfb",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#ead7cf",
+    borderColor: c.borderStrong,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 8,
     fontSize: 14,
-    color: "#4d1b17",
+    color: c.textPrimary,
   },
   channelSettingsInputMulti: {
     minHeight: 56,
@@ -5295,8 +5380,8 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: "#f5c6c2",
-    backgroundColor: "#fff0ef",
+    borderColor: c.dangerSoft,
+    backgroundColor: c.dangerSoft,
     marginTop: 12,
   },
   channelSettingsDeleteBtnText: {
@@ -5314,10 +5399,10 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     paddingHorizontal: 16,
     borderRadius: 18,
-    backgroundColor: "#f0e4dd",
+    backgroundColor: c.border,
   },
   channelSettingsCancelText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "700",
   },
@@ -5327,7 +5412,7 @@ const styles = StyleSheet.create({
     borderRadius: 18,
   },
   channelSettingsSaveText: {
-    color: "#fffaf7",
+    color: c.onPrimary,
     fontSize: 13,
     fontWeight: "700",
   },

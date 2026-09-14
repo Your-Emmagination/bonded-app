@@ -17,7 +17,13 @@ export type DraftAttachment = {
   name: string;
   mimeType: string;
   source: "camera" | "gallery" | "file" | "gif";
-  uploaded?: { url: string; name: string; mimeType: string };
+  uploaded?: {
+    url: string;
+    name: string;
+    mimeType: string;
+    width?: number | null;
+    height?: number | null;
+  };
 };
 
 /** Keep a successful upload on the draft so a failed message send can retry
@@ -25,10 +31,20 @@ export type DraftAttachment = {
 export async function prepareDraftAttachment(
   attachment: DraftAttachment,
   upload: (options: { uri: string; folder: "post_images" | "post_files"; resourceType: "image" | "raw" }) => Promise<string>,
+  /** Optional: reports the uploaded image's pixel size so the bubble can be
+   *  shaped to it rather than cropping it into a fixed box. */
+  measure?: (url: string) => { width: number | null; height: number | null } | null,
 ) {
   if (attachment.uploaded) return attachment.uploaded;
   const image = attachment.mimeType.startsWith("image/");
   const url = await upload({ uri: attachment.uri, folder: image ? "post_images" : "post_files", resourceType: image ? "image" : "raw" });
   if (!url) throw new Error("The attachment could not be uploaded.");
-  return { url, name: attachment.name, mimeType: attachment.mimeType };
+  const size = image && measure ? measure(url) : null;
+  return {
+    url,
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    width: size?.width ?? null,
+    height: size?.height ?? null,
+  };
 }

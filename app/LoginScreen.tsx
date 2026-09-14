@@ -1,4 +1,6 @@
 // app/LoginScreen.tsx
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
 import { beginLoginPreparation, findSetupProfile } from "@/contexts/AccountSetupContext";
 import { checkAccountPassword } from "@/utils/passwordReset";
@@ -8,7 +10,7 @@ import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Animated,
@@ -23,7 +25,7 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { auth } from "../Firebase_configure";
 import ConfirmDialog from "./(main)/components/ConfirmDialog";
 
@@ -34,6 +36,7 @@ function TermsModal({ visible, onAccept, onDecline }: {
   onAccept: () => void;
   onDecline: () => void;
 }) {
+  const { tos, theme } = useTosStyles();
   const [scrolledToBottom, setScrolledToBottom] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
@@ -44,13 +47,13 @@ function TermsModal({ visible, onAccept, onDecline }: {
   }, []);
 
   return (
-    <Modal visible={visible} animationType="slide" transparent statusBarTranslucent>
-      <View style={tos.overlay}>
-        <View style={tos.sheet}>
+    <Modal visible={visible} animationType="slide" transparent statusBarTranslucent navigationBarTranslucent>
+      <SafeAreaProvider style={tos.overlay}>
+        <SafeAreaView edges={["bottom", "left", "right"]} style={tos.sheet}>
           {/* Header */}
           <View style={tos.header}>
             <View style={tos.headerIcon}>
-              <Ionicons name="document-text" size={22} color="#e0a53d" />
+              <Ionicons name="document-text" size={22} color={theme.accent} />
             </View>
             <Text style={tos.headerTitle}>Terms & Conditions</Text>
             <Text style={tos.headerSub}>Please read before continuing</Text>
@@ -59,7 +62,7 @@ function TermsModal({ visible, onAccept, onDecline }: {
           {/* Scroll prompt */}
           {!scrolledToBottom && (
             <View style={tos.scrollPrompt}>
-              <Ionicons name="chevron-down" size={14} color="#dfb85e" />
+              <Ionicons name="chevron-down" size={14} color={theme.accent} />
               <Text style={tos.scrollPromptText}>Scroll to read all terms</Text>
             </View>
           )}
@@ -156,13 +159,14 @@ function TermsModal({ visible, onAccept, onDecline }: {
               </Text>
             </TouchableOpacity>
           </View>
-        </View>
-      </View>
+        </SafeAreaView>
+      </SafeAreaProvider>
     </Modal>
   );
 }
 
 export default function LoginScreen() {
+  const { styles, theme } = useStyles();
   const router = useRouter();
   const [studentID, setStudentID] = useState("");
   const [password, setPassword] = useState("");
@@ -415,7 +419,7 @@ const handleTermsDecline = useCallback(() => {
                 <View style={[styles.inputWrapper, error && styles.inputError]}>
                   <TextInput
                     placeholder="Email"
-                    placeholderTextColor="#e5b9ad"
+                    placeholderTextColor={theme.onChromeMuted}
                     style={styles.input}
                     value={studentID}
                     onChangeText={(text) => {
@@ -432,7 +436,7 @@ const handleTermsDecline = useCallback(() => {
                 <View style={[styles.inputWrapper, error && styles.inputError]}>
                   <TextInput
                     placeholder="Password"
-                    placeholderTextColor="#e5b9ad"
+                    placeholderTextColor={theme.onChromeMuted}
                     secureTextEntry={!showPassword}
                     style={styles.input}
                     value={password}
@@ -452,7 +456,7 @@ const handleTermsDecline = useCallback(() => {
                     <Ionicons
                       name={showPassword ? "eye-off-outline" : "eye-outline"}
                       size={20}
-                      color="#b88f87"
+                      color={theme.onChromeMuted}
                     />
                   </TouchableOpacity>
                 </View>
@@ -473,7 +477,7 @@ const handleTermsDecline = useCallback(() => {
 
                 {error && (
                   <Animated.View style={styles.errorContainer}>
-                    <Ionicons name="alert-circle" size={18} color="#ffb4ab" />
+                    <Ionicons name="alert-circle" size={18} color={theme.danger} />
                     <Text style={styles.errorText}>{error}</Text>
                   </Animated.View>
                 )}
@@ -485,11 +489,11 @@ const handleTermsDecline = useCallback(() => {
                   activeOpacity={0.85}
                 >
                   {loading ? (
-                    <ActivityIndicator color="#5e0a09" />
+                    <ActivityIndicator color={theme.onAccent} />
                   ) : (
                     <>
                       <Text style={styles.buttonText}>Sign In</Text>
-                      <Ionicons name="arrow-forward" size={18} color="#5e0a09" />
+                      <Ionicons name="arrow-forward" size={18} color={theme.onAccent} />
                     </>
                   )}
                 </TouchableOpacity>
@@ -500,7 +504,7 @@ const handleTermsDecline = useCallback(() => {
                   onPress={() => setShowTerms(true)}
                   activeOpacity={0.7}
                 >
-                  <Ionicons name="document-text-outline" size={13} color="#b88f87" />
+                  <Ionicons name="document-text-outline" size={13} color={theme.onChromeMuted} />
                   <Text style={styles.tosLinkText}>View Terms & Conditions</Text>
                 </TouchableOpacity>
               </Animated.View>
@@ -529,20 +533,22 @@ const handleTermsDecline = useCallback(() => {
 }
 
 // ─── Terms Modal Styles ───────────────────────────────────────────────────────
-const tos = StyleSheet.create({
+const makeTos = (c: ThemeTokens) =>
+  StyleSheet.create({
   overlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.72)",
     justifyContent: "flex-end",
   },
   sheet: {
-    backgroundColor: "#3d0606",
+    backgroundColor: c.chrome,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     maxHeight: "90%",
-    paddingBottom: Platform.OS === "ios" ? 34 : 24,
+    // SafeAreaView adds the modal window's actual navigation-bar inset.
+    paddingBottom: 16,
     borderTopWidth: 1.5,
-    borderColor: "#8a1214",
+    borderColor: c.chromeBorder,
   },
   header: {
     alignItems: "center",
@@ -556,9 +562,9 @@ const tos = StyleSheet.create({
     width: 46,
     height: 46,
     borderRadius: 23,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
     borderWidth: 1.5,
-    borderColor: "#e0a028",
+    borderColor: c.accent,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 12,
@@ -566,12 +572,12 @@ const tos = StyleSheet.create({
   headerTitle: {
     fontSize: 20,
     fontWeight: "800",
-    color: "#e0aa42",
+    color: c.accent,
     letterSpacing: 0.3,
   },
   headerSub: {
     fontSize: 13,
-    color: "#b88f87",
+    color: c.onChromeMuted,
     marginTop: 4,
     fontWeight: "500",
   },
@@ -585,11 +591,13 @@ const tos = StyleSheet.create({
   },
   scrollPromptText: {
     fontSize: 12,
-    color: "#dfb85e",
+    color: c.accent,
     fontWeight: "600",
   },
   body: {
     maxHeight: 380,
+    flexShrink: 1,
+    minHeight: 0,
     paddingHorizontal: 24,
   },
   bodyContent: {
@@ -599,7 +607,7 @@ const tos = StyleSheet.create({
   sectionTitle: {
     fontSize: 13,
     fontWeight: "800",
-    color: "#e0a53d",
+    color: c.accent,
     marginTop: 18,
     marginBottom: 6,
     textTransform: "uppercase",
@@ -607,13 +615,13 @@ const tos = StyleSheet.create({
   },
   paragraph: {
     fontSize: 14,
-    color: "#f5d8d3",
+    color: c.onChrome,
     lineHeight: 21,
     fontWeight: "400",
   },
   bullet: {
     fontSize: 14,
-    color: "#f5d8d3",
+    color: c.onChrome,
     lineHeight: 22,
     paddingLeft: 8,
     fontWeight: "400",
@@ -626,7 +634,7 @@ const tos = StyleSheet.create({
   },
   lastUpdatedText: {
     fontSize: 12,
-    color: "#b88f87",
+    color: c.onChromeMuted,
     fontWeight: "500",
     textAlign: "center",
   },
@@ -641,12 +649,12 @@ const tos = StyleSheet.create({
     paddingVertical: 13,
     borderRadius: 10,
     borderWidth: 1.5,
-    borderColor: "#8a1214",
+    borderColor: c.chromeBorder,
     alignItems: "center",
     backgroundColor: "transparent",
   },
   declineBtnText: {
-    color: "#b88f87",
+    color: c.onChromeMuted,
     fontSize: 15,
     fontWeight: "700",
   },
@@ -654,7 +662,7 @@ const tos = StyleSheet.create({
     flex: 2,
     paddingVertical: 13,
     borderRadius: 10,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     alignItems: "center",
     flexDirection: "row",
     justifyContent: "center",
@@ -664,7 +672,7 @@ const tos = StyleSheet.create({
     opacity: 0.7,
   },
   acceptBtnText: {
-    color: "#5e0a09",
+    color: c.onAccent,
     fontSize: 15,
     fontWeight: "800",
   },
@@ -674,17 +682,18 @@ const tos = StyleSheet.create({
 });
 
 // ─── Login Screen Styles ──────────────────────────────────────────────────────
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
   },
   keyboardView: {
     flex: 1,
   },
   scrollView: {
     flex: 1,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
   },
   scrollContent: {
     flexGrow: 1,
@@ -696,7 +705,7 @@ const styles = StyleSheet.create({
   },
   visualShell: {
     flex: 1,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
     overflow: "hidden",
     paddingHorizontal: 28,
     paddingTop: 16,
@@ -710,7 +719,7 @@ const styles = StyleSheet.create({
     width: 220,
     height: 220,
     borderRadius: 110,
-    backgroundColor: "#8a1214",
+    backgroundColor: c.chromeBorder,
   },
   bottomAccent: {
     position: "absolute",
@@ -719,7 +728,7 @@ const styles = StyleSheet.create({
     width: 220,
     height: 220,
     borderRadius: 110,
-    backgroundColor: "#8a1214",
+    backgroundColor: c.chromeBorder,
   },
   logoContainer: {
     alignItems: "center",
@@ -738,11 +747,11 @@ const styles = StyleSheet.create({
   loginTitle: {
     fontSize: 28,
     fontWeight: "800",
-    color: "#e0aa42",
+    color: c.accent,
     marginTop: 52,
   },
   subtitle: {
-    color: "#dfb85e",
+    color: c.accent,
     fontSize: 15,
     marginTop: 6,
     fontWeight: "600",
@@ -752,8 +761,8 @@ const styles = StyleSheet.create({
     marginTop: 28,
   },
   inputWrapper: {
-    backgroundColor: "#7a2020",
-    borderColor: "#e0a028",
+    backgroundColor: c.chromeBorder,
+    borderColor: c.accent,
     borderWidth: 1.6,
     borderRadius: 12,
     flexDirection: "row",
@@ -763,11 +772,11 @@ const styles = StyleSheet.create({
     height: 46,
   },
   inputError: {
-    borderColor: "#ffb4ab",
+    borderColor: c.danger,
   },
   input: {
     flex: 1,
-    color: "#f5d8d3",
+    color: c.onChrome,
     fontSize: 15,
     paddingVertical: 0,
     fontWeight: "600",
@@ -783,7 +792,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
   },
   forgotPasswordText: {
-    color: "#dfb85e",
+    color: c.accent,
     fontSize: 13,
     fontWeight: "600",
   },
@@ -796,13 +805,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
   },
   errorText: {
-    color: "#ffd4cf",
+    color: c.danger,
     fontSize: 13.5,
     flex: 1,
     fontWeight: "500",
   },
   button: {
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: "center",
@@ -816,7 +825,7 @@ const styles = StyleSheet.create({
     opacity: 0.75,
   },
   buttonText: {
-    color: "#5e0a09",
+    color: c.onAccent,
     fontWeight: "800",
     fontSize: 17,
   },
@@ -828,7 +837,7 @@ const styles = StyleSheet.create({
     marginTop: 16,
   },
   tosLinkText: {
-    color: "#b88f87",
+    color: c.onChromeMuted,
     fontSize: 12.5,
     fontWeight: "600",
   },
@@ -843,8 +852,22 @@ const styles = StyleSheet.create({
     marginBottom: 18,
   },
   footerText: {
-    color: "#b88f87",
+    color: c.onChromeMuted,
     fontSize: 12,
     fontWeight: "500",
   },
 });
+
+/** Themed stylesheet for the login screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
+
+/** Themed stylesheet for the terms sheet. */
+const useTosStyles = () => {
+  const theme = useThemeColors();
+  const tos = useMemo(() => makeTos(theme), [theme]);
+  return useMemo(() => ({ tos, theme }), [tos, theme]);
+};

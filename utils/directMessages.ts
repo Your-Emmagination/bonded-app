@@ -89,6 +89,14 @@ export type DirectFileAttachment = {
   mimeType: string;
   name?: string;
   size?: number;
+  /**
+   * Pixel size of the original, recorded at upload. Lets the bubble be shaped
+   * to the picture on first paint instead of guessing a height and cropping.
+   * Absent on anything sent before this existed — those are measured as they
+   * load instead.
+   */
+  width?: number | null;
+  height?: number | null;
 };
 
 export type DirectMessage = {

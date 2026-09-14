@@ -1,3 +1,5 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useNavigation, useRouter } from "expo-router";
@@ -30,6 +32,7 @@ import {
     View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import AlumniBadge from "./components/AlumniBadge";
 import ConfirmDialog from "./components/ConfirmDialog";
 
 import { resolveAvatarUri } from "@/utils/avatar";
@@ -173,6 +176,7 @@ const canShowProfileContent = (
   publicUserId !== "anonymous";
 
 const UserProfileScreen = () => {
+  const { styles, theme } = useStyles();
   const params = useLocalSearchParams<{
     userId?: string | string[];
     profileDocId?: string | string[];
@@ -1128,6 +1132,9 @@ const UserProfileScreen = () => {
       lastProfileFeedIndex,
       openImageViewer,
       ownerRole,
+      styles.feedCardGroupItem,
+      styles.feedCardGroupItemFirst,
+      styles.feedCardGroupItemLast,
       viewer?.uid,
       viewerRole,
     ],
@@ -1140,7 +1147,7 @@ const UserProfileScreen = () => {
           <View style={styles.headerShell}>
             <View style={styles.headerRow}>
               <TouchableOpacity style={styles.headerBackButton} onPress={navigateBack}>
-                <Ionicons name="arrow-back" size={20} color="#fffaf7" />
+                <Ionicons name="arrow-back" size={20} color={theme.onChrome} />
               </TouchableOpacity>
               <View style={styles.headerCopy}>
                 <Text style={styles.headerTitle}>Profile</Text>
@@ -1161,7 +1168,7 @@ const UserProfileScreen = () => {
         <View style={styles.headerShell}>
           <View style={styles.headerRow}>
             <TouchableOpacity style={styles.headerBackButton} onPress={navigateBack}>
-              <Ionicons name="arrow-back" size={20} color="#fffaf7" />
+              <Ionicons name="arrow-back" size={20} color={theme.onChrome} />
             </TouchableOpacity>
             <View style={styles.headerCopy}>
               <Text style={styles.headerTitle}>Profile</Text>
@@ -1171,7 +1178,7 @@ const UserProfileScreen = () => {
           </View>
         </View>
         <View style={styles.loadingState}>
-          <Ionicons name="person-circle-outline" size={52} color="#c9a89c" />
+          <Ionicons name="person-circle-outline" size={52} color={theme.textMuted} />
           <Text style={styles.errorText}>User not found</Text>
         </View>
       </SafeAreaView>
@@ -1184,7 +1191,7 @@ const UserProfileScreen = () => {
         <View style={styles.headerShell}>
           <View style={styles.headerRow}>
             <TouchableOpacity style={styles.headerBackButton} onPress={navigateBack}>
-              <Ionicons name="arrow-back" size={20} color="#fffaf7" />
+              <Ionicons name="arrow-back" size={20} color={theme.onChrome} />
             </TouchableOpacity>
             <View style={styles.headerCopy}>
               <Text style={styles.headerTitle}>Profile</Text>
@@ -1196,7 +1203,7 @@ const UserProfileScreen = () => {
 
         {isOffline && (
           <View style={styles.offlineStatusBar}>
-            <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+            <Ionicons name="cloud-offline-outline" size={14} color={theme.warning} />
             <Text style={styles.offlineStatusText}>
               Offline mode
             </Text>
@@ -1233,29 +1240,30 @@ const UserProfileScreen = () => {
                     />
                   ) : (
                     <View style={styles.placeholder}>
-                      <Ionicons name="person" size={48} color="#e0a53d" />
+                      <Ionicons name="person" size={48} color={theme.accent} />
                     </View>
                   )}
                   <View
                     style={[
                       styles.statusBadge,
-                      { backgroundColor: student.isOnline ? "#2e9d63" : "#a58e87" },
+                      { backgroundColor: student.isOnline ? "#2e9d63" : theme.textMuted },
                     ]}
                   />
                 </TouchableOpacity>
 
                 <Text style={styles.profileName}>{fullName}</Text>
+                <AlumniBadge yearlvl={student.yearlvl} size="md" />
                 <View style={styles.statusPill}>
                   <View
                     style={[
                       styles.statusDot,
-                      { backgroundColor: student.isOnline ? "#2e9d63" : "#a58e87" },
+                      { backgroundColor: student.isOnline ? "#2e9d63" : theme.textMuted },
                     ]}
                   />
                   <Text
                     style={[
                       styles.statusText,
-                      { color: student.isOnline ? "#2e9d63" : "#8f746c" },
+                      { color: student.isOnline ? "#2e9d63" : theme.textMuted },
                     ]}
                   >
                     {student.isOnline ? "Online" : "Offline"}
@@ -1282,7 +1290,7 @@ const UserProfileScreen = () => {
                       }
                     }}
                   >
-                    <Ionicons name="chatbubble-ellipses-outline" size={18} color="#ffffff" />
+                    <Ionicons name="chatbubble-ellipses-outline" size={18} color={theme.onChrome} />
                     <Text style={styles.messageButtonText}>Message</Text>
                   </TouchableOpacity>
                 )}
@@ -1290,7 +1298,7 @@ const UserProfileScreen = () => {
 
               <View style={styles.section}>
                 <View style={styles.sectionTitleRow}>
-                  <Ionicons name="person" size={18} color="#5f0909" />
+                  <Ionicons name="person" size={18} color={theme.primary} />
                   <Text style={styles.sectionTitle}>Personal Information</Text>
                 </View>
                 <View style={styles.goldCard}>
@@ -1306,7 +1314,7 @@ const UserProfileScreen = () => {
 
               <View style={styles.section}>
                 <View style={styles.sectionTitleRow}>
-                  <Ionicons name="school" size={18} color="#5f0909" />
+                  <Ionicons name="school" size={18} color={theme.primary} />
                   <Text style={styles.sectionTitle}>Academic Information</Text>
                 </View>
                 <View style={styles.goldCard}>
@@ -1328,7 +1336,7 @@ const UserProfileScreen = () => {
                 <View style={styles.activityHeader}>
                   <View style={styles.activityTitleGroup}>
                     <View style={styles.activityIconBox}>
-                      <Ionicons name="newspaper-outline" size={18} color="#5f0909" />
+                      <Ionicons name="newspaper-outline" size={18} color={theme.primary} />
                     </View>
                     <View>
                       <View style={styles.activityTitleRow}>
@@ -1360,7 +1368,7 @@ const UserProfileScreen = () => {
                               : "layers-outline"
                         }
                         size={15}
-                        color="#5f0909"
+                        color={theme.primary}
                       />
                       <Text style={styles.filterButtonText}>
                         {contentFilter === "all"
@@ -1372,7 +1380,7 @@ const UserProfileScreen = () => {
                       <Ionicons
                         name={contentFilterOpen ? "chevron-up" : "chevron-down"}
                         size={14}
-                        color="#8a6258"
+                        color={theme.textMuted}
                       />
                     </TouchableOpacity>
 
@@ -1417,7 +1425,7 @@ const UserProfileScreen = () => {
                                 <Ionicons
                                   name={option.icon}
                                   size={16}
-                                  color={selected ? "#5f0909" : "#8a6258"}
+                                  color={selected ? theme.primary : theme.textMuted}
                                 />
                                 <Text
                                   style={[
@@ -1469,7 +1477,7 @@ const UserProfileScreen = () => {
                             : "newspaper-outline"
                       }
                       size={28}
-                      color="#b58a7c"
+                      color={theme.textMuted}
                     />
                   </View>
                   <Text style={styles.emptyStateTitle}>
@@ -1497,10 +1505,10 @@ const UserProfileScreen = () => {
                   disabled={isLoadingMoreContent}
                 >
                   {isLoadingMoreContent ? (
-                    <ActivityIndicator size="small" color="#5f0909" />
+                    <ActivityIndicator size="small" color={theme.primary} />
                   ) : (
                     <>
-                      <Ionicons name="chevron-down-circle-outline" size={17} color="#5f0909" />
+                      <Ionicons name="chevron-down-circle-outline" size={17} color={theme.primary} />
                       <Text style={styles.loadMoreText}>
                         Load more {contentFilter === "all" ? "activity" : contentFilter}
                       </Text>
@@ -1544,23 +1552,28 @@ const InfoRow = ({
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
   value: string;
-}) => (
-  <View style={styles.infoRow}>
-    <View style={styles.iconBox}>
-      <Ionicons name={icon} size={18} color="#e0a53d" />
+}) => {
+  const { styles, theme } = useStyles();
+
+  return (
+    <View style={styles.infoRow}>
+      <View style={styles.iconBox}>
+        <Ionicons name={icon} size={18} color={theme.accent} />
+      </View>
+      <View style={styles.infoCopy}>
+        <Text style={styles.infoLabel}>{label}</Text>
+        <Text style={styles.infoValue}>{value}</Text>
+      </View>
     </View>
-    <View style={styles.infoCopy}>
-      <Text style={styles.infoLabel}>{label}</Text>
-      <Text style={styles.infoValue}>{value}</Text>
-    </View>
-  </View>
-);
+  );
+};
 
 export default UserProfileScreen;
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f8f4f0" },
-  contentShell: { flex: 1, backgroundColor: "#f8f4f0" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.surfaceSunken },
+  contentShell: { flex: 1, backgroundColor: c.surfaceSunken },
   headerShell: {
     marginHorizontal: 12,
     marginTop: 10,
@@ -1568,10 +1581,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 13,
     borderRadius: 18,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderWidth: 1,
-    borderColor: "#812525",
-    shadowColor: "#4d1b17",
+    borderColor: c.chromeBorder,
+    shadowColor: c.textPrimary,
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.14,
     shadowRadius: 8,
@@ -1596,14 +1609,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   headerTitle: {
-    color: "#fffaf7",
+    color: c.surface,
     fontSize: 20,
     fontWeight: "700",
     textAlign: "center",
     letterSpacing: 0.5,
   },
   headerSubtext: {
-    color: "#f0d2c2",
+    color: c.borderStrong,
     fontSize: 12,
     textAlign: "center",
     marginTop: 2,
@@ -1616,11 +1629,11 @@ const styles = StyleSheet.create({
     gap: 12,
     paddingHorizontal: 24,
   },
-  loadingText: { color: "#8f6a60", fontSize: 14, fontWeight: "600" },
-  errorText: { color: "#8f6a60", fontSize: 16, fontWeight: "600" },
+  loadingText: { color: c.textMuted, fontSize: 14, fontWeight: "600" },
+  errorText: { color: c.textMuted, fontSize: 16, fontWeight: "600" },
   profileCard: {
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     marginHorizontal: 16,
     marginTop: 12,
     paddingHorizontal: 22,
@@ -1628,9 +1641,9 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     borderWidth: 1,
     borderTopWidth: 3,
-    borderColor: "#ead8cf",
-    borderTopColor: "#e0a53d",
-    shadowColor: "#4d1b17",
+    borderColor: c.border,
+    borderTopColor: c.accent,
+    shadowColor: c.textPrimary,
     shadowOffset: { width: 0, height: 5 },
     shadowOpacity: 0.09,
     shadowRadius: 12,
@@ -1642,15 +1655,15 @@ const styles = StyleSheet.create({
     height: 104,
     borderRadius: 52,
     borderWidth: 3,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
   placeholder: {
     width: 104,
     height: 104,
     borderRadius: 52,
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
     justifyContent: "center",
     alignItems: "center",
   },
@@ -1662,10 +1675,10 @@ const styles = StyleSheet.create({
     height: 16,
     borderRadius: 8,
     borderWidth: 2,
-    borderColor: "#fffaf7",
+    borderColor: c.surface,
   },
   profileName: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 23,
     fontWeight: "800",
     marginBottom: 10,
@@ -1679,9 +1692,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 7,
     borderRadius: 20,
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
   },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   statusText: { fontWeight: "600" },
@@ -1689,20 +1702,20 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     paddingHorizontal: 22,
     paddingVertical: 10,
     borderRadius: 22,
     marginTop: 14,
     gap: 8,
-    shadowColor: "#5f0909",
+    shadowColor: c.primary,
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.25,
     shadowRadius: 5,
     elevation: 4,
   },
   messageButtonText: {
-    color: "#ffffff",
+    color: c.surfaceRaised,
     fontSize: 14,
     fontWeight: "700",
     letterSpacing: 0.3,
@@ -1715,7 +1728,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   sectionTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "700",
     fontSize: 14,
     letterSpacing: 0.5,
@@ -1725,20 +1738,20 @@ const styles = StyleSheet.create({
     height: 24,
     borderRadius: 12,
     paddingHorizontal: 7,
-    backgroundColor: "#f4dfc3",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
     marginLeft: 4,
   },
-  countBadgeText: { color: "#5f0909", fontSize: 12, fontWeight: "800" },
+  countBadgeText: { color: c.primary, fontSize: 12, fontWeight: "800" },
   goldCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#ead0b0",
+    borderColor: c.borderStrong,
     paddingHorizontal: 14,
     paddingVertical: 4,
-    shadowColor: "#4d1b17",
+    shadowColor: c.textPrimary,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05,
     shadowRadius: 7,
@@ -1749,14 +1762,14 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 10,
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
     justifyContent: "center",
     alignItems: "center",
   },
   infoCopy: { flex: 1, marginLeft: 12 },
-  infoLabel: { color: "#9b766c", fontSize: 11, fontWeight: "600" },
+  infoLabel: { color: c.textMuted, fontSize: 11, fontWeight: "600" },
   infoValue: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "600",
     marginTop: 2,
@@ -1787,9 +1800,9 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f5e6db",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#ead4c8",
+    borderColor: c.border,
   },
   activityTitleRow: {
     flexDirection: "row",
@@ -1797,13 +1810,13 @@ const styles = StyleSheet.create({
     gap: 5,
   },
   activityTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 16,
     fontWeight: "800",
     letterSpacing: 0.1,
   },
   activitySubtitle: {
-    color: "#94736a",
+    color: c.textMuted,
     fontSize: 11.5,
     marginTop: 2,
   },
@@ -1820,16 +1833,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 6,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#dfc8bd",
+    borderColor: c.border,
   },
   filterButtonOpen: {
-    borderColor: "#e0a53d",
-    backgroundColor: "#fff7ea",
+    borderColor: c.accent,
+    backgroundColor: c.accentSoft,
   },
   filterButtonText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 12,
     fontWeight: "800",
   },
@@ -1840,10 +1853,10 @@ const styles = StyleSheet.create({
     width: 178,
     padding: 6,
     borderRadius: 14,
-    backgroundColor: "#fffdfb",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#e5d2c8",
-    shadowColor: "#4d1b17",
+    borderColor: c.border,
+    shadowColor: c.textPrimary,
     shadowOffset: { width: 0, height: 7 },
     shadowOpacity: 0.16,
     shadowRadius: 12,
@@ -1859,7 +1872,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   filterMenuItemActive: {
-    backgroundColor: "#f9eadf",
+    backgroundColor: c.accentSoft,
   },
   filterMenuItemCopy: {
     flexDirection: "row",
@@ -1867,12 +1880,12 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   filterMenuItemText: {
-    color: "#76584f",
+    color: c.textMuted,
     fontSize: 12.5,
     fontWeight: "700",
   },
   filterMenuItemTextActive: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "800",
   },
   filterMenuCount: {
@@ -1882,18 +1895,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f4ede9",
+    backgroundColor: c.surfaceSunken,
   },
   filterMenuCountActive: {
-    backgroundColor: "#efd7ad",
+    backgroundColor: c.accentSoft,
   },
   filterMenuCountText: {
-    color: "#8a6a60",
+    color: c.textMuted,
     fontSize: 10.5,
     fontWeight: "800",
   },
   filterMenuCountTextActive: {
-    color: "#5f0909",
+    color: c.primary,
   },
   // Keeps the header (and its activity filter menu) drawn above the list.
   activityListHeader: {
@@ -1909,8 +1922,8 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     borderLeftWidth: 1,
     borderRightWidth: 1,
-    borderColor: "#ead8cf",
-    backgroundColor: "#fffaf7",
+    borderColor: c.border,
+    backgroundColor: c.surface,
   },
   feedCardGroupItemFirst: {
     borderTopWidth: 1,
@@ -1924,10 +1937,10 @@ const styles = StyleSheet.create({
   },
   emptyState: {
     minHeight: 138,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
@@ -1940,19 +1953,19 @@ const styles = StyleSheet.create({
     borderRadius: 26,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#f8eee8",
+    backgroundColor: c.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
     marginBottom: 2,
   },
   emptyStateTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 14.5,
     fontWeight: "800",
     textAlign: "center",
   },
   emptyText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12.5,
     lineHeight: 18,
     fontWeight: "600",
@@ -1968,24 +1981,31 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 7,
     borderRadius: 14,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#dfbd80",
+    borderColor: c.accent,
   },
-  loadMoreText: { fontWeight: "800", color: "#5f0909", fontSize: 12.5 },
+  loadMoreText: { fontWeight: "800", color: c.primary, fontSize: 12.5 },
   offlineStatusBar: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#ffedd5",
+    backgroundColor: c.accentSoft,
     paddingHorizontal: 16,
     paddingVertical: 8,
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: "#fed7aa",
+    borderBottomColor: c.borderStrong,
   },
   offlineStatusText: {
     fontSize: 12,
-    color: "#9a3412",
+    color: c.warning,
     fontWeight: "600",
   },
 });
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

@@ -13,6 +13,7 @@ export type SetupProfile = {
   studentID?: string;
   email?: string;
   recoveryEmail?: string;
+  recoveryEmailVerified?: boolean;
   profileImage?: string | null;
   mustChangePassword?: boolean;
   communityRulesVersion?: string;
@@ -37,6 +38,12 @@ export function hasProfilePhoto(value: unknown): value is string {
   return typeof value === "string" && /^https:\/\/\S+$/i.test(value.trim());
 }
 
+export function hasVerifiedProfileEmail(profile: SetupProfile, email = profileEmail(profile)): boolean {
+  return validPersonalEmail(email) && validPersonalEmail(profile.recoveryEmail)
+    && profile.recoveryEmailVerified === true
+    && email.trim().toLowerCase() === profile.recoveryEmail.trim().toLowerCase();
+}
+
 export function hasAcceptedCommunityRules(profile: SetupProfile): boolean {
   return profile.communityRulesVersion === COMMUNITY_RULES_VERSION
     && profile.communityRulesAcceptedAt != null;
@@ -47,6 +54,6 @@ export function getSetupStep(profile: SetupProfile): "password-check" | "passwor
   // forcing people who already chose a password to change it again.
   if (typeof profile.mustChangePassword !== "boolean") return "password-check";
   if (profile.mustChangePassword) return "password";
-  if (!profileEmail(profile) || !hasProfilePhoto(profile.profileImage) || !hasAcceptedCommunityRules(profile)) return "profile";
+  if (!hasVerifiedProfileEmail(profile) || !hasProfilePhoto(profile.profileImage) || !hasAcceptedCommunityRules(profile)) return "profile";
   return "complete";
 }

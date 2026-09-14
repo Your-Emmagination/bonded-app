@@ -1,6 +1,6 @@
 # Profile setup rollout
 
-The app now protects its main routes until the signed-in account has a personal
+The app now protects its main routes until the signed-in account has a verified personal
 email, an uploaded profile image, acceptance of community rules version
 `2026-09-12`, and `mustChangePassword: false`. Back navigation and notification
 links cannot open a main screen before the gate passes. Profile reads that fail
@@ -14,11 +14,23 @@ authenticated credential and writes the password state. An existing personal
 password is retained. A restored, unclassified session asks for its current
 password once on setup. Passwords are never stored in Firestore or local storage.
 
-The email entered during setup is a profile/contact email, saved in `students.email`.
+Setup uses the same six-digit email verification flow as Edit Profile. It first
+saves the photo, contact email, and accepted rules, then sends a code. Verify &
+Continue confirms that code through the existing Worker. Only the Worker sets
+`recoveryEmail` and `recoveryEmailVerified`; the gate requires the profile email
+to match that verified inbox. An existing verification of a different email does
+not qualify. Incorrect/expired codes keep setup locked, and resending has a
+60-second cooldown. Changing the draft email clears its pending code.
+
 The Firebase Auth school email remains unchanged, so ID login still works.
-Setup does not mark this email as verified or replace an existing verified
-`recoveryEmail`. Users can verify a recovery inbox in their profile using the
-existing code flow. Change Password is also accessible from Settings.
+The verified personal email can also receive password-reset codes. Previously
+completed but unverified accounts return to setup with their saved photo and
+details prefilled. The same verified email does not require another code.
+Change Password is also accessible from Settings.
+
+The September 13 email-verification update reuses the deployed recovery-email
+endpoints and protected verification fields. If the initial setup Worker/rules
+deployment below is already complete, only the app needs updating for this step.
 
 ## Deploy before releasing this app update
 
@@ -52,7 +64,8 @@ npx.cmd tsx scripts/test-profile-setup-emulator.ts
 ```
 
 On a phone, check new and existing accounts, photo permission denial/cancellation,
-failed upload and retry, invalid email, unchecked rules, password mismatch, sign
+failed upload and retry, invalid email, incorrect/expired codes, resend cooldown,
+changing an email after requesting a code, unchecked rules, password mismatch, sign
 out/reopen while incomplete, completed-profile login, deep links during setup,
 and Settings → Change Password. Verify the keyboard and safe areas in Expo Go
 and the next APK build. No production account was modified by the local tests.

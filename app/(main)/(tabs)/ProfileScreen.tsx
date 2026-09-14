@@ -1,4 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps */
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { uploadProfileImage } from "@/utils/cloudinaryUpload";
 import { changeAccountPassword } from "@/utils/changeAccountPassword";
 import { useAccountSetup } from "@/contexts/AccountSetupContext";
@@ -54,18 +56,13 @@ import {
     unregisterDeviceForPushNotifications,
 } from "@/utils/pushNotifications";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
-import { resolveUserRoleForAuthUser, updateUserDataCache, UserRole } from "@/utils/rbac";
+import { updateUserDataCache } from "@/utils/rbac";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
 import { Image } from "expo-image";
 import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
-import React, {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-} from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Animated,
@@ -183,6 +180,7 @@ const TABS: {
 ];
 
 const ProfileScreen = () => {
+  const { styles, theme } = useStyles();
   const { profileId: accountProfileId } = useAccountSetup();
   const { returnTo, editTab } = useLocalSearchParams<{ returnTo?: string | string[]; editTab?: string }>();
   const { isOffline } = useNetworkStatus();
@@ -265,7 +263,8 @@ const ProfileScreen = () => {
   const canNavigateBack = navigation.canGoBack() || !!resolvedReturnTo;
 
   // ─── My Posts ─────────────────────────────────────────────────────────
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole | undefined>();
+  // Live, so a role change is reflected without reopening the screen.
+  const currentUserRole = useCurrentUserRole();
   const [myPosts, setMyPosts] = useState<Post[]>([]);
   const [myPostsLoading, setMyPostsLoading] = useState(true);
   // Fix 4: bounded, "Load more"-grown page size for the own-posts query.
@@ -355,14 +354,6 @@ const ProfileScreen = () => {
     setLoadingMoreMyPosts(true);
     setMyPostsLimit((current) => current + MY_POSTS_PAGE_SIZE);
   }, [hasMoreMyPosts, loadingMoreMyPosts]);
-
-  useEffect(() => {
-    if (!user) {
-      setCurrentUserRole(undefined);
-      return;
-    }
-    resolveUserRoleForAuthUser(user).then((role) => setCurrentUserRole(role as UserRole));
-  }, [user]);
 
   const approvedMyPosts = useMemo(() => myPosts.filter(isApprovedPost), [myPosts]);
 
@@ -1041,7 +1032,7 @@ const ProfileScreen = () => {
                 }}
                 activeOpacity={0.7}
               >
-                <Ionicons name="arrow-back" size={20} color="#fffaf7" />
+                <Ionicons name="arrow-back" size={20} color={theme.onChrome} />
               </TouchableOpacity>
             ) : (
               <View style={styles.headerBackSpacer} />
@@ -1060,7 +1051,7 @@ const ProfileScreen = () => {
 
         {isOffline && (
           <View style={styles.offlineStatusBar}>
-            <Ionicons name="cloud-offline-outline" size={14} color="#9a3412" />
+            <Ionicons name="cloud-offline-outline" size={14} color={theme.warning} />
             <Text style={styles.offlineStatusText}>
               Offline mode
             </Text>
@@ -1096,16 +1087,16 @@ const ProfileScreen = () => {
                     <Image source={{ uri: avatarThumb(imageUri, AVATAR_SIZE_LARGE) }} style={styles.profileImage} />
                   ) : (
                     <View style={styles.placeholder}>
-                      <Ionicons name="person" size={48} color="#e0a53d" />
+                      <Ionicons name="person" size={48} color={theme.accent} />
                     </View>
                   )}
                   <View style={styles.editBadge}>
-                    <Ionicons name="camera" size={14} color="#fff" />
+                    <Ionicons name="camera" size={14} color={theme.onAccent} />
                   </View>
                   <View
                     style={[
                       styles.statusBadge,
-                      { backgroundColor: student?.isOnline ? "#00e676" : "#999" },
+                      { backgroundColor: student?.isOnline ? "#00e676" : theme.textMuted },
                     ]}
                   />
                 </TouchableOpacity>
@@ -1118,12 +1109,12 @@ const ProfileScreen = () => {
                   <View
                     style={[
                       styles.statusDot,
-                      { backgroundColor: student?.isOnline ? "#00e676" : "#999" },
+                      { backgroundColor: student?.isOnline ? "#00e676" : theme.textMuted },
                     ]}
                   />
                   <Text
                     style={{
-                      color: student?.isOnline ? "#00e676" : "#c4a39b",
+                      color: student?.isOnline ? "#00e676" : theme.textMuted,
                       fontWeight: "600",
                     }}
                   >
@@ -1135,7 +1126,7 @@ const ProfileScreen = () => {
               {/* Grouped Personal Information Card */}
     <View style={styles.section}>
       <View style={styles.sectionTitleRow}>
-        <Ionicons name="person" size={18} color="#5f0909" />
+        <Ionicons name="person" size={18} color={theme.primary} />
         <Text style={styles.sectionTitle}>Personal Information</Text>
       </View>
       <View style={styles.goldCard}>
@@ -1159,7 +1150,7 @@ const ProfileScreen = () => {
     {/* Grouped Academic Information Card */}
     <View style={styles.section}>
       <View style={styles.sectionTitleRow}>
-        <Ionicons name="school" size={18} color="#5f0909" />
+        <Ionicons name="school" size={18} color={theme.primary} />
         <Text style={styles.sectionTitle}>Academic Information</Text>
       </View>
       <View style={styles.goldCard}>
@@ -1214,25 +1205,25 @@ const ProfileScreen = () => {
               {/* My Posts Section */}
               <View style={styles.section}>
                 <View style={styles.sectionTitleRow}>
-                  <Ionicons name="grid-outline" size={18} color="#5f0909" />
+                  <Ionicons name="grid-outline" size={18} color={theme.primary} />
                   <Text style={styles.sectionTitle}>My Posts</Text>
                 </View>
 
                 {/* Toolbar: search, sort, date filter */}
                 <View style={styles.postsToolbar}>
                   <View style={styles.searchBar}>
-                    <Ionicons name="search-outline" size={16} color="#b88f87" />
+                    <Ionicons name="search-outline" size={16} color={theme.textMuted} />
                     <TextInput
                       style={styles.searchInput}
                       placeholder="Search your posts"
-                      placeholderTextColor="#b88f87"
+                      placeholderTextColor={theme.textMuted}
                       value={postSearchQuery}
                       onChangeText={setPostSearchQuery}
                       returnKeyType="search"
                     />
                     {postSearchQuery.length > 0 && (
                       <TouchableOpacity onPress={() => setPostSearchQuery("")}>
-                        <Ionicons name="close-circle" size={16} color="#b88f87" />
+                        <Ionicons name="close-circle" size={16} color={theme.textMuted} />
                       </TouchableOpacity>
                     )}
                   </View>
@@ -1243,16 +1234,16 @@ const ProfileScreen = () => {
                       onPress={() => setShowSortMenu(true)}
                       activeOpacity={0.75}
                     >
-                      <Ionicons name="swap-vertical-outline" size={14} color="#5f0909" />
+                      <Ionicons name="swap-vertical-outline" size={14} color={theme.primary} />
                       <Text style={styles.toolbarChipText}>
                         {POST_SORT_OPTIONS.find((o) => o.key === postSortOption)?.label}
                       </Text>
-                      <Ionicons name="chevron-down" size={14} color="#5f0909" />
+                      <Ionicons name="chevron-down" size={14} color={theme.primary} />
                     </TouchableOpacity>
 
                     {selectedDateFilter ? (
                       <View style={[styles.toolbarChip, styles.toolbarChipActive]}>
-                        <Ionicons name="calendar-outline" size={14} color="#fffaf7" />
+                        <Ionicons name="calendar-outline" size={14} color={theme.onPrimary} />
                         <Text style={[styles.toolbarChipText, styles.toolbarChipTextActive]}>
                           {selectedDateFilter.toLocaleDateString("en-US", {
                             month: "short",
@@ -1260,7 +1251,7 @@ const ProfileScreen = () => {
                           })}
                         </Text>
                         <TouchableOpacity onPress={() => setSelectedDateFilter(null)}>
-                          <Ionicons name="close" size={14} color="#fffaf7" />
+                          <Ionicons name="close" size={14} color={theme.onPrimary} />
                         </TouchableOpacity>
                       </View>
                     ) : (
@@ -1269,7 +1260,7 @@ const ProfileScreen = () => {
                         onPress={() => setShowDatePicker(true)}
                         activeOpacity={0.75}
                       >
-                        <Ionicons name="calendar-outline" size={14} color="#5f0909" />
+                        <Ionicons name="calendar-outline" size={14} color={theme.primary} />
                         <Text style={styles.toolbarChipText}>Date</Text>
                       </TouchableOpacity>
                     )}
@@ -1294,19 +1285,19 @@ const ProfileScreen = () => {
                 <FeedSkeleton count={3} />
               ) : myPosts.length === 0 ? (
                 <View style={styles.postsEmptyState}>
-                  <Ionicons name="albums-outline" size={32} color="#c9a89c" />
+                  <Ionicons name="albums-outline" size={32} color={theme.textMuted} />
                   <Text style={styles.postsEmptyTitle}>You haven't posted anything yet</Text>
                 </View>
               ) : approvedMyPosts.length === 0 ? (
                 <View style={styles.postsEmptyState}>
-                  <Ionicons name="time-outline" size={32} color="#c9a89c" />
+                  <Ionicons name="time-outline" size={32} color={theme.textMuted} />
                   <Text style={styles.postsEmptyTitle}>
                     Your post{myPosts.length > 1 ? "s are" : " is"} awaiting moderator review
                   </Text>
                 </View>
               ) : (
                 <View style={styles.postsEmptyState}>
-                  <Ionicons name="search-outline" size={32} color="#c9a89c" />
+                  <Ionicons name="search-outline" size={32} color={theme.textMuted} />
                   <Text style={styles.postsEmptyTitle}>No posts match your filters</Text>
                   <TouchableOpacity
                     onPress={() => {
@@ -1331,10 +1322,10 @@ const ProfileScreen = () => {
                   activeOpacity={0.85}
                 >
                   {loadingMoreMyPosts ? (
-                    <ActivityIndicator size="small" color="#5f0909" />
+                    <ActivityIndicator size="small" color={theme.primary} />
                   ) : (
                     <>
-                      <Ionicons name="chevron-down-circle-outline" size={17} color="#5f0909" />
+                      <Ionicons name="chevron-down-circle-outline" size={17} color={theme.primary} />
                       <Text style={styles.loadMoreButtonText}>Load more</Text>
                     </>
                   )}
@@ -1376,7 +1367,7 @@ const ProfileScreen = () => {
                   {option.label}
                 </Text>
                 {postSortOption === option.key && (
-                  <Ionicons name="checkmark" size={16} color="#a61f1f" />
+                  <Ionicons name="checkmark" size={16} color={theme.success} />
                 )}
               </TouchableOpacity>
             ))}
@@ -1475,26 +1466,30 @@ const CardItemRow = React.memo(
     label: string;
     value: string;
     isLocked?: boolean;
-  }) => (
-    <View style={styles.cardItemRow}>
-      <View style={styles.iconBox}>
-        <Ionicons name={icon} size={18} color="#5f0909" />
+  }) => {
+    const { styles, theme } = useStyles();
+
+    return (
+      <View style={styles.cardItemRow}>
+        <View style={styles.iconBox}>
+          <Ionicons name={icon} size={18} color={theme.primary} />
+        </View>
+        <View style={{ marginLeft: 12, flex: 1 }}>
+          <Text style={styles.infoLabel}>{label}</Text>
+          <Text style={styles.infoValue}>{value}</Text>
+        </View>
+        {/* Shows lock if read-only/admin managed, nothing if editable via Edit Profile */}
+        {isLocked && (
+          <Ionicons
+            name="lock-closed"
+            size={16}
+            color={theme.accent}
+            style={{ marginLeft: 8 }}
+          />
+        )}
       </View>
-      <View style={{ marginLeft: 12, flex: 1 }}>
-        <Text style={styles.infoLabel}>{label}</Text>
-        <Text style={styles.infoValue}>{value}</Text>
-      </View>
-      {/* Shows lock if read-only/admin managed, nothing if editable via Edit Profile */}
-      {isLocked && (
-        <Ionicons
-          name="lock-closed"
-          size={16}
-          color="#e0a53d"
-          style={{ marginLeft: 8 }}
-        />
-      )}
-    </View>
-  ),
+    );
+  },
 );
 
 const ActionButton = React.memo(
@@ -1506,22 +1501,26 @@ const ActionButton = React.memo(
     icon: keyof typeof Ionicons.glyphMap;
     text: string;
     onPress: () => void;
-  }) => (
-    <TouchableOpacity
-      style={styles.actionButton}
-      onPress={onPress}
-      activeOpacity={0.75}
-    >
-      <Ionicons name={icon} size={20} color="#e0a53d" />
-      <Text style={styles.actionText}>{text}</Text>
-      <Ionicons
-        name="chevron-forward"
-        size={18}
-        color="#9b766c"
-        style={{ marginLeft: "auto" }}
-      />
-    </TouchableOpacity>
-  ),
+  }) => {
+    const { styles, theme } = useStyles();
+
+    return (
+      <TouchableOpacity
+        style={styles.actionButton}
+        onPress={onPress}
+        activeOpacity={0.75}
+      >
+        <Ionicons name={icon} size={20} color={theme.accent} />
+        <Text style={styles.actionText}>{text}</Text>
+        <Ionicons
+          name="chevron-forward"
+          size={18}
+          color={theme.textMuted}
+          style={{ marginLeft: "auto" }}
+        />
+      </TouchableOpacity>
+    );
+  },
 );
 
 const EditModal = ({
@@ -1558,94 +1557,98 @@ const EditModal = ({
   pendingProfileImage: string | null;
   onCommitImage: () => void;
   onCancelImage: () => void;
-}) => (
-  <Modal
-    visible={visible}
-    transparent
-    animationType="fade"
-    onShow={onShow}
-    onRequestClose={onClose}
-  >
-    <View style={styles.modalOverlay}>
-      <Animated.View
-        style={[styles.modalCard, { transform: [{ scale: scaleAnim }] }]}
-      >
-        <Text style={styles.modalHeader}>Edit Profile</Text>
+}) => {
+  const { styles, theme } = useStyles();
 
-        <View style={styles.tabRow}>
-          {TABS.map(({ key, label, icon }) => (
-            <TouchableOpacity
-              key={key}
-              onPress={() => onTabChange(key)}
-              style={[
-                styles.tabButton,
-                editedData.selectedTab === key && styles.tabButtonActive,
-              ]}
-              activeOpacity={0.8}
-            >
-              <Ionicons
-                name={icon}
-                size={18}
-                color={editedData.selectedTab === key ? "#fff" : "#999"}
-                style={{ marginBottom: 2 }}
-              />
-              <Text
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onShow={onShow}
+      onRequestClose={onClose}
+    >
+      <View style={styles.modalOverlay}>
+        <Animated.View
+          style={[styles.modalCard, { transform: [{ scale: scaleAnim }] }]}
+        >
+          <Text style={styles.modalHeader}>Edit Profile</Text>
+
+          <View style={styles.tabRow}>
+            {TABS.map(({ key, label, icon }) => (
+              <TouchableOpacity
+                key={key}
+                onPress={() => onTabChange(key)}
                 style={[
-                  styles.tabText,
-                  editedData.selectedTab === key && styles.tabTextActive,
+                  styles.tabButton,
+                  editedData.selectedTab === key && styles.tabButtonActive,
                 ]}
+                activeOpacity={0.8}
               >
-                {label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        <View style={styles.tabContent}>
-          {loading ? (
-            <ActivityIndicator
-              size="large"
-              color="#e0a53d"
-              style={{ marginVertical: 24 }}
-            />
-          ) : (
-            <>
-              {editedData.selectedTab === "info" && (
-                <InfoTab
-                  studentID={infoStudentID}
-                  initialEmail={infoEmail}
-                  initialVerified={infoVerified}
+                <Ionicons
+                  name={icon}
+                  size={18}
+                  color={editedData.selectedTab === key ? theme.onPrimary : theme.textMuted}
+                  style={{ marginBottom: 2 }}
                 />
-              )}
+                <Text
+                  style={[
+                    styles.tabText,
+                    editedData.selectedTab === key && styles.tabTextActive,
+                  ]}
+                >
+                  {label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
 
-              {editedData.selectedTab === "password" && (
-                <PasswordTab
-                  editedData={editedData}
-                  onDataChange={onDataChange}
-                  onChangePassword={onChangePassword}
-                />
-              )}
+          <View style={styles.tabContent}>
+            {loading ? (
+              <ActivityIndicator
+                size="large"
+                color={theme.accent}
+                style={{ marginVertical: 24 }}
+              />
+            ) : (
+              <>
+                {editedData.selectedTab === "info" && (
+                  <InfoTab
+                    studentID={infoStudentID}
+                    initialEmail={infoEmail}
+                    initialVerified={infoVerified}
+                  />
+                )}
 
-              {editedData.selectedTab === "photo" && (
-                <PhotoTab
-                  onImagePick={onImagePick}
-                  previewUri={pendingProfileImage}
-                  onCommit={onCommitImage}
-                  onCancel={onCancelImage}
-                  loading={loading}
-                />
-              )}
-            </>
-          )}
-        </View>
+                {editedData.selectedTab === "password" && (
+                  <PasswordTab
+                    editedData={editedData}
+                    onDataChange={onDataChange}
+                    onChangePassword={onChangePassword}
+                  />
+                )}
 
-        <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
-          <Text style={styles.closeText}>Close</Text>
-        </TouchableOpacity>
-      </Animated.View>
-    </View>
-  </Modal>
-);
+                {editedData.selectedTab === "photo" && (
+                  <PhotoTab
+                    onImagePick={onImagePick}
+                    previewUri={pendingProfileImage}
+                    onCommit={onCommitImage}
+                    onCancel={onCancelImage}
+                    loading={loading}
+                  />
+                )}
+              </>
+            )}
+          </View>
+
+          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
+            <Text style={styles.closeText}>Close</Text>
+          </TouchableOpacity>
+        </Animated.View>
+      </View>
+    </Modal>
+  );
+};
 
 // Personal email address = the account's recovery email. Saving a new one
 // verifies it with a 6-digit code (utils/passwordReset -> the Worker) so
@@ -1659,6 +1662,7 @@ const InfoTab = ({
   initialEmail?: string;
   initialVerified?: boolean;
 }) => {
+  const { styles, theme } = useStyles();
   const [savedEmail, setSavedEmail] = useState(initialEmail ?? "");
   const [savedVerified, setSavedVerified] = useState(initialVerified === true);
   const [draft, setDraft] = useState(initialEmail ?? "");
@@ -1776,7 +1780,7 @@ const InfoTab = ({
             <Ionicons
               name={savedVerified ? "checkmark-circle" : "alert-circle"}
               size={14}
-              color={savedVerified ? "#17845c" : "#b7791f"}
+              color={savedVerified ? theme.success : theme.warning}
             />
           </View>
         ) : null}
@@ -1786,7 +1790,7 @@ const InfoTab = ({
         <Ionicons
           name="mail-outline"
           size={17}
-          color="#9b766c"
+          color={theme.textMuted}
           style={styles.inputIcon}
         />
         <TextInput
@@ -1807,7 +1811,7 @@ const InfoTab = ({
           <Ionicons
             name="keypad-outline"
             size={17}
-            color="#9b766c"
+            color={theme.textMuted}
             style={styles.inputIcon}
           />
           <TextInput
@@ -1847,7 +1851,7 @@ const InfoTab = ({
         activeOpacity={0.85}
       >
         {busy ? (
-          <ActivityIndicator color="#fff" />
+          <ActivityIndicator color={theme.onPrimary} />
         ) : (
           <Text style={styles.primaryText}>Save Changes</Text>
         )}
@@ -1865,6 +1869,7 @@ const PasswordTab = ({
   onDataChange: (field: keyof EditData, value: string) => void;
   onChangePassword: () => void;
 }) => {
+  const { styles, theme } = useStyles();
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
 
@@ -1875,7 +1880,7 @@ const PasswordTab = ({
         <Ionicons
           name="lock-closed-outline"
           size={17}
-          color="#9b766c"
+          color={theme.textMuted}
           style={styles.pwLeadIcon}
         />
         <TextInput
@@ -1893,7 +1898,7 @@ const PasswordTab = ({
           <Ionicons
             name={showCurrentPassword ? "eye-off-outline" : "eye-outline"}
             size={20}
-            color="#9b766c"
+            color={theme.textMuted}
           />
         </TouchableOpacity>
       </View>
@@ -1903,7 +1908,7 @@ const PasswordTab = ({
         <Ionicons
           name="lock-closed-outline"
           size={17}
-          color="#9b766c"
+          color={theme.textMuted}
           style={styles.pwLeadIcon}
         />
         <TextInput
@@ -1921,7 +1926,7 @@ const PasswordTab = ({
           <Ionicons
             name={showNewPassword ? "eye-off-outline" : "eye-outline"}
             size={20}
-            color="#9b766c"
+            color={theme.textMuted}
           />
         </TouchableOpacity>
       </View>
@@ -1941,34 +1946,38 @@ const PhotoTab = ({
   onCommit: () => void;
   onCancel: () => void;
   loading: boolean;
-}) => (
-  <View style={{ marginTop: 6 }}>
-    {previewUri && (
-      <View style={{ alignItems: "center", marginBottom: 14 }}>
-        <Image source={{ uri: previewUri }} style={{ width: 110, height: 110, borderRadius: 55, borderWidth: 3, borderColor: "#e0a53d" }} />
-        <Text style={{ marginTop: 8, color: "#7a3b2e", fontWeight: "600" }}>Preview</Text>
-      </View>
-    )}
-    <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(false)} disabled={loading}>
-      <Ionicons name="images-outline" size={20} color="#e0a53d" />
-      <Text style={styles.optionText}>Choose from Gallery</Text>
-    </TouchableOpacity>
-    <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(true)} disabled={loading}>
-      <Ionicons name="camera-outline" size={20} color="#e0a53d" />
-      <Text style={styles.optionText}>Take Photo</Text>
-    </TouchableOpacity>
-    {previewUri && (
-      <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
-        <TouchableOpacity style={[styles.closeBtn, { flex: 1 }]} onPress={onCancel} disabled={loading}>
-          <Text style={styles.closeText}>Cancel</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.primaryBtn, { flex: 1, marginTop: 0 }]} onPress={onCommit} disabled={loading}>
-          {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryText}>Done</Text>}
-        </TouchableOpacity>
-      </View>
-    )}
-  </View>
-);
+}) => {
+  const { styles, theme } = useStyles();
+
+  return (
+    <View style={{ marginTop: 6 }}>
+      {previewUri && (
+        <View style={{ alignItems: "center", marginBottom: 14 }}>
+          <Image source={{ uri: previewUri }} style={{ width: 110, height: 110, borderRadius: 55, borderWidth: 3, borderColor: theme.accent }} />
+          <Text style={{ marginTop: 8, color: theme.textSecondary, fontWeight: "600" }}>Preview</Text>
+        </View>
+      )}
+      <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(false)} disabled={loading}>
+        <Ionicons name="images-outline" size={20} color={theme.accent} />
+        <Text style={styles.optionText}>Choose from Gallery</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(true)} disabled={loading}>
+        <Ionicons name="camera-outline" size={20} color={theme.accent} />
+        <Text style={styles.optionText}>Take Photo</Text>
+      </TouchableOpacity>
+      {previewUri && (
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+          <TouchableOpacity style={[styles.closeBtn, { flex: 1 }]} onPress={onCancel} disabled={loading}>
+            <Text style={styles.closeText}>Cancel</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.primaryBtn, { flex: 1, marginTop: 0 }]} onPress={onCommit} disabled={loading}>
+            {loading ? <ActivityIndicator color={theme.onPrimary} /> : <Text style={styles.primaryText}>Done</Text>}
+          </TouchableOpacity>
+        </View>
+      )}
+    </View>
+  );
+};
 
 
 type YearLevelDropdownProps = {
@@ -1978,6 +1987,7 @@ type YearLevelDropdownProps = {
 
 const YearLevelDropdown: React.FC<YearLevelDropdownProps> = React.memo(
   ({ value, onChange }) => {
+    const { styles } = useStyles();
     const [open, setOpen] = useState(false);
     const [items, setItems] = useState([
       { label: "1st Year", value: "1st Year" },
@@ -2014,9 +2024,10 @@ const YearLevelDropdown: React.FC<YearLevelDropdownProps> = React.memo(
   },
 );
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f6f1ed" },
-  contentShell: { flex: 1, backgroundColor: "#f6f1ed" },
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.surfaceSunken },
+  contentShell: { flex: 1, backgroundColor: c.surfaceSunken },
   headerShell: {
     marginHorizontal: 16,
     marginTop: 12,
@@ -2024,11 +2035,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 16,
     borderRadius: 20,
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
     borderWidth: 1,
-    borderColor: "#8f3a2b",
+    borderColor: c.textSecondary,
 
-    shadowColor: "#5f0909",
+    shadowColor: c.primary,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.25,
     shadowRadius: 6,
@@ -2059,14 +2070,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   header: {
-    color: "#fffaf7",
+    color: c.onChrome,
     fontSize: 20,
     fontWeight: "700",
     textAlign: "center",
     letterSpacing: 0.5,
   },
   headerSubtext: {
-    color: "#f0d2c2",
+    color: c.borderStrong,
     fontSize: 12,
     textAlign: "center",
     marginTop: 2,
@@ -2074,13 +2085,13 @@ const styles = StyleSheet.create({
   scroll: { paddingBottom: 60 },
   profileCard: {
     alignItems: "center",
-    backgroundColor: "#5f0909",
+    backgroundColor: c.chrome,
     marginHorizontal: 16,
     marginTop: 12,
     padding: 24,
     borderRadius: 22,
     borderWidth: 1,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
 
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 4 },
@@ -2097,13 +2108,13 @@ const styles = StyleSheet.create({
     height: 104,
     borderRadius: 52,
     borderWidth: 3,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
   },
   placeholder: {
     width: 104,
     height: 104,
     borderRadius: 52,
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     justifyContent: "center",
     alignItems: "center",
   },
@@ -2111,14 +2122,14 @@ const styles = StyleSheet.create({
     position: "absolute",
     bottom: 2,
     right: 2,
-    backgroundColor: "#e0a53d",
+    backgroundColor: c.accent,
     borderRadius: 16,
     width: 30,
     height: 30,
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 2,
-    borderColor: "#5f0909",
+    borderColor: c.primary,
   },
   statusBadge: {
     position: "absolute",
@@ -2128,7 +2139,7 @@ const styles = StyleSheet.create({
     height: 16,
     borderRadius: 8,
     borderWidth: 2,
-    borderColor: "#5f0909",
+    borderColor: c.primary,
   },
   statusBtn: {
     flexDirection: "row",
@@ -2150,16 +2161,16 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   sectionTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontWeight: "700",
     fontSize: 14,
     letterSpacing: 0.5,
   },
   goldCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 2,
-    borderColor: "#e0a53d",
+    borderColor: c.accent,
     paddingHorizontal: 14,
     paddingVertical: 4,
 
@@ -2182,17 +2193,17 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 10,
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     justifyContent: "center",
     alignItems: "center",
   },
   infoLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     fontWeight: "600",
   },
   infoValue: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 14,
     fontWeight: "600",
     marginTop: 2,
@@ -2200,14 +2211,14 @@ const styles = StyleSheet.create({
   actionButton: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     padding: 16,
     borderRadius: 14,
     marginBottom: 10,
     borderWidth: 1,
-    borderColor: "#e8d3b2",
+    borderColor: c.borderStrong,
     borderLeftWidth: 4,
-    borderLeftColor: "#e0a53d",
+    borderLeftColor: c.accent,
 
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 2 },
@@ -2216,7 +2227,7 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   actionText: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15,
     fontWeight: "600",
     marginLeft: 12,
@@ -2230,7 +2241,7 @@ const styles = StyleSheet.create({
   modalCard: {
     width: "90%",
     maxWidth: 400,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 22,
     paddingVertical: 20,
     paddingHorizontal: 18,
@@ -2239,7 +2250,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(224,165,61,0.22)",
   },
   modalHeader: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 18,
     fontWeight: "bold",
     textAlign: "center",
@@ -2250,7 +2261,7 @@ const styles = StyleSheet.create({
   },
   tabRow: {
     flexDirection: "row",
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     borderRadius: 12,
     padding: 4,
     gap: 4,
@@ -2262,9 +2273,9 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 10,
   },
-  tabButtonActive: { backgroundColor: "#5f0909" },
+  tabButtonActive: { backgroundColor: c.primary },
   tabText: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 11,
     textAlign: "center",
     fontWeight: "600",
@@ -2272,15 +2283,15 @@ const styles = StyleSheet.create({
   tabTextActive: { color: "#fff" },
   tabContent: { marginVertical: 16 },
   inputLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12,
     marginBottom: 4,
     marginLeft: 2,
     fontWeight: "600",
   },
   input: {
-    backgroundColor: "#f0e7e2",
-    color: "#4d1b17",
+    backgroundColor: c.border,
+    color: c.textPrimary,
     borderRadius: 10,
     padding: 12,
     marginBottom: 12,
@@ -2291,28 +2302,28 @@ const styles = StyleSheet.create({
   passwordInputWrapper: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     borderRadius: 10,
     marginBottom: 12,
     paddingRight: 8,
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.32)",
   },
-  passwordInput: { flex: 1, color: "#4d1b17", paddingVertical: 12, paddingRight: 12, fontSize: 14 },
+  passwordInput: { flex: 1, color: c.textPrimary, paddingVertical: 12, paddingRight: 12, fontSize: 14 },
   pwLeadIcon: { marginLeft: 10, marginRight: 6 },
   eyeIconPassword: { padding: 8 },
   primaryBtn: {
-    backgroundColor: "#5f0909",
+    backgroundColor: c.primary,
     borderRadius: 10,
     paddingVertical: 14,
     alignItems: "center",
     marginTop: 6,
-    shadowColor: "#5f0909",
+    shadowColor: c.primary,
     shadowOpacity: 0.3,
     shadowRadius: 4,
     elevation: 3,
     borderWidth: 1,
-    borderColor: "#8f3a2b",
+    borderColor: c.textSecondary,
   },
   primaryText: { color: "#fff", fontWeight: "700", fontSize: 14 },
   infoTab: { paddingTop: 2 },
@@ -2334,7 +2345,7 @@ const styles = StyleSheet.create({
   inputWrap: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.32)",
@@ -2342,54 +2353,54 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   inputIcon: { marginRight: 8 },
-  inputWithIcon: { flex: 1, color: "#4d1b17", paddingVertical: 12, fontSize: 14 },
+  inputWithIcon: { flex: 1, color: c.textPrimary, paddingVertical: 12, fontSize: 14 },
   codeField: { letterSpacing: 4, fontSize: 16 },
   resendInline: { paddingHorizontal: 8, paddingVertical: 6 },
-  resendInlineText: { color: "#a8791f", fontWeight: "700", fontSize: 12 },
-  mutedText: { color: "#b7a29c" },
-  infoNotice: { color: "#17845c", fontSize: 12, marginBottom: 8, marginTop: 2 },
-  infoError: { color: "#b3261e", fontSize: 12, marginBottom: 8, marginTop: 2 },
+  resendInlineText: { color: c.accent, fontWeight: "700", fontSize: 12 },
+  mutedText: { color: c.textMuted },
+  infoNotice: { color: c.success, fontSize: 12, marginBottom: 8, marginTop: 2 },
+  infoError: { color: c.danger, fontSize: 12, marginBottom: 8, marginTop: 2 },
   btnMuted: { opacity: 0.55 },
   closeBtn: {
-    backgroundColor: "#f5efeb",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 10,
     paddingVertical: 12,
     alignItems: "center",
     marginTop: 4,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
-  closeText: { color: "#9b766c", fontWeight: "600", fontSize: 14 },
+  closeText: { color: c.textMuted, fontWeight: "600", fontSize: 14 },
   modalOption: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#f0e7e2",
+    backgroundColor: c.border,
     padding: 14,
     borderRadius: 10,
     marginBottom: 10,
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.24)",
   },
-  optionText: { color: "#4d1b17", fontSize: 15, marginLeft: 12, fontWeight: "500" },
+  optionText: { color: c.textPrimary, fontSize: 15, marginLeft: 12, fontWeight: "500" },
   dropdown: {
-    backgroundColor: "#fffaf7",
-    borderColor: "#e0a53d",
+    backgroundColor: c.surface,
+    borderColor: c.accent,
     borderWidth: 1,
     borderRadius: 10,
     minHeight: 48,
   },
   dropdownContainer: {
-    backgroundColor: "#f6f1ed",
-    borderColor: "#e0a53d",
+    backgroundColor: c.surfaceSunken,
+    borderColor: c.accent,
     borderWidth: 1,
     borderRadius: 10,
   },
-  dropdownText: { color: "#4d1b17", fontSize: 14 },
+  dropdownText: { color: c.textPrimary, fontSize: 14 },
   placeholderStyle: { color: "rgba(155,118,108,0.6)" },
-  listItemContainer: { borderBottomColor: "#fffaf7", borderBottomWidth: 0.5 },
-  listItemLabel: { color: "#4d1b17" },
-  arrowIcon: { tintColor: "#e0a53d" } as any,
-  tickIcon: { tintColor: "#e0a53d" } as any,
+  listItemContainer: { borderBottomColor: c.surface, borderBottomWidth: 0.5 },
+  listItemLabel: { color: c.textPrimary },
+  arrowIcon: { tintColor: c.accent } as any,
+  tickIcon: { tintColor: c.accent } as any,
 
   // My Posts
   postsToolbar: { gap: 10, marginBottom: 12 },
@@ -2397,32 +2408,32 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
     borderRadius: 12,
     paddingHorizontal: 12,
     height: 40,
   },
-  searchInput: { flex: 1, color: "#4d1b17", fontSize: 14 },
+  searchInput: { flex: 1, color: c.textPrimary, fontSize: 14 },
   toolbarRow: { flexDirection: "row", gap: 8 },
   toolbarChip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#ead8cf",
+    borderColor: c.border,
     borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 7,
   },
   toolbarChipActive: {
-    backgroundColor: "#a61f1f",
-    borderColor: "#a61f1f",
+    backgroundColor: c.danger,
+    borderColor: c.danger,
   },
-  toolbarChipText: { color: "#5f0909", fontSize: 12.5, fontWeight: "600" },
-  toolbarChipTextActive: { color: "#fffaf7" },
+  toolbarChipText: { color: c.primary, fontSize: 12.5, fontWeight: "600" },
+  toolbarChipTextActive: { color: c.onPrimary },
   postsEmptyState: {
     alignItems: "center",
     justifyContent: "center",
@@ -2430,13 +2441,13 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   postsEmptyTitle: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 13.5,
     fontWeight: "600",
     textAlign: "center",
   },
   postsClearFiltersText: {
-    color: "#a61f1f",
+    color: c.danger,
     fontSize: 13,
     fontWeight: "700",
     marginTop: 2,
@@ -2447,15 +2458,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
-    backgroundColor: "#fffaf6",
+    backgroundColor: c.background,
     borderWidth: 1,
-    borderColor: "#e7d5cc",
+    borderColor: c.borderStrong,
     borderRadius: 14,
     paddingVertical: 13,
     marginTop: 12,
   },
   loadMoreButtonText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 13,
     fontWeight: "800",
   },
@@ -2469,11 +2480,11 @@ const styles = StyleSheet.create({
   sortMenuCard: {
     width: "100%",
     maxWidth: 320,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 16,
     paddingVertical: 8,
     borderWidth: 1,
-    borderColor: "#f0e7e2",
+    borderColor: c.border,
   },
   sortMenuOption: {
     flexDirection: "row",
@@ -2482,23 +2493,30 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
   },
-  sortMenuOptionText: { color: "#4d1b17", fontSize: 14.5 },
-  sortMenuOptionTextActive: { color: "#a61f1f", fontWeight: "700" },
+  sortMenuOptionText: { color: c.textPrimary, fontSize: 14.5 },
+  sortMenuOptionTextActive: { color: c.danger, fontWeight: "700" },
   offlineStatusBar: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#ffedd5",
+    backgroundColor: c.accentSoft,
     paddingHorizontal: 16,
     paddingVertical: 8,
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: "#fed7aa",
+    borderBottomColor: c.borderStrong,
   },
   offlineStatusText: {
     fontSize: 12,
-    color: "#9a3412",
+    color: c.warning,
     fontWeight: "600",
   },
 });
 
 export default ProfileScreen;
+
+/** Themed stylesheet for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

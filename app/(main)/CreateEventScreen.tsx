@@ -1,14 +1,17 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import * as Haptics from "expo-haptics";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { addDoc, collection, doc, getDoc, serverTimestamp, updateDoc } from "firebase/firestore";
-import { ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { addDoc, collection, doc, getDoc, getDocs, query, serverTimestamp, updateDoc, where } from "firebase/firestore";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
     Keyboard,
     KeyboardAvoidingView,
+    Modal,
     Platform,
     ScrollView,
     StyleSheet,
@@ -20,10 +23,11 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import { createBroadcastEventNotifications } from "@/utils/notifications";
 import { sendBroadcastEventPushNotifications } from "@/utils/pushNotifications";
-import { getUserData, UserRole } from "@/utils/rbac";
+import { getUserData } from "@/utils/rbac";
 import { auth, db } from "../../Firebase_configure";
 
 type CalendarEvent = {
@@ -35,29 +39,33 @@ type CalendarEvent = {
   category: "morning" | "afternoon" | "evening" | "all-day";
   notifyUsers?: boolean;
   status?: "published" | "draft" | "archived";
+  /**
+   * The main event this one belongs to — "Intramurals" for a "Basketball
+   * Finals" part. Null or missing means a standalone event. Only one level
+   * deep: a part can never itself be a parent.
+   */
+  parentEventId?: string | null;
 };
 
 type Category = CalendarEvent["category"];
-type IconName = ComponentProps<typeof Ionicons>["name"];
 
-const colors = {
-  maroon: "#5f0909",
-  gold: "#e0a53d",
-  cream: "#faf4ec",
-  surface: "#fffdf9",
-  soft: "#f5eae0",
-  ink: "#321817",
-  muted: "#806964",
-  border: "#ead7c9",
-  error: "#b42318",
-} as const;
-
-const categoryIcons: Record<Category, IconName> = {
-  morning: "sunny-outline",
-  afternoon: "partly-sunny-outline",
-  evening: "moon-outline",
-  "all-day": "infinite-outline",
-};
+const palette = (c: ThemeTokens) =>
+  ({
+    /** The screen's maroon ground — a bar, so it follows `chrome`. */
+    shell: c.chrome,
+    /** The identity red, as ink and as a filled button. */
+    maroon: c.primary,
+    /** Anything drawn on top of that button. */
+    onDark: c.onPrimary,
+    gold: c.accent,
+    cream: c.background,
+    surface: c.surfaceRaised,
+    soft: c.surfaceSunken,
+    ink: c.textPrimary,
+    muted: c.textMuted,
+    border: c.border,
+    error: c.danger,
+  }) as const;
 
 const categoryLabels: Record<Category, string> = {
   morning: "MORNING",
@@ -66,7 +74,27 @@ const categoryLabels: Record<Category, string> = {
   "all-day": "ALL DAY",
 };
 
-const categories = Object.keys(categoryIcons) as Category[];
+// The colour each time-of-day shows as on the calendar.
+const CATEGORY_COLORS: Record<Category, string> = {
+  morning: "#ff9f43",
+  afternoon: "#4f9cff",
+  evening: "#9b59b6",
+  "all-day": "#e0a53d",
+};
+
+/**
+ * Morning/afternoon/evening is a fact about the start time, so it is worked
+ * out rather than picked. One less field, and no way for the label and the
+ * clock to disagree.
+ */
+const deriveCategory = (allDay: boolean, startTime?: string): Category => {
+  if (allDay) return "all-day";
+  const hour = Number(String(startTime || "").split(":")[0]);
+  if (!Number.isFinite(hour)) return "morning";
+  if (hour < 12) return "morning";
+  if (hour < 17) return "afternoon";
+  return "evening";
+};
 
 const toLocalDateString = (date: Date) => {
   const year = date.getFullYear();
@@ -87,73 +115,88 @@ const formatTime = (value?: string) => {
   });
 };
 
+// A plain label above each field. A six-field form does not need an icon tile
+// and a subtitle per section — that chrome was most of what made this screen
+// hard to read.
 const SectionHeading = ({
-  icon,
   title,
-  subtitle,
   spaced = false,
 }: {
-  icon: IconName;
   title: string;
-  subtitle: string;
   spaced?: boolean;
-}) => (
-  <View style={[styles.sectionHeading, spaced && styles.sectionHeadingSpaced]}>
-    <View style={styles.sectionIcon}>
-      <Ionicons name={icon} size={18} color={colors.maroon} />
-    </View>
-    <View>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      <Text style={styles.sectionSubtitle}>{subtitle}</Text>
-    </View>
-  </View>
-);
+}) => {
+  const { styles } = useStyles();
 
-const TimeRow = ({
+  return (
+    <Text style={[styles.fieldLabel, spaced && styles.fieldLabelSpaced]}>{title}</Text>
+  );
+};
+
+// Start and end sit side by side: they are a pair, and stacking them made the
+// two read as a sequence instead of a range.
+const TimeCard = ({
   label,
-  date,
   value,
   empty,
+  required,
   onPress,
 }: {
   label: string;
-  date: string;
   value: string;
   empty: boolean;
+  required?: boolean;
   onPress: () => void;
-}) => (
-  <View style={styles.timeRow}>
-    <View style={styles.timeCopy}>
-      <Text style={styles.timeLabel}>{label}</Text>
-      <Text style={styles.timeDate}>{date}</Text>
-    </View>
+}) => {
+  const { styles, colors } = useStyles();
+
+  return (
     <TouchableOpacity
       accessibilityHint={`Opens the ${label.toLowerCase()} time picker`}
       accessibilityLabel={`${label} time, ${value}`}
       accessibilityRole="button"
       activeOpacity={0.72}
       onPress={onPress}
-      style={styles.timeButton}
+      style={styles.timeCard}
     >
-      <Ionicons name="time-outline" size={16} color={colors.maroon} />
-      <Text style={[styles.timeButtonText, empty && styles.timePlaceholder]}>{value}</Text>
+      <Text style={styles.timeCardLabel}>
+        {label}
+        {required ? " · required" : ""}
+      </Text>
+      <View style={styles.timeCardValueRow}>
+        <Ionicons name="time-outline" size={15} color={colors.maroon} />
+        <Text
+          numberOfLines={1}
+          style={[styles.timeCardValue, empty && styles.timeCardPlaceholder]}
+        >
+          {value}
+        </Text>
+      </View>
     </TouchableOpacity>
-  </View>
-);
+  );
+};
 
 const CreateEventScreen = () => {
+  const { styles, colors } = useStyles();
   const router = useRouter();
   const { isOffline } = useNetworkStatus();
-  const { eventId } = useLocalSearchParams<{ eventId?: string | string[] }>();
+  const { eventId, parentId } = useLocalSearchParams<{
+    eventId?: string | string[];
+    parentId?: string | string[];
+  }>();
   const editingEventId = Array.isArray(eventId) ? eventId[0] : eventId;
+  // Set when "Add a part" is tapped on a main event, so the link is pre-filled.
+  const presetParentId = Array.isArray(parentId) ? parentId[0] : parentId;
   const savingRef = useRef(false);
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole>();
+  // Live, so a role change lands here too — a demoted account is turned away
+  // even if it had this form open.
+  const currentUserRole = useCurrentUserRole();
   const [form, setForm] = useState<CalendarEvent>({
     title: "",
     description: "",
     date: toLocalDateString(new Date()),
     category: "morning",
     notifyUsers: false,
+    parentEventId: presetParentId || null,
   });
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showStartTimePicker, setShowStartTimePicker] = useState(false);
@@ -162,6 +205,59 @@ const CreateEventScreen = () => {
   const [titleTouched, setTitleTouched] = useState(false);
   const [titleFocused, setTitleFocused] = useState(false);
   const [detailsFocused, setDetailsFocused] = useState(false);
+  const [parentOptions, setParentOptions] = useState<
+    { id: string; title: string; date: string; status?: string }[]
+  >([]);
+  const [parentPickerVisible, setParentPickerVisible] = useState(false);
+  const [parentSearch, setParentSearch] = useState("");
+  const [isAllDay, setIsAllDay] = useState(false);
+
+  const selectedParent = useMemo(
+    () => parentOptions.find((option) => option.id === form.parentEventId) || null,
+    [parentOptions, form.parentEventId],
+  );
+
+  const filteredParents = useMemo(() => {
+    const needle = parentSearch.trim().toLowerCase();
+    if (!needle) return parentOptions;
+    return parentOptions.filter((option) =>
+      option.title.toLowerCase().includes(needle),
+    );
+  }, [parentOptions, parentSearch]);
+
+  const derivedCategory = useMemo(
+    () => deriveCategory(isAllDay, form.startTime),
+    [isAllDay, form.startTime],
+  );
+
+  // Main events this one could belong to. Fetched once rather than subscribed:
+  // the list is short and a live listener would only churn a form.
+  useEffect(() => {
+    const loadParents = async () => {
+      try {
+        const snapshot = await getDocs(
+          query(collection(db, "events"), where("status", "in", ["published", "draft"])),
+        );
+        setParentOptions(
+          snapshot.docs
+            .map((eventDoc) => ({ id: eventDoc.id, ...(eventDoc.data() as any) }))
+            // Only a top-level event can be a parent, and an event can never be
+            // its own parent. One level of nesting keeps the calendar simple.
+            .filter((option) => !option.parentEventId && option.id !== editingEventId)
+            .sort((first, second) => String(first.date).localeCompare(String(second.date)))
+            .map((option) => ({
+              id: option.id,
+              title: String(option.title || "Untitled"),
+              date: String(option.date || ""),
+              status: option.status,
+            })),
+        );
+      } catch (error) {
+        console.warn("[CreateEvent] Could not load main events:", error);
+      }
+    };
+    void loadParents();
+  }, [editingEventId]);
 
   useEffect(() => {
     if (!editingEventId) return;
@@ -179,7 +275,9 @@ const CreateEventScreen = () => {
             category: event.category || "morning",
             notifyUsers: event.notifyUsers || false,
             status: event.status,
+            parentEventId: event.parentEventId || null,
           });
+          setIsAllDay(event.category === "all-day");
         }
       } catch (error) {
         console.error("Error loading event:", error);
@@ -188,16 +286,6 @@ const CreateEventScreen = () => {
     };
     void loadEvent();
   }, [editingEventId]);
-
-  useEffect(() => {
-    const fetchUserRole = async () => {
-      if (auth.currentUser) {
-        const userData = await getUserData(auth.currentUser.uid);
-        setCurrentUserRole(userData?.role);
-      }
-    };
-    void fetchUserRole();
-  }, []);
 
   const canManageEvents = useCallback(
     () => ["moderator", "teacher", "admin"].includes(currentUserRole || ""),
@@ -268,6 +356,31 @@ const CreateEventScreen = () => {
       Alert.alert("Error", "You must be logged in to create an event.");
       return;
     }
+
+    const partOfId = String(form.parentEventId || "");
+    // A part is a session, and a session has a clock. Without both times the
+    // whole day counts as its window, so it would read as happening now from
+    // midnight to midnight — useless for "which game is on right now".
+    if (partOfId && (!form.startTime || !form.endTime)) {
+      Alert.alert(
+        "Start and end time needed",
+        "A part needs both times so students can see what is happening right now.",
+      );
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      return;
+    }
+    // A published part under an unpublished main event would appear on the
+    // calendar with nothing to belong to.
+    if (partOfId && status === "published") {
+      const parent = parentOptions.find((option) => option.id === partOfId);
+      if (parent?.status === "draft") {
+        Alert.alert(
+          "Publish the main event first",
+          `"${parent.title}" is still a draft, so this part would appear on its own with no context.`,
+        );
+        return;
+      }
+    }
     // Firestore has no offline persistence here, so a "saved" event would be
     // lost without ever reaching the server.
     if (isOffline) {
@@ -300,6 +413,11 @@ const CreateEventScreen = () => {
       const eventData = {
         ...form,
         status,
+        // Derived from the start time rather than picked separately.
+        category: derivedCategory,
+        // Normalised to null so "standalone" is one value everywhere, never a
+        // mix of null, undefined and "".
+        parentEventId: partOfId || null,
       };
       const createdEventRef = editingEventId
         ? { id: editingEventId }
@@ -365,6 +483,19 @@ const CreateEventScreen = () => {
     }
   };
 
+  // The role is resolved asynchronously. Rendering null while it is still
+  // undefined showed authorized staff a blank screen for a beat, so wait on a
+  // spinner and only decide who may be here once the role is actually known.
+  if (currentUserRole === undefined) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={[styles.contentShell, styles.roleLoading]}>
+          <ActivityIndicator size="large" color={colors.maroon} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   if (!canManageEvents()) return null;
 
   return (
@@ -387,10 +518,6 @@ const CreateEventScreen = () => {
             <Text style={styles.headerTitle}>Create Event</Text>
             <Text style={styles.headerSubtitle}>Add an event to the school calendar</Text>
           </View>
-          <View style={styles.modeBadge}>
-            <View style={styles.modeDot} />
-            <Text style={styles.modeText}>{editingEventId ? "EDIT" : "NEW"}</Text>
-          </View>
         </View>
 
         <ScrollView
@@ -401,7 +528,7 @@ const CreateEventScreen = () => {
           style={styles.formContainer}
         >
           <View style={styles.titleSection}>
-            <Text style={styles.eyebrow}>EVENT NAME</Text>
+            <SectionHeading title="Event name" />
             <TextInput
               accessibilityLabel="Event title, required"
               onBlur={() => {
@@ -430,7 +557,7 @@ const CreateEventScreen = () => {
             )}
           </View>
 
-          <SectionHeading icon="calendar-outline" title="Schedule" subtitle="Set the event date and time" />
+          <SectionHeading title="Schedule" spaced />
           <View style={styles.scheduleCard}>
             <TouchableOpacity
               accessibilityHint="Opens the date picker"
@@ -441,21 +568,17 @@ const CreateEventScreen = () => {
                 setShowDatePicker(true);
                 void Haptics.selectionAsync();
               }}
-              style={styles.dateSelector}
+              style={styles.dateRow}
             >
-              <View style={styles.dateTile}>
-                <View style={styles.dateTileHeader}>
-                  <Text style={styles.dateMonth}>{dateDisplay.month}</Text>
-                </View>
-                <Text style={styles.dateDay}>{dateDisplay.day}</Text>
+              <View style={styles.rowIcon}>
+                <Ionicons name="calendar" size={18} color={colors.maroon} />
               </View>
-              <View style={styles.dateCopy}>
-                <Text style={styles.dateWeekday}>{dateDisplay.weekday}</Text>
-                <Text style={styles.dateLong}>{dateDisplay.long}</Text>
-                <Text style={styles.dateHint}>Tap to change date</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={20} color={colors.maroon} />
+              <Text style={styles.dateRowValue} numberOfLines={1}>
+                {dateDisplay.weekday}, {dateDisplay.long}
+              </Text>
+              <Ionicons name="chevron-forward" size={20} color={colors.muted} />
             </TouchableOpacity>
+
             {showDatePicker && (
               <DateTimePicker
                 value={selectedDate}
@@ -465,33 +588,66 @@ const CreateEventScreen = () => {
               />
             )}
 
-            <View style={styles.divider} />
-            <View style={styles.timeline}>
-              <View style={styles.timelineRail}>
-                <View style={styles.timelineDotActive} />
-                <View style={styles.timelineLine} />
-                <View style={styles.timelineDot} />
-              </View>
-              <View style={styles.timelineBody}>
-                <TimeRow
-                  label="START"
-                  date={`${dateDisplay.weekday}, ${dateDisplay.month} ${dateDisplay.day}`}
-                  value={formatTime(form.startTime)}
-                  empty={!form.startTime}
-                  onPress={() => setShowStartTimePicker(true)}
-                />
-                <View style={styles.timelineGap}>
-                  <Text style={styles.timelineGapText}>SAME DAY</Text>
+            {!isAllDay && (
+              <>
+                <View style={styles.divider} />
+                <View style={styles.timePairRow}>
+                  <TimeCard
+                    label="Starts"
+                    value={formatTime(form.startTime)}
+                    empty={!form.startTime}
+                    required={!!form.parentEventId}
+                    onPress={() => setShowStartTimePicker(true)}
+                  />
+                  <TimeCard
+                    label="Ends"
+                    value={formatTime(form.endTime)}
+                    empty={!form.endTime}
+                    required={!!form.parentEventId}
+                    onPress={() => setShowEndTimePicker(true)}
+                  />
                 </View>
-                <TimeRow
-                  label="END"
-                  date={`${dateDisplay.weekday}, ${dateDisplay.month} ${dateDisplay.day}`}
-                  value={formatTime(form.endTime)}
-                  empty={!form.endTime}
-                  onPress={() => setShowEndTimePicker(true)}
-                />
+              </>
+            )}
+
+            <View style={styles.divider} />
+            <View style={styles.allDayRow}>
+              <View style={styles.allDayCopy}>
+                <Text style={styles.allDayTitle}>All day</Text>
+                <Text style={styles.allDayHint}>
+                  {form.parentEventId
+                    ? "A part always needs a start and end time"
+                    : "No start or end time"}
+                </Text>
               </View>
+              <Switch
+                accessibilityLabel="All day event"
+                disabled={!!form.parentEventId}
+                ios_backgroundColor={colors.border}
+                onValueChange={(value) => {
+                  setIsAllDay(value);
+                  void Haptics.selectionAsync();
+                }}
+                thumbColor={colors.onDark}
+                trackColor={{ false: colors.border, true: colors.maroon }}
+                value={isAllDay}
+              />
             </View>
+
+            {/* The time of day is derived from the start time, so there is no
+                separate category to pick and no way for the two to disagree. */}
+            <View style={styles.derivedRow}>
+              <View
+                style={[
+                  styles.derivedDot,
+                  { backgroundColor: CATEGORY_COLORS[derivedCategory] },
+                ]}
+              />
+              <Text style={styles.derivedText} numberOfLines={1}>
+                Shows as {categoryLabels[derivedCategory].toLowerCase()} on the calendar
+              </Text>
+            </View>
+
             {showStartTimePicker && (
               <DateTimePicker
                 value={form.startTime ? new Date(`2000-01-01T${form.startTime}`) : new Date()}
@@ -510,46 +666,47 @@ const CreateEventScreen = () => {
             )}
           </View>
 
-          <SectionHeading icon="options-outline" title="Category" subtitle="Choose the event time-of-day label" spaced />
-          <ScrollView
-            contentContainerStyle={styles.categoryContainer}
-            horizontal
-            showsHorizontalScrollIndicator={false}
+          <SectionHeading title="Part of a bigger event?" spaced />
+          {/* A row that opens a searchable list. The old horizontal chips meant
+              scrolling sideways through every event to find one. */}
+          <TouchableOpacity
+            accessibilityLabel={
+              selectedParent ? `Part of ${selectedParent.title}` : "Standalone event"
+            }
+            accessibilityRole="button"
+            activeOpacity={0.75}
+            onPress={() => {
+              setParentSearch("");
+              setParentPickerVisible(true);
+            }}
+            style={styles.pickerRow}
           >
-            {categories.map((category) => {
-              const selected = form.category === category;
-              return (
-                <TouchableOpacity
-                  accessibilityRole="button"
-                  accessibilityState={{ selected }}
-                  activeOpacity={0.76}
-                  key={category}
-                  onPress={() => {
-                    handleInputChange("category", category);
-                    void Haptics.selectionAsync();
-                  }}
-                  style={[styles.categoryButton, selected && styles.selectedCategoryButton]}
-                >
-                  <Ionicons
-                    name={categoryIcons[category]}
-                    size={17}
-                    color={selected ? colors.cream : colors.maroon}
-                  />
-                  <Text
-                    style={[
-                      styles.categoryButtonText,
-                      selected && styles.selectedCategoryButtonText,
-                    ]}
-                  >
-                    {categoryLabels[category]}
-                  </Text>
-                  {selected && <Ionicons name="checkmark" size={14} color={colors.gold} />}
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
+            <View
+              style={[
+                styles.rowIcon,
+                !!selectedParent && { backgroundColor: "#efe3f5" },
+              ]}
+            >
+              <Ionicons
+                name={selectedParent ? "albums" : "calendar-outline"}
+                size={18}
+                color={selectedParent ? "#7b3fa0" : colors.maroon}
+              />
+            </View>
+            <View style={styles.pickerRowCopy}>
+              <Text style={styles.pickerRowValue} numberOfLines={1}>
+                {selectedParent ? selectedParent.title : "Standalone event"}
+              </Text>
+              <Text style={styles.pickerRowHint} numberOfLines={1}>
+                {selectedParent
+                  ? "Tap to change or remove"
+                  : "Not part of a bigger event"}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+          </TouchableOpacity>
 
-          <SectionHeading icon="document-text-outline" title="Description" subtitle="Add helpful details for attendees" spaced />
+          <SectionHeading title="Details (optional)" spaced />
           <TextInput
             accessibilityLabel="Event description"
             multiline
@@ -564,7 +721,7 @@ const CreateEventScreen = () => {
             value={form.description}
           />
 
-          <SectionHeading icon="notifications-outline" title="Publishing options" subtitle="Control how people hear about it" spaced />
+          <SectionHeading title="Publishing" spaced />
           <View style={styles.notifyCard}>
             <View style={styles.notifyIcon}>
               <Ionicons name="megaphone-outline" size={20} color={colors.maroon} />
@@ -580,35 +737,12 @@ const CreateEventScreen = () => {
                 handleInputChange("notifyUsers", value);
                 void Haptics.selectionAsync();
               }}
-              thumbColor={colors.cream}
+              thumbColor={colors.onDark}
               trackColor={{ false: colors.border, true: colors.maroon }}
               value={Boolean(form.notifyUsers)}
             />
           </View>
 
-          <View style={styles.previewHeading}>
-            <Text style={styles.eyebrow}>LIVE PREVIEW</Text>
-            <Text style={styles.previewState}>{form.title.trim() ? "READY" : "ADD A TITLE"}</Text>
-          </View>
-          <View style={styles.previewCard}>
-            <View style={styles.previewDate}>
-              <Text style={styles.previewMonth}>{dateDisplay.month}</Text>
-              <Text style={styles.previewDay}>{dateDisplay.day}</Text>
-            </View>
-            <View style={styles.previewCopy}>
-              <Text numberOfLines={2} style={[styles.previewTitle, !form.title && styles.previewPlaceholder]}>
-                {form.title || "Event title"}
-              </Text>
-              <View style={styles.previewMetaRow}>
-                <Ionicons name="time-outline" size={14} color="#dcc4b8" />
-                <Text numberOfLines={1} style={styles.previewMeta}>
-                  {form.startTime || form.endTime
-                    ? `${formatTime(form.startTime)} – ${formatTime(form.endTime)}`
-                    : categoryLabels[form.category]}
-                </Text>
-              </View>
-            </View>
-          </View>
         </ScrollView>
 
         <View style={styles.actionBar}>
@@ -634,31 +768,291 @@ const CreateEventScreen = () => {
             ]}
           >
             {loading ? (
-              <ActivityIndicator color={colors.cream} size="small" />
+              <ActivityIndicator color={colors.onDark} size="small" />
             ) : (
-              <Ionicons name="paper-plane-outline" size={18} color={colors.cream} />
+              <Ionicons name="paper-plane-outline" size={18} color={colors.onDark} />
             )}
             <Text style={styles.submitButtonText}>{loading ? "Saving..." : "Publish"}</Text>
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={parentPickerVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setParentPickerVisible(false)}
+      >
+        <View style={styles.pickerBackdrop}>
+          <View style={styles.pickerSheet}>
+            <View style={styles.pickerHandle} />
+            <Text style={styles.pickerTitle}>Part of a bigger event?</Text>
+
+            <View style={styles.pickerSearch}>
+              <Ionicons name="search" size={17} color={colors.muted} />
+              <TextInput
+                accessibilityLabel="Search main events"
+                autoCorrect={false}
+                onChangeText={setParentSearch}
+                placeholder="Search events"
+                placeholderTextColor="#a68d85"
+                style={styles.pickerSearchInput}
+                value={parentSearch}
+              />
+              {!!parentSearch && (
+                <TouchableOpacity
+                  accessibilityLabel="Clear search"
+                  accessibilityRole="button"
+                  hitSlop={8}
+                  onPress={() => setParentSearch("")}
+                >
+                  <Ionicons name="close-circle" size={18} color={colors.muted} />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              style={styles.pickerList}
+            >
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityState={{ selected: !form.parentEventId }}
+                activeOpacity={0.75}
+                onPress={() => {
+                  handleInputChange("parentEventId", "");
+                  setParentPickerVisible(false);
+                  void Haptics.selectionAsync();
+                }}
+                style={styles.pickerOption}
+              >
+                <Ionicons name="calendar-outline" size={18} color={colors.maroon} />
+                <Text style={styles.pickerOptionText}>Standalone event</Text>
+                {!form.parentEventId && (
+                  <Ionicons name="checkmark-circle" size={20} color={colors.maroon} />
+                )}
+              </TouchableOpacity>
+
+              {filteredParents.map((option) => {
+                const selected = form.parentEventId === option.id;
+                return (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                    activeOpacity={0.75}
+                    key={option.id}
+                    onPress={() => {
+                      handleInputChange("parentEventId", option.id);
+                      setParentPickerVisible(false);
+                      void Haptics.selectionAsync();
+                    }}
+                    style={styles.pickerOption}
+                  >
+                    <Ionicons name="albums-outline" size={18} color="#7b3fa0" />
+                    <View style={styles.pickerOptionCopy}>
+                      <Text style={styles.pickerOptionText} numberOfLines={1}>
+                        {option.title}
+                      </Text>
+                      <Text style={styles.pickerOptionMeta} numberOfLines={1}>
+                        {option.date}
+                        {option.status === "draft" ? " · draft" : ""}
+                      </Text>
+                    </View>
+                    {selected && (
+                      <Ionicons name="checkmark-circle" size={20} color={colors.maroon} />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+
+              {filteredParents.length === 0 && (
+                <Text style={styles.pickerEmpty}>
+                  {parentSearch
+                    ? `No events match "${parentSearch}"`
+                    : "No other events yet."}
+                </Text>
+              )}
+            </ScrollView>
+
+            <TouchableOpacity
+              accessibilityRole="button"
+              activeOpacity={0.8}
+              onPress={() => setParentPickerVisible(false)}
+              style={styles.pickerClose}
+            >
+              <Text style={styles.pickerCloseText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
     </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.maroon },
-  contentShell: { flex: 1, backgroundColor: colors.cream },
+const makeStyles = (t: ThemeTokens) => {
+  const c = palette(t);
+  return StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.shell },
+  fieldLabel: {
+    color: c.ink,
+    fontSize: 14,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
+  fieldLabelSpaced: { marginTop: 26 },
+  rowIcon: {
+    width: 38,
+    height: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    backgroundColor: c.soft,
+  },
+  dateRow: {
+    minHeight: 66,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 14,
+  },
+  dateRowValue: { flex: 1, color: c.ink, fontSize: 16, fontWeight: "700" },
+  timePairRow: { flexDirection: "row", gap: 10, padding: 14 },
+  timeCard: {
+    flex: 1,
+    minHeight: 68,
+    justifyContent: "center",
+    paddingHorizontal: 13,
+    borderRadius: 14,
+    backgroundColor: c.cream,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  timeCardLabel: {
+    color: c.maroon,
+    fontSize: 12,
+    fontWeight: "800",
+    marginBottom: 5,
+  },
+  timeCardValueRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  timeCardValue: { flex: 1, color: c.ink, fontSize: 16, fontWeight: "700" },
+  timeCardPlaceholder: { color: c.muted, fontWeight: "500" },
+  allDayRow: {
+    minHeight: 62,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 14,
+  },
+  allDayCopy: { flex: 1, minWidth: 0 },
+  allDayTitle: { color: c.ink, fontSize: 15, fontWeight: "700" },
+  allDayHint: { color: c.muted, fontSize: 13, marginTop: 2 },
+  derivedRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingBottom: 14,
+  },
+  derivedDot: { width: 9, height: 9, borderRadius: 5 },
+  derivedText: { flex: 1, color: c.muted, fontSize: 13 },
+  pickerRow: {
+    minHeight: 70,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 14,
+    borderRadius: 18,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  pickerRowCopy: { flex: 1, minWidth: 0 },
+  pickerRowValue: { color: c.ink, fontSize: 16, fontWeight: "700" },
+  pickerRowHint: { color: c.muted, fontSize: 13, marginTop: 2 },
+  pickerBackdrop: {
+    flex: 1,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(22, 4, 3, 0.55)",
+  },
+  pickerSheet: {
+    maxHeight: "82%",
+    paddingTop: 10,
+    paddingHorizontal: 18,
+    paddingBottom: 18,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    backgroundColor: c.surface,
+  },
+  pickerHandle: {
+    alignSelf: "center",
+    width: 42,
+    height: 4,
+    borderRadius: 2,
+    marginBottom: 14,
+    backgroundColor: c.border,
+  },
+  pickerTitle: {
+    color: c.ink,
+    fontSize: 18,
+    fontWeight: "800",
+    marginBottom: 12,
+  },
+  pickerSearch: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    minHeight: 48,
+    paddingHorizontal: 13,
+    borderRadius: 14,
+    backgroundColor: c.cream,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  pickerSearchInput: { flex: 1, color: c.ink, fontSize: 15 },
+  pickerList: { marginTop: 12 },
+  pickerOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    minHeight: 58,
+    paddingHorizontal: 13,
+    marginBottom: 8,
+    borderRadius: 14,
+    backgroundColor: c.cream,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  pickerOptionCopy: { flex: 1, minWidth: 0 },
+  pickerOptionText: { flex: 1, color: c.ink, fontSize: 15, fontWeight: "700" },
+  pickerOptionMeta: { color: c.muted, fontSize: 13, marginTop: 2 },
+  pickerEmpty: {
+    color: c.muted,
+    fontSize: 14,
+    textAlign: "center",
+    paddingVertical: 26,
+  },
+  pickerClose: {
+    minHeight: 50,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 6,
+    borderRadius: 14,
+    backgroundColor: c.soft,
+  },
+  pickerCloseText: { color: c.maroon, fontSize: 15, fontWeight: "800" },
+  contentShell: { flex: 1, backgroundColor: c.cream },
+  roleLoading: { alignItems: "center", justifyContent: "center" },
   header: {
     minHeight: 72,
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 16,
     paddingVertical: 10,
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
-    shadowColor: colors.ink,
+    borderBottomColor: c.border,
+    shadowColor: c.ink,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.06,
     shadowRadius: 8,
@@ -671,139 +1065,54 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 22,
-    backgroundColor: colors.soft,
+    backgroundColor: c.soft,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: c.border,
   },
   headerCopy: { flex: 1, marginLeft: 12 },
-  headerTitle: { color: colors.ink, fontSize: 20, fontWeight: "800", letterSpacing: -0.3 },
-  headerSubtitle: { color: colors.muted, fontSize: 11.5, marginTop: 2 },
-  modeBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 99,
-    backgroundColor: colors.soft,
-  },
-  modeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.gold },
-  modeText: { color: colors.maroon, fontSize: 9, fontWeight: "900", letterSpacing: 0.9 },
+  headerTitle: { color: c.ink, fontSize: 20, fontWeight: "800", letterSpacing: -0.3 },
+  headerSubtitle: { color: c.muted, fontSize: 13, marginTop: 2 },
   formContainer: { flex: 1 },
   formContent: { paddingHorizontal: 18, paddingTop: 24, paddingBottom: 30 },
   titleSection: { marginBottom: 28 },
-  eyebrow: { color: colors.maroon, fontSize: 10, fontWeight: "900", letterSpacing: 1.5 },
   titleInput: {
     minHeight: 64,
     marginTop: 7,
     paddingHorizontal: 0,
-    color: colors.ink,
+    color: c.ink,
     fontSize: 25,
     fontWeight: "700",
     letterSpacing: -0.5,
     borderBottomWidth: 2,
-    borderBottomColor: colors.border,
+    borderBottomColor: c.border,
   },
-  inputFocused: { borderColor: colors.maroon },
-  inputError: { borderColor: colors.error },
-  fieldHint: { color: colors.muted, fontSize: 12, marginTop: 8 },
+  inputFocused: { borderColor: c.maroon },
+  inputError: { borderColor: c.error },
+  fieldHint: { color: c.muted, fontSize: 12, marginTop: 8 },
   errorRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8 },
-  errorText: { color: colors.error, fontSize: 12, fontWeight: "600" },
-  sectionHeading: { flexDirection: "row", alignItems: "center", marginBottom: 12 },
-  sectionHeadingSpaced: { marginTop: 28 },
-  sectionIcon: {
-    width: 38,
-    height: 38,
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 10,
-    borderRadius: 12,
-    backgroundColor: colors.soft,
-  },
-  sectionTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
-  sectionSubtitle: { color: colors.muted, fontSize: 11.5, marginTop: 2 },
+  errorText: { color: c.error, fontSize: 12, fontWeight: "600" },
   scheduleCard: {
     overflow: "hidden",
     borderRadius: 22,
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: colors.border,
-    shadowColor: colors.ink,
+    borderColor: c.border,
+    shadowColor: c.ink,
     shadowOffset: { width: 0, height: 5 },
     shadowOpacity: 0.07,
     shadowRadius: 14,
     elevation: 3,
   },
-  dateSelector: { minHeight: 94, flexDirection: "row", alignItems: "center", padding: 16 },
-  dateTile: {
-    width: 58,
-    height: 66,
-    overflow: "hidden",
-    alignItems: "center",
-    borderRadius: 15,
-    backgroundColor: colors.cream,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  dateTileHeader: { alignSelf: "stretch", alignItems: "center", paddingVertical: 4, backgroundColor: colors.maroon },
-  dateMonth: { color: colors.cream, fontSize: 9, fontWeight: "900", letterSpacing: 1 },
-  dateDay: { color: colors.ink, fontSize: 25, lineHeight: 39, fontWeight: "900" },
-  dateCopy: { flex: 1, marginLeft: 14 },
-  dateWeekday: { color: colors.ink, fontSize: 17, fontWeight: "800" },
-  dateLong: { color: colors.muted, fontSize: 13, marginTop: 3 },
-  dateHint: { color: colors.maroon, fontSize: 10.5, fontWeight: "700", marginTop: 5 },
-  divider: { height: 1, marginHorizontal: 16, backgroundColor: colors.border },
-  timeline: { flexDirection: "row", padding: 16 },
-  timelineRail: { width: 20, alignItems: "center", paddingVertical: 16 },
-  timelineDotActive: { width: 11, height: 11, borderRadius: 6, backgroundColor: colors.maroon, borderWidth: 2, borderColor: colors.gold },
-  timelineLine: { flex: 1, width: 1.5, marginVertical: 4, backgroundColor: colors.border },
-  timelineDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.maroon },
-  timelineBody: { flex: 1, marginLeft: 8 },
-  timeRow: { minHeight: 60, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  timeCopy: { flex: 1, marginRight: 8 },
-  timeLabel: { color: colors.maroon, fontSize: 9, fontWeight: "900", letterSpacing: 1.2 },
-  timeDate: { color: colors.muted, fontSize: 11.5, marginTop: 4 },
-  timeButton: {
-    minWidth: 116,
-    minHeight: 44,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 7,
-    paddingHorizontal: 11,
-    borderRadius: 12,
-    backgroundColor: colors.soft,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  timeButtonText: { color: colors.ink, fontSize: 13, fontWeight: "700" },
-  timePlaceholder: { color: colors.muted, fontWeight: "500" },
-  timelineGap: { height: 24, justifyContent: "center" },
-  timelineGapText: { alignSelf: "flex-start", paddingHorizontal: 7, paddingVertical: 3, borderRadius: 99, overflow: "hidden", backgroundColor: colors.cream, color: colors.muted, fontSize: 9, fontWeight: "800", letterSpacing: 0.6 },
-  categoryContainer: { gap: 8, paddingRight: 18 },
-  categoryButton: {
-    minHeight: 44,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 7,
-    paddingHorizontal: 15,
-    borderRadius: 99,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  selectedCategoryButton: { backgroundColor: colors.maroon, borderColor: colors.maroon },
-  categoryButtonText: { color: colors.maroon, fontSize: 12, fontWeight: "800", letterSpacing: 0.3 },
-  selectedCategoryButtonText: { color: colors.cream },
+  divider: { height: 1, marginHorizontal: 16, backgroundColor: c.border },
   descriptionInput: {
     minHeight: 124,
     paddingHorizontal: 16,
     paddingVertical: 14,
     borderRadius: 18,
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: colors.border,
-    color: colors.ink,
+    borderColor: c.border,
+    color: c.ink,
     fontSize: 15,
     lineHeight: 22,
   },
@@ -813,46 +1122,43 @@ const styles = StyleSheet.create({
     alignItems: "center",
     padding: 14,
     borderRadius: 18,
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: c.border,
   },
-  notifyIcon: { width: 42, height: 42, alignItems: "center", justifyContent: "center", borderRadius: 13, backgroundColor: colors.soft },
+  notifyIcon: { width: 42, height: 42, alignItems: "center", justifyContent: "center", borderRadius: 13, backgroundColor: c.soft },
   notifyCopy: { flex: 1, marginHorizontal: 12 },
-  notifyTitle: { color: colors.ink, fontSize: 14, fontWeight: "800" },
-  notifyText: { color: colors.muted, fontSize: 11.5, lineHeight: 16, marginTop: 3 },
-  previewHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 30, marginBottom: 10 },
-  previewState: { color: colors.muted, fontSize: 9, fontWeight: "800", letterSpacing: 0.8 },
-  previewCard: { minHeight: 92, flexDirection: "row", alignItems: "center", padding: 14, borderRadius: 18, backgroundColor: colors.maroon, borderLeftWidth: 4, borderLeftColor: colors.gold },
-  previewDate: { width: 52, height: 60, alignItems: "center", justifyContent: "center", borderRadius: 14, backgroundColor: "rgba(250,244,236,0.12)", borderWidth: 1, borderColor: "rgba(250,244,236,0.18)" },
-  previewMonth: { color: colors.gold, fontSize: 9, fontWeight: "900", letterSpacing: 1 },
-  previewDay: { color: colors.cream, fontSize: 22, fontWeight: "900", marginTop: 1 },
-  previewCopy: { flex: 1, marginLeft: 13 },
-  previewTitle: { color: colors.cream, fontSize: 15, lineHeight: 20, fontWeight: "800" },
-  previewPlaceholder: { color: "rgba(250,244,236,0.62)", fontStyle: "italic" },
-  previewMetaRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 7 },
-  previewMeta: { flex: 1, color: "#dcc4b8", fontSize: 11.5 },
+  notifyTitle: { color: c.ink, fontSize: 14, fontWeight: "800" },
+  notifyText: { color: c.muted, fontSize: 13, lineHeight: 16, marginTop: 3 },
   actionBar: {
     flexDirection: "row",
     gap: 9,
     paddingHorizontal: 16,
     paddingTop: 11,
     paddingBottom: Platform.OS === "android" ? 14 : 10,
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
-    shadowColor: colors.ink,
+    borderTopColor: c.border,
+    shadowColor: c.ink,
     shadowOffset: { width: 0, height: -3 },
     shadowOpacity: 0.06,
     shadowRadius: 8,
     elevation: 7,
   },
-  secondaryAction: { flex: 0.9, minHeight: 54, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, borderRadius: 15, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
-  secondaryActionText: { color: colors.maroon, fontSize: 14, fontWeight: "800" },
-  submitButton: { flex: 1.1, minHeight: 54, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 15, backgroundColor: colors.maroon, shadowColor: colors.maroon, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 3 },
+  secondaryAction: { flex: 0.9, minHeight: 54, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, borderRadius: 15, backgroundColor: c.surface, borderWidth: 1, borderColor: c.border },
+  secondaryActionText: { color: c.maroon, fontSize: 14, fontWeight: "800" },
+  submitButton: { flex: 1.1, minHeight: 54, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 15, backgroundColor: c.maroon, shadowColor: c.maroon, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 3 },
   submitIncomplete: { opacity: 0.62 },
   actionDisabled: { opacity: 0.55 },
-  submitButtonText: { color: colors.cream, fontSize: 16, fontWeight: "800" },
+  submitButtonText: { color: c.onDark, fontSize: 16, fontWeight: "800" },
 });
+};
 
 export default CreateEventScreen;
+/** Themed stylesheet and palette for this screen. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  const colors = useMemo(() => palette(theme), [theme]);
+  return useMemo(() => ({ styles, colors }), [styles, colors]);
+};

@@ -14,10 +14,13 @@
 //   <ProfileHeaderSkeleton /> avatar + name + stat blocks
 //   <DashboardSkeleton />     header + stat grid + action rows
 //   <ChatSkeleton />          alternating chat bubble blocks
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import React, {
     createContext,
     useContext,
     useEffect,
+    useMemo,
     useState,
 } from "react";
 import {
@@ -38,9 +41,11 @@ import Reanimated, {
     withTiming,
 } from "react-native-reanimated";
 
-// Warm grey that reads as "placeholder" against the app's cream surfaces.
-const SKELETON_BASE = "#e9ddd5";
-const SKELETON_HIGHLIGHT = "rgba(255, 255, 255, 0.55)";
+// The sweep that crosses each placeholder block. On a cream surface a
+// strong white reads as a shine; on a near-black one the same value is a
+// flashbulb, so the dark themes get a fraction of it.
+const SHIMMER_LIGHT = "rgba(255, 255, 255, 0.55)";
+const SHIMMER_DARK = "rgba(255, 255, 255, 0.06)";
 const SWEEP_DURATION_MS = 1150;
 // After this long the shimmer is joined by a quiet "still working" line so a
 // genuinely hung load doesn't just shimmer forever.
@@ -81,6 +86,7 @@ export function SkeletonBlock({
   radius = 7,
   style,
 }: SkeletonBlockProps) {
+  const { styles, theme } = useStyles();
   const progress = useShimmerProgress();
   const measured = useSharedValue(0);
 
@@ -111,7 +117,7 @@ export function SkeletonBlock({
           width,
           height,
           borderRadius: radius,
-          backgroundColor: SKELETON_BASE,
+          backgroundColor: theme.skeleton,
           overflow: "hidden",
         },
         style,
@@ -153,6 +159,7 @@ export function SkeletonGroup({
   slowMessage?: string;
   style?: StyleProp<ViewStyle>;
 }) {
+  const { styles } = useStyles();
   const progress = useSharedValue(0);
   const [slow, setSlow] = useState(false);
 
@@ -191,6 +198,7 @@ export function SkeletonGroup({
 
 /** One post-card-shaped skeleton — mirrors PostCard's hanging layout. */
 export function PostCardSkeleton() {
+  const { styles } = useStyles();
   return (
     <View style={styles.postCard}>
       <View style={styles.postRow}>
@@ -247,6 +255,7 @@ export function ListRowSkeleton({
   showAvatar?: boolean;
   style?: StyleProp<ViewStyle>;
 }) {
+  const { styles } = useStyles();
   return (
     <View style={[styles.listRow, style]}>
       {showAvatar && (
@@ -284,6 +293,7 @@ export function ListSkeleton({
   lines?: 1 | 2;
   showAvatar?: boolean;
 }) {
+  const { styles } = useStyles();
   return (
     <SkeletonGroup style={[styles.listContent, contentStyle]}>
       {Array.from({ length: count }).map((_, i) => (
@@ -301,6 +311,7 @@ export function ListSkeleton({
 }
 
 export function ProfileHeaderSkeleton() {
+  const { styles } = useStyles();
   return (
     <SkeletonGroup style={styles.profileHeader}>
       <SkeletonCircle size={92} />
@@ -316,6 +327,7 @@ export function ProfileHeaderSkeleton() {
 }
 
 export function DashboardSkeleton() {
+  const { styles } = useStyles();
   return (
     <SkeletonGroup style={styles.dashboard}>
       <SkeletonBlock width="60%" height={20} />
@@ -350,6 +362,7 @@ export function ChatSkeleton({
   count?: number;
   style?: StyleProp<ViewStyle>;
 }) {
+  const { styles } = useStyles();
   return (
     <SkeletonGroup style={[styles.chat, style]}>
       {Array.from({ length: count }).map((_, i) => {
@@ -377,28 +390,29 @@ export function ChatSkeleton({
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   shimmerBand: {
     position: "absolute",
     top: -20,
     bottom: -20,
     left: 0,
-    backgroundColor: SKELETON_HIGHLIGHT,
+    backgroundColor: c.isDark ? SHIMMER_DARK : SHIMMER_LIGHT,
   },
   slowText: {
     textAlign: "center",
-    color: "#9b7d72",
+    color: c.textMuted,
     fontSize: 12,
     marginTop: 18,
     paddingHorizontal: 24,
   },
   // Post-card skeleton — matches PostCard.postCard spacing.
   postCard: {
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     paddingVertical: 14,
     paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#ead8cf",
+    borderBottomColor: c.borderStrong,
   },
   postRow: { flexDirection: "row" },
   postBody: { flex: 1 },
@@ -448,3 +462,10 @@ const styles = StyleSheet.create({
 export default function SkeletonRoutePlaceholder() {
   return null;
 }
+
+/** Themed stylesheet for this file. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

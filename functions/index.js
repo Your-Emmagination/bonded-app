@@ -1,5 +1,6 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/firestore");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { initializeApp } = require("firebase-admin/app");
 const {
   getAuth,
@@ -987,5 +988,275 @@ exports.registerUser = onCall(
 
       role: config.role,
     };
+  }
+);
+
+// =================================================================
+// AUTOMATIC YEAR LEVEL PROMOTION
+// =================================================================
+//
+// An admin schedules a promotion in the app (YearPromotionScreen), which
+// writes one promotionSchedules document holding the moment it should run.
+// This job wakes every two minutes, finds any schedule that has come due, and
+// moves every eligible student one rung up the year ladder.
+//
+// There is deliberately ONE implementation. The app's "Run now" button does
+// not promote anybody itself - it writes a schedule dated now and lets this
+// job pick it up. That keeps a bulk mutation of every student record on a
+// single, audited code path.
+//
+// MIRRORED LOGIC: the ladder and the skip rules below are a hand-copy of
+// utils/yearLevels.ts (Cloud Functions is CommonJS and cannot import it).
+// Change both, or the in-app preview will lie about what this job will do.
+
+const YEAR_LEVELS = [
+  "1st Year",
+  "2nd Year",
+  "3rd Year",
+  "4th Year",
+  "Graduated",
+];
+
+// Students are updated in batches of this size. Firestore caps a batch at 500
+// writes; 400 leaves headroom and keeps each commit quick.
+const PROMOTION_WRITE_CHUNK = 400;
+
+// The audit trail is stored as chunk documents rather than one array, so a
+// campus with thousands of students cannot push the run document past the
+// 1MB document ceiling.
+const PROMOTION_AUDIT_CHUNK = 500;
+
+function normalizeYearLevel(value) {
+  const raw = String(value == null ? "" : value).trim().toLowerCase();
+  if (!raw) return null;
+  return YEAR_LEVELS.find((level) => level.toLowerCase() === raw) || null;
+}
+
+function nextYearLevel(value) {
+  const current = normalizeYearLevel(value);
+  if (!current) return null;
+  const index = YEAR_LEVELS.indexOf(current);
+  if (index < 0 || index >= YEAR_LEVELS.length - 1) return null;
+  return YEAR_LEVELS[index + 1];
+}
+
+// Accepts the legacy numeric roles on older student documents
+// (1 = student, 3 = moderator), matching parseUserRole() in utils/rbac.ts.
+function isPromotableRole(value) {
+  if (typeof value === "number") return value === 1 || value === 3;
+  const raw = String(value == null ? "" : value).trim().toLowerCase();
+  return raw === "student" || raw === "moderator" || raw === "1" || raw === "3";
+}
+
+function toMillis(value) {
+  if (!value) return null;
+  if (typeof value.toMillis === "function") return value.toMillis();
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value;
+  return null;
+}
+
+function chunkList(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+/**
+ * Finds the oldest schedule that has come due and marks it "running" inside a
+ * transaction, so two overlapping invocations can never both run it.
+ *
+ * The query filters on status only. Adding a runAt cutoff would make it a
+ * composite query needing a deployed index; pending schedules are always a
+ * handful, so the cutoff is applied in memory instead.
+ */
+async function claimDuePromotionSchedule() {
+  const pending = await db
+    .collection("promotionSchedules")
+    .where("status", "==", "pending")
+    .limit(20)
+    .get();
+
+  if (pending.empty) return null;
+
+  const nowMs = Date.now();
+  const due = pending.docs
+    .map((docSnap) => ({
+      ref: docSnap.ref,
+      runAtMs: toMillis(docSnap.get("runAt")),
+    }))
+    .filter((entry) => entry.runAtMs !== null && entry.runAtMs <= nowMs)
+    .sort((a, b) => a.runAtMs - b.runAtMs);
+
+  if (!due.length) return null;
+
+  return db.runTransaction(async (tx) => {
+    const fresh = await tx.get(due[0].ref);
+    if (!fresh.exists) return null;
+    if (fresh.get("status") !== "pending") return null;
+
+    tx.update(fresh.ref, {
+      status: "running",
+      startedAt: FieldValue.serverTimestamp(),
+    });
+
+    return { id: fresh.id, ref: fresh.ref, data: fresh.data() || {} };
+  });
+}
+
+async function runPromotionSchedule(schedule) {
+  const scheduleCreatedAtMs = toMillis(schedule.data.createdAt);
+  const students = await db.collection("students").get();
+
+  const changes = [];
+  const skipped = {
+    notAStudent: 0,
+    noYearLevel: 0,
+    alreadyGraduated: 0,
+    onHold: 0,
+    registeredAfterScheduling: 0,
+    alreadyPromotedByThisRun: 0,
+  };
+
+  students.forEach((docSnap) => {
+    const data = docSnap.data() || {};
+
+    if (!isPromotableRole(data.role)) {
+      skipped.notAStudent += 1;
+      return;
+    }
+
+    const current = normalizeYearLevel(data.yearlvl);
+    if (!current) {
+      skipped.noYearLevel += 1;
+      return;
+    }
+
+    if (data.promotionHold === true) {
+      skipped.onHold += 1;
+      return;
+    }
+
+    const createdAtMs = toMillis(data.createdAt);
+    if (
+      scheduleCreatedAtMs !== null &&
+      createdAtMs !== null &&
+      createdAtMs > scheduleCreatedAtMs
+    ) {
+      skipped.registeredAfterScheduling += 1;
+      return;
+    }
+
+    const next = nextYearLevel(current);
+    if (!next) {
+      skipped.alreadyGraduated += 1;
+      return;
+    }
+
+    // Makes a retry after a partial failure safe: anyone this run already
+    // moved is left alone the second time through.
+    if (data.lastPromotionRunId === schedule.id) {
+      skipped.alreadyPromotedByThisRun += 1;
+      return;
+    }
+
+    changes.push({ studentId: docSnap.id, from: current, to: next });
+  });
+
+  for (const chunk of chunkList(changes, PROMOTION_WRITE_CHUNK)) {
+    const batch = db.batch();
+    chunk.forEach((change) => {
+      batch.update(db.collection("students").doc(change.studentId), {
+        yearlvl: change.to,
+        previousYearlvl: change.from,
+        promotedAt: FieldValue.serverTimestamp(),
+        lastPromotionRunId: schedule.id,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    });
+    await batch.commit();
+  }
+
+  const graduatedCount = changes.filter(
+    (change) => change.to === "Graduated"
+  ).length;
+
+  const runRef = db.collection("promotionRuns").doc(schedule.id);
+  await runRef.set({
+    scheduleId: schedule.id,
+    runAt: schedule.data.runAt || null,
+    scheduledBy: schedule.data.createdBy || null,
+    scheduledByName: schedule.data.createdByName || null,
+    label: schedule.data.label || null,
+    promotedCount: changes.length,
+    graduatedCount,
+    skipped,
+    studentsScanned: students.size,
+    completedAt: FieldValue.serverTimestamp(),
+  });
+
+  // Previous year levels, so a mistaken run can be reversed by hand.
+  const auditChunks = chunkList(changes, PROMOTION_AUDIT_CHUNK);
+  for (let index = 0; index < auditChunks.length; index += 1) {
+    await runRef
+      .collection("changes")
+      .doc("chunk-" + String(index).padStart(4, "0"))
+      .set({ entries: auditChunks[index] });
+  }
+
+  await schedule.ref.update({
+    status: "completed",
+    completedAt: FieldValue.serverTimestamp(),
+    promotedCount: changes.length,
+    graduatedCount,
+    studentsScanned: students.size,
+  });
+
+  return { promotedCount: changes.length, graduatedCount };
+}
+
+exports.runYearLevelPromotions = onSchedule(
+  {
+    schedule: "every 2 minutes",
+    timeZone: "Asia/Manila",
+    // A promotion touches every student document, so give it room. Most
+    // invocations find nothing due and return within a second.
+    timeoutSeconds: 540,
+    memory: "512MiB",
+  },
+  async () => {
+    const schedule = await claimDuePromotionSchedule();
+    if (!schedule) return;
+
+    console.log("[Promotion] running schedule " + schedule.id);
+
+    try {
+      const result = await runPromotionSchedule(schedule);
+      console.log(
+        "[Promotion] schedule " +
+          schedule.id +
+          " promoted " +
+          result.promotedCount +
+          " student(s), " +
+          result.graduatedCount +
+          " graduating"
+      );
+    } catch (error) {
+      console.error(
+        "[Promotion] schedule " + schedule.id + " failed:",
+        error && error.message ? error.message : error
+      );
+
+      // Parked rather than retried automatically. Students already moved carry
+      // lastPromotionRunId, so an admin re-running this schedule resumes
+      // instead of double-promoting anyone.
+      await schedule.ref.update({
+        status: "failed",
+        failedAt: FieldValue.serverTimestamp(),
+        error: String((error && error.message) || error).slice(0, 500),
+      });
+    }
   }
 );

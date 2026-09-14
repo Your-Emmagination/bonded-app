@@ -189,6 +189,113 @@ export const KEYWORD_CATEGORIES = Object.freeze({
       "malandi",
     ],
   },
+
+  // WHY THIS EXISTS, AND WHY IT IS THE MOST CAREFUL LIST IN THE FILE:
+  //
+  // OpenModeration does have a self-harm category, and it is the only thing
+  // that sets `selfHarm: true` — the flag that opens SafetyDialog with the
+  // helplines and the "reach out to a trusted adult" line. But the model is
+  // English-first. A student writing "gusto ko na mamatay" or "wala na akong
+  // silbi" can score below the threshold, and when that happens the dialog
+  // never appears: no helpline, no trusted adult, and the post may publish
+  // as if nothing was said. That is precisely the case the whole feature was
+  // built for, and it is the one most likely to fail.
+  //
+  // The cost of being wrong runs BOTH ways here, unlike every other category:
+  //   - a miss means a student in crisis is handed nothing
+  //   - a false positive shows a crisis dialog to someone who did not need it
+  // So this list is phrases, not words. Every entry states intent about
+  // oneself. Single words are avoided because Filipino everyday speech is
+  // full of them innocently.
+  //
+  // Deliberately NOT included, because each appears constantly in ordinary
+  // posts: "patay" (lights/battery off), "mamatay" and "namatay" on their own
+  // (a phone dying, someone else passing away), "hindi na ako kaya" (usually
+  // about homework), "hurt myself" (usually basketball), and bare "suicide"
+  // (awareness seminars, news, schoolwork). Intent phrases carry the signal;
+  // these carry only the vocabulary.
+  //
+  // Staff never reach this code — teachers, moderators and admins bypass text
+  // moderation entirely — so everything here is judged only on student text.
+  self_harm: {
+    label: "Possible self-harm",
+    priority: "critical",
+    // Opens SafetyDialog, not just the moderation queue. Only this category
+    // carries it.
+    selfHarm: true,
+    terms: [
+      // --- Tagalog: intent to die ---------------------------------------
+      // "..." allows up to two particles in between — see buildGapPattern.
+      "gusto ko ... mamatay",
+      "gusto kong ... mamatay",
+      "nais ko ... mamatay",
+      "ayoko ... mabuhay",
+      "ayaw ko ... mabuhay",
+      "sawa na ako sa buhay",
+      "pagod na ako sa buhay",
+      "pagod na ako ... mabuhay",
+      "ayoko na sa mundong ito",
+      // --- Tagalog: acting on it ----------------------------------------
+      "magpapakamatay",
+      "magpakamatay",
+      "nagpakamatay",
+      // Tagalog drops particles ("na", "nang") in the middle of a phrase, and
+      // the matcher only bridges non-letters — so "papatayin ko ANG sarili"
+      // and "papatayin ko NA ang sarili" are two different strings and both
+      // have to be listed. Each entry is also written in its shortest form:
+      // "papatayin ko ang sarili" already covers "...ang sarili ko", because
+      // matching ends on a word boundary rather than end-of-text.
+      "papatayin ko ang sarili",
+      "papatayin ko na ang sarili",
+      "papatayin ko sarili",
+      "papatayin ko na sarili",
+      "papatayin ko na lang ang sarili",
+      "tatapusin ko ang buhay",
+      "tatapusin ko na ang buhay",
+      "tatapusin ko na buhay",
+      "tapusin ko ang buhay ko",
+      "tapusin ko na ang buhay",
+      "wawakasan ko ang buhay",
+      "wawakasan ko na ang buhay",
+      // --- Tagalog: worthlessness, the common lead-in -------------------
+      "wala na akong silbi",
+      "wala akong silbi",
+      "wala na akong kwenta",
+      "wala akong kwenta",
+      "wala na akong halaga",
+      "mabuti pang mamatay na ako",
+      "mas mabuti pang wala na ako",
+      // --- Bisaya / Cebuano ---------------------------------------------
+      "gusto na ko ... mamatay",
+      "gusto nako ... mamatay",
+      "gikapoy na ko ... kinabuhi",
+      "wala na koy pulos",
+      "wala koy pulos",
+      "maghikog",
+      "naghikog",
+      "mohikog",
+      "hikog",
+      // --- English -------------------------------------------------------
+      "kill myself",
+      "killing myself",
+      "kms",
+      "end my life",
+      "ending my life",
+      "take my own life",
+      "want to die",
+      "wanna die",
+      "i want to die",
+      "better off dead",
+      "no reason to live",
+      "nothing to live for",
+      "cut myself",
+      "cutting myself",
+      "self harm",
+      "unalive myself",
+      "commit suicide",
+      "kill my self",
+    ],
+  },
 });
 
 // Characters that commonly stand in for a letter. Only symbols that are safe
@@ -229,6 +336,38 @@ const letterClass = (letter) => {
 
 const buildPattern = (parts) => `${LEFT_EDGE}${parts.join(SEPARATOR)}${RIGHT_EDGE}`;
 
+// "..." inside a term means "up to GAP_MAX_WORDS other words here".
+//
+// Needed because Tagalog drops particles mid-phrase freely: "gusto ko
+// mamatay", "gusto ko NA mamatay", "gusto ko NA TALAGA mamatay" are all the
+// same sentence, and listing every combination is a losing game. A term
+// written "gusto ko ... mamatay" covers all of them.
+//
+// Two words, not more. The gap is the one place this list can over-reach —
+// "gusto ko na mamatay ang ilaw" (I want the lights off) would match — and
+// every extra word widens that. Two is enough for the particle stacking that
+// actually occurs, and the cost of the rare false positive is a dialog
+// somebody did not need, against a miss that leaves a student with nothing.
+const GAP_MAX_WORDS = 2;
+const WORD_GAP = `[^a-z0-9]+(?:[a-z0-9]+[^a-z0-9]+){0,${GAP_MAX_WORDS}}`;
+
+const lettersOf = (value) => String(value).toLowerCase().replace(/[^a-z]/g, "").split("");
+
+// Compiles a term that contains "...": each segment matches as usual, with a
+// bounded run of other words allowed between them. Masked variants are not
+// generated for these — nobody star-masks a four-word sentence.
+const buildGapPattern = (term) => {
+  const segments = String(term)
+    .split("...")
+    .map((segment) => lettersOf(segment))
+    .filter((letters) => letters.length > 0);
+  if (segments.length < 2) return null;
+  const body = segments
+    .map((letters) => letters.map(letterClass).join(SEPARATOR))
+    .join(WORD_GAP);
+  return `${LEFT_EDGE}${body}${RIGHT_EDGE}`;
+};
+
 // One variant per maskable position. The first and last letters are never
 // masked: they anchor the match and keep "p**a"-style noise from matching
 // unrelated words.
@@ -249,12 +388,14 @@ const COMPILED_CATEGORIES = Object.entries(KEYWORD_CATEGORIES).map(([name, confi
   name,
   label: config.label,
   priority: config.priority,
+  selfHarm: config.selfHarm === true,
   patterns: config.terms
     .map((term) => {
-      const letters = String(term)
-        .toLowerCase()
-        .replace(/[^a-z]/g, "")
-        .split("");
+      if (String(term).includes("...")) {
+        const source = buildGapPattern(term);
+        return source ? { term, regex: new RegExp(source, "i") } : null;
+      }
+      const letters = lettersOf(term);
       if (letters.length === 0) return null;
       const parts = letters.map(letterClass);
       const sources = [buildPattern(parts), ...maskedPatterns(parts)];
@@ -278,21 +419,28 @@ const normalizeForMatching = (value) =>
  *   {
  *     flagged: boolean,
  *     priority: "critical" | "normal",   // highest priority among matches
+ *     selfHarm: boolean,                 // a self-harm term matched
  *     matches: [{ category, label, term }],
  *   }
+ *
+ * `selfHarm` is separate from `flagged` on purpose: flagging holds the post
+ * for a moderator, while selfHarm opens SafetyDialog for the student who
+ * wrote it. The caller merges it with OpenModeration's own self-harm signal.
  */
 export function checkKeywordFlags(text) {
   const input = normalizeForMatching(text);
   const matches = [];
   let priority = "normal";
+  let selfHarm = false;
 
-  if (!input) return { flagged: false, priority, matches };
+  if (!input) return { flagged: false, priority, selfHarm, matches };
 
   for (const category of COMPILED_CATEGORIES) {
     for (const { term, regex } of category.patterns) {
       if (regex.test(input)) {
         matches.push({ category: category.name, label: category.label, term });
         if (category.priority === "critical") priority = "critical";
+        if (category.selfHarm) selfHarm = true;
       }
     }
   }
@@ -300,6 +448,7 @@ export function checkKeywordFlags(text) {
   return {
     flagged: matches.length > 0,
     priority,
+    selfHarm,
     matches,
   };
 }

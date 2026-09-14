@@ -1,3 +1,5 @@
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import React, { useMemo, useState } from "react";
 import {
   StyleProp,
@@ -28,6 +30,7 @@ export default function ExpandableText({
   collapsedLines = 5,
   minLengthToToggle = 220,
 }: ExpandableTextProps) {
+  const { styles } = useStyles();
   const [expanded, setExpanded] = useState(false);
 
   const trimmedText = useMemo(() => text?.trim() || "", [text]);
@@ -60,14 +63,22 @@ export default function ExpandableText({
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   button: {
     alignSelf: "flex-start",
     marginTop: 4,
   },
   buttonText: {
-    color: "#a61f1f",
+    color: c.primary,
     fontSize: 14,
     fontWeight: "600",
   },
 });
+
+/** Themed stylesheet for this file. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};

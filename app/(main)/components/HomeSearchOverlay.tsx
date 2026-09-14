@@ -4,22 +4,13 @@
 // suggestions dropdown, and the full results screen. All search state lives in
 // HomeSearchProvider rather than HomeScreen, so typing only re-renders the
 // search UI instead of the whole feed screen.
+import { useThemeColors } from "@/contexts/ThemeContext";
+import type { ThemeTokens } from "@/utils/theme";
 import { avatarThumb } from "@/utils/cloudinaryImages";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useDeferredValue,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactElement,
-  type ReactNode,
-} from "react";
+import { createContext, type ReactElement, type ReactNode, useCallback, useContext, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   ScrollView,
   StyleSheet,
@@ -669,6 +660,7 @@ type HomeSearchBarProps = {
 
 // Takes over the header's contents while search is open.
 export function HomeSearchBar({ onOpenServerDrawer }: HomeSearchBarProps) {
+  const { styles, theme } = useStyles();
   const { query, changeQuery, clearQuery, submit, close } = useHomeSearch();
   const inputRef = useRef<TextInput>(null);
 
@@ -686,25 +678,25 @@ export function HomeSearchBar({ onOpenServerDrawer }: HomeSearchBarProps) {
         activeOpacity={0.82}
         onPress={onOpenServerDrawer}
       >
-        <Ionicons name="menu" size={22} color="#f4e7df" />
+        <Ionicons name="menu" size={22} color={theme.onChrome} />
       </TouchableOpacity>
 
       <View style={styles.headerSearchBar}>
-        <Ionicons name="search" size={20} color="#7f4d44" />
+        <Ionicons name="search" size={20} color={theme.textMuted} />
         <TextInput
           ref={inputRef}
           style={styles.headerSearchInput}
           value={query}
           onChangeText={changeQuery}
           placeholder="Search people, posts, or polls"
-          placeholderTextColor="#af8478"
+          placeholderTextColor={theme.textMuted}
           returnKeyType="search"
           autoFocus
           onSubmitEditing={submit}
         />
         {query.length > 0 ? (
           <TouchableOpacity onPress={clearQuery} activeOpacity={0.82}>
-            <Ionicons name="close-circle" size={20} color="#c47e6e" />
+            <Ionicons name="close-circle" size={20} color={theme.textMuted} />
           </TouchableOpacity>
         ) : null}
       </View>
@@ -729,6 +721,7 @@ export function HomeSearchPanel() {
 }
 
 function SearchDropdown() {
+  const { styles, theme } = useStyles();
   const { trimmedQuery, suggestions, submit, pressSuggestion } = useHomeSearch();
 
   return (
@@ -756,7 +749,7 @@ function SearchDropdown() {
               <Ionicons
                 name={getSearchSuggestionIconName(suggestion.kind)}
                 size={18}
-                color="#7c2a22"
+                color={theme.accent}
               />
             </View>
             <View style={styles.searchSuggestionCopy}>
@@ -767,12 +760,12 @@ function SearchDropdown() {
                 {suggestion.hint}
               </Text>
             </View>
-            <Ionicons name="chevron-forward" size={16} color="#c47e6e" />
+            <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
           </TouchableOpacity>
         ))
       ) : (
         <View style={styles.searchDropdownEmpty}>
-          <Ionicons name="search-outline" size={22} color="#c9a89a" />
+          <Ionicons name="search-outline" size={22} color={theme.textMuted} />
           <Text style={styles.searchDropdownEmptyText}>
             Start typing to search Home.
           </Text>
@@ -783,6 +776,7 @@ function SearchDropdown() {
 }
 
 function SearchResultsScreen() {
+  const { styles, theme } = useStyles();
   const {
     contentResults,
     dateFilter,
@@ -818,7 +812,7 @@ function SearchResultsScreen() {
             <Ionicons
               name={trimmedQuery ? "sparkles" : "search"}
               size={20}
-              color="#5f0909"
+              color={theme.accent}
             />
           </View>
           <View style={styles.searchOverviewCopy}>
@@ -896,7 +890,7 @@ function SearchResultsScreen() {
             onPress={toggleSort}
             activeOpacity={0.9}
           >
-            <Ionicons name="swap-vertical" size={14} color="#8f6a60" />
+            <Ionicons name="swap-vertical" size={14} color={theme.textMuted} />
             <Text style={styles.timeChipText}>
               {sort === "relevance"
                 ? "Best match"
@@ -909,7 +903,7 @@ function SearchResultsScreen() {
 
         {results.length === 0 ? (
           <View style={styles.emptySearchState}>
-            <Ionicons name="search-outline" size={58} color="#d4b8a8" />
+            <Ionicons name="search-outline" size={58} color={theme.textMuted} />
             <Text style={styles.emptyTitle}>No results found</Text>
             <Text style={styles.emptySubtitle}>
               Try a different keyword or widen the date filter.
@@ -921,7 +915,7 @@ function SearchResultsScreen() {
               <View style={styles.searchSection}>
                 <View style={styles.searchSectionHeader}>
                   <View style={styles.searchSectionIcon}>
-                    <Ionicons name="people" size={18} color="#5f0909" />
+                    <Ionicons name="people" size={18} color={theme.accent} />
                   </View>
                   <View style={styles.searchSectionCopy}>
                     <Text style={styles.searchSectionTitle}>People</Text>
@@ -956,7 +950,7 @@ function SearchResultsScreen() {
                         {result.subtitle}
                       </Text>
                     </View>
-                    <Ionicons name="chevron-forward" size={18} color="#c47e6e" />
+                    <Ionicons name="chevron-forward" size={18} color={theme.textMuted} />
                   </TouchableOpacity>
                 ))}
               </View>
@@ -966,7 +960,7 @@ function SearchResultsScreen() {
               <View style={styles.searchSection}>
                 <View style={styles.searchSectionHeader}>
                   <View style={styles.searchSectionIcon}>
-                    <Ionicons name="newspaper" size={18} color="#5f0909" />
+                    <Ionicons name="newspaper" size={18} color={theme.accent} />
                   </View>
                   <View style={styles.searchSectionCopy}>
                     <Text style={styles.searchSectionTitle}>Related Content</Text>
@@ -1005,7 +999,8 @@ function SearchResultsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (c: ThemeTokens) =>
+  StyleSheet.create({
   headerIconButton: {
     justifyContent: "center",
     alignItems: "center",
@@ -1023,12 +1018,12 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fff7f2",
+    backgroundColor: c.surface,
     borderRadius: 18,
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderWidth: 1.5,
-    borderColor: "#e6c6b9",
+    borderColor: c.border,
     shadowColor: "#280404",
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.08,
@@ -1037,7 +1032,7 @@ const styles = StyleSheet.create({
   },
   headerSearchInput: {
     flex: 1,
-    color: "#3f1e1a",
+    color: c.textPrimary,
     fontSize: 17,
     fontWeight: "500",
     marginLeft: 10,
@@ -1048,7 +1043,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   searchCancelText: {
-    color: "#f4dccc",
+    color: c.onChromeMuted,
     fontSize: 16,
     fontWeight: "600",
   },
@@ -1057,11 +1052,11 @@ const styles = StyleSheet.create({
     top: 8,
     left: 14,
     right: 14,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderRadius: 24,
     padding: 14,
     borderWidth: 1.5,
-    borderColor: "#ead8cd",
+    borderColor: c.border,
     shadowColor: "#2d0905",
     shadowOffset: { width: 0, height: 10 },
     shadowOpacity: 0.16,
@@ -1077,12 +1072,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   searchDropdownTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 15.5,
     fontWeight: "800",
   },
   searchDropdownAction: {
-    color: "#b45c4b",
+    color: c.primary,
     fontSize: 13.5,
     fontWeight: "700",
   },
@@ -1093,13 +1088,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: "#f1e4dc",
+    borderBottomColor: c.surfaceSunken,
   },
   searchSuggestionIconWrap: {
     width: 38,
     height: 38,
     borderRadius: 14,
-    backgroundColor: "#f9e4d7",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1107,12 +1102,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   searchSuggestionTitle: {
-    color: "#3f1e1a",
+    color: c.textPrimary,
     fontSize: 15.5,
     fontWeight: "700",
   },
   searchSuggestionHint: {
-    color: "#8d6a61",
+    color: c.textMuted,
     fontSize: 13,
     marginTop: 2,
   },
@@ -1124,7 +1119,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   searchDropdownEmptyText: {
-    color: "#9c776d",
+    color: c.textMuted,
     fontSize: 14,
     fontWeight: "500",
   },
@@ -1140,18 +1135,18 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-start",
     gap: 12,
-    backgroundColor: "#fff8f3",
+    backgroundColor: c.surface,
     borderRadius: 24,
     padding: 16,
     borderWidth: 1.5,
-    borderColor: "#efd9ca",
+    borderColor: c.border,
     marginBottom: 14,
   },
   searchOverviewIcon: {
     width: 42,
     height: 42,
     borderRadius: 15,
-    backgroundColor: "#f8ddbf",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1159,13 +1154,13 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   searchOverviewTitle: {
-    color: "#4a1712",
+    color: c.textPrimary,
     fontSize: 18,
     fontWeight: "800",
     marginBottom: 3,
   },
   searchOverviewSubtitle: {
-    color: "#86645a",
+    color: c.textMuted,
     fontSize: 14,
     lineHeight: 20,
   },
@@ -1176,22 +1171,22 @@ const styles = StyleSheet.create({
   },
   searchMetricChip: {
     flex: 1,
-    backgroundColor: "#fff",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 18,
     paddingVertical: 12,
     paddingHorizontal: 12,
     borderWidth: 1,
-    borderColor: "#ebddd4",
+    borderColor: c.border,
     alignItems: "center",
   },
   searchMetricValue: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 16,
     fontWeight: "800",
     textTransform: "capitalize",
   },
   searchMetricLabel: {
-    color: "#9b766c",
+    color: c.textMuted,
     fontSize: 12.5,
     fontWeight: "600",
     marginTop: 3,
@@ -1214,21 +1209,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 11,
     borderRadius: 999,
-    backgroundColor: "#fff",
+    backgroundColor: c.surfaceRaised,
     borderWidth: 1.5,
-    borderColor: "#e8d9d0",
+    borderColor: c.border,
   },
   quickFilterChipActive: {
-    backgroundColor: "#5f0909",
-    borderColor: "#5f0909",
+    backgroundColor: c.primary,
+    borderColor: c.primary,
   },
   quickFilterText: {
-    color: "#8c5f54",
+    color: c.textMuted,
     fontSize: 14.5,
     fontWeight: "600",
   },
   quickFilterTextActive: {
-    color: "#f4e7df",
+    color: c.surfaceSunken,
     fontWeight: "700",
   },
   timeChip: {
@@ -1238,24 +1233,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 9,
     borderRadius: 20,
-    backgroundColor: "#fffaf7",
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: "#e8d9d0",
+    borderColor: c.border,
   },
   sortChip: {
     marginLeft: 0,
   },
   timeChipActive: {
-    backgroundColor: "#5f0909",
-    borderColor: "#5f0909",
+    backgroundColor: c.primary,
+    borderColor: c.primary,
   },
   timeChipText: {
-    color: "#8f6a60",
+    color: c.textMuted,
     fontSize: 13.5,
     fontWeight: "600",
   },
   timeChipTextActive: {
-    color: "#f4e7df",
+    color: c.surfaceSunken,
   },
 
   /* Results */
@@ -1273,7 +1268,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 16,
-    backgroundColor: "#f9dfc8",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1281,30 +1276,30 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   searchSectionTitle: {
-    color: "#4d1b17",
+    color: c.textPrimary,
     fontSize: 16.5,
     fontWeight: "800",
   },
   searchSectionSubtitle: {
-    color: "#967267",
+    color: c.textMuted,
     fontSize: 13.5,
     marginTop: 2,
   },
   personResultCard: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#fff",
+    backgroundColor: c.surfaceRaised,
     borderRadius: 22,
     padding: 14,
     marginBottom: 10,
     borderWidth: 1,
-    borderColor: "#efdfd6",
+    borderColor: c.border,
   },
   personAvatar: {
     width: 50,
     height: 50,
     borderRadius: 18,
-    backgroundColor: "#f4d7b1",
+    backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
     marginRight: 14,
@@ -1314,7 +1309,7 @@ const styles = StyleSheet.create({
     height: "100%",
   },
   personAvatarText: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 17,
     fontWeight: "800",
   },
@@ -1323,12 +1318,12 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   personResultTitle: {
-    color: "#381713",
+    color: c.primary,
     fontSize: 16,
     fontWeight: "700",
   },
   personResultSubtitle: {
-    color: "#77574f",
+    color: c.textMuted,
     fontSize: 13.5,
     lineHeight: 19,
     marginTop: 3,
@@ -1337,21 +1332,21 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   searchTopicCard: {
-    backgroundColor: "#fffaf4",
+    backgroundColor: c.surface,
     borderRadius: 22,
     padding: 18,
     borderWidth: 1.5,
-    borderColor: "#edd7b5",
+    borderColor: c.borderStrong,
     marginTop: 16,
   },
   searchTopicTitle: {
-    color: "#4c1b14",
+    color: c.textPrimary,
     fontSize: 18,
     fontWeight: "800",
     marginBottom: 6,
   },
   searchTopicSubtitle: {
-    color: "#87685f",
+    color: c.textMuted,
     fontSize: 14,
     lineHeight: 20,
   },
@@ -1362,14 +1357,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 26,
   },
   emptyTitle: {
-    color: "#5f0909",
+    color: c.primary,
     fontSize: 18,
     fontWeight: "800",
     marginTop: 14,
     textAlign: "center",
   },
   emptySubtitle: {
-    color: "#9b776d",
+    color: c.textMuted,
     fontSize: 14.5,
     lineHeight: 21,
     marginTop: 8,
@@ -1384,7 +1379,14 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     left: 0,
-    backgroundColor: "#f8f3ef",
+    backgroundColor: c.surfaceSunken,
     zIndex: 25,
   },
 });
+
+/** Themed stylesheet for this overlay. */
+const useStyles = () => {
+  const theme = useThemeColors();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  return useMemo(() => ({ styles, theme }), [styles, theme]);
+};
