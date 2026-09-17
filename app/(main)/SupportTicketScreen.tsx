@@ -34,7 +34,9 @@ import { auth } from "../../Firebase_configure";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 import { uploadPostImage } from "@/utils/cloudinaryUpload";
 import { isAdmin as isAdminRole } from "@/utils/rbac";
-import { getTimeAgo } from "@/utils/relativeTime";
+import { formatChatTimeLabel, formatClockTime, formatDayLabel, sameDay } from "@/utils/chatTime";
+import { timestampMillis } from "@/utils/messengerState";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import {
   assignTicket,
@@ -83,6 +85,8 @@ export default function SupportTicketScreen() {
   // these the composer empties and nothing appears until the round-trip
   // finishes, which on a slow connection reads as "my message was lost".
   const [pending, setPending] = useState<TicketMessage[]>([]);
+  // Only "Today" / "Yesterday" depend on the clock, so a minute is plenty.
+  const nowMs = useRelativeTimeNow(60_000);
   // insets.bottom is the gesture-bar allowance. While the keyboard is open
   // the keyboard occupies that space, so keeping the padding leaves the
   // composer floating above the keys instead of sitting on them. Same pattern
@@ -463,12 +467,29 @@ export default function SupportTicketScreen() {
                 />
               </TouchableOpacity>
             )}
-            <Text style={styles.bubbleTime}>{getTimeAgo(ticket.createdAt)}</Text>
+            <Text style={styles.bubbleTime}>
+              {formatChatTimeLabel(timestampMillis(ticket.createdAt), nowMs)}
+            </Text>
           </View>
 
-          {[...messages, ...pending].map((message) => (
+          {[...messages, ...pending].map((message, index, all) => {
+            // A day label wherever the conversation crosses into a new day,
+            // measured from the message before (or the request itself).
+            const ms = timestampMillis(message.createdAt);
+            const previousMs =
+              index === 0
+                ? timestampMillis(ticket.createdAt)
+                : timestampMillis(all[index - 1].createdAt);
+            const newDay =
+              !!ms && !!previousMs && !sameDay(new Date(ms), new Date(previousMs));
+            return (
+            <React.Fragment key={message.id}>
+            {newDay && (
+              <Text style={styles.dayLabel} accessibilityRole="header">
+                {formatDayLabel(ms, nowMs)}
+              </Text>
+            )}
             <View
-              key={message.id}
               style={[
                 styles.bubble,
                 message.fromStaff ? styles.bubbleStaff : styles.bubbleUser,
@@ -516,13 +537,13 @@ export default function SupportTicketScreen() {
                     <Text style={styles.bubbleTime}>Sending…</Text>
                   </>
                 ) : (
-                  <Text style={styles.bubbleTime}>
-                    {getTimeAgo(message.createdAt)}
-                  </Text>
+                  <Text style={styles.bubbleTime}>{formatClockTime(ms)}</Text>
                 )}
               </View>
             </View>
-          ))}
+            </React.Fragment>
+            );
+          })}
 
           {ticket.status === "closed" && (
             <View style={styles.closedNote}>
@@ -888,6 +909,14 @@ const makeStyles = (c: ThemeTokens) =>
   bubbleAuthorStaff: { color: c.accent },
   bubbleBody: { color: c.textPrimary, fontSize: 13.5, lineHeight: 19 },
   bubbleTime: { color: c.textMuted, fontSize: 10.5 },
+  dayLabel: {
+    alignSelf: "center",
+    marginTop: 8,
+    marginBottom: 2,
+    fontSize: 11.5,
+    fontWeight: "700",
+    color: c.textMuted,
+  },
   bubbleFooter: { flexDirection: "row", alignItems: "center", gap: 4 },
   bubblePending: { opacity: 0.65 },
   bubbleFailed: { borderColor: c.danger, backgroundColor: c.dangerSoft },

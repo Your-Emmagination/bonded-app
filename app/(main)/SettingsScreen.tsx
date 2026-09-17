@@ -191,7 +191,16 @@ const SettingsScreen = () => {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>ACCOUNT</Text>
         <View style={styles.goldCard}>
-          <TouchableOpacity accessibilityRole="button" style={styles.soundRow} onPress={() => router.push({ pathname: "/(main)/(tabs)/ProfileScreen", params: { editTab: "password" } })}>
+          {/* Both rows open the same screen; Change Password just lands on
+              its tab. It used to bounce through the Profile tab, which left
+              "back" on Profile instead of here. */}
+          <TouchableOpacity accessibilityRole="button" style={styles.soundRow} onPress={() => router.push("/(main)/EditProfileScreen" as any)}>
+            <View style={styles.iconBox}><Ionicons name="person-circle-outline" size={18} color={theme.primary} /></View>
+            <View style={{ marginLeft: 12, flex: 1 }}><Text style={styles.rowLabel}>Edit Profile</Text><Text style={styles.rowSubtext}>Personal email and profile photo</Text></View>
+            <Ionicons name="chevron-forward" size={20} color={theme.textMuted} />
+          </TouchableOpacity>
+          <View style={styles.rowDivider} />
+          <TouchableOpacity accessibilityRole="button" style={styles.soundRow} onPress={() => router.push({ pathname: "/(main)/EditProfileScreen", params: { tab: "password" } } as any)}>
             <View style={styles.iconBox}><Ionicons name="lock-closed-outline" size={18} color={theme.primary} /></View>
             <View style={{ marginLeft: 12, flex: 1 }}><Text style={styles.rowLabel}>Change Password</Text><Text style={styles.rowSubtext}>Update your password whenever you need to</Text></View>
             <Ionicons name="chevron-forward" size={20} color={theme.textMuted} />

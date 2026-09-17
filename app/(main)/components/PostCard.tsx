@@ -2,6 +2,16 @@
 
 import { auth, db } from "@/Firebase_configure";
 import { resolveAvatarUri } from "@/utils/avatar";
+import {
+  canUpdateLostFoundStatus,
+  getLostFoundStatus,
+  getLostFoundStatusInfo,
+  isLostFoundPost,
+  LOST_FOUND_STATUSES,
+  lostFoundStatusColors,
+  updateLostFoundStatus,
+  type LostFoundStatus,
+} from "@/utils/lostFoundStatus";
 import { AVATAR_SIZE_SMALL, avatarThumb, FEED_IMAGE_WIDTH, feedImage } from "@/utils/cloudinaryImages";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
@@ -32,7 +42,7 @@ import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
 import { useIsFocused } from "expo-router";
 import { addDoc, arrayRemove, arrayUnion, collection, doc, getDoc, serverTimestamp, updateDoc, writeBatch } from "firebase/firestore";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Dimensions,
@@ -57,6 +67,7 @@ import CommentModal from "../components/CommentModal";
 import ExpandableText from "../components/ExpandableText";
 import VideoPostMedia from "../components/VideoPostMedia";
 import ConfirmDialog from "./ConfirmDialog";
+import ContentActionMenu from "./ContentActionMenu";
 import ExternalLinkDialog, { prepareExternalLink } from "./ExternalLinkDialog";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -111,6 +122,10 @@ type Post = {
   targetDate?: any;
   targetDateLabel?: string | null;
   flair?: string;
+  // Lost & Found — see utils/lostFoundStatus.ts.
+  lostFoundStatus?: string;
+  returnedAt?: any;
+  resolvedAt?: any;
   // Auto-generated video captions (written server-side after upload).
   captionStatus?: CaptionStatus;
   captions?: CaptionSegment[];
@@ -464,6 +479,51 @@ const PostCard = React.memo<PostCardProps>(({
   const taggedUsers = post.taggedUsers ?? [];
   const postFlair = getPostFlair(post.flair);
 
+  // ── Lost & Found status ──────────────────────────────────────────────────
+  // The chosen status is shown straight away and the write follows. The feed
+  // isn't necessarily listening to this post, so without the local value the
+  // badge would keep showing the old status until the next refresh.
+  const isLostFound = isLostFoundPost(post);
+  const [statusOverride, setStatusOverride] = useState<LostFoundStatus | null>(null);
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  const lostFoundStatus = statusOverride ?? getLostFoundStatus(post);
+  const canChangeStatus =
+    isLostFound &&
+    canUpdateLostFoundStatus({
+      viewerRole: currentUserRole,
+      viewerUserId: activeUserId,
+      authorUserId: post.realUserId || post.userId,
+    });
+
+  const changeStatus = useCallback(
+    (next: LostFoundStatus) => {
+      setStatusMenuOpen(false);
+      if (!activeUserId) return;
+      const previous = statusOverride;
+      setStatusOverride(next);
+      updateLostFoundStatus(post.id, next, activeUserId).catch((error) => {
+        console.error("[PostCard] Failed to update Lost & Found status:", error);
+        setStatusOverride(previous);
+      });
+    },
+    [activeUserId, post.id, statusOverride],
+  );
+
+  // Every status except the current one. Choosing the current one again
+  // would rewrite its timestamp — for Returned, that restarts the archive
+  // clock for no reason.
+  const statusActions = useMemo(
+    () =>
+      LOST_FOUND_STATUSES.filter((item) => item.id !== lostFoundStatus).map((item) => ({
+        label: `${item.emoji}  ${item.label} — ${item.hint}`,
+        icon: "swap-horizontal-outline" as const,
+        onPress: () => changeStatus(item.id),
+      })),
+    [lostFoundStatus, changeStatus],
+  );
+  const statusInfo = getLostFoundStatusInfo(lostFoundStatus);
+  const statusTones = lostFoundStatusColors(lostFoundStatus, theme);
+
   return (
     <View
       style={[
@@ -505,12 +565,49 @@ const PostCard = React.memo<PostCardProps>(({
             onEdit={onEdit}
           />
 
-          <View style={[styles.postFlairBadge, postFlair.staffOnly && styles.postFlairBadgeOfficial]}>
-            <Text style={styles.postFlairEmoji}>{postFlair.emoji}</Text>
-            <Text style={[styles.postFlairText, postFlair.staffOnly && styles.postFlairTextOfficial]}>
-              {postFlair.label}
-            </Text>
+          <View style={styles.postFlairRow}>
+            <View style={[styles.postFlairBadge, postFlair.staffOnly && styles.postFlairBadgeOfficial]}>
+              <Text style={styles.postFlairEmoji}>{postFlair.emoji}</Text>
+              <Text style={[styles.postFlairText, postFlair.staffOnly && styles.postFlairTextOfficial]}>
+                {postFlair.label}
+              </Text>
+            </View>
+
+            {isLostFound && (
+              <TouchableOpacity
+                style={[
+                  styles.postFlairBadge,
+                  { backgroundColor: statusTones.fill, borderColor: statusTones.line },
+                ]}
+                onPress={canChangeStatus ? () => setStatusMenuOpen(true) : undefined}
+                disabled={!canChangeStatus}
+                activeOpacity={0.8}
+                accessibilityRole={canChangeStatus ? "button" : "text"}
+                accessibilityLabel={
+                  canChangeStatus
+                    ? `Status: ${statusInfo.label}. Tap to change.`
+                    : `Status: ${statusInfo.label}`
+                }
+              >
+                <Text style={styles.postFlairEmoji}>{statusInfo.emoji}</Text>
+                <Text style={[styles.postFlairText, { color: statusTones.ink }]}>
+                  {statusInfo.label}
+                </Text>
+                {canChangeStatus && (
+                  <Ionicons name="chevron-down" size={12} color={statusTones.ink} />
+                )}
+              </TouchableOpacity>
+            )}
           </View>
+
+          {canChangeStatus && (
+            <ContentActionMenu
+              visible={statusMenuOpen}
+              title="Update status"
+              actions={statusActions}
+              onClose={() => setStatusMenuOpen(false)}
+            />
+          )}
 
           {post.content && (
             <View style={styles.postContentContainer}>
@@ -1537,6 +1634,7 @@ const makeStyles = (c: ThemeTokens) =>
   avatarColumn: { width: AVATAR_COLUMN_WIDTH, marginRight: AVATAR_COLUMN_GAP },
   contentColumn: { flex: 1, overflow: "visible" },
 
+  postFlairRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 6 },
   postFlairBadge: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 5, marginTop: 5, marginBottom: 5, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, backgroundColor: c.surfaceSunken, borderWidth: 1, borderColor: c.border },
   postFlairBadgeOfficial: { backgroundColor: c.accentSoft, borderColor: c.accentSoft },
   postFlairEmoji: { fontSize: 12 },

@@ -51,6 +51,15 @@ service cloud.firestore {
       );
     }
 
+    // What a new comment, reply or server message may start as. Students'
+    // content starts pending and waits for the Worker. Staff content may start
+    // approved: the Worker approves teacher, moderator and admin content
+    // without reading it, so writing it approved only skips the wait.
+    function validInitialModeration() {
+      return request.resource.data.moderationStatus == 'pending' ||
+        (request.resource.data.moderationStatus == 'approved' && isStaff());
+    }
+
     function isStudentOwner(studentId) {
       return signedIn() && (
         request.auth.uid == studentId ||
@@ -451,7 +460,7 @@ service cloud.firestore {
           request.resource.data.userId == request.auth.uid ||
           (request.resource.data.userId == 'anonymous' && request.resource.data.realUserId == request.auth.uid)
         ) &&
-        request.resource.data.moderationStatus == 'pending'
+        validInitialModeration()
       ) ||
       (
         isAiMessageOwner(request.resource.data) &&
@@ -913,6 +922,13 @@ match /userNotificationSettings/{userId} {
         request.resource.data.content is string &&
         request.resource.data.createdAt is timestamp &&
         validPostFlair(request.resource.data) &&
+        (
+          !('lostFoundStatus' in request.resource.data) ||
+          (
+            request.resource.data.flair == 'lost_found' &&
+            request.resource.data.lostFoundStatus in ['lost', 'found']
+          )
+        ) &&
         request.resource.data.moderationStatus == 'pending';
 
       allow update: if signedIn() && (
@@ -1040,6 +1056,24 @@ match /userNotificationSettings/{userId} {
           isContentOwner(resource.data) &&
           resource.data.flair == 'lost_found' &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resolvedAt', 'resolutionPrompt'])
+        ) ||
+        (
+          // Lost & Found status: the poster, or anyone on staff — settling a
+          // disputed claim is part of moderating the post. Only the status
+          // fields may move, the status must be one of the four, and the
+          // update has to say truthfully who made it.
+          (isContentOwner(resource.data) || isStaff()) &&
+          resource.data.flair == 'lost_found' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'lostFoundStatus',
+            'lostFoundUpdatedAt',
+            'lostFoundUpdatedBy',
+            'returnedAt',
+            'resolvedAt',
+            'resolutionPrompt'
+          ]) &&
+          request.resource.data.lostFoundStatus in ['lost', 'found', 'claim_pending', 'returned'] &&
+          request.resource.data.lostFoundUpdatedBy == request.auth.uid
         )
       );
 
@@ -1057,8 +1091,9 @@ match /userNotificationSettings/{userId} {
 
       allow read: if signedIn();
 
-      // Comments enter the database only as pending. The Cloudflare Worker
-      // re-reads and moderates them before changing the moderation status.
+      // Students' comments enter the database pending; the Cloudflare Worker
+      // re-reads and moderates them before changing the status. Staff
+      // comments may enter approved — see validInitialModeration().
       allow create: if signedIn() &&
         request.resource.data.postId is string &&
         request.resource.data.userId is string &&
@@ -1067,7 +1102,7 @@ match /userNotificationSettings/{userId} {
         request.resource.data.text is string &&
         request.resource.data.createdAt is timestamp &&
         request.resource.data.likes is list &&
-        request.resource.data.moderationStatus == 'pending';
+        validInitialModeration();
 
       allow update: if signedIn() && (
         isStaffModerationReview(resource.data) ||
@@ -1126,7 +1161,7 @@ match /userNotificationSettings/{userId} {
         request.resource.data.realUserId == request.auth.uid &&
         request.resource.data.text is string &&
         request.resource.data.createdAt is timestamp &&
-        request.resource.data.moderationStatus == 'pending';
+        validInitialModeration();
 
       allow update: if signedIn() && (
         isStaffModerationReview(resource.data) ||
@@ -1770,5 +1805,108 @@ match /userNotificationSettings/{userId} {
         request.resource.data.value == resource.data.value + 1;
       allow delete: if false;
     }
+
+    // ── Live streams ────────────────────────────────────────────────────
+    //
+    // A viewer has to be able to touch two counters on a stream they do not
+    // own (a comment posted, a heart tapped), so the rules pin exactly which
+    // fields each party may change rather than granting write on the whole
+    // document. The host controls the stream itself; staff can only end it.
+    function liveStreamData(streamId) {
+      return get(/databases/$(database)/documents/liveStreams/$(streamId)).data;
+    }
+
+    function isLiveHost(streamId) {
+      return signedIn() && liveStreamData(streamId).hostId == request.auth.uid;
+    }
+
+    function liveChangedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // Anyone watching may raise these, and only these, and only upward.
+    function liveCounterBump() {
+      return liveChangedKeys().hasOnly(['commentCount', 'reactionCount']) &&
+        request.resource.data.commentCount >= resource.data.commentCount &&
+        request.resource.data.reactionCount >= resource.data.reactionCount;
+    }
+
+    function liveHostFields() {
+      return liveChangedKeys().hasOnly([
+        'status', 'endedAt', 'provider', 'channelName', 'playbackUrl',
+        'replayUrl', 'viewerCount', 'peakViewers',
+        'micMuted', 'cameraOff', 'pinnedComment'
+      ]);
+    }
+
+    // Staff hiding a pinned comment also has to take the pin down, or the
+    // comment they just removed would stay on everyone's screen. Clearing it
+    // is the only change allowed; staff cannot pin something themselves.
+    function liveStaffUnpin() {
+      return liveChangedKeys().hasOnly(['pinnedComment']) &&
+        request.resource.data.pinnedComment == null;
+    }
+
+    // The kill switch, and nothing else. A moderator cannot rewrite the
+    // title, the host, or where the video came from.
+    function liveModeratorFields() {
+      return liveChangedKeys().hasOnly([
+        'status', 'endedAt', 'endedBy', 'endedByName', 'viewerCount'
+      ]) && request.resource.data.status == 'blocked' &&
+        request.resource.data.endedBy == request.auth.uid;
+    }
+
+    match /liveStreams/{streamId} {
+      allow read: if signedIn();
+
+      // To restrict who may broadcast, change signedIn() to isStaff() here.
+      // That is the single line that decides it.
+      allow create: if signedIn() &&
+        request.resource.data.hostId == request.auth.uid &&
+        request.resource.data.status == 'live' &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() <= 120 &&
+        request.resource.data.commentCount == 0 &&
+        request.resource.data.reactionCount == 0;
+
+      allow update: if signedIn() && (
+        (isLiveHost(streamId) && liveHostFields()) ||
+        (isStaff() && liveModeratorFields()) ||
+        (isStaff() && liveStaffUnpin()) ||
+        liveCounterBump()
+      );
+
+      allow delete: if isAdmin();
+
+      match /comments/{commentId} {
+        allow read: if signedIn();
+
+        allow create: if signedIn() &&
+          request.resource.data.authorId == request.auth.uid &&
+          request.resource.data.hidden == false &&
+          request.resource.data.text is string &&
+          request.resource.data.text.size() > 0 &&
+          request.resource.data.text.size() <= 200;
+
+        // Hiding only. The text stays for anyone reviewing afterwards.
+        allow update: if (isLiveHost(streamId) || isStaff()) &&
+          liveChangedKeys().hasOnly(['hidden']);
+
+        allow delete: if isAdmin();
+      }
+
+      // Presence. Each viewer owns exactly one document, named for them, so
+      // nobody can inflate the count by writing somebody else's.
+      match /viewers/{viewerId} {
+        allow read: if isLiveHost(streamId) || isStaff();
+        allow create, update: if signedIn() &&
+          viewerId == request.auth.uid &&
+          request.resource.data.userId == request.auth.uid;
+        allow delete: if signedIn() && (
+          viewerId == request.auth.uid || isLiveHost(streamId) || isStaff()
+        );
+      }
+    }
+
   }
 }

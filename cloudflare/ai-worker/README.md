@@ -185,3 +185,28 @@ Optional overrides:
 but this is a real recurring per-video-minute operating cost — not one-time.
 Only approved video posts are transcribed, and each post is transcribed at
 most once.
+
+## Live video tokens (Agora)
+
+The `agora-token` mode signs Agora RTC tokens for live streams. The Agora
+project has an App Certificate, so every join needs a token signed with it —
+and the certificate must never ship inside the app.
+
+The caller sends a Firebase ID token and a `channelName` (the `liveStreams`
+document id). The Worker checks that the stream exists and is still live,
+derives the Agora uid from the verified Firebase user rather than trusting the
+request, and grants publish rights **only** to the stream's host. Everyone
+else gets a subscriber token, even if they ask for host. Tokens last 3 hours;
+the app renews them before they lapse.
+
+Both values come from the Agora console → your project. They must belong to
+the **same** project as `agoraAppId` in the app's `app.json`, or Agora rejects
+the token with error 110.
+
+```bash
+wrangler secret put AGORA_APP_ID           # Basic Settings -> App ID
+wrangler secret put AGORA_APP_CERTIFICATE  # Security -> Primary Certificate
+```
+
+Without them the mode answers 503 and the app says live video is not
+configured on the server. No cost: token signing is local HMAC, no API call.

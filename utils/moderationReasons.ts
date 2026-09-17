@@ -110,3 +110,49 @@ export const friendlyModerationReasons = (reasons?: string[] | null): string[] =
 
   return cleaned;
 };
+
+/**
+ * A one-word description of an item's attachment, for places that would
+ * otherwise show a blank line: "📷 Photo", "🎬 Video", "🔗 Link", or "".
+ */
+export const moderationMediaSummary = (data: any): string => {
+  const files: any[] = Array.isArray(data?.files) ? data.files : [];
+  const kinds = files.map((file) => String(file?.mimeType || ""));
+  if (kinds.some((kind) => kind.startsWith("video/"))) return "🎬 Video";
+  if (kinds.some((kind) => kind.startsWith("image/")) || typeof data?.imageUrl === "string") {
+    return "📷 Photo";
+  }
+  if (files.length > 0) return "📎 File";
+  if (data?.link?.url) return "🔗 Link";
+  return "";
+};
+
+const SAFETY_LABELS: Record<string, string> = {
+  "self-harm": "SELF-HARM / INTENT",
+  "weapon-term": "WEAPON-RELATED TERM",
+  "weapon-image": "WEAPON IN IMAGE",
+  "offensive-image": "OFFENSIVE IMAGE",
+  "adult-link": "ADULT LINK",
+};
+
+/**
+ * The banner on a priority item.
+ *
+ * Older items were all written as "weapon" unless they were self-harm, so an
+ * offensive photo in the queue today still carries that label. For those the
+ * reason is worked out again from the categories the checks recorded, which
+ * corrects them without re-running moderation.
+ */
+export const safetyReviewLabel = (
+  safetyType?: string | null,
+  categories: string[] = [],
+): string => {
+  if (safetyType && SAFETY_LABELS[safetyType]) return SAFETY_LABELS[safetyType];
+  if (safetyType === "weapon" || !safetyType) {
+    if (categories.includes("keyword:weapons")) return SAFETY_LABELS["weapon-term"];
+    if (categories.includes("sightengine:weapon")) return SAFETY_LABELS["weapon-image"];
+    if (categories.includes("sightengine:offensive")) return SAFETY_LABELS["offensive-image"];
+    if (categories.includes("link:adult_link")) return SAFETY_LABELS["adult-link"];
+  }
+  return "FLAGGED FOR REVIEW";
+};

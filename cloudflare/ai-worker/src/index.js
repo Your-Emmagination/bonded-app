@@ -5,6 +5,7 @@ import {
 import { checkKeywordFlags } from "./keywordModeration.js";
 import { checkLinkFlags } from "./linkModeration.js";
 import { checkAccountPassword } from "./accountSetup.js";
+import { issueAgoraToken } from "./agoraToken.js";
 
 const OPENMODERATION_API_URL = "https://api.openmoderation.com/v1/moderation";
 const DEFAULT_OPENMODERATION_PROVIDER = "openai";
@@ -1202,10 +1203,10 @@ async function createCriticalReviewerAlerts(
           ? collectionName.slice(0, -1)
           : collectionName;
 
-  const alertMessage =
-    safetyType === "weapon"
-      ? `Priority safety review: weapon-related term detected in a ${contentLabel}.`
-      : `Priority safety review: possible self-harm/intent detected in a ${contentLabel}.`;
+  const wording = SAFETY_ALERT_WORDING[safetyType];
+  const alertMessage = wording
+    ? `Priority safety review: ${wording} a ${contentLabel}.`
+    : `Priority safety review: a ${contentLabel} was flagged for urgent review.`;
 
   await Promise.all(
     reviewers.map(async (reviewer) => {
@@ -1357,6 +1358,35 @@ function hasMediaRequiringSeparateReview(collectionName, content, callerRole = "
   return files.length > 0;
 }
 
+// Why an item jumped the queue, in terms a reviewer can act on. Every
+// critical item used to be labelled "weapon" unless it was self-harm, so an
+// offensive photo or an adult link reached reviewers announced as a weapon.
+// The categories already say which check fired; this reads them.
+//
+//   self-harm        keyword or model self-harm signal
+//   weapon-term      the weapons keyword list matched the text
+//   weapon-image     Sightengine saw a weapon in an image or video
+//   offensive-image  Sightengine saw an offensive gesture or symbol
+//   adult-link       a link to an adult site
+//   flagged          critical for some other reason
+function criticalSafetyType(decision) {
+  if (decision.selfHarm === true) return "self-harm";
+  const categories = Array.isArray(decision.categories) ? decision.categories : [];
+  if (categories.includes("keyword:weapons")) return "weapon-term";
+  if (categories.includes("sightengine:weapon")) return "weapon-image";
+  if (categories.includes("sightengine:offensive")) return "offensive-image";
+  if (categories.includes("link:adult_link")) return "adult-link";
+  return "flagged";
+}
+
+const SAFETY_ALERT_WORDING = {
+  "self-harm": "possible self-harm/intent detected in",
+  "weapon-term": "weapon-related term detected in",
+  "weapon-image": "a weapon detected in an image in",
+  "offensive-image": "an offensive image detected in",
+  "adult-link": "a link to an adult site detected in",
+};
+
 async function applyModerationDecision(
   env,
   collectionName,
@@ -1372,7 +1402,8 @@ async function applyModerationDecision(
   // priority before it ever reaches Firestore, which is exactly what used
   // to happen before this fix.
   const priority = decision.priority === "critical" ? "critical" : "normal";
-  const safetyType = selfHarm ? "self-harm" : priority === "critical" ? "weapon" : null;
+  const safetyType =
+    selfHarm || priority === "critical" ? criticalSafetyType(decision) : null;
 
   await patchFirestore(env, collectionName, documentId, {
     moderationStatus: status,
@@ -2434,6 +2465,17 @@ export default {
           patchProfile: (environment, id, fields) => patchFirestore(environment, "students", id, fields),
         });
         return json(result.body, { status: result.status, headers: { "Access-Control-Allow-Origin": allowedOrigin } });
+      }
+      if (body?.mode === "agora-token") {
+        const result = await issueAgoraToken(env, request, body, {
+          verifyUser: verifyFirebaseUser,
+          readStream: (environment, id) =>
+            readFirestoreDocSafe(environment, `/liveStreams/${encodeURIComponent(id)}`),
+        });
+        return json(result.body, {
+          status: result.status,
+          headers: { "Access-Control-Allow-Origin": allowedOrigin },
+        });
       }
       if (body?.mode === "recovery-email-confirm") {
         return await handleRecoveryEmailConfirm(env, request, body);

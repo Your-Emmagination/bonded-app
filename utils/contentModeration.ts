@@ -95,6 +95,42 @@ export const approvedModerationDecision = (): ModerationDecision => ({
   ruleSource: "ai",
 });
 
+/**
+ * The moderation fields a new comment, reply or server message starts with.
+ *
+ * The Worker approves teacher, moderator and admin content without reading it
+ * (TEXT_MODERATION_BYPASS_ROLES), so for staff the round trip only ever wrote
+ * "approved" a second later. Writing it at creation puts their message in
+ * front of everyone immediately. Students' content still starts pending and
+ * waits for the Worker, and the rules only accept "approved" from staff.
+ */
+export const initialModerationFields = (authorIsStaff: boolean) =>
+  authorIsStaff
+    ? {
+        moderationStatus: "approved" as const,
+        moderationReasons: [] as string[],
+        moderatedAtMs: Date.now(),
+        moderationRuleSource: "staff-role-bypass",
+      }
+    : {
+        moderationStatus: "pending" as const,
+        moderationReasons: [] as string[],
+        moderatedAtMs: null,
+      };
+
+/**
+ * The decision for content that was just written with
+ * initialModerationFields(). Staff get the answer the Worker would have given
+ * without asking it; everyone else is checked as before.
+ */
+export const moderateNewContent = (
+  authorIsStaff: boolean,
+  input: Parameters<typeof requestFirestoreModerationDecision>[0],
+): Promise<ModerationDecision> =>
+  authorIsStaff
+    ? Promise.resolve(approvedModerationDecision())
+    : requestFirestoreModerationDecision(input);
+
 export const requestModerationDecisionForAiTrigger = async (
   input: ModerationRequestInput,
   _options: { shouldTriggerAi: boolean },

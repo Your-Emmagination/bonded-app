@@ -1,5 +1,9 @@
 //createpostscreen.tsx
 import { useThemeColors } from "@/contexts/ThemeContext";
+import {
+  getLostFoundStatusInfo,
+  lostFoundStatusColors,
+} from "@/utils/lostFoundStatus";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
@@ -628,6 +632,9 @@ const CreatePostScreen = () => {
   const { styles, theme } = useStyles();
   const [content, setContent] = useState("");
   const [selectedFlair, setSelectedFlair] = useState<PostFlairId>(DEFAULT_POST_FLAIR);
+  // Which side of a Lost & Found post this is. Only asked when writing a new
+  // one; afterwards the status moves from the post itself.
+  const [lostFoundKind, setLostFoundKind] = useState<"lost" | "found">("lost");
   const [authorRole, setAuthorRole] = useState<string>("student");
   const [authorProfileName, setAuthorProfileName] = useState("");
   const [files, setFiles] = useState<
@@ -1173,6 +1180,7 @@ try {
   // Rebuilt on every edit below too.
   searchTerms: buildPostSearchTerms(content, [attachedLink?.title, attachedLink?.url]),
   flair: selectedFlair,
+  ...(selectedFlair === "lost_found" ? { lostFoundStatus: lostFoundKind } : {}),
   files: uploadedUrls,
   ...(hasVideoAttachment ? { captionStatus: "pending" } : {}),
 
@@ -1371,6 +1379,7 @@ try {
         () => {
           setContent("");
           setSelectedFlair(DEFAULT_POST_FLAIR);
+          setLostFoundKind("lost");
           setLostFoundSuggestionDismissed(false);
           setHelpSuggestionDismissed(false);
           setDismissedDetectedDate(false);
@@ -1968,6 +1977,49 @@ try {
               onPickerScroll={handleFlairPickerScroll}
               onChipLayout={handleFlairChipLayout}
             />
+
+            {/* Status is set here once, then changed from the post itself — so
+                editing a post never touches it. */}
+            {selectedFlair === "lost_found" && !isEditMode && (
+              <View style={styles.lostFoundKind}>
+                <Text style={styles.lostFoundKindTitle}>Is this item…</Text>
+                <View style={styles.lostFoundKindRow}>
+                  {(["lost", "found"] as const).map((kind) => {
+                    const info = getLostFoundStatusInfo(kind);
+                    const tones = lostFoundStatusColors(kind, theme);
+                    const selected = lostFoundKind === kind;
+                    return (
+                      <TouchableOpacity
+                        key={kind}
+                        style={[
+                          styles.lostFoundKindOption,
+                          selected && { backgroundColor: tones.fill, borderColor: tones.line },
+                        ]}
+                        onPress={() => setLostFoundKind(kind)}
+                        activeOpacity={0.82}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected }}
+                      >
+                        <Text style={styles.lostFoundKindEmoji}>{info.emoji}</Text>
+                        <View style={styles.lostFoundKindCopy}>
+                          <Text
+                            style={[
+                              styles.lostFoundKindLabel,
+                              selected && { color: tones.ink },
+                            ]}
+                          >
+                            {kind === "lost" ? "Lost" : "Found"}
+                          </Text>
+                          <Text style={styles.lostFoundKindHint}>
+                            {kind === "lost" ? "I'm looking for it" : "I have it"}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
           </View>
 
           {isStaff && (
@@ -2529,6 +2581,25 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surfaceSunken,
   },
   flairSection: { marginTop: 16, marginBottom: 16 },
+  lostFoundKind: { marginTop: 12, gap: 8 },
+  lostFoundKindTitle: { color: c.textSecondary, fontSize: 13, fontWeight: "700" },
+  lostFoundKindRow: { flexDirection: "row", gap: 10 },
+  lostFoundKindOption: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: c.border,
+    backgroundColor: c.surfaceRaised,
+  },
+  lostFoundKindEmoji: { fontSize: 16 },
+  lostFoundKindCopy: { flex: 1, minWidth: 0 },
+  lostFoundKindLabel: { color: c.textPrimary, fontSize: 14.5, fontWeight: "800" },
+  lostFoundKindHint: { color: c.textMuted, fontSize: 11.5, marginTop: 1 },
   flairSectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 9 },
   flairSectionTitle: { color: c.textPrimary, fontSize: 14, fontWeight: "800" },
   flairSectionHint: { color: c.textMuted, fontSize: 12, fontWeight: "600" },

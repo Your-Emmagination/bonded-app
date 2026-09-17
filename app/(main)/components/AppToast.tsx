@@ -49,12 +49,15 @@ export default function AppToast() {
 
   if (!toast) return null;
 
+  const hasAction = !!toast.actionLabel && (!!toast.actionHref || !!toast.onAction);
+
   const handleAction = () => {
-    if (!toast.actionHref) return;
+    if (!hasAction) return;
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
     progress.setValue(0);
     setToast(null);
-    router.push(toast.actionHref as any);
+    if (toast.onAction) toast.onAction();
+    else if (toast.actionHref) router.push(toast.actionHref as any);
   };
 
   return (
@@ -82,7 +85,7 @@ export default function AppToast() {
         <Text style={styles.message} numberOfLines={2}>
           {toast.message}
         </Text>
-        {toast.actionLabel && toast.actionHref ? (
+        {hasAction ? (
           <TouchableOpacity onPress={handleAction} activeOpacity={0.7} hitSlop={8}>
             <Text style={styles.action}>{toast.actionLabel}</Text>
           </TouchableOpacity>

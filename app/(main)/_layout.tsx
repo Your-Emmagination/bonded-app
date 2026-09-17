@@ -50,6 +50,20 @@ export default function MainLayout() {
         }}
       />
       <Stack.Screen
+        name="GoLiveScreen"
+        options={{
+          animation: "fade_from_bottom",
+          contentStyle: { backgroundColor: theme.background },
+        }}
+      />
+      <Stack.Screen
+        name="EditProfileScreen"
+        options={{
+          animation: "slide_from_right",
+          contentStyle: { backgroundColor: theme.background },
+        }}
+      />
+      <Stack.Screen
         name="EventCalendarScreen"
         options={{
           animation: "fade_from_bottom",

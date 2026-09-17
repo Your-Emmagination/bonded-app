@@ -18,6 +18,8 @@ import {
 } from "@/utils/cloudinaryImages";
 import {
     canViewModeratedContent,
+    initialModerationFields,
+    moderateNewContent,
     requestFirestoreModerationDecision,
     type ModerationDecision
 } from "@/utils/contentModeration";
@@ -1428,6 +1430,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     }
   }, [commentId, currentUser?.role, currentUser?.uid, hasMoreReplies, loadingMore]);
 
+  // Whether the person writing is staff, for how their reply starts out.
+  const authorIsStaff = isStaff(parseUserRole(currentUser?.role));
+
   const handleSendReply =
     async (replyData: any) => {
       if (!currentUser) return;
@@ -1451,20 +1456,19 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         }),
       };
 
-      // Pure OpenModeration text flow: no local keyword or blocklist checks.
-      // Every reply is written as pending before the trusted Worker evaluates it.
-      newReply.moderationStatus = "pending";
-      newReply.moderationReasons = [];
+      // No local keyword or blocklist checks. A student's reply is written
+      // pending before the trusted Worker evaluates it; a staff reply is
+      // written approved, since the Worker would approve it unread.
       newReply.moderationModel = null;
       newReply.moderationRuleSource = null;
-      newReply.moderatedAtMs = null;
+      Object.assign(newReply, initialModerationFields(authorIsStaff));
 
       const replyRef = await addDoc(collection(db, "replies"), newReply);
 
       void (async () => {
         let moderationDecision: ModerationDecision;
         try {
-          moderationDecision = await requestFirestoreModerationDecision({
+          moderationDecision = await moderateNewContent(authorIsStaff, {
             collectionName: "replies",
             documentId: replyRef.id,
             scope: "reply",

@@ -45,6 +45,8 @@ import {
 import { resolveAvatarUri } from "@/utils/avatar";
 import {
     canViewModeratedContent,
+    initialModerationFields,
+    moderateNewContent,
     requestFirestoreModerationDecision,
     type ModerationDecision
 } from "@/utils/contentModeration";
@@ -54,6 +56,7 @@ import {
     dismissLostAndFoundResolutionPrompt,
     flagPotentialResolution,
 } from "@/utils/lostAndFoundResolution";
+import { updateLostFoundStatus } from "@/utils/lostFoundStatus";
 import {
     createMentionNotifications,
     createNotification,
@@ -880,6 +883,9 @@ const CommentModal: React.FC<CommentModalProps> = ({
     }
   }, [hasMoreComments, loadingMore, postId, user?.role, user?.uid]);
 
+  // Whether the person writing is staff, for how their comment starts out.
+  const authorIsStaff = isStaff(parseUserRole(user?.role));
+
   const handleSend = async (commentData: any) => {
     if (!user?.uid) return;
 
@@ -892,17 +898,16 @@ const CommentModal: React.FC<CommentModalProps> = ({
       postId,
       createdAt: serverTimestamp(),
     };
-    // Pure OpenModeration text flow: never block locally. Every comment is
-    // written as pending first and then re-read by the trusted Worker.
-    newComment.moderationStatus = "pending";
-    newComment.moderationReasons = [];
-    newComment.moderatedAtMs = null;
+    // Never blocks locally. A student's comment is written pending and re-read
+    // by the trusted Worker; a staff comment is written approved, since the
+    // Worker would approve it unread.
+    Object.assign(newComment, initialModerationFields(authorIsStaff));
     const commentRef = await addDoc(collection(db, "comments"), newComment);
 
     void (async () => {
       let moderationDecision: ModerationDecision;
       try {
-        moderationDecision = await requestFirestoreModerationDecision({
+        moderationDecision = await moderateNewContent(authorIsStaff, {
           collectionName: "comments",
           documentId: commentRef.id,
           scope: "comment",
@@ -1493,12 +1498,27 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const activeResolutionPrompt = isPostOwner ? postFields?.resolutionPrompt : null;
 
   const handleConfirmResolution = async () => {
-    if (!postId || resolvingPrompt) return;
+    if (!postId || !user?.uid || resolvingPrompt) return;
     setResolvingPrompt(true);
     try {
-      await confirmLostAndFoundResolution(postId);
+      await confirmLostAndFoundResolution(postId, user.uid);
     } catch (error) {
       console.error("[CommentModal] Failed to confirm resolution:", error);
+    } finally {
+      setResolvingPrompt(false);
+    }
+  };
+
+  // The detector only knows that a comment sounds like the item turned up.
+  // That is as often "I think that's mine" as "got it back", so the poster
+  // gets both next steps rather than being pushed straight to Returned.
+  const handleMarkClaimPending = async () => {
+    if (!postId || !user?.uid || resolvingPrompt) return;
+    setResolvingPrompt(true);
+    try {
+      await updateLostFoundStatus(postId, "claim_pending", user.uid);
+    } catch (error) {
+      console.error("[CommentModal] Failed to mark claim pending:", error);
     } finally {
       setResolvingPrompt(false);
     }
@@ -1620,10 +1640,12 @@ const CommentModal: React.FC<CommentModalProps> = ({
 
     {activeResolutionPrompt && (
       <View style={styles.resolutionBanner}>
-        <Ionicons name="checkmark-circle-outline" size={18} color="#2f9e44" />
-        <Text style={styles.resolutionBannerText}>
-          Looks like this might be resolved — mark as found?
-        </Text>
+        <View style={styles.resolutionBannerHead}>
+          <Ionicons name="checkmark-circle-outline" size={18} color={theme.success} />
+          <Text style={styles.resolutionBannerText}>
+            A comment suggests this item may have turned up. Update the status?
+          </Text>
+        </View>
         <View style={styles.resolutionBannerActions}>
           <TouchableOpacity
             style={styles.resolutionBannerDismiss}
@@ -1633,11 +1655,18 @@ const CommentModal: React.FC<CommentModalProps> = ({
             <Text style={styles.resolutionBannerDismissText}>Dismiss</Text>
           </TouchableOpacity>
           <TouchableOpacity
+            style={styles.resolutionBannerSecondary}
+            onPress={handleMarkClaimPending}
+            disabled={resolvingPrompt}
+          >
+            <Text style={styles.resolutionBannerSecondaryText}>🟡 Claim pending</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
             style={styles.resolutionBannerConfirm}
             onPress={handleConfirmResolution}
             disabled={resolvingPrompt}
           >
-            <Text style={styles.resolutionBannerConfirmText}>Mark as found</Text>
+            <Text style={styles.resolutionBannerConfirmText}>🔵 Returned</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -1957,14 +1986,17 @@ modalContainer: {
   sortTextActive: { color: c.accent },
 
   resolutionBanner: {
-    flexDirection: "row",
-    alignItems: "center",
     gap: 8,
     paddingHorizontal: 16,
     paddingVertical: 10,
     backgroundColor: c.successSoft,
     borderBottomWidth: 1,
     borderBottomColor: c.successSoft,
+  },
+  resolutionBannerHead: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   resolutionBannerText: {
     flex: 1,
@@ -1974,7 +2006,22 @@ modalContainer: {
   },
   resolutionBannerActions: {
     flexDirection: "row",
+    justifyContent: "flex-end",
+    flexWrap: "wrap",
     gap: 8,
+  },
+  resolutionBannerSecondary: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: c.warning,
+    backgroundColor: c.surface,
+  },
+  resolutionBannerSecondaryText: {
+    color: c.warning,
+    fontSize: 12,
+    fontWeight: "700",
   },
   resolutionBannerDismiss: {
     paddingHorizontal: 10,

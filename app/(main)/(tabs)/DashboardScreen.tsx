@@ -2,7 +2,7 @@
 import { useThemeColors } from "@/contexts/ThemeContext";
 import { onSurface, type ThemeTokens } from "@/utils/theme";
 import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
-import { friendlyModerationReasons } from "@/utils/moderationReasons";
+import { friendlyModerationReasons, moderationMediaSummary } from "@/utils/moderationReasons";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { YEAR_LEVELS } from "@/utils/yearLevels";
 import { subscribeToStaffTicketBadge } from "@/utils/supportTickets";
@@ -447,22 +447,22 @@ export default function DashboardScreen() {
       );
 
     unsubscribers.push(
-      subscribePending("posts", "post", (item) => item.content || "[empty post]"),
+      subscribePending("posts", "post", (item) => item.content || moderationMediaSummary(item) || "[empty post]"),
     );
     unsubscribers.push(
       subscribePending("polls", "poll", (item) => item.question || "[empty poll]"),
     );
     unsubscribers.push(
-      subscribePending("comments", "comment", (item) => item.text || "[empty comment]"),
+      subscribePending("comments", "comment", (item) => item.text || moderationMediaSummary(item) || "[empty comment]"),
     );
     unsubscribers.push(
-      subscribePending("replies", "reply", (item) => item.text || "[empty reply]"),
+      subscribePending("replies", "reply", (item) => item.text || moderationMediaSummary(item) || "[empty reply]"),
     );
     unsubscribers.push(
       subscribePending(
         "communityThreadMessages",
         "message",
-        (item) => item.text || "[empty message]",
+        (item) => item.text || moderationMediaSummary(item) || "[empty message]",
       ),
     );
 

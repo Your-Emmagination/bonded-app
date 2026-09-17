@@ -1,18 +1,14 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
-import { uploadProfileImage } from "@/utils/cloudinaryUpload";
-import { changeAccountPassword } from "@/utils/changeAccountPassword";
 import { useAccountSetup } from "@/contexts/AccountSetupContext";
 import { profileEmail } from "@/utils/profileSetup";
 import { endPresenceSession } from "@/utils/presence";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
-import * as ImagePicker from "expo-image-picker";
 import {
     User as FirebaseUser,
     signOut,
-    updateProfile,
 } from "firebase/auth";
 import {
     collection,
@@ -45,18 +41,12 @@ import {
     saveCachedMyPosts,
     saveCachedMyProfile,
 } from "@/utils/offlineStorage";
-import { validateNewPassword } from "@/utils/passwordPolicy";
-import {
-    confirmRecoveryEmailVerification,
-    startRecoveryEmailVerification,
-} from "@/utils/passwordReset";
 import { getProfileIdLabel } from "@/utils/profileLabels";
 import {
     isPushNotificationsSupported,
     unregisterDeviceForPushNotifications,
 } from "@/utils/pushNotifications";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
-import { updateUserDataCache } from "@/utils/rbac";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
@@ -65,7 +55,6 @@ import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
-    Animated,
     BackHandler,
     FlatList,
     Linking,
@@ -96,16 +85,6 @@ type Student = {
   role?: string;
   recoveryEmail?: string;
   recoveryEmailVerified?: boolean;
-};
-
-type TabKey = "info" | "password" | "photo";
-
-type EditData = {
-  yearlvl?: string;
-  email?: string;
-  currentPassword?: string;
-  newPassword?: string;
-  selectedTab?: TabKey;
 };
 
 type TaggedUser = { id: string; name: string; studentID: string };
@@ -169,31 +148,15 @@ const isApprovedPost = (post: Post): boolean => {
   return !status || status === "approved";
 };
 
-const TABS: {
-  key: TabKey;
-  label: string;
-  icon: keyof typeof Ionicons.glyphMap;
-}[] = [
-  { key: "info", label: "Edit Info", icon: "create-outline" },
-  { key: "password", label: "Change Password", icon: "lock-closed-outline" },
-  { key: "photo", label: "Change Photo", icon: "camera-outline" },
-];
-
 const ProfileScreen = () => {
   const { styles, theme } = useStyles();
   const { profileId: accountProfileId } = useAccountSetup();
-  const { returnTo, editTab } = useLocalSearchParams<{ returnTo?: string | string[]; editTab?: string }>();
+  const { returnTo } = useLocalSearchParams<{ returnTo?: string | string[] }>();
   const { isOffline } = useNetworkStatus();
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [student, setStudent] = useState<Student | null>(null);
-  const [editedData, setEditedData] = useState<EditData>({
-    selectedTab: "info",
-  });
   const [profileImage, setProfileImage] = useState<string>();
-  const [pendingProfileImage, setPendingProfileImage] = useState<string | null>(null);
-  const [editModalVisible, setEditModalVisible] = useState(false);
   const [viewImageVisible, setViewImageVisible] = useState(false);
-  const [loading, setLoading] = useState(false);
 
   // Single dialog state used to render every alert on this screen through
   // the app's branded ConfirmDialog instead of the bare native Alert.alert.
@@ -246,7 +209,6 @@ const ProfileScreen = () => {
     });
   };
 
-  const scaleAnim = useRef(new Animated.Value(0)).current;
   const myPostsListRef = useRef<FlatList<Post>>(null);
 
   // Tapping the Profile tab while it's already open scrolls back to the top.
@@ -450,11 +412,6 @@ const ProfileScreen = () => {
           if (cached) {
             setStudent(cached);
             setProfileImage(cached.profileImage);
-            setEditedData((prev) => ({
-              ...prev,
-              yearlvl: cached.yearlvl,
-              email: cached.email || "",
-            }));
           }
         });
 
@@ -466,11 +423,6 @@ const ProfileScreen = () => {
               setStudent(data);
               saveCachedMyProfile(currentUser.uid, data);
               setProfileImage(data.profileImage);
-              setEditedData((prev) => ({
-                ...prev,
-                yearlvl: data.yearlvl,
-                email: data.email || "",
-              }));
             }
           },
           (error) => {
@@ -745,86 +697,6 @@ const ProfileScreen = () => {
     [isOffline, student?.studentID],
   );
 
-  const handleImagePick = useCallback(
-    async (useCamera = false) => {
-      if (isOffline) {
-        showInfo("Offline", "You are currently offline. Updating profile photo is unavailable.");
-        return;
-      }
-      setLoading(true);
-      try {
-        const permission = useCamera
-          ? await ImagePicker.requestCameraPermissionsAsync()
-          : await ImagePicker.requestMediaLibraryPermissionsAsync();
-
-        if (permission.status !== "granted") {
-          showInfo(
-            "Permission required",
-            `Allow ${useCamera ? "camera" : "photo"} access.`,
-          );
-          return;
-        }
-
-        const result = await (
-          useCamera
-            ? ImagePicker.launchCameraAsync
-            : ImagePicker.launchImageLibraryAsync
-        )({
-          allowsEditing: true,
-          aspect: [1, 1],
-          quality: 0.8,
-        });
-
-        if (!result.canceled && result.assets?.[0]?.uri) {
-          setPendingProfileImage(result.assets[0].uri);
-          setEditModalVisible(true);
-        }
-      } catch (error: any) {
-        showInfo("Error", `Failed to update photo: ${error.message}`);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [isOffline, updateStudent],
-  );
-
-  const commitPendingProfileImage = useCallback(async () => {
-    if (!pendingProfileImage) return;
-    if (isOffline) {
-      showInfo("Offline", "You are currently offline. Uploading profile photo is unavailable.");
-      return;
-    }
-    setLoading(true);
-    try {
-      const cloudinaryUrl = await uploadProfileImage(pendingProfileImage);
-      await updateStudent({ profileImage: cloudinaryUrl });
-      setProfileImage(cloudinaryUrl);
-      setPendingProfileImage(null);
-      setEditModalVisible(false);
-
-      if (auth.currentUser) {
-        updateProfile(auth.currentUser, { photoURL: cloudinaryUrl }).catch((err) =>
-          console.warn("Error updating auth photoURL:", err),
-        );
-      }
-
-      const keysToUpdate = [
-        user?.uid,
-        student?.studentID,
-        user?.email?.split("@")[0]?.trim(),
-      ].filter(Boolean);
-      updateUserDataCache(keysToUpdate, { profileImage: cloudinaryUrl });
-      if (user?.uid && student) {
-        saveCachedMyProfile(user.uid, { ...student, profileImage: cloudinaryUrl });
-      }
-      showInfo("Success", "Profile photo updated!");
-    } catch (error: any) {
-      showInfo("Error", `Failed to update photo: ${error?.message || "Please try again."}`);
-    } finally {
-      setLoading(false);
-    }
-  }, [isOffline, pendingProfileImage, student, updateStudent, user]);
-
   const toggleOnlineStatus = useCallback(async () => {
     if (!student || !auth.currentUser) return;
     if (isOffline) {
@@ -839,40 +711,6 @@ const ProfileScreen = () => {
       showInfo("Error", "Failed to update status");
     }
   }, [isOffline, student, updateStudent]);
-
-  const handleChangePassword = useCallback(async () => {
-    if (!user) return;
-    if (isOffline) {
-      return showInfo("Offline", "You are currently offline. Changing password is unavailable.");
-    }
-
-    const { currentPassword, newPassword } = editedData;
-    if (!currentPassword || !newPassword) {
-      return showInfo("Error", "Enter both current and new password.");
-    }
-    if (currentPassword === newPassword) {
-      return showInfo(
-        "Same Password",
-        "Your new password must be different from your current one.",
-      );
-    }
-    const policyError = validateNewPassword(newPassword);
-    if (policyError) {
-      return showInfo("Weak Password", policyError);
-    }
-
-    try {
-      await changeAccountPassword(user, student?.studentID || user.email?.split("@")[0] || user.uid, currentPassword, newPassword);
-      showInfo("Success", "Password changed successfully!");
-      setEditedData((prev) => ({
-        ...prev,
-        currentPassword: "",
-        newPassword: "",
-      }));
-    } catch (error: any) {
-      showInfo("Error", error.message || "Failed to change password");
-    }
-  }, [user, editedData.currentPassword, editedData.newPassword]);
 
   const performLogout = useCallback(async () => {
     try {
@@ -930,51 +768,24 @@ const ProfileScreen = () => {
     });
   }, [performLogout]);
 
-  const openModal = useCallback(() => {
-    Animated.spring(scaleAnim, {
-      toValue: 1,
-      useNativeDriver: true,
-      friction: 7,
-      tension: 40,
-    }).start();
-  }, [scaleAnim]);
-
-  const closeModal = useCallback(() => {
-    Animated.timing(scaleAnim, {
-      toValue: 0,
-      duration: 180,
-      useNativeDriver: true,
-    }).start(() => setEditModalVisible(false));
-  }, [scaleAnim]);
+  // Editing lives in its own screen now, opened from Settings. Your avatar
+  // stays a shortcut to the photo tab, since that is where people reach for
+  // it on their own profile.
+  const openPhotoEditor = useCallback(() => {
+    router.push({ pathname: "/(main)/EditProfileScreen", params: { tab: "photo" } } as any);
+  }, [router]);
 
   const openImageViewer = useCallback(() => {
     if (imageUri) {
       setViewImageVisible(true);
     } else {
-      setEditedData((prev) => ({ ...prev, selectedTab: "photo" }));
-      setEditModalVisible(true);
+      openPhotoEditor();
     }
-  }, [imageUri]);
-
-  const handleTabChange = useCallback((key: TabKey) => {
-    setEditedData((prev) => ({ ...prev, selectedTab: key }));
-  }, []);
-
-  useFocusEffect(useCallback(() => {
-    if (editTab !== "password") return;
-    handleTabChange("password");
-    setEditModalVisible(true);
-    router.setParams({ editTab: undefined });
-  }, [editTab, handleTabChange, router]));
+  }, [imageUri, openPhotoEditor]);
 
   const handleScreenBack = useCallback(() => {
     if (viewImageVisible) {
       setViewImageVisible(false);
-      return true;
-    }
-
-    if (editModalVisible) {
-      closeModal();
       return true;
     }
 
@@ -990,20 +801,11 @@ const ProfileScreen = () => {
 
     return false;
   }, [
-    closeModal,
-    editModalVisible,
     navigation,
     resolvedReturnTo,
     router,
     viewImageVisible,
   ]);
-
-  const updateEditedData = useCallback(
-    (field: keyof EditData, value: string) => {
-      setEditedData((prev) => ({ ...prev, [field]: value }));
-    },
-    [],
-  );
 
   useFocusEffect(
     useCallback(() => {
@@ -1075,11 +877,7 @@ const ProfileScreen = () => {
               <View style={styles.profileCard}>
                 <TouchableOpacity
                   onPress={openImageViewer}
-                  onLongPress={() => {
-                    handleTabChange("photo");
-                    setEditModalVisible(true);
-                  }}
-                  disabled={loading}
+                  onLongPress={openPhotoEditor}
                   activeOpacity={0.88}
                   style={styles.avatarWrapper}
                 >
@@ -1180,11 +978,6 @@ const ProfileScreen = () => {
 
               {/* Actions Section */}
               <View style={styles.section}>
-                <ActionButton
-                  icon="create-outline"
-                  text="Edit Profile"
-                  onPress={() => setEditModalVisible(true)}
-                />
                 <ActionButton
                   icon="bookmark-outline"
                   text="Saved Posts"
@@ -1410,25 +1203,6 @@ const ProfileScreen = () => {
       />
 
       {/* Edit Modal */}
-      <EditModal
-        visible={editModalVisible}
-        scaleAnim={scaleAnim}
-        onShow={openModal}
-        onClose={closeModal}
-        editedData={editedData}
-        onTabChange={handleTabChange}
-        onDataChange={updateEditedData}
-        infoStudentID={student?.studentID ?? user?.email?.split("@")[0] ?? ""}
-        infoEmail={student?.recoveryEmail || profileEmail({ email: student?.email })}
-        infoVerified={student?.recoveryEmailVerified}
-        onChangePassword={handleChangePassword}
-        onImagePick={handleImagePick}
-        pendingProfileImage={pendingProfileImage}
-        onCommitImage={commitPendingProfileImage}
-        onCancelImage={() => setPendingProfileImage(null)}
-        loading={loading}
-      />
-
       {/* Full Image Viewer Modal */}
       <ImageZoomViewer
         images={imageUri ? [imageUri] : []}
@@ -1522,464 +1296,6 @@ const ActionButton = React.memo(
     );
   },
 );
-
-const EditModal = ({
-  visible,
-  scaleAnim,
-  onShow,
-  onClose,
-  editedData,
-  infoStudentID,
-  infoEmail,
-  infoVerified,
-  onTabChange,
-  onDataChange,
-  onChangePassword,
-  onImagePick,
-  loading,
-  pendingProfileImage,
-  onCommitImage,
-  onCancelImage,
-}: {
-  visible: boolean;
-  scaleAnim: Animated.Value;
-  onShow: () => void;
-  onClose: () => void;
-  editedData: EditData;
-  infoStudentID: string;
-  infoEmail?: string;
-  infoVerified?: boolean;
-  onTabChange: (key: TabKey) => void;
-  onDataChange: (field: keyof EditData, value: string) => void;
-  onChangePassword: () => void;
-  onImagePick: (useCamera: boolean) => void;
-  loading: boolean;
-  pendingProfileImage: string | null;
-  onCommitImage: () => void;
-  onCancelImage: () => void;
-}) => {
-  const { styles, theme } = useStyles();
-
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onShow={onShow}
-      onRequestClose={onClose}
-    >
-      <View style={styles.modalOverlay}>
-        <Animated.View
-          style={[styles.modalCard, { transform: [{ scale: scaleAnim }] }]}
-        >
-          <Text style={styles.modalHeader}>Edit Profile</Text>
-
-          <View style={styles.tabRow}>
-            {TABS.map(({ key, label, icon }) => (
-              <TouchableOpacity
-                key={key}
-                onPress={() => onTabChange(key)}
-                style={[
-                  styles.tabButton,
-                  editedData.selectedTab === key && styles.tabButtonActive,
-                ]}
-                activeOpacity={0.8}
-              >
-                <Ionicons
-                  name={icon}
-                  size={18}
-                  color={editedData.selectedTab === key ? theme.onPrimary : theme.textMuted}
-                  style={{ marginBottom: 2 }}
-                />
-                <Text
-                  style={[
-                    styles.tabText,
-                    editedData.selectedTab === key && styles.tabTextActive,
-                  ]}
-                >
-                  {label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <View style={styles.tabContent}>
-            {loading ? (
-              <ActivityIndicator
-                size="large"
-                color={theme.accent}
-                style={{ marginVertical: 24 }}
-              />
-            ) : (
-              <>
-                {editedData.selectedTab === "info" && (
-                  <InfoTab
-                    studentID={infoStudentID}
-                    initialEmail={infoEmail}
-                    initialVerified={infoVerified}
-                  />
-                )}
-
-                {editedData.selectedTab === "password" && (
-                  <PasswordTab
-                    editedData={editedData}
-                    onDataChange={onDataChange}
-                    onChangePassword={onChangePassword}
-                  />
-                )}
-
-                {editedData.selectedTab === "photo" && (
-                  <PhotoTab
-                    onImagePick={onImagePick}
-                    previewUri={pendingProfileImage}
-                    onCommit={onCommitImage}
-                    onCancel={onCancelImage}
-                    loading={loading}
-                  />
-                )}
-              </>
-            )}
-          </View>
-
-          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
-            <Text style={styles.closeText}>Close</Text>
-          </TouchableOpacity>
-        </Animated.View>
-      </View>
-    </Modal>
-  );
-};
-
-// Personal email address = the account's recovery email. Saving a new one
-// verifies it with a 6-digit code (utils/passwordReset -> the Worker) so
-// "Forgot password?" has a real inbox to send the reset code to.
-const InfoTab = ({
-  studentID,
-  initialEmail,
-  initialVerified,
-}: {
-  studentID: string;
-  initialEmail?: string;
-  initialVerified?: boolean;
-}) => {
-  const { styles, theme } = useStyles();
-  const [savedEmail, setSavedEmail] = useState(initialEmail ?? "");
-  const [savedVerified, setSavedVerified] = useState(initialVerified === true);
-  const [draft, setDraft] = useState(initialEmail ?? "");
-  const [stage, setStage] = useState<"email" | "code">("email");
-  const [code, setCode] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [cooldown, setCooldown] = useState(0);
-  const cooldownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  useEffect(() => {
-    setSavedEmail(initialEmail ?? "");
-    setSavedVerified(initialVerified === true);
-    setDraft(initialEmail ?? "");
-  }, [initialEmail, initialVerified]);
-
-  useEffect(
-    () => () => {
-      if (cooldownRef.current) clearInterval(cooldownRef.current);
-    },
-    [],
-  );
-
-  const startCooldown = useCallback(() => {
-    setCooldown(60);
-    if (cooldownRef.current) clearInterval(cooldownRef.current);
-    cooldownRef.current = setInterval(() => {
-      setCooldown((v) => {
-        if (v <= 1 && cooldownRef.current) {
-          clearInterval(cooldownRef.current);
-          cooldownRef.current = null;
-        }
-        return v - 1;
-      });
-    }, 1000);
-  }, []);
-
-  const trimmed = draft.trim().toLowerCase();
-  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
-  const emailChanged = trimmed !== savedEmail.trim().toLowerCase();
-  const nothingToDo = !emailChanged && savedVerified;
-
-  const editEmail = (text: string) => {
-    setDraft(text);
-    setError(null);
-    if (stage === "code") {
-      setStage("email");
-      setCode("");
-      setNotice(null);
-    }
-  };
-
-  const sendCode = useCallback(async () => {
-    if (busy || cooldown > 0) return;
-    setError(null);
-    setNotice(null);
-    if (!emailValid) {
-      setError("Enter a valid email address.");
-      return;
-    }
-    setBusy(true);
-    try {
-      await startRecoveryEmailVerification(studentID, trimmed);
-      setStage("code");
-      setNotice(`Code sent to ${trimmed}.`);
-      startCooldown();
-    } catch (e: any) {
-      setError(e?.message || "Couldn't send the code. Try again.");
-    } finally {
-      setBusy(false);
-    }
-  }, [busy, cooldown, emailValid, studentID, trimmed, startCooldown]);
-
-  const onSave = useCallback(async () => {
-    if (busy || nothingToDo) return;
-    if (stage === "email") {
-      await sendCode();
-      return;
-    }
-    setError(null);
-    if (!/^\d{6}$/.test(code.trim())) {
-      setError("Enter the 6-digit code.");
-      return;
-    }
-    setBusy(true);
-    try {
-      const res = (await confirmRecoveryEmailVerification(
-        studentID,
-        code.trim(),
-      )) as { recoveryEmail?: string };
-      setSavedEmail(res.recoveryEmail || trimmed);
-      setSavedVerified(true);
-      setStage("email");
-      setCode("");
-      setNotice("Email verified.");
-    } catch (e: any) {
-      setError(e?.message || "Couldn't verify the code. Try again.");
-    } finally {
-      setBusy(false);
-    }
-  }, [busy, nothingToDo, stage, code, studentID, trimmed, sendCode]);
-
-  return (
-    <View style={styles.infoTab}>
-      <View style={styles.fieldLabelRow}>
-        <Text style={styles.inputLabel}>Personal Email Address</Text>
-        {savedEmail ? (
-          <View
-            style={[
-              styles.verifyChip,
-              savedVerified ? styles.verifyChipOk : styles.verifyChipWarn,
-            ]}
-          >
-            <Ionicons
-              name={savedVerified ? "checkmark-circle" : "alert-circle"}
-              size={14}
-              color={savedVerified ? theme.success : theme.warning}
-            />
-          </View>
-        ) : null}
-      </View>
-
-      <View style={styles.inputWrap}>
-        <Ionicons
-          name="mail-outline"
-          size={17}
-          color={theme.textMuted}
-          style={styles.inputIcon}
-        />
-        <TextInput
-          style={styles.inputWithIcon}
-          placeholder="Enter email address"
-          placeholderTextColor="rgba(155,118,108,0.6)"
-          value={draft}
-          onChangeText={editEmail}
-          keyboardType="email-address"
-          autoCapitalize="none"
-          autoCorrect={false}
-          editable={!busy}
-        />
-      </View>
-
-      {stage === "code" ? (
-        <View style={styles.inputWrap}>
-          <Ionicons
-            name="keypad-outline"
-            size={17}
-            color={theme.textMuted}
-            style={styles.inputIcon}
-          />
-          <TextInput
-            style={[styles.inputWithIcon, styles.codeField]}
-            placeholder="6-digit code"
-            placeholderTextColor="rgba(155,118,108,0.6)"
-            value={code}
-            onChangeText={(t) => setCode(t.replace(/\D/g, "").slice(0, 6))}
-            keyboardType="number-pad"
-            maxLength={6}
-            editable={!busy}
-          />
-          <TouchableOpacity
-            onPress={sendCode}
-            disabled={busy || cooldown > 0}
-            style={styles.resendInline}
-          >
-            <Text
-              style={[
-                styles.resendInlineText,
-                (busy || cooldown > 0) && styles.mutedText,
-              ]}
-            >
-              {cooldown > 0 ? `${cooldown}s` : "Resend"}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      ) : null}
-
-      {notice ? <Text style={styles.infoNotice}>{notice}</Text> : null}
-      {error ? <Text style={styles.infoError}>{error}</Text> : null}
-
-      <TouchableOpacity
-        style={[styles.primaryBtn, (busy || nothingToDo) && styles.btnMuted]}
-        onPress={onSave}
-        disabled={busy || nothingToDo}
-        activeOpacity={0.85}
-      >
-        {busy ? (
-          <ActivityIndicator color={theme.onPrimary} />
-        ) : (
-          <Text style={styles.primaryText}>Save Changes</Text>
-        )}
-      </TouchableOpacity>
-    </View>
-  );
-};
-
-const PasswordTab = ({
-  editedData,
-  onDataChange,
-  onChangePassword,
-}: {
-  editedData: EditData;
-  onDataChange: (field: keyof EditData, value: string) => void;
-  onChangePassword: () => void;
-}) => {
-  const { styles, theme } = useStyles();
-  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
-  const [showNewPassword, setShowNewPassword] = useState(false);
-
-  return (
-    <>
-      <Text style={styles.inputLabel}>Current Password</Text>
-      <View style={styles.passwordInputWrapper}>
-        <Ionicons
-          name="lock-closed-outline"
-          size={17}
-          color={theme.textMuted}
-          style={styles.pwLeadIcon}
-        />
-        <TextInput
-          style={styles.passwordInput}
-          placeholder="Current Password"
-          placeholderTextColor="rgba(155,118,108,0.6)"
-          secureTextEntry={!showCurrentPassword}
-          value={editedData.currentPassword ?? ""}
-          onChangeText={(text) => onDataChange("currentPassword", text)}
-        />
-        <TouchableOpacity
-          onPress={() => setShowCurrentPassword(!showCurrentPassword)}
-          style={styles.eyeIconPassword}
-        >
-          <Ionicons
-            name={showCurrentPassword ? "eye-off-outline" : "eye-outline"}
-            size={20}
-            color={theme.textMuted}
-          />
-        </TouchableOpacity>
-      </View>
-
-      <Text style={styles.inputLabel}>New Password</Text>
-      <View style={styles.passwordInputWrapper}>
-        <Ionicons
-          name="lock-closed-outline"
-          size={17}
-          color={theme.textMuted}
-          style={styles.pwLeadIcon}
-        />
-        <TextInput
-          style={styles.passwordInput}
-          placeholder="New Password"
-          placeholderTextColor="rgba(155,118,108,0.6)"
-          secureTextEntry={!showNewPassword}
-          value={editedData.newPassword ?? ""}
-          onChangeText={(text) => onDataChange("newPassword", text)}
-        />
-        <TouchableOpacity
-          onPress={() => setShowNewPassword(!showNewPassword)}
-          style={styles.eyeIconPassword}
-        >
-          <Ionicons
-            name={showNewPassword ? "eye-off-outline" : "eye-outline"}
-            size={20}
-            color={theme.textMuted}
-          />
-        </TouchableOpacity>
-      </View>
-
-      <TouchableOpacity style={styles.primaryBtn} onPress={onChangePassword}>
-        <Text style={styles.primaryText}>Update Password</Text>
-      </TouchableOpacity>
-    </>
-  );
-};
-
-const PhotoTab = ({
-  onImagePick, previewUri, onCommit, onCancel, loading,
-}: {
-  onImagePick: (useCamera: boolean) => void;
-  previewUri: string | null;
-  onCommit: () => void;
-  onCancel: () => void;
-  loading: boolean;
-}) => {
-  const { styles, theme } = useStyles();
-
-  return (
-    <View style={{ marginTop: 6 }}>
-      {previewUri && (
-        <View style={{ alignItems: "center", marginBottom: 14 }}>
-          <Image source={{ uri: previewUri }} style={{ width: 110, height: 110, borderRadius: 55, borderWidth: 3, borderColor: theme.accent }} />
-          <Text style={{ marginTop: 8, color: theme.textSecondary, fontWeight: "600" }}>Preview</Text>
-        </View>
-      )}
-      <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(false)} disabled={loading}>
-        <Ionicons name="images-outline" size={20} color={theme.accent} />
-        <Text style={styles.optionText}>Choose from Gallery</Text>
-      </TouchableOpacity>
-      <TouchableOpacity style={styles.modalOption} onPress={() => onImagePick(true)} disabled={loading}>
-        <Ionicons name="camera-outline" size={20} color={theme.accent} />
-        <Text style={styles.optionText}>Take Photo</Text>
-      </TouchableOpacity>
-      {previewUri && (
-        <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
-          <TouchableOpacity style={[styles.closeBtn, { flex: 1 }]} onPress={onCancel} disabled={loading}>
-            <Text style={styles.closeText}>Cancel</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.primaryBtn, { flex: 1, marginTop: 0 }]} onPress={onCommit} disabled={loading}>
-            {loading ? <ActivityIndicator color={theme.onPrimary} /> : <Text style={styles.primaryText}>Done</Text>}
-          </TouchableOpacity>
-        </View>
-      )}
-    </View>
-  );
-};
-
-
 type YearLevelDropdownProps = {
   value: string;
   onChange: (val: string) => void;
@@ -2232,63 +1548,6 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "600",
     marginLeft: 12,
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.72)",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  modalCard: {
-    width: "90%",
-    maxWidth: 400,
-    backgroundColor: c.surface,
-    borderRadius: 22,
-    paddingVertical: 20,
-    paddingHorizontal: 18,
-    elevation: 8,
-    borderWidth: 1,
-    borderColor: "rgba(224,165,61,0.22)",
-  },
-  modalHeader: {
-    color: c.primary,
-    fontSize: 18,
-    fontWeight: "bold",
-    textAlign: "center",
-    marginBottom: 14,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(95,9,9,0.08)",
-  },
-  tabRow: {
-    flexDirection: "row",
-    backgroundColor: c.border,
-    borderRadius: 12,
-    padding: 4,
-    gap: 4,
-  },
-  tabButton: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 10,
-    borderRadius: 10,
-  },
-  tabButtonActive: { backgroundColor: c.primary },
-  tabText: {
-    color: c.textMuted,
-    fontSize: 11,
-    textAlign: "center",
-    fontWeight: "600",
-  },
-  tabTextActive: { color: "#fff" },
-  tabContent: { marginVertical: 16 },
-  inputLabel: {
-    color: c.textMuted,
-    fontSize: 12,
-    marginBottom: 4,
-    marginLeft: 2,
-    fontWeight: "600",
-  },
   input: {
     backgroundColor: c.border,
     color: c.textPrimary,
@@ -2299,89 +1558,6 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: "rgba(224,165,61,0.32)",
   },
-  passwordInputWrapper: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: c.border,
-    borderRadius: 10,
-    marginBottom: 12,
-    paddingRight: 8,
-    borderWidth: 1,
-    borderColor: "rgba(224,165,61,0.32)",
-  },
-  passwordInput: { flex: 1, color: c.textPrimary, paddingVertical: 12, paddingRight: 12, fontSize: 14 },
-  pwLeadIcon: { marginLeft: 10, marginRight: 6 },
-  eyeIconPassword: { padding: 8 },
-  primaryBtn: {
-    backgroundColor: c.primary,
-    borderRadius: 10,
-    paddingVertical: 14,
-    alignItems: "center",
-    marginTop: 6,
-    shadowColor: c.primary,
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 3,
-    borderWidth: 1,
-    borderColor: c.textSecondary,
-  },
-  primaryText: { color: "#fff", fontWeight: "700", fontSize: 14 },
-  infoTab: { paddingTop: 2 },
-  fieldLabelRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 6,
-  },
-  verifyChip: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  verifyChipOk: { backgroundColor: "rgba(31,158,110,0.14)" },
-  verifyChipWarn: { backgroundColor: "rgba(214,158,46,0.16)" },
-  inputWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: c.border,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(224,165,61,0.32)",
-    paddingHorizontal: 10,
-    marginBottom: 10,
-  },
-  inputIcon: { marginRight: 8 },
-  inputWithIcon: { flex: 1, color: c.textPrimary, paddingVertical: 12, fontSize: 14 },
-  codeField: { letterSpacing: 4, fontSize: 16 },
-  resendInline: { paddingHorizontal: 8, paddingVertical: 6 },
-  resendInlineText: { color: c.accent, fontWeight: "700", fontSize: 12 },
-  mutedText: { color: c.textMuted },
-  infoNotice: { color: c.success, fontSize: 12, marginBottom: 8, marginTop: 2 },
-  infoError: { color: c.danger, fontSize: 12, marginBottom: 8, marginTop: 2 },
-  btnMuted: { opacity: 0.55 },
-  closeBtn: {
-    backgroundColor: c.surfaceSunken,
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: "center",
-    marginTop: 4,
-    borderWidth: 1,
-    borderColor: c.border,
-  },
-  closeText: { color: c.textMuted, fontWeight: "600", fontSize: 14 },
-  modalOption: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: c.border,
-    padding: 14,
-    borderRadius: 10,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: "rgba(224,165,61,0.24)",
-  },
-  optionText: { color: c.textPrimary, fontSize: 15, marginLeft: 12, fontWeight: "500" },
   dropdown: {
     backgroundColor: c.surface,
     borderColor: c.accent,

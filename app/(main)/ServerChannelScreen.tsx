@@ -20,6 +20,8 @@ import {
 import { markCommunityChannelViewed } from "@/utils/communityUnread";
 import {
     canViewModeratedContent,
+    initialModerationFields,
+    moderateNewContent,
     requestFirestoreModerationDecision,
 } from "@/utils/contentModeration";
 import SafetyDialog from "./components/SafetyDialog";
@@ -2903,10 +2905,9 @@ export default function ServerChannelScreen() {
         serverId: resolvedServerId,
         channelId: resolvedChannelId,
         createdAt: serverTimestamp(),
-        // Server-authoritative moderation: every user message starts pending.
-        moderationStatus: "pending",
-        moderationReasons: [],
-        moderatedAtMs: null,
+        // Students' messages start pending for the Worker; staff messages
+        // start approved, since the Worker would only approve them unread.
+        ...initialModerationFields(isStaffUser),
         // Feature 4: attach the reply snapshot if one is active. The create
         // rule allows extra fields, so no rules change is needed here.
         ...(replyingTo ? { replyTo: replyingTo } : {}),
@@ -2941,7 +2942,7 @@ export default function ServerChannelScreen() {
       void (async () => {
         let moderationDecision;
         try {
-          moderationDecision = await requestFirestoreModerationDecision({
+          moderationDecision = await moderateNewContent(isStaffUser, {
             collectionName: "communityThreadMessages",
             documentId: messageRef.id,
             scope: "thread",

@@ -35,7 +35,7 @@ import { feedImage, videoThumb } from "@/utils/cloudinaryImages";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 import VideoPostMedia from "./components/VideoPostMedia";
 import ConfirmDialog from "./components/ConfirmDialog";
-import { friendlyModerationReasons } from "@/utils/moderationReasons";
+import { friendlyModerationReasons, moderationMediaSummary, safetyReviewLabel } from "@/utils/moderationReasons";
 import { ListSkeleton } from "./components/Skeleton";
 import { createModerationNotification } from "@/utils/notifications";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
@@ -121,11 +121,14 @@ const getCollectionName = (type: ModerationType) => {
 };
 
 const getTextSelector = (type: ModerationType, data: any): string => {
-  if (type === "post") return data.content || "[empty post]";
-  if (type === "poll") return data.question || "[empty poll]";
-  if (type === "comment") return data.text || "[empty comment]";
-  if (type === "reply") return data.text || "[empty reply]";
-  return data.text || "[empty message]";
+  const raw =
+    type === "post" ? data.content : type === "poll" ? data.question : data.text;
+  if (typeof raw === "string" && raw.trim()) return raw;
+  // A photo with no caption is a complete post, not an empty one; the media
+  // preview below says everything. The marker is kept only for items that
+  // really have nothing in them.
+  if (moderationMediaSummary(data)) return "";
+  return `[empty ${type}]`;
 };
 
 // Pulls out whatever preview media exists on a pending item — an image, a
@@ -194,6 +197,10 @@ const matchesMediaFilter = (item: ModerationItem, filter: MediaFilter): boolean 
   if (filter === "url") return !!item.linkUrl;
   return !item.imageUrl && !item.videoUrl && !item.linkUrl;
 };
+
+/** What a text-less item is, for places that need words: "📷 Photo". */
+const moderationMediaPreview = (item: ModerationItem): string =>
+  item.videoUrl ? "🎬 Video" : item.imageUrl ? "📷 Photo" : item.linkUrl ? "🔗 Link" : "";
 
 const selectionKey = (item: Pick<ModerationItem, "type" | "id">) => `${item.type}:${item.id}`;
 
@@ -449,7 +456,7 @@ export default function ManageModerationScreen() {
           entityType: item.type,
           entityId: item.id,
           reasons: item.reasons,
-          preview: item.text,
+          preview: item.text || moderationMediaPreview(item),
         }).catch((error) => {
           console.error("Error sending moderation notification:", error);
         });
@@ -613,7 +620,7 @@ export default function ManageModerationScreen() {
                 entityType: item.type,
                 entityId: item.id,
                 reasons: item.reasons,
-                preview: item.text,
+                preview: item.text || moderationMediaPreview(item),
               }).catch((error) => {
                 console.error("Error sending moderation notification:", error);
               });
@@ -979,19 +986,16 @@ const ModerationCard = React.memo(function ModerationCard({
         <View style={styles.criticalBanner}>
           <Ionicons name="warning" size={15} color={theme.danger} />
           <Text style={styles.criticalText}>
-            PRIORITY SAFETY REVIEW ·{" "}
-            {item.safetyType === "weapon"
-              ? "WEAPON-RELATED TERM"
-              : item.safetyType === "self-harm"
-                ? "SELF-HARM / INTENT"
-                : "FLAGGED FOR REVIEW"}
+            PRIORITY SAFETY REVIEW · {safetyReviewLabel(item.safetyType, item.categories)}
           </Text>
         </View>
       )}
 
-      <Text style={styles.reviewBody} numberOfLines={5}>
-        {item.text}
-      </Text>
+      {!!item.text && (
+        <Text style={styles.reviewBody} numberOfLines={5}>
+          {item.text}
+        </Text>
+      )}
 
       {!!item.imageUrl && (
         <TouchableOpacity

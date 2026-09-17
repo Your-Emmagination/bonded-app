@@ -113,7 +113,19 @@ import ServerDrawer, {
   ServerMemberPreview,
 } from "../components/ServerDrawer";
 import { FeedSkeleton } from "../components/Skeleton";
+import LiveCard from "../components/LiveCard";
 import { useThemeColors } from "@/contexts/ThemeContext";
+import {
+  subscribeToActiveStreams,
+  type LiveStream,
+} from "@/utils/liveStreams";
+import {
+  getLostFoundStatus,
+  isLostFoundArchived,
+  LOST_FOUND_STATUSES,
+  lostFoundStatusColors,
+  type LostFoundStatus,
+} from "@/utils/lostFoundStatus";
 import type { ThemeTokens } from "@/utils/theme";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -167,6 +179,9 @@ type Post = {
   moderatedAtMs?: number;
   moderationReasons?: string[];
   flair?: string;
+  lostFoundStatus?: string;
+  returnedAt?: any;
+  resolvedAt?: any;
 };
 
 
@@ -469,20 +484,53 @@ const isGlobalFeedItem = (item: FeedItem) => !item.serverId;
  * Shared by the rendered list and by the new-posts pill's count, so the pill
  * can never promise items that would be filtered out on arrival.
  */
+type LostFoundFeedFields = {
+  flair?: string | null;
+  lostFoundStatus?: unknown;
+  returnedAt?: unknown;
+  resolvedAt?: unknown;
+};
+
+/**
+ * Whether a feed item should show under the current filters.
+ *
+ * `lostFoundFilter` only means anything while the flair filter is Lost &
+ * Found. `archiveNowMs` turns on archiving: returned Lost & Found items drop
+ * out of the list after a week — except under the Returned filter, which is
+ * precisely how somebody finds them again. Callers that leave it out (the
+ * trending and staging calculations) keep their behaviour unchanged.
+ */
 const isDisplayableFeedItem = (
   item: FeedItem,
   flairFilter: "all" | PostFlairId,
+  lostFoundFilter: "all" | LostFoundStatus = "all",
+  archiveNowMs?: number,
 ) => {
   if (!isGlobalFeedItem(item)) return false;
 
   const status = String(item.moderationStatus ?? "approved").toLowerCase();
   if (status !== "approved") return false;
 
+  const showingReturned =
+    flairFilter === "lost_found" && lostFoundFilter === "returned";
+  if (
+    archiveNowMs !== undefined &&
+    !showingReturned &&
+    isLostFoundArchived(item as LostFoundFeedFields, archiveNowMs)
+  ) {
+    return false;
+  }
+
   if (flairFilter === "all") return true;
 
   // Posts and polls share the same flair taxonomy. Legacy items with no
   // flair are treated as Discussion by normalizePostFlair().
-  return normalizePostFlair(item.flair) === flairFilter;
+  if (normalizePostFlair(item.flair) !== flairFilter) return false;
+
+  if (flairFilter === "lost_found" && lostFoundFilter !== "all") {
+    return getLostFoundStatus(item as LostFoundFeedFields) === lostFoundFilter;
+  }
+  return true;
 };
 
 // A post the signed-in user just wrote always goes straight in — nobody wants
@@ -560,6 +608,12 @@ const HomeScreen = () => {
   const [user, setUser] = useState<User | null>(null);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [selectedFlairFilter, setSelectedFlairFilter] = useState<"all" | PostFlairId>("all");
+  // The status chips under Lost & Found. Only consulted while that flair is
+  // the filter, and reset whenever the flair changes.
+  const [lostFoundFilter, setLostFoundFilter] = useState<"all" | LostFoundStatus>("all");
+  // Archiving is measured in days, so the clock behind it only needs to move
+  // hourly (and when the app comes back to the foreground).
+  const archiveNowMs = useRelativeTimeNow(60 * 60 * 1000);
 
   // Live arrivals held back from the list while the reader is scrolled away
   // from the top. Each listener owns its own half and rebuilds it from every
@@ -1009,9 +1063,9 @@ const selectedChannel = useMemo(() => {
   const visibleFeedItems = useMemo(
     () =>
       feedItems.filter((item) =>
-        isDisplayableFeedItem(item, selectedFlairFilter),
+        isDisplayableFeedItem(item, selectedFlairFilter, lostFoundFilter, archiveNowMs),
       ),
-    [feedItems, selectedFlairFilter],
+    [feedItems, selectedFlairFilter, lostFoundFilter, archiveNowMs],
   );
 
   // Only the staged items the reader would actually get, so the pill's count
@@ -1019,9 +1073,9 @@ const selectedChannel = useMemo(() => {
   const stagedFeedCount = useMemo(
     () =>
       [...stagedPosts, ...stagedPolls].filter((item) =>
-        isDisplayableFeedItem(item, selectedFlairFilter),
+        isDisplayableFeedItem(item, selectedFlairFilter, lostFoundFilter, archiveNowMs),
       ).length,
-    [stagedPosts, stagedPolls, selectedFlairFilter],
+    [stagedPosts, stagedPolls, selectedFlairFilter, lostFoundFilter, archiveNowMs],
   );
   const hasStagedFeedItems = stagedFeedCount > 0;
 
@@ -1490,24 +1544,29 @@ const selectedChannel = useMemo(() => {
     fetchCurrentUserProfile();
   }, [user, isOffline, currentUserProfile]);
 
+  // Fast path: the profile this phone saved last time, so the greeting and
+  // the avatar are right the moment Home opens. It used to apply only when
+  // the saved copy had a photo — so anyone without one waited on the network
+  // and was greeted as "there" — and not at all offline, which is exactly
+  // when a saved copy matters most.
   useEffect(() => {
-    if (!user?.uid || isOffline) return;
-
-    // Fast-path: read from persistent offline profile cache so avatar displays immediately on reload
-    getCachedMyProfile<any>(user.uid)
+    if (!user?.uid) return;
+    const uid = user.uid;
+    getCachedMyProfile<any>(uid)
       .then((cached) => {
-        if (cached && (cached.profileImage || cached.profilePic)) {
-          setCurrentUserProfile((prev: any) => ({
-            ...(prev || {}),
-            ...cached,
-            uid: user.uid,
-            userId: user.uid,
-            profileImage: cached.profileImage || cached.profilePic || prev?.profileImage || null,
-            profilePic: cached.profileImage || cached.profilePic || prev?.profilePic || null,
-          }));
-        }
+        if (!cached) return;
+        setCurrentUserProfile((prev: any) => {
+          // Anything the network already delivered is newer than the cache.
+          const merged = { ...cached, ...(prev || {}) };
+          const image = merged.profileImage || merged.profilePic || null;
+          return { ...merged, uid, userId: uid, profileImage: image, profilePic: image };
+        });
       })
       .catch(() => {});
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (!user?.uid || isOffline) return;
 
     // Initial load
     getUserDataByAuthUser(user)
@@ -3406,15 +3465,9 @@ const handleSelectChannel = useCallback(
     } else if (action === "polls") {
       router.push("/CreatePollScreen");
     } else if (action === "live") {
-      router.push({
-        pathname: "/LiveStreamScreen",
-        params: {
-          serverId: selectedServer?.id || "",
-          serverName: selectedServer?.name || "",
-          channelId: selectedChannel?.id || "",
-          channelLabel: selectedChannel?.label || "",
-        },
-      });
+      // Streams belong to the campus feed, not to a server channel, so no
+      // server context is carried across.
+      router.push("/GoLiveScreen");
     }
   };
 
@@ -3725,6 +3778,10 @@ const handleSelectChannel = useCallback(
       // Only change the feed filter. Do not programmatically move the
       // horizontal flair row; it should stay exactly where the user left it.
       setSelectedFlairFilter(flairId);
+      // A status chosen under Lost & Found means nothing under another flair,
+      // and coming back to a forgotten "Returned" would look like an empty
+      // feed.
+      setLostFoundFilter("all");
     },
     [],
   );
@@ -3914,13 +3971,31 @@ const handleSelectChannel = useCallback(
     [visibleFeedItems],
   );
 
+  // Whoever is broadcasting right now. Live sits above everything else in
+  // the header because it is the only thing on this screen that stops being
+  // true while you look at it.
+  const [activeStreams, setActiveStreams] = useState<LiveStream[]>([]);
+  useEffect(() => subscribeToActiveStreams(setActiveStreams), []);
+
+  const openLiveStream = useCallback(
+    (stream: LiveStream) => {
+      router.push({
+        pathname: "/(main)/LiveStreamScreen",
+        params: { streamId: stream.id },
+      } as any);
+    },
+    [router],
+  );
+
   const renderFeedHeader = useCallback(() => {
     const displayNameParts =
       user?.displayName?.trim().split(/\s+/).filter(Boolean) || [];
+    // No name yet means no name, not "there": it reads as a mistake the
+    // moment the real one replaces it.
     const lastName =
       currentUserProfile?.lastname?.trim() ||
       displayNameParts[displayNameParts.length - 1] ||
-      "there";
+      "";
 
     return (
       <>
@@ -3996,13 +4071,23 @@ const handleSelectChannel = useCallback(
               transform: [{ translateY: welcomeCopyTranslateY }],
             }}
           >
-            <Text style={styles.feedWelcomeTitle}>Good day, {lastName} 👋</Text>
+            <Text style={styles.feedWelcomeTitle}>
+              {lastName ? `Good day, ${lastName} 👋` : "Good day 👋"}
+            </Text>
             <Text style={styles.feedWelcomeSubtitle}>
               Stay connected with campus news, events, conversations, and student updates.
             </Text>
           </Animated.View>
         </View>
       </Animated.View>
+
+      {activeStreams.length > 0 && (
+        <View style={styles.liveSection}>
+          {activeStreams.map((stream) => (
+            <LiveCard key={stream.id} stream={stream} onPress={openLiveStream} />
+          ))}
+        </View>
+      )}
 
       {activeAnnouncements.length > 0 && (
         <AnnouncementCarousel
@@ -4080,14 +4165,61 @@ const handleSelectChannel = useCallback(
             );
           })}
         </ScrollView>
+
+        {selectedFlairFilter === "lost_found" && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={[styles.flairFilterContent, styles.lostFoundFilterContent]}
+          >
+            {(["all", ...LOST_FOUND_STATUSES.map((item) => item.id)] as const).map(
+              (statusId) => {
+                const active = lostFoundFilter === statusId;
+                const info = LOST_FOUND_STATUSES.find((item) => item.id === statusId);
+                const tones = info ? lostFoundStatusColors(info.id, theme) : null;
+                return (
+                  <TouchableOpacity
+                    key={statusId}
+                    style={[
+                      styles.lostFoundFilterChip,
+                      active &&
+                        (tones
+                          ? { backgroundColor: tones.fill, borderColor: tones.line }
+                          : styles.flairFilterChipActive),
+                    ]}
+                    onPress={() => setLostFoundFilter(statusId)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                  >
+                    {info && <Text style={styles.flairFilterEmoji}>{info.emoji}</Text>}
+                    <Text
+                      style={[
+                        styles.flairFilterText,
+                        active &&
+                          (tones ? { color: tones.ink } : styles.flairFilterTextActive),
+                      ]}
+                    >
+                      {info ? info.label : "All"}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              },
+            )}
+          </ScrollView>
+        )}
       </View>
       </>
     );
   }, [
     activeAnnouncements,
+    activeStreams,
+    openLiveStream,
+    styles,
+    theme,
     currentUserProfile?.lastname,
     handleAnnouncementCardPress,
     handleFlairFilterPress,
+    lostFoundFilter,
     onlineUsersCount,
     renderTrendingPost,
     selectedFlairFilter,
@@ -4720,6 +4852,7 @@ export default HomeScreen;
 
 const makeStyles = (c: ThemeTokens) =>
   StyleSheet.create({
+  liveSection: { borderTopWidth: 1, borderTopColor: c.border },
   container: { 
     flex: 1, 
     backgroundColor: c.chrome 
@@ -4872,6 +5005,8 @@ const makeStyles = (c: ThemeTokens) =>
   },
   flairFilterSection: { marginBottom: 10 },
   flairFilterContent: { paddingHorizontal: 14, gap: 8, paddingRight: 22 },
+  lostFoundFilterContent: { marginTop: 8 },
+  lostFoundFilterChip: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 11, paddingVertical: 6, borderRadius: 16, backgroundColor: c.surfaceSunken, borderWidth: 1, borderColor: c.border },
   flairFilterChip: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18, backgroundColor: c.surface, borderWidth: 1, borderColor: c.border },
   flairFilterChipActive: { backgroundColor: c.primary, borderColor: c.primary },
   flairFilterEmoji: { fontSize: 13 },

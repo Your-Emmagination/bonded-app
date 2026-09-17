@@ -4,9 +4,11 @@ const APP_TOAST_EVENT = "bonded.appToast.show";
 
 export type AppToastOptions = {
   message: string;
-  // Optional button, e.g. "View", that opens `actionHref` when tapped.
+  // Optional button, e.g. "View", that opens `actionHref` when tapped —
+  // or, e.g. "Undo", that runs `onAction`.
   actionLabel?: string;
   actionHref?: string;
+  onAction?: () => void;
 };
 
 export const showAppToast = (options: AppToastOptions) => {

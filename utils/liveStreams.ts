@@ -1,0 +1,495 @@
+// utils/liveStreams.ts
+//
+// Live streams in the Home feed.
+//
+// Everything here is Firestore: who is live, the running comments, the hearts,
+// the viewer count and the moderator kill switch. None of it knows how the
+// video itself is carried, which is the point — the `provider` and
+// `playbackUrl` fields describe the pipe, and swapping Agora for Cloudflare
+// (or the reverse) changes those two fields and nothing else in this file.
+//
+// That separation is deliberate: the social half is what makes a stream feel
+// live, it costs nothing, and it works in Expo Go. The video half needs a
+// native module and a vendor. Building them apart means the feature still
+// demos if the vendor falls through.
+import {
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  increment,
+  limit as fsLimit,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+} from "firebase/firestore";
+
+import { db } from "../Firebase_configure";
+import { timestampMs } from "./supportTickets";
+
+/**
+ * "live" is the only state the feed shows. "ended" is a finished stream, kept
+ * so a replay can be watched. "blocked" is a moderator ending someone else's
+ * stream — separate from "ended" so the difference survives in the record.
+ */
+export type LiveStatus = "live" | "ended" | "blocked";
+
+/** Which service is carrying the video. Null until a stream actually starts. */
+export type LiveProvider = "agora" | "cloudflare";
+
+export type LiveStream = {
+  id: string;
+  hostId: string;
+  hostName: string;
+  hostAvatar: string | null;
+  hostRole: string;
+  title: string;
+  status: LiveStatus;
+
+  /** The video pipe. Everything else in this file ignores these. */
+  provider: LiveProvider | null;
+  /** Agora channel name, or the Cloudflare live input id. */
+  channelName: string | null;
+  /** HLS URL for Cloudflare. Null for Agora, which viewers join by channel. */
+  playbackUrl: string | null;
+  /** Set once a recording of a finished stream exists. */
+  replayUrl: string | null;
+
+  startedAt: any;
+  endedAt: any;
+  /** Who ended it, when that was not the host. */
+  endedBy: string | null;
+  endedByName: string | null;
+
+  viewerCount: number;
+  peakViewers: number;
+  commentCount: number;
+  reactionCount: number;
+
+  /**
+   * What the host has switched off. Kept on the document, not read from the
+   * video pipe, so somebody who joins late sees the right state at once
+   * rather than a frozen frame until the next change.
+   */
+  micMuted: boolean;
+  cameraOff: boolean;
+
+  /** The comment the host has pinned above the chat, if any. */
+  pinnedComment: PinnedLiveComment | null;
+};
+
+/**
+ * A copy of the pinned comment, not a reference to it. Chat only keeps the
+ * newest comments on screen, so a pin that pointed at an old one would vanish
+ * as the conversation moved on — which is the opposite of what pinning is for.
+ */
+export type PinnedLiveComment = {
+  id: string;
+  authorName: string;
+  text: string;
+};
+
+/** How many comments a viewer keeps on screen. Live chat is not a transcript. */
+export const LIVE_COMMENT_WINDOW = 100;
+
+/** A viewer is counted as present if they checked in within this long. */
+export const VIEWER_STALE_MS = 45_000;
+
+/** How often a watching client refreshes its presence doc. */
+export const VIEWER_HEARTBEAT_MS = 20_000;
+
+export type LiveComment = {
+  id: string;
+  authorId: string;
+  authorName: string;
+  authorAvatar: string | null;
+  text: string;
+  createdAt: any;
+  /** Hidden by the host or a moderator; kept rather than deleted. */
+  hidden: boolean;
+};
+
+const toStream = (id: string, data: any): LiveStream => ({
+  id,
+  hostId: String(data?.hostId || ""),
+  hostName: String(data?.hostName || "Unknown"),
+  hostAvatar: data?.hostAvatar ?? null,
+  hostRole: String(data?.hostRole || "student"),
+  title: String(data?.title || ""),
+  status: (data?.status || "ended") as LiveStatus,
+  provider: (data?.provider ?? null) as LiveProvider | null,
+  channelName: data?.channelName ?? null,
+  playbackUrl: data?.playbackUrl ?? null,
+  replayUrl: data?.replayUrl ?? null,
+  startedAt: data?.startedAt,
+  endedAt: data?.endedAt,
+  endedBy: data?.endedBy ?? null,
+  endedByName: data?.endedByName ?? null,
+  viewerCount: Number(data?.viewerCount || 0),
+  peakViewers: Number(data?.peakViewers || 0),
+  commentCount: Number(data?.commentCount || 0),
+  reactionCount: Number(data?.reactionCount || 0),
+  micMuted: data?.micMuted === true,
+  cameraOff: data?.cameraOff === true,
+  pinnedComment:
+    data?.pinnedComment && typeof data.pinnedComment.id === "string"
+      ? {
+          id: data.pinnedComment.id,
+          authorName: String(data.pinnedComment.authorName || ""),
+          text: String(data.pinnedComment.text || ""),
+        }
+      : null,
+});
+
+const toComment = (id: string, data: any): LiveComment => ({
+  id,
+  authorId: String(data?.authorId || ""),
+  authorName: String(data?.authorName || "Unknown"),
+  authorAvatar: data?.authorAvatar ?? null,
+  text: String(data?.text || ""),
+  createdAt: data?.createdAt,
+  hidden: data?.hidden === true,
+});
+
+// ── Starting and ending ───────────────────────────────────────────────────
+
+export type StartLiveInput = {
+  hostId: string;
+  hostName: string;
+  hostAvatar?: string | null;
+  hostRole?: string | null;
+  title: string;
+  provider?: LiveProvider | null;
+  channelName?: string | null;
+  playbackUrl?: string | null;
+};
+
+/**
+ * Opens a stream and returns its id.
+ *
+ * The document is created before any video exists, so the feed card and the
+ * comment room are ready the moment the camera connects. A stream that never
+ * gets video is just a stream with no pictures — the rest still works.
+ */
+export async function startLiveStream(input: StartLiveInput): Promise<string> {
+  const ref = await addDoc(collection(db, "liveStreams"), {
+    hostId: input.hostId,
+    hostName: input.hostName,
+    hostAvatar: input.hostAvatar ?? null,
+    hostRole: input.hostRole || "student",
+    title: input.title.trim().slice(0, 120) || "Live",
+    status: "live" as LiveStatus,
+    provider: input.provider ?? null,
+    channelName: input.channelName ?? null,
+    playbackUrl: input.playbackUrl ?? null,
+    replayUrl: null,
+    startedAt: serverTimestamp(),
+    endedAt: null,
+    endedBy: null,
+    endedByName: null,
+    viewerCount: 0,
+    peakViewers: 0,
+    commentCount: 0,
+    reactionCount: 0,
+    micMuted: false,
+    cameraOff: false,
+    pinnedComment: null,
+  });
+  return ref.id;
+}
+
+/** The host closing their own stream. */
+export async function endLiveStream(streamId: string): Promise<void> {
+  await updateDoc(doc(db, "liveStreams", streamId), {
+    status: "ended" as LiveStatus,
+    endedAt: serverTimestamp(),
+    viewerCount: 0,
+  });
+}
+
+/**
+ * A moderator ending someone else's stream.
+ *
+ * The one control that matters most here. None of the app's text moderation
+ * reaches live video — no keyword list reads a camera — so the only real
+ * defence is a person watching and a button that works immediately. Viewers
+ * are already subscribed to this document, so the status change reaches every
+ * screen on the next snapshot without anything else being notified.
+ */
+export async function blockLiveStream(
+  streamId: string,
+  moderator: { id: string; name: string },
+): Promise<void> {
+  await updateDoc(doc(db, "liveStreams", streamId), {
+    status: "blocked" as LiveStatus,
+    endedAt: serverTimestamp(),
+    endedBy: moderator.id,
+    endedByName: moderator.name,
+    viewerCount: 0,
+  });
+}
+
+/** Attaches the video pipe once the vendor hands back its identifiers. */
+export async function attachLiveVideo(
+  streamId: string,
+  video: {
+    provider: LiveProvider;
+    channelName?: string | null;
+    playbackUrl?: string | null;
+  },
+): Promise<void> {
+  await updateDoc(doc(db, "liveStreams", streamId), {
+    provider: video.provider,
+    channelName: video.channelName ?? null,
+    playbackUrl: video.playbackUrl ?? null,
+  });
+}
+
+/** The host switching their mic or camera; only the fields passed change. */
+export async function setLiveMediaState(
+  streamId: string,
+  patch: { micMuted?: boolean; cameraOff?: boolean },
+): Promise<void> {
+  const update: Record<string, boolean> = {};
+  if (typeof patch.micMuted === "boolean") update.micMuted = patch.micMuted;
+  if (typeof patch.cameraOff === "boolean") update.cameraOff = patch.cameraOff;
+  if (Object.keys(update).length === 0) return;
+  await updateDoc(doc(db, "liveStreams", streamId), update);
+}
+
+export async function pinLiveComment(
+  streamId: string,
+  comment: Pick<LiveComment, "id" | "authorName" | "text">,
+): Promise<void> {
+  await updateDoc(doc(db, "liveStreams", streamId), {
+    pinnedComment: {
+      id: comment.id,
+      authorName: comment.authorName,
+      text: comment.text.slice(0, 200),
+    },
+  });
+}
+
+/** Also what hiding a pinned comment does, so a removed comment can't stay pinned. */
+export async function unpinLiveComment(streamId: string): Promise<void> {
+  await updateDoc(doc(db, "liveStreams", streamId), { pinnedComment: null });
+}
+
+/** Records the replay URL after a finished stream has been processed. */
+export async function setLiveReplayUrl(
+  streamId: string,
+  replayUrl: string,
+): Promise<void> {
+  await updateDoc(doc(db, "liveStreams", streamId), { replayUrl });
+}
+
+// ── Reading ───────────────────────────────────────────────────────────────
+
+/**
+ * Whoever is live right now, newest first — the Home feed's source.
+ *
+ * Ordering happens in memory rather than in the query: a where + orderBy on
+ * different fields needs a deployed composite index, and the number of
+ * simultaneous streams on one campus is small enough that it never matters.
+ */
+export function subscribeToActiveStreams(
+  onStreams: (streams: LiveStream[]) => void,
+): () => void {
+  return onSnapshot(
+    query(collection(db, "liveStreams"), where("status", "==", "live")),
+    (snapshot) => {
+      const rows = snapshot.docs.map((item) => toStream(item.id, item.data()));
+      rows.sort((a, b) => timestampMs(b.startedAt) - timestampMs(a.startedAt));
+      onStreams(rows);
+    },
+    (error) => console.error("Live streams listener failed:", error),
+  );
+}
+
+/** One stream. Also how viewers learn it was ended or blocked. */
+export function subscribeToStream(
+  streamId: string,
+  onStream: (stream: LiveStream | null) => void,
+): () => void {
+  return onSnapshot(
+    doc(db, "liveStreams", streamId),
+    (snapshot) =>
+      onStream(snapshot.exists() ? toStream(snapshot.id, snapshot.data()) : null),
+    (error) => console.error("Live stream listener failed:", error),
+  );
+}
+
+export async function getLiveStream(streamId: string): Promise<LiveStream | null> {
+  const snapshot = await getDoc(doc(db, "liveStreams", streamId));
+  return snapshot.exists() ? toStream(snapshot.id, snapshot.data()) : null;
+}
+
+// ── Comments ──────────────────────────────────────────────────────────────
+
+/**
+ * The running comments, oldest first so the list reads downward.
+ *
+ * Firestore can only take the *newest* N with a descending order, so the
+ * window is fetched descending and reversed here.
+ */
+export function subscribeToLiveComments(
+  streamId: string,
+  onComments: (comments: LiveComment[]) => void,
+): () => void {
+  return onSnapshot(
+    query(
+      collection(db, "liveStreams", streamId, "comments"),
+      orderBy("createdAt", "desc"),
+      fsLimit(LIVE_COMMENT_WINDOW),
+    ),
+    (snapshot) => {
+      const rows = snapshot.docs.map((item) => toComment(item.id, item.data()));
+      rows.reverse();
+      onComments(rows.filter((row) => !row.hidden));
+    },
+    (error) => console.error("Live comments listener failed:", error),
+  );
+}
+
+export async function postLiveComment(input: {
+  streamId: string;
+  authorId: string;
+  authorName: string;
+  authorAvatar?: string | null;
+  text: string;
+}): Promise<void> {
+  const text = input.text.trim().slice(0, 200);
+  if (!text) return;
+
+  await addDoc(collection(db, "liveStreams", input.streamId, "comments"), {
+    authorId: input.authorId,
+    authorName: input.authorName,
+    authorAvatar: input.authorAvatar ?? null,
+    text,
+    createdAt: serverTimestamp(),
+    hidden: false,
+  });
+  await updateDoc(doc(db, "liveStreams", input.streamId), {
+    commentCount: increment(1),
+  });
+}
+
+/**
+ * Takes a comment off screen.
+ *
+ * Hidden rather than deleted, so a moderator reviewing a stream afterwards can
+ * still see what was said and by whom.
+ */
+export async function hideLiveComment(
+  streamId: string,
+  commentId: string,
+): Promise<void> {
+  await updateDoc(doc(db, "liveStreams", streamId, "comments", commentId), {
+    hidden: true,
+  });
+}
+
+// ── Reactions ─────────────────────────────────────────────────────────────
+
+/**
+ * Hearts, as a counter rather than a document each.
+ *
+ * People tap these continuously, and a document per tap would be thousands of
+ * writes for something nobody ever reads back. Clients watch the counter and
+ * float one heart per increment they see, which looks the same and costs a
+ * fraction as much.
+ */
+export async function sendLiveReaction(
+  streamId: string,
+  count = 1,
+): Promise<void> {
+  if (count < 1) return;
+  await updateDoc(doc(db, "liveStreams", streamId), {
+    reactionCount: increment(count),
+  });
+}
+
+// ── Presence ──────────────────────────────────────────────────────────────
+
+/**
+ * Marks this viewer present, and keeps the mark fresh.
+ *
+ * Returns a function that removes the presence document. A client that dies
+ * without calling it leaves a stale document instead of an inflated count —
+ * `countActiveViewers` ignores anything that has stopped checking in.
+ */
+export function joinAsViewer(
+  streamId: string,
+  viewer: { id: string; name: string },
+): () => void {
+  const ref = doc(db, "liveStreams", streamId, "viewers", viewer.id);
+  const touch = () =>
+    setDoc(
+      ref,
+      {
+        userId: viewer.id,
+        name: viewer.name,
+        joinedAt: serverTimestamp(),
+        lastSeenAt: serverTimestamp(),
+      },
+      { merge: true },
+    ).catch(() => undefined);
+
+  touch();
+  const timer = setInterval(touch, VIEWER_HEARTBEAT_MS);
+
+  return () => {
+    clearInterval(timer);
+    deleteDoc(ref).catch(() => undefined);
+  };
+}
+
+/**
+ * Watches who is present and reports the live count.
+ *
+ * Only the host's screen should call this. Every viewer subscribing to every
+ * other viewer is a read for each pair, which grows with the square of the
+ * audience; instead the host publishes the number onto the stream document,
+ * which viewers are already watching and get for free.
+ */
+export function subscribeToViewerCount(
+  streamId: string,
+  onCount: (count: number) => void,
+): () => void {
+  return onSnapshot(
+    collection(db, "liveStreams", streamId, "viewers"),
+    (snapshot) => {
+      const cutoff = Date.now() - VIEWER_STALE_MS;
+      const active = snapshot.docs.filter((item) => {
+        const seen = timestampMs(item.data()?.lastSeenAt);
+        // A document written moments ago has no server timestamp yet; treat
+        // that as present rather than blinking the count down.
+        return seen === 0 || seen >= cutoff;
+      }).length;
+      onCount(active);
+    },
+    (error) => console.error("Viewer presence listener failed:", error),
+  );
+}
+
+/** Publishes the count onto the stream, and raises the peak when passed. */
+export async function publishViewerCount(
+  streamId: string,
+  count: number,
+  previousPeak: number,
+): Promise<void> {
+  const patch: Record<string, unknown> = { viewerCount: count };
+  if (count > previousPeak) patch.peakViewers = count;
+  await updateDoc(doc(db, "liveStreams", streamId), patch).catch(() => undefined);
+}
+
+/** Whether this person may end somebody else's stream. */
+export function canModerateLive(role: string | null | undefined): boolean {
+  const normalized = String(role || "").toLowerCase();
+  return normalized === "admin" || normalized === "moderator" || normalized === "teacher";
+}

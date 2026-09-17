@@ -1,5 +1,6 @@
-import { doc, getDoc, serverTimestamp, updateDoc } from "firebase/firestore";
+import { doc, getDoc, updateDoc } from "firebase/firestore";
 import { db } from "../Firebase_configure";
+import { getLostFoundStatus, updateLostFoundStatus } from "./lostFoundStatus";
 import { RESOLUTION_DETECTOR_MODEL } from "./resolutionDetectorModel";
 
 /**
@@ -105,6 +106,7 @@ type ResolutionPrompt = {
 export type LostAndFoundPostFields = {
   flair?: string;
   resolvedAt?: unknown;
+  lostFoundStatus?: unknown;
   resolutionPrompt?: ResolutionPrompt | null;
 };
 
@@ -128,7 +130,8 @@ export const flagPotentialResolution = async (input: {
   if (!postSnap.exists()) return;
   const post = postSnap.data() as LostAndFoundPostFields;
   if (post.flair !== "lost_found") return;
-  if (post.resolvedAt != null) return; // already resolved, nothing to flag
+  // Already returned: nothing left to ask the poster about.
+  if (getLostFoundStatus(post) === "returned") return;
 
   const prompt: ResolutionPrompt = {
     commentId,
@@ -140,15 +143,15 @@ export const flagPotentialResolution = async (input: {
 };
 
 /**
- * Poster confirms the item was found — the ONLY place resolvedAt is ever
- * set. Caller is responsible for verifying the confirming user is actually
- * the post owner before calling this (Firestore rules also enforce it).
+ * Poster confirms the item is back with its owner. Goes through the status
+ * update, which sets resolvedAt alongside "returned" so every reader of either
+ * field agrees. Firestore rules check the caller may change this post.
  */
-export const confirmLostAndFoundResolution = async (postId: string): Promise<void> => {
-  await updateDoc(doc(db, "posts", postId), {
-    resolvedAt: serverTimestamp(),
-    resolutionPrompt: null,
-  });
+export const confirmLostAndFoundResolution = async (
+  postId: string,
+  actorUserId: string,
+): Promise<void> => {
+  await updateLostFoundStatus(postId, "returned", actorUserId);
 };
 
 /**

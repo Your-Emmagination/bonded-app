@@ -14,6 +14,7 @@ import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { getTimeAgo, useRelativeTimeNow } from "@/utils/relativeTime";
 import { useNetworkStatus } from "@/utils/networkUtils";
+import { showAppToast } from "@/utils/toastEvents";
 import {
     getCachedConversations,
     saveCachedConversations,
@@ -24,6 +25,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useFocusEffect, useRouter } from "expo-router";
 import { collection, onSnapshot } from "firebase/firestore";
+import ReanimatedSwipeable, {
+    type SwipeableMethods,
+} from "react-native-gesture-handler/ReanimatedSwipeable";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
@@ -62,6 +66,8 @@ interface ConversationRowProps {
   nowMs: number;
   onPress: (conversation: DirectConversation, otherUser: { uid: string; displayName: string; avatarUri: string | null }) => void;
   onActions: (conversation: DirectConversation, name: string) => void;
+  /** Archive, or bring back from Archived — from a swipe or the row's button. */
+  onToggleArchive: (conversation: DirectConversation, name: string, archive: boolean) => void;
   deleting: boolean;
 }
 
@@ -71,6 +77,7 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
   nowMs,
   onPress,
   onActions,
+  onToggleArchive,
   deleting,
 }) => {
   // The row reads the palette itself rather than taking styles as a prop: it
@@ -137,6 +144,33 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
     return text;
   }, [lastMessage, isOwnLastMessage]);
 
+  const archived = isConversationArchived(conversation, currentUserId);
+
+  // Swiping left uncovers one button: Archive in Chats, Unarchive in
+  // Archived. It still needs a tap, so a stray swipe while scrolling never
+  // moves a conversation on its own.
+  const renderSwipeAction = useCallback(
+    (_progress: unknown, _translation: unknown, swipeable: SwipeableMethods) => (
+      <Pressable
+        style={[styles.swipeAction, archived && styles.swipeActionRestore]}
+        onPress={() => {
+          swipeable.close();
+          onToggleArchive(conversation, displayName, !archived);
+        }}
+        accessibilityRole="button"
+        accessibilityLabel={archived ? "Unarchive conversation" : "Archive conversation"}
+      >
+        <Ionicons
+          name={archived ? "arrow-undo-outline" : "archive-outline"}
+          size={22}
+          color={theme.onPrimary}
+        />
+        <Text style={styles.swipeActionText}>{archived ? "Unarchive" : "Archive"}</Text>
+      </Pressable>
+    ),
+    [archived, conversation, displayName, onToggleArchive, styles, theme.onPrimary],
+  );
+
   const handlePress = useCallback(() => {
     onPress(conversation, {
       uid: otherUserId,
@@ -146,6 +180,13 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
   }, [onPress, conversation, otherUserId, displayName, otherUserAvatar]);
 
   return (
+    <ReanimatedSwipeable
+      renderRightActions={renderSwipeAction}
+      friction={2}
+      rightThreshold={40}
+      overshootRight={false}
+      enabled={!deleting}
+    >
     <Pressable
       style={({ pressed }) => [
         styles.conversationItem,
@@ -157,10 +198,14 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
       disabled={deleting}
       accessibilityRole="button"
       accessibilityLabel={`Chat with ${displayName}`}
-      accessibilityHint="Long-press for archive and delete options."
-      accessibilityActions={[{ name: "options", label: "Conversation options" }]}
+      accessibilityHint="Swipe left to archive, or long-press for more options."
+      accessibilityActions={[
+        { name: "options", label: "Conversation options" },
+        { name: "archive", label: archived ? "Unarchive" : "Archive" },
+      ]}
       onAccessibilityAction={({ nativeEvent }) => {
         if (nativeEvent.actionName === "options") onActions(conversation, displayName);
+        if (nativeEvent.actionName === "archive") onToggleArchive(conversation, displayName, !archived);
       }}
     >
       {/* Avatar with unread indicator / online badge */}
@@ -201,7 +246,6 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
           )}
 
           <Text style={[styles.timeText, isUnread && styles.timeTextUnread]}>{timeLabel}</Text>
-          {isConversationArchived(conversation, currentUserId) && <Ionicons name="archive-outline" size={15} color={theme.textMuted} accessibilityLabel="Archived" />}
         </View>
 
         <View style={styles.conversationPreviewRow}>
@@ -213,24 +257,44 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
           </Text>
 
           {/* Right trailing indicator: unread badge pill OR seen miniature avatar */}
-          {deleting ? <ActivityIndicator size="small" color={theme.primary} /> : isUnread ? (
+          {deleting ? <ActivityIndicator size="small" color={theme.primary} /> : archived ? (
+            <Pressable
+              style={styles.unarchiveChip}
+              onPress={() => onToggleArchive(conversation, displayName, false)}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={`Unarchive chat with ${displayName}`}
+            >
+              <Ionicons name="arrow-undo-outline" size={13} color={theme.primary} />
+              <Text style={styles.unarchiveChipText}>Unarchive</Text>
+            </Pressable>
+          ) : isUnread ? (
             <View style={styles.unreadBadgePill}>
               <Text style={styles.unreadBadgeText}>
                 {unreadCount > 99 ? "99+" : unreadCount}
               </Text>
             </View>
-          ) : isOwnLastMessage && isSeenByOther && otherUserAvatar ? (
-            <Image
-              source={{ uri: avatarThumb(otherUserAvatar, 20) }}
-              style={styles.seenMiniAvatar}
-              contentFit="cover"
-            />
+          ) : isOwnLastMessage && isSeenByOther ? (
+            // Same receipt as inside the chat: their photo, or a plain
+            // placeholder when they have none.
+            otherUserAvatar ? (
+              <Image
+                source={{ uri: avatarThumb(otherUserAvatar, 20) }}
+                style={styles.seenMiniAvatar}
+                contentFit="cover"
+              />
+            ) : (
+              <View style={[styles.seenMiniAvatar, styles.seenMiniAvatarEmpty]}>
+                <Ionicons name="person" size={9} color={theme.surface} />
+              </View>
+            )
           ) : isOwnLastMessage ? (
             <Ionicons name="checkmark" size={15} color={theme.textMuted} />
           ) : null}
         </View>
       </View>
     </Pressable>
+    </ReanimatedSwipeable>
   );
 };
 
@@ -252,9 +316,9 @@ export default function MessagesScreen() {
   const [searchQuery, setSearchQuery] = useState("");
   const [folder, setFolder] = useState<"chats" | "archived">("chats");
   const [actionTarget, setActionTarget] = useState<{ id: string; name: string } | null>(null);
-  const [archiveBusy, setArchiveBusy] = useState(false);
+  // Which conversation is being moved right now, if any.
+  const [archiveBusyId, setArchiveBusyId] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState("");
-  const [archiveNotice, setArchiveNotice] = useState("");
   const archiveInFlight = useRef(false);
   useFocusEffect(useCallback(() => {
     if (folder !== "archived") return;
@@ -275,12 +339,6 @@ export default function MessagesScreen() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const deletionInFlight = useRef(false);
 
-  useEffect(() => {
-    if (!archiveNotice) return;
-    const timer = setTimeout(() => setArchiveNotice(""), 3000);
-    return () => clearTimeout(timer);
-  }, [archiveNotice]);
-
   const actionConversation = conversations.find((conversation) => conversation.id === actionTarget?.id);
   const targetIsArchived = !!actionConversation && isConversationArchived(actionConversation, currentUserId);
   const openConversationActions = useCallback((conversation: DirectConversation, name: string) => {
@@ -291,19 +349,67 @@ export default function MessagesScreen() {
     if (archiveInFlight.current) return;
     setActionTarget(null); setArchiveError("");
   }, []);
+  // One path for every way of archiving: the swipe, the row's Unarchive
+  // button, the long-press sheet and Undo. Returns an error message, or null.
+  // The Undo button calls back into it through a ref, since a callback cannot
+  // list itself as a dependency.
+  const toggleArchiveRef = useRef<
+    (id: string, name: string, archive: boolean, offerUndo: boolean) => Promise<string | null>
+  >(async () => null);
+  const toggleArchive = useCallback(
+    async (id: string, name: string, archive: boolean, offerUndo: boolean) => {
+      if (archiveInFlight.current) return null;
+      if (isOffline) return "Reconnect to move this conversation.";
+      archiveInFlight.current = true;
+      setArchiveBusyId(id);
+      try {
+        await setDirectConversationArchived(id, currentUserId, archive);
+        showAppToast({
+          message: archive ? `Chat with ${name} archived` : `Chat with ${name} moved to Chats`,
+          ...(offerUndo
+            ? {
+                actionLabel: "Undo",
+                onAction: () => {
+                  void toggleArchiveRef.current(id, name, !archive, false);
+                },
+              }
+            : {}),
+        });
+        return null;
+      } catch (error) {
+        return error instanceof Error && /unavailable|no messages/.test(error.message)
+          ? error.message
+          : "Could not move this conversation. Please try again.";
+      } finally {
+        archiveInFlight.current = false;
+        setArchiveBusyId(null);
+      }
+    },
+    [currentUserId, isOffline],
+  );
+  useEffect(() => {
+    toggleArchiveRef.current = toggleArchive;
+  }, [toggleArchive]);
+
+  // From a swipe or the Unarchive button: there is no sheet to show an error
+  // in, so a failure is reported the same way success is.
+  const quickToggleArchive = useCallback(
+    (conversation: DirectConversation, name: string, archive: boolean) => {
+      void toggleArchive(conversation.id, name, archive, true).then((failure) => {
+        if (failure) showAppToast({ message: failure });
+      });
+    },
+    [toggleArchive],
+  );
+
   const changeArchive = useCallback(async () => {
-    if (!actionTarget || archiveInFlight.current) return;
-    if (isOffline) { setArchiveError("Reconnect to move this conversation."); return; }
-    archiveInFlight.current = true; setArchiveBusy(true); setArchiveError("");
-    try {
-      await setDirectConversationArchived(actionTarget.id, currentUserId, !targetIsArchived);
-      setActionTarget(null);
-      setArchiveNotice(targetIsArchived ? "Conversation moved to Chats" : "Conversation archived");
-    } catch (error) {
-      setArchiveError(error instanceof Error && /unavailable|no messages/.test(error.message)
-        ? error.message : "Could not move this conversation. Please try again.");
-    } finally { archiveInFlight.current = false; setArchiveBusy(false); }
-  }, [actionTarget, currentUserId, isOffline, targetIsArchived]);
+    if (!actionTarget) return;
+    setArchiveError("");
+    const failure = await toggleArchive(actionTarget.id, actionTarget.name, !targetIsArchived, true);
+    if (failure) setArchiveError(failure);
+    else setActionTarget(null);
+  }, [actionTarget, targetIsArchived, toggleArchive]);
+  const archiveBusy = archiveBusyId !== null;
 
   const handleDeleteConversation = useCallback((conversation: DirectConversation, name: string) => {
     if (deletionInFlight.current) return;
@@ -507,11 +613,12 @@ export default function MessagesScreen() {
           nowMs={nowMs}
           onPress={handleOpenConversation}
           onActions={openConversationActions}
-          deleting={deletingConversationId === item.id || (archiveBusy && actionTarget?.id === item.id)}
+          onToggleArchive={quickToggleArchive}
+          deleting={deletingConversationId === item.id || archiveBusyId === item.id}
         />
       );
     },
-    [currentUserId, nowMs, handleOpenConversation, openConversationActions, deletingConversationId, archiveBusy, actionTarget?.id],
+    [currentUserId, nowMs, handleOpenConversation, openConversationActions, quickToggleArchive, deletingConversationId, archiveBusyId],
   );
 
   return (
@@ -559,11 +666,17 @@ export default function MessagesScreen() {
         {(["chats", "archived"] as const).map((value) => <Pressable key={value} accessibilityRole="tab"
           accessibilityState={{ selected: folder === value }} onPress={() => { setFolder(value); setSearchQuery(""); }}
           style={[styles.folderTab, folder === value && styles.folderTabActive]}>
-          <Ionicons name={value === "chats" ? "chatbubbles-outline" : "archive-outline"} size={17} color={folder === value ? theme.surface : theme.textMuted} />
-          <Text style={[styles.folderTabText, folder === value && { color: theme.surface }]}>{value === "chats" ? "Chats" : `Archived${archivedCount ? ` (${archivedCount})` : ""}`}</Text>
+          <Ionicons name={value === "chats" ? "chatbubbles-outline" : "archive-outline"} size={17} color={folder === value ? theme.onPrimary : theme.textMuted} />
+          <Text style={[styles.folderTabText, folder === value && { color: theme.onPrimary }]}>{value === "chats" ? "Chats" : "Archived"}</Text>
+          {value === "archived" && archivedCount > 0 && (
+            <View style={[styles.folderCount, folder === value && styles.folderCountActive]}>
+              <Text style={[styles.folderCountText, folder === value && styles.folderCountTextActive]}>
+                {archivedCount > 99 ? "99+" : archivedCount}
+              </Text>
+            </View>
+          )}
         </Pressable>)}
       </View>
-      {!!archiveNotice && <Text style={styles.archiveNotice} accessibilityLiveRegion="polite">{archiveNotice}</Text>}
 
       {/* Conversations List (Virtualized 60-120 FPS) */}
       {loading && !isOffline ? (
@@ -583,6 +696,21 @@ export default function MessagesScreen() {
           maxToRenderPerBatch={8}
           updateCellsBatchingPeriod={30}
           removeClippedSubviews={Platform.OS === "android"}
+          ListHeaderComponent={
+            folder === "archived" && filteredConversations.length > 0 ? (
+              <View style={styles.archivedIntro}>
+                <View style={styles.archivedIntroIcon}>
+                  <Ionicons name="archive" size={18} color={theme.accent} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.archivedIntroTitle}>Archived chats</Text>
+                  <Text style={styles.archivedIntroText}>
+                    Hidden from your inbox. A chat comes back on its own when a new message arrives.
+                  </Text>
+                </View>
+              </View>
+            ) : null
+          }
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <View style={styles.emptyIconCircle}>
@@ -594,7 +722,7 @@ export default function MessagesScreen() {
               <Text style={styles.emptySubtitle}>
                 {searchQuery
                   ? "Try searching with a different name or message phrase."
-                  : folder === "archived" ? "Long-press a chat and choose Archive. Your messages will stay here until you unarchive or send or receive a new message."
+                  : folder === "archived" ? "Swipe a chat left and tap Archive. It stays here until you unarchive it, or until a new message brings it back."
                   : archivedCount ? "Your conversations are in Archived. Unarchive one or start a new chat."
                   : "Connect directly with students, teachers, or administrators."}
               </Text>
@@ -750,7 +878,7 @@ export default function MessagesScreen() {
               if (!actionConversation || !actionTarget) return;
               setActionTarget(null); handleDeleteConversation(actionConversation, actionTarget.name);
             }} accessibilityRole="button" accessibilityLabel="Delete conversation for me">
-              <Ionicons name="trash-outline" size={23} color="#b3261e" /><Text style={[styles.conversationActionText, { color: "#b3261e" }]}>Delete conversation</Text>
+              <Ionicons name="trash-outline" size={23} color={theme.danger} /><Text style={[styles.conversationActionText, { color: theme.danger }]}>Delete conversation</Text>
             </Pressable>
             <Pressable style={styles.conversationAction} disabled={archiveBusy} onPress={closeConversationActions} accessibilityRole="button"><Text style={styles.conversationActionText}>Cancel</Text></Pressable>
           </Pressable>
@@ -782,12 +910,24 @@ const makeStyles = (c: ThemeTokens) =>
   folderTab: { flexDirection: "row", alignItems: "center", gap: 7, borderRadius: 22, paddingHorizontal: 16, minHeight: 42, backgroundColor: c.border },
   folderTabActive: { backgroundColor: c.primary },
   folderTabText: { fontSize: 13, fontWeight: "600", color: c.textMuted },
-  archiveNotice: { textAlign: "center", padding: 8, color: c.textMuted, fontSize: 13 },
+  folderCount: { minWidth: 20, height: 20, borderRadius: 10, paddingHorizontal: 6, alignItems: "center", justifyContent: "center", backgroundColor: c.surfaceSunken },
+  folderCountActive: { backgroundColor: c.onPrimary },
+  folderCountText: { fontSize: 11, fontWeight: "800", color: c.textSecondary },
+  folderCountTextActive: { color: c.primary },
+  archivedIntro: { flexDirection: "row", alignItems: "center", gap: 12, marginHorizontal: 16, marginBottom: 10, padding: 14, borderRadius: 16, backgroundColor: c.accentSoft },
+  archivedIntroIcon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: c.surface },
+  archivedIntroTitle: { color: c.textPrimary, fontSize: 14.5, fontWeight: "800" },
+  archivedIntroText: { color: c.textSecondary, fontSize: 12.5, lineHeight: 17, marginTop: 2 },
+  swipeAction: { width: 96, alignItems: "center", justifyContent: "center", gap: 4, backgroundColor: c.primary },
+  swipeActionRestore: { backgroundColor: c.success },
+  swipeActionText: { color: c.onPrimary, fontSize: 12, fontWeight: "800" },
+  unarchiveChip: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 14, borderWidth: 1, borderColor: c.borderStrong, backgroundColor: c.surface },
+  unarchiveChipText: { color: c.primary, fontSize: 12, fontWeight: "700" },
   actionsOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center", padding: 24 },
   actionsCard: { width: "100%", maxWidth: 360, borderRadius: 22, padding: 20, backgroundColor: c.surface },
   actionsTitle: { color: c.textPrimary, fontSize: 19, fontWeight: "700", marginBottom: 6 },
   actionsDescription: { color: c.textMuted, fontSize: 12, lineHeight: 18 },
-  archiveError: { color: "#b3261e", fontSize: 13, paddingVertical: 12 },
+  archiveError: { color: c.danger, fontSize: 13, paddingVertical: 12 },
   conversationAction: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 15, minHeight: 48 },
   conversationActionText: { color: c.primary, fontSize: 15, fontWeight: "600" },
   container: {
@@ -863,10 +1003,10 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surface,
   },
   conversationItemPressed: {
-    backgroundColor: "rgba(143, 33, 23, 0.05)",
+    backgroundColor: c.surfaceSunken,
   },
   conversationItemUnread: {
-    backgroundColor: "rgba(224, 165, 61, 0.08)",
+    backgroundColor: c.accentSoft,
   },
   avatarWrapper: {
     position: "relative",
@@ -976,6 +1116,11 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 8,
     borderWidth: 1,
     borderColor: c.surface,
+  },
+  seenMiniAvatarEmpty: {
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.textMuted,
   },
   emptyContainer: {
     flex: 1,

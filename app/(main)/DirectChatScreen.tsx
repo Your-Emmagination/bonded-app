@@ -35,6 +35,7 @@ import { dismissConversationNotifications } from "@/utils/pushNotifications";
 import { getRoleColor, getRoleDisplayName, getUserDataByAuthUser, parseUserRole, subscribeToStudentProfile, type UserData } from "@/utils/rbac";
 import { getTimeAgo, useRelativeTimeNow } from "@/utils/relativeTime";
 import { getPresenceState, isMessageAfterDeletion, receiptCoversMessage, timestampMillis } from "@/utils/messengerState";
+import { formatChatTimeLabel, sameDay } from "@/utils/chatTime";
 import { messageLinks, splitMessageLinks } from "@/utils/chatLinks";
 import { findBlockedLink } from "@/utils/externalLinks";
 import { useDirectTyping } from "@/utils/directTyping";
@@ -99,25 +100,23 @@ const EMOJI_REACTIONS = ["❤️", "😆", "😮", "😢", "😡", "👍"];
 // without the delay the two gestures fight and the first tap always wins.
 const DOUBLE_TAP_MS = 260;
 const DEFAULT_REACTION = "❤️";
+/** A gap this long between two messages earns its own time label. */
+const TIME_LABEL_GAP_MS = 15 * 60 * 1000;
 
-function formatMessageDate(timestamp: any): string {
-  if (!timestamp) return "Today";
-  let date: Date;
-  if (typeof timestamp?.toDate === "function") date = timestamp.toDate();
-  else if (timestamp?.seconds) date = new Date(timestamp.seconds * 1000);
-  else date = new Date(timestamp);
-  if (isNaN(date.getTime())) return "Today";
-
-  const now = new Date();
-  const isToday = now.toDateString() === date.toDateString();
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const isYesterday = yesterday.toDateString() === date.toDateString();
-
-  const timeStr = date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
-  if (isToday) return `Today · ${timeStr}`;
-  if (isYesterday) return `Yesterday · ${timeStr}`;
-  return `${date.toLocaleDateString("en-US", { month: "short", day: "numeric" })} · ${timeStr}`;
+/**
+ * Whether a message opens a new stretch of the conversation: the first one
+ * loaded, the first of a new day, or one after a long pause.
+ */
+function needsTimeLabel(message: DirectMessage, older: DirectMessage | undefined): boolean {
+  const current = timestampMillis(message.createdAt);
+  if (!current) return false;
+  if (!older) return true;
+  const previous = timestampMillis(older.createdAt);
+  if (!previous) return false;
+  return (
+    !sameDay(new Date(previous), new Date(current)) ||
+    current - previous >= TIME_LABEL_GAP_MS
+  );
 }
 
 /* ==================== MESSAGE BUBBLE (MEMOIZED FOR 60-120 FPS) ==================== */
@@ -128,8 +127,12 @@ interface DirectMessageBubbleProps {
   recipientAvatar?: string | null;
   recipientName: string;
   showAvatar: boolean;
-  isLastOwnMessage: boolean;
-  isSeenByRecipient: boolean;
+  /** Show Sending / Sent / Delivered under this message. */
+  showStatus: boolean;
+  /** This is the newest of your messages the other person has read. */
+  showSeenAvatar: boolean;
+  /** A centred time label above the message, when it starts a new stretch. */
+  timeLabel: string | null;
   isDelivered: boolean;
   isPending: boolean;
   isHighlighted: boolean;
@@ -152,8 +155,9 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
   recipientAvatar,
   recipientName,
   showAvatar,
-  isLastOwnMessage,
-  isSeenByRecipient,
+  showStatus,
+  showSeenAvatar,
+  timeLabel,
   isDelivered,
   isPending,
   isHighlighted,
@@ -257,6 +261,12 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
   }, [item, onReactionPress, onToggleReveal]);
 
   return (
+    <>
+    {!!timeLabel && (
+      <Text style={styles.timeLabel} accessibilityRole="header">
+        {timeLabel}
+      </Text>
+    )}
     <View style={[styles.bubbleContainer, isOwn ? styles.bubbleContainerOwn : styles.bubbleContainerOther, reactionEntries.length > 0 && styles.bubbleContainerWithReactions]}>
       {!isOwn && showAvatar && <View style={styles.incomingAvatarWrap}>
         {recipientAvatar ? <Image source={{ uri: avatarThumb(recipientAvatar, 28) }} style={styles.incomingAvatar} />
@@ -458,36 +468,43 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
         </View>
       )}
 
-      {/* Messenger Sent / Delivered / Seen Status under latest own message */}
-      {isOwn && isLastOwnMessage && (
-        // Words rather than icons, the way Messenger states it. A tick and a
-        // double tick are a vocabulary people have to be taught; "Delivered"
-        // and "Seen" are not.
+      {/* Messenger's receipts: the other person's small photo sits under the
+          newest of your messages they have read, and Sending / Sent /
+          Delivered sits under your latest one until they read it. */}
+      {isOwn && (showSeenAvatar || showStatus) && (
         <View
           style={styles.statusRow}
           accessible
           accessibilityLabel={
-            isPending
-              ? "Sending"
-              : isSeenByRecipient
-                ? `Seen by ${recipientName}`
+            showSeenAvatar
+              ? `Seen by ${recipientName}`
+              : isPending
+                ? "Sending"
                 : isDelivered
                   ? "Delivered"
                   : "Sent"
           }
         >
-          <Text style={styles.statusText}>
-            {isPending
-              ? "Sending…"
-              : isSeenByRecipient
-                ? "Seen"
-                : isDelivered
-                  ? "Delivered"
-                  : "Sent"}
-          </Text>
+          {showSeenAvatar ? (
+            recipientAvatar ? (
+              <Image
+                source={{ uri: avatarThumb(recipientAvatar, 28) }}
+                style={styles.seenAvatar}
+              />
+            ) : (
+              <View style={[styles.seenAvatar, styles.seenAvatarFallback]}>
+                <Ionicons name="person" size={9} color={theme.surface} />
+              </View>
+            )
+          ) : (
+            <Text style={styles.statusText}>
+              {isPending ? "Sending…" : isDelivered ? "Delivered" : "Sent"}
+            </Text>
+          )}
         </View>
       )}
     </View>
+    </>
   );
 };
 
@@ -1338,15 +1355,25 @@ function DirectChatContent() {
     return null;
   }, [messages, currentUserId]);
 
-  const isSeenByRecipient = useMemo(() => {
-    if (!conversation || !recipientId) return false;
-    const recipientLastRead = conversation.lastReadAt?.[recipientId];
-    if (!recipientLastRead) return false;
-    const readMs = recipientLastRead.toMillis?.() ?? 0;
-    const lastOwnMsg = messages.find((m) => m.id === lastOwnMessageId);
-    const msgMs = lastOwnMsg?.createdAt?.toMillis?.() ?? 0;
-    return readMs >= msgMs && msgMs > 0;
-  }, [conversation, recipientId, messages, lastOwnMessageId]);
+  // Receipts only mean something while the conversation ends on your side:
+  // once they have replied, their reply already says they read it.
+  const lastMessageIsOwn =
+    messages.length > 0 && messages[messages.length - 1].senderId === currentUserId;
+
+  // The newest of your trailing messages that the other person has read —
+  // where Messenger puts their photo. Walking back stops at their last
+  // message, so a photo never appears above something they wrote.
+  const recipientLastRead = recipientId ? conversation?.lastReadAt?.[recipientId] : null;
+  const seenMessageId = useMemo(() => {
+    if (!recipientLastRead) return null;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (message.senderId !== currentUserId) return null;
+      if (pendingIds.has(message.id)) continue;
+      if (receiptCoversMessage(recipientLastRead, message.createdAt)) return message.id;
+    }
+    return null;
+  }, [messages, currentUserId, recipientLastRead, pendingIds]);
 
   return (
     <KeyboardAvoidingView style={styles.container} behavior="padding" enabled={Platform.OS !== "web"}>
@@ -1559,15 +1586,6 @@ function DirectChatContent() {
                       </Text>
                     </TouchableOpacity>
                   )}
-
-                  {/* Date separator pill for first message */}
-                  {messages.length > 0 && (
-                    <View style={styles.dateSeparator}>
-                      <Text style={styles.dateSeparatorText}>
-                        {formatMessageDate(messages[0].createdAt)}
-                      </Text>
-                    </View>
-                  )}
                 </View>
               </View>
             }
@@ -1581,7 +1599,9 @@ function DirectChatContent() {
             renderItem={({ item, index }) => {
               const isOwn = item.senderId === currentUserId;
               const newer = messages[messages.length - index];
+              const older = messages[messages.length - 2 - index];
               const showAvatar = !newer || newer.senderId !== item.senderId || timestampMillis(newer.createdAt) - timestampMillis(item.createdAt) > 300000;
+              const isLatestOwn = item.id === lastOwnMessageId;
               return (
                 <DirectMessageBubble
                   item={item}
@@ -1590,9 +1610,14 @@ function DirectChatContent() {
                   recipientAvatar={recipientAvatar}
                   recipientName={displayName}
                   showAvatar={showAvatar}
-                  isLastOwnMessage={item.id === lastOwnMessageId}
                   isPending={pendingIds.has(item.id)}
-                  isSeenByRecipient={isSeenByRecipient}
+                  showSeenAvatar={item.id === seenMessageId}
+                  showStatus={isLatestOwn && lastMessageIsOwn && item.id !== seenMessageId}
+                  timeLabel={
+                    needsTimeLabel(item, older)
+                      ? formatChatTimeLabel(timestampMillis(item.createdAt), nowMs)
+                      : null
+                  }
                   isDelivered={receiptCoversMessage(conversation?.lastDeliveredAt?.[recipientId], item.createdAt)}
                   isHighlighted={item.id === activeHighlightedMessageId}
                   revealedTimestamp={revealedTimestampId === item.id}
@@ -2901,6 +2926,20 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontWeight: "600",
   },
+  seenAvatar: { width: 14, height: 14, borderRadius: 7 },
+  seenAvatarFallback: {
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.textMuted,
+  },
+  timeLabel: {
+    alignSelf: "center",
+    marginTop: 14,
+    marginBottom: 6,
+    fontSize: 11.5,
+    fontWeight: "600",
+    color: c.textMuted,
+  },
 
   /* Reply Banner */
   replyBanner: {
@@ -3216,20 +3255,6 @@ const makeStyles = (c: ThemeTokens) =>
   waveText: {
     fontSize: 14,
     fontWeight: "700",
-  },
-  dateSeparator: {
-    marginTop: 24,
-    marginBottom: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    backgroundColor: "rgba(0,0,0,0.05)",
-    borderRadius: 12,
-    alignSelf: "center",
-  },
-  dateSeparatorText: {
-    fontSize: 11.5,
-    fontWeight: "600",
-    color: c.textMuted,
   },
 
   /* Info / Settings Sheet */

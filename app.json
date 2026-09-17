@@ -100,6 +100,8 @@
     },
     "extra": {
       "aiWorkerUrl": "https://bonded-ai-worker.encaboemmz77.workers.dev",
+      "agoraAppId": "b2042228efe24464a3b218dc91198d7b",
+      "agoraTokenEndpoint": "",
       "router": {},
       "eas": {
         "projectId": "fcf84c1d-4b2b-408b-b8ac-be878865d028"
