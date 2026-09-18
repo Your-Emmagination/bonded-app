@@ -220,7 +220,9 @@ function RootNavigator() {
           headerShown: false,
           gestureEnabled: false,
           animation: "fade",
-          contentStyle: { backgroundColor: "#f6f1ed" },
+          // Shows for a moment behind a screen as it fades in, so it follows
+          // the palette (it is Light's own sunken tone, so Light is unchanged).
+          contentStyle: { backgroundColor: colors.surfaceSunken },
         }}
       >
         <Stack.Screen name="index" />

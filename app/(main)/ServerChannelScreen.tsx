@@ -24,6 +24,7 @@ import {
     moderateNewContent,
     requestFirestoreModerationDecision,
 } from "@/utils/contentModeration";
+import { localCopyOf, type ComposerAttachments } from "@/utils/composerUploads";
 import SafetyDialog from "./components/SafetyDialog";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { useNetworkStatus } from "@/utils/networkUtils";
@@ -92,6 +93,7 @@ import ReanimatedAnimated, {
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
 import MessageImage from "./components/MessageImage";
+import BeaOrb from "./components/BeaOrb";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import ServerMessageComposer from "./components/ServerMessageComposer";
@@ -148,6 +150,9 @@ type ThreadMessage = {
   aiStatus?: string | null;
   moderationStatus?: string;
   moderationReasons?: string[];
+  // Only on the copy of your own message shown while its attachments upload.
+  // Never saved; the real message replaces it under the same id.
+  sending?: boolean;
   // Feature 3: emoji -> list of user IDs who reacted with it. Written by any
   // server member via a nested-field update (see handleSetReaction).
   reactions?: Record<string, string[]>;
@@ -582,16 +587,26 @@ const MessageTimestamp = React.memo(function MessageTimestamp({
   revealed,
   isGroupEnd,
   isOwnMessage,
+  sending,
 }: {
   createdAt: any;
   nowMs?: number;
   revealed: boolean;
   isGroupEnd: boolean;
   isOwnMessage: boolean;
+  sending?: boolean;
 }) {
   const { styles, theme } = useStyles();
   const hookNowMs = useRelativeTimeNow();
   const nowMs = propNowMs ?? hookNowMs;
+
+  if (sending) {
+    return (
+      <Text style={[styles.messageMeta, isOwnMessage && styles.messageMetaOwn]}>
+        Sending…
+      </Text>
+    );
+  }
 
   if (revealed) {
     return (
@@ -671,9 +686,21 @@ function MessageBubbleComponent({
   const gifFiles = messageGifFiles(item);
   const docs = messageDocFiles(item);
   const avatarUri = liveAvatarUri || resolveAvatarUri(item);
-  const bubbleStyle = isOwnMessage
-    ? [styles.messageBubble, styles.messageBubbleOwn, { backgroundColor: accent }]
-    : styles.messageBubble;
+  // Your message while its photos upload: shown, but there is nothing saved
+  // yet to react to, reply to or open.
+  const sending = item.sending === true;
+  // A B.E.A. reply still being written. It is saved as "processing"; older
+  // ones said "generating". Only the second was recognised before, so the
+  // waiting state never showed.
+  const aiThinking =
+    item.aiAssistant === true &&
+    !item.text &&
+    (item.aiStatus === "processing" || item.aiStatus === "generating");
+  const bubbleStyle = [
+    styles.messageBubble,
+    isOwnMessage && [styles.messageBubbleOwn, { backgroundColor: accent }],
+    sending && styles.messageSending,
+  ];
   // Avatar + name appear once per group, on the last (bottom) bubble; the
   // earlier bubbles in the group keep an empty avatar-width spacer so their
   // content stays aligned with the rest of the run.
@@ -730,6 +757,7 @@ function MessageBubbleComponent({
   const replyGesture = useMemo(
     () =>
       Gesture.Pan()
+        .enabled(!sending)
         .activeOffsetX(isOwnMessage ? [-14, 9999] : [-9999, 14])
         .failOffsetY([-12, 12])
         .onUpdate((event) => {
@@ -744,7 +772,7 @@ function MessageBubbleComponent({
           // Snap straight back, like Messenger — no spring overshoot.
           swipeX.value = 0;
         }),
-    [isOwnMessage, messageId, onSwipeReply, swipeDir, swipeX],
+    [isOwnMessage, messageId, onSwipeReply, sending, swipeDir, swipeX],
   );
   const rowSwipeStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: swipeX.value * swipeDir }],
@@ -776,7 +804,13 @@ function MessageBubbleComponent({
       </ReanimatedAnimated.View>
 
       {!isOwnMessage &&
-        (showAvatar ? (
+        (showAvatar && item.aiAssistant ? (
+          // B.E.A.'s own face, thinking while its reply is being written. It
+          // has no profile to open, so it isn't a button.
+          <View style={styles.avatarWrap}>
+            <BeaOrb size={34} mood={aiThinking ? "thinking" : "idle"} animated={aiThinking} />
+          </View>
+        ) : showAvatar ? (
           <TouchableOpacity
             onPress={() => onProfilePress(item.realUserId || item.userId, item.isAnonymous)}
             disabled={item.isAnonymous}
@@ -853,6 +887,7 @@ function MessageBubbleComponent({
           onPress={handleBubbleTap}
           onLongPress={() => onLongPress(item.id)}
           delayLongPress={250}
+          disabled={sending}
         >
           {pinned && (
             // Task 3: pinned badge — shown to everyone so students spot pinned
@@ -918,7 +953,7 @@ function MessageBubbleComponent({
             </Text>
           )}
 
-          {item.aiAssistant && item.aiStatus === "generating" && !item.text ? (
+          {aiThinking ? (
             <View style={styles.aiPendingRow}>
               <ActivityIndicator size="small" color={isOwnMessage ? theme.surface : "#8f2117"} />
               <Text style={[styles.aiPendingText, isOwnMessage && styles.aiPendingTextOwn]}>
@@ -936,6 +971,7 @@ function MessageBubbleComponent({
               // reacted to. Tap still opens the viewer; hold reacts.
               onLongPress={() => onLongPress(item.id)}
               delayLongPress={250}
+              disabled={sending}
               style={({ pressed }) => (pressed ? styles.messageImagePressed : undefined)}
             >
               <MessageImage
@@ -945,6 +981,7 @@ function MessageBubbleComponent({
                 sourceHeight={file.height}
                 style={styles.messageImageSpacing}
                 recyclingKey={`${item.id}:${file.url}`}
+                placeholderUri={localCopyOf(file.url)}
               />
             </Pressable>
           ))}
@@ -960,6 +997,7 @@ function MessageBubbleComponent({
                 // message that is only an attachment cannot be reacted to.
                 onLongPress={() => onLongPress(item.id)}
                 delayLongPress={250}
+                disabled={sending}
                 activeOpacity={0.8}
               >
                 <Ionicons
@@ -1025,6 +1063,7 @@ function MessageBubbleComponent({
           revealed={revealed}
           isGroupEnd={isGroupEnd}
           isOwnMessage={isOwnMessage}
+          sending={sending}
         />
 
         {reactionEntries.length > 0 && (
@@ -1296,6 +1335,9 @@ export default function ServerChannelScreen() {
     () => buildCurrentUserPreview(auth.currentUser),
   );
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
+  // Your messages whose attachments are still uploading, shown until the
+  // saved message arrives under the same id.
+  const [sendingMessages, setSendingMessages] = useState<ThreadMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const { isOffline } = useNetworkStatus();
 
@@ -1549,6 +1591,13 @@ export default function ServerChannelScreen() {
           )
           .sort((a, b) => getMessageSortMs(a) - getMessageSortMs(b) || 0);
         setMessages(nextMessages);
+        // A saved message takes over from the copy shown while it uploaded.
+        const savedIds = new Set(snapshot.docs.map((item) => item.id));
+        setSendingMessages((prev) =>
+          prev.some((message) => savedIds.has(message.id))
+            ? prev.filter((message) => !savedIds.has(message.id))
+            : prev,
+        );
         setLoading(false);
         saveCachedChannelMessages(resolvedServerId, resolvedChannelId, nextMessages);
       },
@@ -2784,6 +2833,18 @@ export default function ServerChannelScreen() {
     return map;
   }, [reads]);
 
+  // What the list shows: the channel, then any of your messages still
+  // uploading in it. They are the newest, so they go at the bottom.
+  const displayedMessages = useMemo(() => {
+    const stillSending = sendingMessages.filter(
+      (message) =>
+        message.serverId === resolvedServerId &&
+        message.channelId === resolvedChannelId &&
+        !messages.some((saved) => saved.id === message.id),
+    );
+    return stillSending.length > 0 ? [...messages, ...stillSending] : messages;
+  }, [messages, resolvedChannelId, resolvedServerId, sendingMessages]);
+
   // Stable function reference for FlatList's renderItem, paired with
   // MessageBubble now being React.memo'd above. Previously this was an
   // inline arrow function passed directly in JSX, which gets a new
@@ -2797,8 +2858,8 @@ export default function ServerChannelScreen() {
       // Grouping only needs the immediate neighbours: this bubble starts a
       // group if the previous message isn't part of the same run, and ends
       // one if the next message isn't.
-      const groupedWithPrev = isSameSenderRun(messages[index - 1], item);
-      const groupedWithNext = isSameSenderRun(item, messages[index + 1]);
+      const groupedWithPrev = isSameSenderRun(displayedMessages[index - 1], item);
+      const groupedWithNext = isSameSenderRun(item, displayedMessages[index + 1]);
       const authorId = item.realUserId || item.userId;
       const isOwn = authorId === user?.uid;
       const liveAvatar = isOwn
@@ -2828,7 +2889,7 @@ export default function ServerChannelScreen() {
       );
     },
     [
-      messages,
+      displayedMessages,
       readsByMessageId,
       currentUserProfile,
       userAvatarMap,
@@ -2879,7 +2940,7 @@ export default function ServerChannelScreen() {
   );
 
   const handleSend = useCallback(
-    async (messageData: any) => {
+    async (messageData: any, attachments: ComposerAttachments) => {
       if (!user?.uid || !resolvedServerId || !resolvedChannelId) return false;
       if (isOffline) {
         showInfo("No Connection", "You need internet access to send a message.");
@@ -2892,7 +2953,7 @@ export default function ServerChannelScreen() {
         ? (isStaffUser ? "Anonymous (You)" : "Anonymous")
         : (messageData.username || currentUserProfile?.firstname || "Someone");
 
-      const payload = {
+      const draftPayload = {
         ...messageData,
         userId: user.uid,
         realUserId: user.uid,
@@ -2920,17 +2981,44 @@ export default function ServerChannelScreen() {
       const activeReplyingTo = replyingTo;
       setReplyingTo(null);
 
-      const messageRef = await addDoc(collection(db, "communityThreadMessages"), payload).catch(
-        (error) => {
-          setReplyingTo(activeReplyingTo);
-          throw error;
-        },
-      );
+      // The id is picked up front, so the copy shown while attachments upload
+      // and the saved message are the same row.
+      const messageRef = doc(collection(db, "communityThreadMessages"));
+      const undoSend = () => {
+        setSendingMessages((prev) => prev.filter((message) => message.id !== messageRef.id));
+        setReplyingTo(activeReplyingTo);
+      };
+
       // Feature 6: sending ends the current typing burst.
       stopTyping();
       userScrolledUpRef.current = false;
       isNearBottomRef.current = true;
       setShowScrollToBottom(false);
+      if (attachments.local.length > 0) {
+        // Text on its own already appears at once from Firestore's local
+        // write. Photos would wait for their upload, so show them from the
+        // phone meanwhile.
+        setSendingMessages((prev) => [
+          ...prev,
+          {
+            ...draftPayload,
+            id: messageRef.id,
+            files: attachments.local,
+            createdAt: new Date(),
+            sending: true,
+          },
+        ]);
+      }
+
+      const files = await attachments.upload().catch((error) => {
+        undoSend();
+        throw error;
+      });
+      const payload = { ...draftPayload, files };
+      await setDoc(messageRef, payload).catch((error) => {
+        undoSend();
+        throw error;
+      });
       requestAnimationFrame(() => {
         listRef.current?.scrollToEnd({ animated: true });
       });
@@ -3264,7 +3352,7 @@ export default function ServerChannelScreen() {
           )}
           <FlatList
             ref={listRef}
-            data={messages}
+            data={displayedMessages}
             keyExtractor={(item) => item.id}
             renderItem={renderMessageItem}
             // Same virtualization approach as HomeScreen's feed: message
@@ -3280,7 +3368,7 @@ export default function ServerChannelScreen() {
               styles.listContent,
               // Center the real empty state ("Kick off #channel"), but let the
               // loading skeleton sit top-aligned like real messages would.
-              messages.length === 0 && (!loading || isOffline) && styles.emptyListContent,
+              displayedMessages.length === 0 && (!loading || isOffline) && styles.emptyListContent,
             ]}
             ListEmptyComponent={
               loading && !isOffline ? (
@@ -4337,7 +4425,7 @@ const makeStyles = (c: ThemeTokens) =>
     gap: 7,
     alignSelf: "flex-start",
     maxWidth: "100%",
-    backgroundColor: "rgba(95,9,9,0.06)",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 14,
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -4384,6 +4472,9 @@ const makeStyles = (c: ThemeTokens) =>
     alignSelf: "flex-end",
     borderColor: "transparent",
     borderBottomRightRadius: 8,
+  },
+  messageSending: {
+    opacity: 0.6,
   },
   messageAuthor: {
     color: c.textSecondary,
@@ -5141,7 +5232,7 @@ const makeStyles = (c: ThemeTokens) =>
     padding: 10,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "rgba(95,9,9,0.12)",
+    borderColor: c.border,
     gap: 8,
   },
   forwardSnippetAccent: {
@@ -5179,7 +5270,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 12,
     paddingVertical: 9,
     borderWidth: 1,
-    borderColor: "rgba(95,9,9,0.15)",
+    borderColor: c.borderStrong,
     gap: 8,
     marginBottom: 12,
   },
@@ -5200,7 +5291,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 12,
     gap: 10,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(95,9,9,0.06)",
+    borderBottomColor: c.border,
   },
   forwardDestIconWrap: {
     width: 36,

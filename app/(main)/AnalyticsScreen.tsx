@@ -20,8 +20,10 @@ import {
   where,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import Svg, { Circle, Polyline } from "react-native-svg";
 import {
   ActivityIndicator,
+  Animated,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -52,6 +54,8 @@ import {
   type UnansweredQuestionCluster,
 } from "@/utils/unansweredClustering";
 import ConfirmDialog from "./components/ConfirmDialog";
+import CampusReveal, { useReducedMotion } from "./components/CampusReveal";
+import { SkeletonBlock, SkeletonGroup } from "./components/Skeleton";
 import {
   CategoryBar,
   DailyActiveUsersLine,
@@ -78,9 +82,7 @@ function friendlyCategory(raw: string): string {
   return keyword ? `${titled} (keyword)` : titled;
 }
 
-// ── Minimal dependency-free sparkline ──────────────────────────────────────
-// A row of thin bars scaled to the series max. Deliberately not a chart
-// library — Task 2 makes that call; this stays self-contained.
+// A compact, axis-free line from the existing rollup series.
 function Sparkline({
   data,
   color = "#8f3a2b",
@@ -90,21 +92,25 @@ function Sparkline({
 }) {
   const { styles } = useStyles();
   const max = Math.max(1, ...data);
+  const points = data.map((value, index) => ({
+    x: data.length === 1 ? 60 : 2 + (index * 116) / (data.length - 1),
+    y: 27 - (value / max) * 22,
+  }));
   return (
     <View style={styles.sparkRow}>
-      {data.map((value, index) => (
-        <View
-          key={index}
-          style={[
-            styles.sparkBar,
-            {
-              height: 3 + (value / max) * 26,
-              backgroundColor: color,
-              opacity: 0.3 + 0.7 * (value / max),
-            },
-          ]}
-        />
-      ))}
+      {points.length > 0 && (
+        <Svg width="100%" height={32} viewBox="0 0 120 32" accessibilityLabel="Recent trend">
+          <Polyline
+            points={points.map((point) => `${point.x},${point.y}`).join(" ")}
+            fill="none"
+            stroke={color}
+            strokeWidth={2.4}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          {points.length === 1 && <Circle cx={points[0].x} cy={points[0].y} r={2.5} fill={color} />}
+        </Svg>
+      )}
     </View>
   );
 }
@@ -117,6 +123,7 @@ type KpiCardProps = {
   accent: string;
   featured?: boolean;
   loading?: boolean;
+  delay?: number;
 };
 
 function KpiCard({
@@ -127,10 +134,12 @@ function KpiCard({
   accent,
   featured,
   loading,
+  delay = 0,
 }: KpiCardProps) {
   const { styles } = useStyles();
   return (
-    <View
+    <CampusReveal
+      delay={delay}
       style={[
         styles.card,
         featured ? styles.cardFeatured : styles.cardHalf,
@@ -148,23 +157,71 @@ function KpiCard({
         />
       ) : (
         <Text
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.65}
           style={[
             styles.cardValue,
             featured && styles.cardValueFeatured,
             { color: accent },
           ]}
         >
-          {value}
+          {typeof value === "number" ? value.toLocaleString() : value}
         </Text>
       )}
       <Sparkline data={series} color={accent} />
       <Text style={styles.cardCaption}>{caption}</Text>
-    </View>
+    </CampusReveal>
+  );
+}
+
+function RangeChip({
+  days,
+  selected,
+  onPress,
+  reducedMotion,
+}: {
+  days: (typeof LINE_RANGES)[number];
+  selected: boolean;
+  onPress: () => void;
+  reducedMotion: boolean;
+}) {
+  const { styles } = useStyles();
+  const [scale] = useState(() => new Animated.Value(1));
+
+  useEffect(() => {
+    if (reducedMotion || !selected) {
+      scale.setValue(1);
+      return;
+    }
+    scale.setValue(0.94);
+    const animation = Animated.timing(scale, {
+      toValue: 1,
+      duration: 160,
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [reducedMotion, scale, selected]);
+
+  return (
+    <Animated.View style={{ transform: [{ scale }] }}>
+      <TouchableOpacity
+        style={[styles.rangeChip, selected && styles.rangeChipActive]}
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={`Show ${days} days`}
+        accessibilityState={{ selected }}
+      >
+        <Text style={[styles.rangeChipText, selected && styles.rangeChipTextActive]}>{days}d</Text>
+      </TouchableOpacity>
+    </Animated.View>
   );
 }
 
 export default function AnalyticsScreen() {
   const { styles, theme } = useStyles();
+  const reducedMotion = useReducedMotion();
   const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
   // Live, so losing staff access closes this screen off without a reopen.
@@ -373,6 +430,8 @@ export default function AnalyticsScreen() {
     () => detectAnomalies(trend),
     [trend],
   );
+  const briefingNeedsAttention = anomalyResult.status === "ok" &&
+    anomalyResult.anomalies.some((anomaly) => anomaly.direction === "up");
 
   // Same hand-off UnansweredQuestionsScreen.openAiMemorySuggestion uses:
   // navigate to AiMemoryScreen with the cluster's title + tags pre-filled,
@@ -445,13 +504,16 @@ export default function AnalyticsScreen() {
           style={styles.backButton}
           onPress={() => router.back()}
           activeOpacity={0.8}
+          accessibilityRole="button"
+          accessibilityLabel="Go back to Dashboard"
         >
-          <Ionicons name="arrow-back" size={21} color={theme.onPrimary} />
+          <Ionicons name="arrow-back" size={21} color={theme.onChrome} />
         </TouchableOpacity>
         <View style={styles.topBarCopy}>
           <Text style={styles.topBarEyebrow}>ADMIN WORKSPACE</Text>
           <Text style={styles.topBarTitle}>Analytics</Text>
         </View>
+        <Ionicons name="analytics-outline" size={22} color={theme.onChromeMuted} />
       </View>
 
       <ScrollView
@@ -464,13 +526,24 @@ export default function AnalyticsScreen() {
       >
         {loading ? (
           <View style={styles.loadingState}>
-            <ActivityIndicator size="large" color={theme.textSecondary} />
+            <SkeletonGroup timeoutMs={8000}>
+              <SkeletonBlock width="100%" height={112} radius={18} />
+              <SkeletonBlock width="100%" height={150} radius={18} style={{ marginTop: 14 }} />
+              <View style={styles.grid}>
+                {Array.from({ length: 4 }).map((_, index) => (
+                  <SkeletonBlock key={index} width="48%" height={136} radius={18} />
+                ))}
+              </View>
+              <SkeletonBlock width="100%" height={240} radius={18} style={{ marginTop: 16 }} />
+            </SkeletonGroup>
           </View>
         ) : (
           <>
-            <View style={styles.briefingCard}>
+            <CampusReveal style={[styles.briefingCard, briefingNeedsAttention && styles.briefingCardAttention]}>
               <View style={styles.briefingHeader}>
-                <Ionicons name="pulse-outline" size={16} color={theme.danger} />
+                <View style={[styles.briefingIcon, briefingNeedsAttention && styles.briefingIconAttention]}>
+                  <Ionicons name="pulse-outline" size={18} color={briefingNeedsAttention ? theme.danger : theme.primary} />
+                </View>
                 <Text style={styles.briefingTitle}>This week&apos;s briefing</Text>
               </View>
               {anomalyResult.status === "insufficient-history" ? (
@@ -486,8 +559,8 @@ export default function AnalyticsScreen() {
                   pending moderation are all within ±50% of the 4-week average.
                 </Text>
               ) : (
-                anomalyResult.anomalies.map((anomaly) => (
-                  <View key={anomaly.field} style={styles.briefingLine}>
+                anomalyResult.anomalies.map((anomaly, index) => (
+                  <CampusReveal key={anomaly.field} delay={70 + index * 45} style={styles.briefingLine}>
                     <Ionicons
                       name={
                         anomaly.direction === "up"
@@ -500,22 +573,24 @@ export default function AnalyticsScreen() {
                     <Text style={styles.briefingLineText}>
                       {anomalySentence(anomaly)}
                     </Text>
-                  </View>
+                  </CampusReveal>
                 ))
               )}
-            </View>
+            </CampusReveal>
 
             <KpiCard
               featured
+              delay={90}
               label="Critical safety flags this week"
               value={criticalThisWeek}
               caption={`Last ${WEEK_DAYS} days · trend over ${SPARK_DAYS}`}
               series={seriesOf(trend, "criticalFlags").slice(-SPARK_DAYS)}
-              accent={theme.danger}
+              accent={criticalThisWeek > 0 ? theme.danger : theme.success}
             />
 
             <View style={styles.grid}>
               <KpiCard
+                delay={130}
                 label="Active users now"
                 value={activeNow ?? "—"}
                 caption="Online right now"
@@ -523,6 +598,7 @@ export default function AnalyticsScreen() {
                 accent={onSurface("#356a59", theme)}
               />
               <KpiCard
+                delay={160}
                 label="Pending moderation"
                 value={pendingModeration ?? "—"}
                 caption="Awaiting review now"
@@ -530,6 +606,7 @@ export default function AnalyticsScreen() {
                 accent={onSurface("#b86b1d", theme)}
               />
               <KpiCard
+                delay={190}
                 label="New posts this week"
                 value={newPostsThisWeek}
                 caption={`Last ${WEEK_DAYS} days`}
@@ -537,6 +614,7 @@ export default function AnalyticsScreen() {
                 accent={theme.primary}
               />
               <KpiCard
+                delay={220}
                 label="Comments this week"
                 value={sumDailyStat(weekRows, "commentsCreated")}
                 caption={`Last ${WEEK_DAYS} days`}
@@ -561,30 +639,20 @@ export default function AnalyticsScreen() {
                 <Text style={styles.chartTitle}>Daily active users</Text>
                 <View style={styles.rangeToggle}>
                   {LINE_RANGES.map((days) => (
-                    <TouchableOpacity
+                    <RangeChip
                       key={days}
-                      style={[
-                        styles.rangeChip,
-                        lineRange === days && styles.rangeChipActive,
-                      ]}
+                      days={days}
+                      selected={lineRange === days}
                       onPress={() => setLineRange(days)}
-                    >
-                      <Text
-                        style={[
-                          styles.rangeChipText,
-                          lineRange === days && styles.rangeChipTextActive,
-                        ]}
-                      >
-                        {days}d
-                      </Text>
-                    </TouchableOpacity>
+                      reducedMotion={reducedMotion}
+                    />
                   ))}
                 </View>
               </View>
               <Text style={styles.chartSubtitle}>
                 Contributors per day, from the daily rollup.
               </Text>
-              <DailyActiveUsersLine data={activeUsersLine} rangeDays={lineRange} />
+              <DailyActiveUsersLine data={activeUsersLine} rangeDays={lineRange} animate={!reducedMotion} />
             </View>
 
             <View style={styles.chartCard}>
@@ -596,6 +664,7 @@ export default function AnalyticsScreen() {
                 data={flairDist}
                 color={theme.primary}
                 emptyNote="No posts yet."
+                animate={!reducedMotion}
               />
             </View>
 
@@ -609,13 +678,14 @@ export default function AnalyticsScreen() {
                 data={moderationReasons}
                 color={theme.accent}
                 emptyNote="No flagged content in this window."
+                animate={!reducedMotion}
               />
             </View>
 
             <View style={styles.chartCard}>
               <Text style={styles.chartTitle}>Role distribution</Text>
               <Text style={styles.chartSubtitle}>Everyone on BondED right now.</Text>
-              <DistributionDonut data={roleDist} emptyNote="No accounts yet." />
+              <DistributionDonut data={roleDist} emptyNote="No accounts yet." animate={!reducedMotion} />
             </View>
 
             <View style={styles.chartCard}>
@@ -626,6 +696,7 @@ export default function AnalyticsScreen() {
               <DistributionDonut
                 data={reportDist}
                 emptyNote="No reports submitted yet."
+                animate={!reducedMotion}
               />
             </View>
 
@@ -654,7 +725,7 @@ export default function AnalyticsScreen() {
                     activeOpacity={0.8}
                     onPress={() => openRecommendation(cluster)}
                   >
-                    <View style={styles.recCount}>
+                    <View style={styles.recCount} accessibilityLabel={`Asked ${cluster.count} times`}>
                       <Text style={styles.recCountText}>{cluster.count}</Text>
                     </View>
                     <View style={styles.recBody}>
@@ -684,6 +755,8 @@ export default function AnalyticsScreen() {
                 onPress={runRollupNow}
                 disabled={rollingUp}
                 activeOpacity={0.85}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: rollingUp, busy: rollingUp }}
               >
                 {rollingUp ? (
                   <ActivityIndicator size="small" color={theme.primary} />
@@ -715,36 +788,36 @@ export default function AnalyticsScreen() {
 
 const makeStyles = (c: ThemeTokens) =>
   StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: c.primary },
+  safeArea: { flex: 1, backgroundColor: c.chrome },
   topBar: {
-    minHeight: 66,
+    minHeight: 64,
     paddingHorizontal: 16,
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: c.primary,
+    backgroundColor: c.chrome,
     borderBottomWidth: 1,
-    borderBottomColor: c.primary,
+    borderBottomColor: c.chromeBorder,
   },
   backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
+    width: 44,
+    height: 44,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.08)",
   },
-  topBarCopy: { flex: 1 },
+  topBarCopy: { flex: 1, minWidth: 0 },
   topBarEyebrow: {
     color: c.accent,
-    fontSize: 10,
-    fontWeight: "900",
+    fontSize: 11,
+    fontWeight: "700",
     letterSpacing: 1.1,
   },
-  topBarTitle: { color: c.background, fontSize: 22, fontWeight: "900", marginTop: 2 },
+  topBarTitle: { color: c.onChrome, fontSize: 23, fontWeight: "700", marginTop: 2 },
   body: { flex: 1, backgroundColor: c.surfaceSunken },
   content: { padding: 16, paddingBottom: 60 },
-  loadingState: { paddingTop: 80, alignItems: "center" },
+  loadingState: { flex: 1 },
 
   grid: {
     flexDirection: "row",
@@ -753,34 +826,34 @@ const makeStyles = (c: ThemeTokens) =>
     marginTop: 12,
   },
   card: {
-    backgroundColor: c.background,
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
     borderColor: c.border,
-    padding: 15,
+    padding: 16,
+    minWidth: 0,
+    shadowColor: c.chrome,
+    shadowOpacity: 0.04,
+    shadowRadius: 7,
+    elevation: 1,
   },
-  cardHalf: { width: "48%", flexGrow: 1 },
-  cardFeatured: { width: "100%", borderWidth: 2, padding: 18 },
+  cardHalf: { width: "47%", flexGrow: 1, minHeight: 145 },
+  cardFeatured: { width: "100%", borderLeftWidth: 3, padding: 18 },
   cardLabel: {
     color: c.textSecondary,
-    fontSize: 11.5,
-    fontWeight: "800",
-    letterSpacing: 0.2,
+    fontSize: 12,
+    fontWeight: "600",
   },
-  cardLabelFeatured: { fontSize: 12.5, color: c.danger },
-  cardValue: { fontSize: 26, fontWeight: "900", marginTop: 6 },
-  cardValueFeatured: { fontSize: 40 },
+  cardLabelFeatured: { fontSize: 13 },
+  cardValue: { fontSize: 28, fontWeight: "800", marginTop: 7 },
+  cardValueFeatured: { fontSize: 38 },
   cardValueLoading: { alignSelf: "flex-start", marginTop: 10, marginBottom: 6 },
-  cardCaption: { color: c.textMuted, fontSize: 10.5, marginTop: 6 },
+  cardCaption: { color: c.textMuted, fontSize: 11, marginTop: 8, lineHeight: 15 },
 
   sparkRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 2,
-    height: 30,
-    marginTop: 10,
+    height: 32,
+    marginTop: 9,
   },
-  sparkBar: { flex: 1, borderRadius: 1.5, minWidth: 2 },
 
   noticeCard: {
     flexDirection: "row",
@@ -796,39 +869,42 @@ const makeStyles = (c: ThemeTokens) =>
   noticeText: { flex: 1, color: c.accent, fontSize: 12, lineHeight: 17 },
 
   briefingCard: {
-    backgroundColor: c.dangerSoft,
-    borderRadius: 16,
+    backgroundColor: c.surface,
+    borderRadius: 18,
     borderWidth: 1,
+    borderColor: c.border,
+    padding: 16,
+    marginBottom: 14,
+  },
+  briefingCardAttention: {
     borderColor: c.danger,
-    padding: 14,
-    marginBottom: 4,
   },
   briefingHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 7,
-    marginBottom: 8,
+    gap: 10,
+    marginBottom: 12,
   },
+  briefingIcon: { width: 34, height: 34, borderRadius: 10, backgroundColor: c.accentSoft, alignItems: "center", justifyContent: "center" },
+  briefingIconAttention: { backgroundColor: c.dangerSoft },
   briefingTitle: {
-    color: c.danger,
-    fontSize: 12,
-    fontWeight: "900",
-    letterSpacing: 0.4,
-    textTransform: "uppercase",
+    color: c.textPrimary,
+    fontSize: 15,
+    fontWeight: "700",
   },
-  briefingMuted: { color: c.textSecondary, fontSize: 12.5, lineHeight: 18 },
+  briefingMuted: { color: c.textSecondary, fontSize: 13, lineHeight: 19 },
   briefingLine: {
     flexDirection: "row",
     alignItems: "flex-start",
     gap: 7,
-    paddingVertical: 3,
+    paddingVertical: 6,
   },
   briefingLineText: {
     flex: 1,
     color: c.textPrimary,
     fontSize: 13,
     lineHeight: 18,
-    fontWeight: "600",
+    fontWeight: "500",
   },
 
   recEmpty: {
@@ -842,54 +918,59 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     gap: 11,
-    paddingVertical: 10,
-    borderTopWidth: 1,
-    borderTopColor: c.border,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: c.surfaceSunken,
+    marginTop: 8,
   },
   recCount: {
-    minWidth: 26,
-    height: 26,
-    borderRadius: 8,
-    paddingHorizontal: 5,
+    minWidth: 32,
+    height: 32,
+    borderRadius: 10,
+    paddingHorizontal: 6,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: c.surfaceSunken,
+    backgroundColor: c.accentSoft,
   },
-  recCountText: { color: c.textSecondary, fontSize: 12, fontWeight: "900" },
+  recCountText: { color: c.primary, fontSize: 12, fontWeight: "700" },
   recBody: { flex: 1 },
   recTitle: { color: c.textPrimary, fontSize: 13, fontWeight: "700", lineHeight: 17 },
   recTags: { color: c.textMuted, fontSize: 11, marginTop: 3 },
 
   chartCard: {
-    backgroundColor: c.background,
+    backgroundColor: c.surface,
     borderRadius: 18,
     borderWidth: 1,
     borderColor: c.border,
-    padding: 14,
-    marginTop: 14,
+    padding: 16,
+    marginTop: 16,
   },
   chartHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 8,
   },
-  chartTitle: { color: c.textPrimary, fontSize: 15, fontWeight: "900" },
-  chartSubtitle: { color: c.textMuted, fontSize: 11, marginTop: 3 },
+  chartTitle: { color: c.textPrimary, fontSize: 15, fontWeight: "700" },
+  chartSubtitle: { color: c.textMuted, fontSize: 12, lineHeight: 17, marginTop: 5 },
   rangeToggle: {
     flexDirection: "row",
     backgroundColor: c.surfaceSunken,
-    borderRadius: 9,
-    padding: 2,
+    borderRadius: 12,
+    padding: 3,
     gap: 2,
   },
   rangeChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 7,
+    minWidth: 42,
+    minHeight: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 9,
   },
   rangeChipActive: { backgroundColor: c.primary },
-  rangeChipText: { color: c.textSecondary, fontSize: 11, fontWeight: "800" },
-  rangeChipTextActive: { color: c.background },
+  rangeChipText: { color: c.textSecondary, fontSize: 12, fontWeight: "600" },
+  rangeChipTextActive: { color: c.onPrimary },
 
   footerRow: {
     marginTop: 20,
@@ -897,17 +978,19 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
+    flexWrap: "wrap",
   },
-  footerText: { flex: 1, color: c.textMuted, fontSize: 11 },
+  footerText: { flexGrow: 1, flexShrink: 1, minWidth: 150, color: c.textMuted, fontSize: 11 },
   rollupButton: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    backgroundColor: c.background,
+    backgroundColor: c.surface,
     borderWidth: 1,
     borderColor: c.accent,
     borderRadius: 12,
     paddingHorizontal: 12,
+    minHeight: 44,
     paddingVertical: 9,
     minWidth: 130,
     justifyContent: "center",

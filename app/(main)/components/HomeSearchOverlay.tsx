@@ -10,6 +10,7 @@ import { avatarThumb } from "@/utils/cloudinaryImages";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
+import { useRouter } from "expo-router";
 import { createContext, type ReactElement, type ReactNode, useCallback, useContext, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   ScrollView,
@@ -25,6 +26,7 @@ import type {
   PostFeedItem,
   SearchableStudent,
 } from "../(tabs)/HomeScreen";
+import BeaOrb from "./BeaOrb";
 
 const HOME_SEARCH_HISTORY_KEY = "bonded.homeSearchHistory";
 
@@ -777,7 +779,9 @@ function SearchDropdown() {
 
 function SearchResultsScreen() {
   const { styles, theme } = useStyles();
+  const router = useRouter();
   const {
+    close,
     contentResults,
     dateFilter,
     matchedFeedItems,
@@ -792,6 +796,18 @@ function SearchResultsScreen() {
     toggleSort,
     trimmedQuery,
   } = useHomeSearch();
+
+  // Nothing on Home matched, so B.E.A. gets the question instead: its tab
+  // opens with the words already typed. `askId` makes the same words asked
+  // twice count as a new question.
+  const askBea = useCallback(() => {
+    const question = trimmedQuery;
+    close();
+    router.navigate({
+      pathname: "/(main)/(tabs)/AiChatScreen",
+      params: { ask: question, askId: String(Date.now()) },
+    });
+  }, [close, router, trimmedQuery]);
 
   const showPeopleSection = tab === "all" || tab === "people";
   const showContentSection =
@@ -901,7 +917,25 @@ function SearchResultsScreen() {
           </TouchableOpacity>
         </View>
 
-        {results.length === 0 ? (
+        {results.length === 0 && trimmedQuery ? (
+          <View style={styles.emptySearchState}>
+            <BeaOrb size={80} mood="thinking" animated tappable />
+            <Text style={styles.emptyTitle}>Nothing found for “{trimmedQuery}”</Text>
+            <Text style={styles.emptySubtitle}>
+              B.E.A. might know where to find it
+              {dateFilter === "all" ? "." : ", or try widening the date filter."}
+            </Text>
+            <TouchableOpacity
+              style={styles.askBeaButton}
+              onPress={askBea}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+            >
+              <Ionicons name="sparkles" size={16} color={theme.onPrimary} />
+              <Text style={styles.askBeaButtonText}>Ask B.E.A. instead</Text>
+            </TouchableOpacity>
+          </View>
+        ) : results.length === 0 ? (
           <View style={styles.emptySearchState}>
             <Ionicons name="search-outline" size={58} color={theme.textMuted} />
             <Text style={styles.emptyTitle}>No results found</Text>
@@ -1369,6 +1403,21 @@ const makeStyles = (c: ThemeTokens) =>
     lineHeight: 21,
     marginTop: 8,
     textAlign: "center",
+  },
+  askBeaButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 18,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 999,
+    backgroundColor: c.primary,
+  },
+  askBeaButtonText: {
+    color: c.onPrimary,
+    fontSize: 14.5,
+    fontWeight: "800",
   },
 
   // Covers the feed instead of replacing it, so closing search doesn't rebuild

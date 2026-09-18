@@ -23,6 +23,7 @@ import {
     requestFirestoreModerationDecision,
     type ModerationDecision
 } from "@/utils/contentModeration";
+import { localCopyOf, type ComposerAttachments } from "@/utils/composerUploads";
 import SafetyDialog from "./SafetyDialog";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { flagPotentialResolution } from "@/utils/lostAndFoundResolution";
@@ -73,6 +74,7 @@ import {
     orderBy,
     query,
     serverTimestamp,
+    setDoc,
     startAfter,
     updateDoc,
     where,
@@ -157,6 +159,8 @@ type Reply = {
   };
   moderationStatus?: string;
   moderationReasons?: string[];
+  /** Only on the copy of your reply shown while its attachments upload. */
+  sending?: boolean;
 };
 
 type ReplyThreadProps = {
@@ -326,6 +330,14 @@ const ReplyBubbleComponent: React.FC<{
     (f) => !f.mimeType.startsWith("image/"),
   );
 
+  // Your reply while its photos upload: shown, but not saved yet, so there
+  // is nothing to like, reply to or open.
+  const sending = item.sending === true;
+  // For a photo you just sent: the copy on your phone, shown until the
+  // uploaded one loads.
+  const gifLocalCopy = localCopyOf(gifFiles[0]?.url);
+  const imageLocalCopy = localCopyOf(imageFiles[0]?.url);
+
   const taggedUsers = item.taggedUsers ?? [];
 
   const liveAvatar = isSelf
@@ -396,7 +408,7 @@ const ReplyBubbleComponent: React.FC<{
                   <Ionicons
                     name="person"
                     size={13}
-                    color="#9b766c"
+                    color={theme.textMuted}
                   />
                 )}
               </View>
@@ -414,6 +426,7 @@ const ReplyBubbleComponent: React.FC<{
             ? styles.bubbleWrapperRight
             : styles.bubbleWrapperLeft,
           isHighlighted && styles.highlightedBubbleWrapper,
+          sending && styles.replySending,
         ]}
       >
         {!isCurrentUser && showHeader && (
@@ -430,7 +443,7 @@ const ReplyBubbleComponent: React.FC<{
                   {
                     color: isIdentityVisible
                       ? roleColor
-                      : "#9b766c",
+                      : theme.textMuted,
                   },
                 ]}
               >
@@ -473,8 +486,8 @@ const ReplyBubbleComponent: React.FC<{
                   size={13}
                   color={
                     revealed
-                      ? "#e0a53d"
-                      : "#9b766c"
+                      ? theme.accent
+                      : theme.textMuted
                   }
                 />
               </TouchableOpacity>
@@ -500,7 +513,7 @@ const ReplyBubbleComponent: React.FC<{
                 style={[
                   styles.replyPreviewAuthor,
                   isCurrentUser && {
-                    color: "#f0c879",
+                    color: theme.onPrimary,
                   },
                 ]}
               >
@@ -525,6 +538,7 @@ const ReplyBubbleComponent: React.FC<{
         <TouchableOpacity
           onLongPress={() => onLongPress(item, authorRole)}
           delayLongPress={350}
+          disabled={sending}
           activeOpacity={0.88}
           style={[
             styles.bubble,
@@ -559,6 +573,8 @@ const ReplyBubbleComponent: React.FC<{
                     FEED_IMAGE_WIDTH,
                   ),
                 }}
+                placeholder={gifLocalCopy ? { uri: gifLocalCopy } : undefined}
+                placeholderContentFit="cover"
                 style={styles.gifImage}
                 contentFit="cover"
               />
@@ -574,6 +590,7 @@ const ReplyBubbleComponent: React.FC<{
                   0,
                 )
               }
+              disabled={sending}
               style={styles.imageContainer}
             >
               <Image
@@ -583,6 +600,8 @@ const ReplyBubbleComponent: React.FC<{
                     FEED_IMAGE_WIDTH,
                   ),
                 }}
+                placeholder={imageLocalCopy ? { uri: imageLocalCopy } : undefined}
+                placeholderContentFit="cover"
                 style={styles.imagePreview}
                 contentFit="cover"
               />
@@ -613,6 +632,7 @@ const ReplyBubbleComponent: React.FC<{
                     onPress={() =>
                       onFilePress(file.url)
                     }
+                    disabled={sending}
                   >
                     <Ionicons
                       name={details.icon}
@@ -642,7 +662,7 @@ const ReplyBubbleComponent: React.FC<{
                       color={
                         isCurrentUser
                           ? "#ffffff99"
-                          : "#9b766c"
+                          : theme.textMuted
                       }
                     />
                   </TouchableOpacity>
@@ -709,7 +729,7 @@ const ReplyBubbleComponent: React.FC<{
                 color={
                   isCurrentUser
                     ? "#ffffff99"
-                    : "#9b766c"
+                    : theme.textMuted
                 }
               />
             </TouchableOpacity>
@@ -728,8 +748,8 @@ const ReplyBubbleComponent: React.FC<{
                 size={11}
                 color={
                   isCurrentUser
-                    ? "#f0c879"
-                    : "#e0a53d"
+                    ? theme.onPrimary
+                    : theme.accent
                 }
               />
 
@@ -737,7 +757,7 @@ const ReplyBubbleComponent: React.FC<{
                 style={[
                   styles.taggedWith,
                   isCurrentUser && {
-                    color: "#f0c879",
+                    color: theme.onPrimary,
                   },
                 ]}
               >
@@ -770,7 +790,7 @@ const ReplyBubbleComponent: React.FC<{
                         style={[
                           styles.taggedWith,
                           isCurrentUser && {
-                            color: "#f0c879",
+                            color: theme.onPrimary,
                           },
                         ]}
                       >
@@ -798,10 +818,10 @@ const ReplyBubbleComponent: React.FC<{
                 styles.timeTextRight,
             ]}
           >
-            {getTimeAgo(item.createdAt)}
+            {sending ? "Sending…" : getTimeAgo(item.createdAt)}
           </Text>
 
-          <View style={styles.footerActions}>
+          <View style={styles.footerActions} pointerEvents={sending ? "none" : "auto"}>
             <TouchableOpacity
               onPress={() =>
                 onLike(
@@ -820,8 +840,8 @@ const ReplyBubbleComponent: React.FC<{
                 size={13}
                 color={
                   isLiked
-                    ? "#e0a53d"
-                    : "#8f3a2b"
+                    ? theme.accent
+                    : theme.textSecondary
                 }
               />
 
@@ -849,7 +869,7 @@ const ReplyBubbleComponent: React.FC<{
               <Ionicons
                 name="return-down-forward-outline"
                 size={13}
-                color="#8f3a2b"
+                color={theme.textSecondary}
               />
             </TouchableOpacity>
 
@@ -865,7 +885,7 @@ const ReplyBubbleComponent: React.FC<{
               <Ionicons
                 name="ellipsis-horizontal"
                 size={13}
-                color="#8f3a2b"
+                color={theme.textSecondary}
               />
             </TouchableOpacity>
           </View>
@@ -894,6 +914,9 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
 }) => {
   const { styles, theme } = useStyles();
   const [replies, setReplies] = useState<Reply[]>([]);
+  // Your replies whose attachments are still uploading, shown until the saved
+  // reply arrives under the same id.
+  const [sendingReplies, setSendingReplies] = useState<Reply[]>([]);
   // Mirrors replies for callbacks (like, jump to reply) so they keep the same
   // identity across thread updates instead of redrawing every ReplyBubble.
   const repliesRef = useRef<Reply[]>([]);
@@ -1214,6 +1237,13 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         setReplies(ordered);
         setLoading(false);
         saveCachedReplies(commentId, ordered);
+        // A saved reply takes over from the copy shown while it uploaded.
+        const savedIds = new Set(snapshot.docs.map((d) => d.id));
+        setSendingReplies((prev) =>
+          prev.some((reply) => savedIds.has(reply.id))
+            ? prev.filter((reply) => !savedIds.has(reply.id))
+            : prev,
+        );
 
         if (currentUser?.uid) {
           const unseenReplies =
@@ -1434,8 +1464,37 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   const authorIsStaff = isStaff(parseUserRole(currentUser?.role));
 
   const handleSendReply =
-    async (replyData: any) => {
+    async (draft: any, attachments: ComposerAttachments) => {
       if (!currentUser) return;
+
+      // The id is picked up front, so the copy shown while attachments upload
+      // and the saved reply are the same row.
+      const replyRef = doc(collection(db, "replies"));
+      const dropSendingCopy = () =>
+        setSendingReplies((prev) => prev.filter((reply) => reply.id !== replyRef.id));
+      if (attachments.local.length > 0) {
+        // Text on its own already appears at once from Firestore's local
+        // write. Photos would wait for their upload, so show them from the
+        // phone meanwhile.
+        setSendingReplies((prev) => [
+          ...prev,
+          {
+            ...draft,
+            id: replyRef.id,
+            commentId,
+            files: attachments.local,
+            createdAt: new Date(),
+            ...(replyingTo && { replyingTo }),
+            sending: true,
+          },
+        ]);
+        scrollToBottom();
+      }
+      const files = await attachments.upload().catch((error) => {
+        dropSendingCopy();
+        throw error;
+      });
+      const replyData = { ...draft, files };
 
       const shouldTriggerAi =
         hasAiAssistantMention(replyData.text) ||
@@ -1463,7 +1522,10 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       newReply.moderationRuleSource = null;
       Object.assign(newReply, initialModerationFields(authorIsStaff));
 
-      const replyRef = await addDoc(collection(db, "replies"), newReply);
+      await setDoc(replyRef, newReply).catch((error) => {
+        dropSendingCopy();
+        throw error;
+      });
 
       void (async () => {
         let moderationDecision: ModerationDecision;
@@ -2722,10 +2784,20 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
 
   // Stable across renders that don't change the thread (keyboard, dialogs,
   // edits), so FlatList doesn't redraw every row for them.
+  // What the thread shows: the saved replies, then any of yours still
+  // uploading. They are the newest, so they go at the bottom.
+  const threadReplies = useMemo(() => {
+    const stillSending = sendingReplies.filter(
+      (reply) =>
+        reply.commentId === commentId && !replies.some((saved) => saved.id === reply.id),
+    );
+    return stillSending.length > 0 ? [...replies, ...stillSending] : replies;
+  }, [commentId, replies, sendingReplies]);
+
   const renderReplyItem = useCallback(
     ({ item, index }: { item: Reply; index: number }) => {
-      const prev = index > 0 ? replies[index - 1] : undefined;
-      const next = index < replies.length - 1 ? replies[index + 1] : undefined;
+      const prev = index > 0 ? threadReplies[index - 1] : undefined;
+      const next = index < threadReplies.length - 1 ? threadReplies[index + 1] : undefined;
       const showDate = shouldShowDateSeparator(item, prev);
 
       return (
@@ -2776,8 +2848,8 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       highlightedReplyId,
       navigateToReply,
       openReplyActions,
-      replies,
       shouldShowDateSeparator,
+      threadReplies,
     ],
   );
 
@@ -2811,7 +2883,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               <Ionicons
                 name="arrow-back"
                 size={24}
-                color="#e0a53d"
+                color={theme.accent}
               />
             </TouchableOpacity>
 
@@ -2835,7 +2907,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                 <Text
                   style={{
                     color:
-                      "#e0a53d",
+                      theme.accent,
                     fontWeight:
                       "700",
                   }}
@@ -2870,11 +2942,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               style={styles.centered}
             >
               <ActivityIndicator
-                color="#e0a53d"
+                color={theme.accent}
                 size="large"
               />
             </View>
-          ) : replies.length ===
+          ) : threadReplies.length ===
             0 ? (
             <View
               style={styles.centered}
@@ -2904,7 +2976,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
           ) : (
             <FlatList
               ref={flatListRef}
-              data={replies}
+              data={threadReplies}
               // Virtualization tuning: reply threads can include images and
               // grow long, so keep the render window modest instead of RN's
               // default rather than rendering the whole thread at once.
@@ -2914,7 +2986,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               removeClippedSubviews={Platform.OS === "android"}
               onStartReached={loadMoreReplies}
               onStartReachedThreshold={0.5}
-              ListHeaderComponent={loadingMore ? <ActivityIndicator color="#e0a53d" style={{ marginVertical: 16 }} /> : null}
+              ListHeaderComponent={loadingMore ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 16 }} /> : null}
               keyExtractor={(item) =>
                 item.id
               }
@@ -3356,7 +3428,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                 <Ionicons
                   name="close"
                   size={22}
-                  color="#9b766c"
+                  color={theme.textMuted}
                 />
               </TouchableOpacity>
             </View>
@@ -3489,7 +3561,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                 <Ionicons
                   name="close"
                   size={22}
-                  color="#9b766c"
+                  color={theme.textMuted}
                 />
               </TouchableOpacity>
             </View>
@@ -3712,7 +3784,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingVertical: 3,
     borderWidth: 1,
     borderColor:
-      "rgba(95,9,9,0.12)",
+      c.border,
   },
 
   messageRow: {
@@ -3777,6 +3849,9 @@ const makeStyles = (c: ThemeTokens) =>
     shadowOpacity: 0.2,
     shadowRadius: 12,
     elevation: 3,
+  },
+  replySending: {
+    opacity: 0.6,
   },
 
   senderRow: {

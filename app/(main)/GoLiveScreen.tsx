@@ -13,7 +13,14 @@
 // is wired later calls attachLiveVideo() with its identifiers.
 import { useThemeColors } from "@/contexts/ThemeContext";
 import { isAgoraConfigured } from "@/utils/agoraConfig";
-import { attachLiveVideo, startLiveStream } from "@/utils/liveStreams";
+import {
+  attachLiveVideo,
+  endLiveStream,
+  findMyLiveStreams,
+  isLiveStreamFresh,
+  startLiveStream,
+  type LiveStream,
+} from "@/utils/liveStreams";
 import { getUserData } from "@/utils/rbac";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
@@ -36,6 +43,21 @@ import { auth } from "../../Firebase_configure";
 
 const TITLE_MAX = 120;
 
+/**
+ * The live this person already has running, if any.
+ *
+ * Lives whose host has gone quiet are ended on the way — nobody is on the
+ * other end of them, and they are what used to pile up as duplicate cards.
+ * A fresh one is returned instead, for the person to resume or end.
+ */
+async function settleMyLiveStreams(hostId: string): Promise<LiveStream | null> {
+  const mine = await findMyLiveStreams(hostId);
+  const now = Date.now();
+  const stale = mine.filter((stream) => !isLiveStreamFresh(stream, now));
+  await Promise.all(stale.map((stream) => endLiveStream(stream.id).catch(() => undefined)));
+  return mine.find((stream) => isLiveStreamFresh(stream, now)) ?? null;
+}
+
 export default function GoLiveScreen() {
   const { styles, theme } = useStyles();
   const router = useRouter();
@@ -49,6 +71,48 @@ export default function GoLiveScreen() {
     avatar: string | null;
     role: string;
   } | null>(null);
+  // A live this person already has open. Starting another is blocked until
+  // they resume it or end it.
+  const [existing, setExisting] = useState<LiveStream | null>(null);
+  const [checking, setChecking] = useState(Boolean(user?.uid));
+  const [endingExisting, setEndingExisting] = useState(false);
+
+  useEffect(() => {
+    if (!user?.uid) return;
+    let cancelled = false;
+    settleMyLiveStreams(user.uid)
+      .then((open) => {
+        if (!cancelled) setExisting(open);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid]);
+
+  const resumeExisting = () => {
+    if (!existing) return;
+    router.replace({
+      pathname: "/(main)/LiveStreamScreen",
+      params: { streamId: existing.id },
+    } as any);
+  };
+
+  const endExisting = async () => {
+    if (!existing || endingExisting) return;
+    setEndingExisting(true);
+    try {
+      await endLiveStream(existing.id);
+      setExisting(null);
+    } catch {
+      setError("Could not end your other live. Check your connection and try again.");
+    } finally {
+      setEndingExisting(false);
+    }
+  };
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -72,7 +136,7 @@ export default function GoLiveScreen() {
   }, [user?.uid]);
 
   const start = async () => {
-    if (!user?.uid || !host || starting) return;
+    if (!user?.uid || !host || starting || existing || checking) return;
     const trimmed = title.trim();
     if (!trimmed) {
       setError("Give your stream a title so people know what it is.");
@@ -82,6 +146,15 @@ export default function GoLiveScreen() {
     setStarting(true);
     setError(null);
     try {
+      // Checked again right before creating: another phone signed in to the
+      // same account may have gone live since this screen opened.
+      const open = await settleMyLiveStreams(user.uid);
+      if (open) {
+        setExisting(open);
+        setStarting(false);
+        return;
+      }
+
       const streamId = await startLiveStream({
         hostId: user.uid,
         hostName: host.name,
@@ -139,10 +212,48 @@ export default function GoLiveScreen() {
             <Text style={styles.noticeText}>
               Your stream appears at the top of the Home feed for everyone on
               campus. Moderators can end it at any time.
-              {!isAgoraConfigured() &&
-                " Live video is not configured for this build, so viewers will see comments only."}
+              {isAgoraConfigured()
+                ? " When you end it, the first 10 minutes are posted to the feed as a replay — keep BondED open while it saves."
+                : " Live video is not configured for this build, so viewers will see comments only."}
             </Text>
           </View>
+
+          {existing && (
+            <View style={styles.existingCard}>
+              <View style={styles.existingHeader}>
+                <View style={styles.existingDot} />
+                <Text style={styles.existingTitle}>You’re already live</Text>
+              </View>
+              <Text style={styles.existingText} numberOfLines={2}>
+                “{existing.title}” is still running. Go back to it, or end it
+                before starting a new one.
+              </Text>
+              <View style={styles.existingActions}>
+                <Pressable
+                  style={({ pressed }) => [styles.resumeButton, pressed && styles.pressed]}
+                  onPress={resumeExisting}
+                  accessibilityRole="button"
+                  accessibilityLabel="Resume your live"
+                >
+                  <Ionicons name="play" size={15} color={theme.onPrimary} />
+                  <Text style={styles.resumeButtonText}>Resume</Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [styles.endExistingButton, pressed && styles.pressed]}
+                  onPress={endExisting}
+                  disabled={endingExisting}
+                  accessibilityRole="button"
+                  accessibilityLabel="End your other live"
+                >
+                  {endingExisting ? (
+                    <ActivityIndicator size="small" color={theme.danger} />
+                  ) : (
+                    <Text style={styles.endExistingText}>End it</Text>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+          )}
 
           <Text style={styles.label}>What is this stream about?</Text>
           <TextInput
@@ -165,11 +276,14 @@ export default function GoLiveScreen() {
           {error && <Text style={styles.error}>{error}</Text>}
 
           <Pressable
-            style={[styles.goButton, (!title.trim() || starting) && styles.goButtonIdle]}
+            style={[
+              styles.goButton,
+              (!title.trim() || starting || !!existing || checking) && styles.goButtonIdle,
+            ]}
             onPress={start}
-            disabled={!title.trim() || starting || !host}
+            disabled={!title.trim() || starting || !host || !!existing || checking}
           >
-            {starting ? (
+            {starting || checking ? (
               <ActivityIndicator color={theme.onPrimary} />
             ) : (
               <>
@@ -232,6 +346,42 @@ const makeStyles = (c: ThemeTokens) =>
       marginBottom: 4,
     },
     noticeText: { flex: 1, color: c.textSecondary, fontSize: 13, lineHeight: 19 },
+
+    existingCard: {
+      backgroundColor: c.surface,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: c.borderStrong,
+      padding: 14,
+      gap: 8,
+    },
+    existingHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+    existingDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: c.danger },
+    existingTitle: { color: c.textPrimary, fontSize: 15, fontWeight: "800" },
+    existingText: { color: c.textSecondary, fontSize: 13, lineHeight: 19 },
+    existingActions: { flexDirection: "row", gap: 10, marginTop: 4 },
+    resumeButton: {
+      flex: 1,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      minHeight: 42,
+      borderRadius: 12,
+      backgroundColor: c.primary,
+    },
+    resumeButtonText: { color: c.onPrimary, fontSize: 14, fontWeight: "800" },
+    endExistingButton: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      minHeight: 42,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: c.danger,
+    },
+    endExistingText: { color: c.danger, fontSize: 14, fontWeight: "800" },
+    pressed: { opacity: 0.8 },
 
     label: { color: c.textPrimary, fontSize: 14.5, fontWeight: "800" },
     input: {

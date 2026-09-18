@@ -31,6 +31,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { auth } from "../../Firebase_configure";
+import BeaOrb from "./components/BeaOrb";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 import { uploadPostImage } from "@/utils/cloudinaryUpload";
 import { isAdmin as isAdminRole } from "@/utils/rbac";
@@ -447,6 +448,22 @@ export default function SupportTicketScreen() {
                 Handled by {ticket.assignedToName}
               </Text>
             )}
+
+            {/* Raised from a question B.E.A. couldn't answer: staff see what
+                was asked first, and the student sees where it came from. */}
+            {!!ticket.sourceQuestion && (
+              <View style={styles.beaNote}>
+                <BeaOrb size={36} mood="unsure" />
+                <View style={styles.beaNoteCopy}>
+                  <Text style={styles.beaNoteLabel}>
+                    {staff ? "Asked B.E.A. first" : "You asked B.E.A. first"}
+                  </Text>
+                  <Text style={styles.beaNoteQuestion} numberOfLines={3}>
+                    “{ticket.sourceQuestion}”
+                  </Text>
+                </View>
+              </View>
+            )}
           </View>
 
           {/* The original report reads as the first message in the thread. */}
@@ -812,6 +829,18 @@ const makeStyles = (c: ThemeTokens) =>
   reporterName: { color: c.textPrimary, fontSize: 13, fontWeight: "800" },
   reporterMeta: { color: c.textMuted, fontSize: 11.5 },
   assignedText: { color: c.accent, fontSize: 12, fontWeight: "800" },
+  beaNote: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 12,
+    padding: 10,
+    borderRadius: 14,
+    backgroundColor: c.surfaceSunken,
+  },
+  beaNoteCopy: { flex: 1, minWidth: 0 },
+  beaNoteLabel: { color: c.textMuted, fontSize: 11.5, fontWeight: "700", letterSpacing: 0.2 },
+  beaNoteQuestion: { color: c.textPrimary, fontSize: 13.5, lineHeight: 19, marginTop: 2 },
 
   headerStatus: {
     flexDirection: "row",

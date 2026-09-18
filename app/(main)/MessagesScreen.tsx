@@ -941,7 +941,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(95, 9, 9, 0.12)",
+    borderBottomColor: c.border,
     backgroundColor: c.surface,
   },
   headerIconButton: {
@@ -1179,7 +1179,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 16,
     paddingVertical: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(95, 9, 9, 0.12)",
+    borderBottomColor: c.border,
   },
   modalTitle: {
     fontSize: 18,
@@ -1206,7 +1206,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(95, 9, 9, 0.06)",
+    borderBottomColor: c.border,
   },
   personAvatarWrap: {
     position: "relative",

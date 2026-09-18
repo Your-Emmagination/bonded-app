@@ -19,12 +19,14 @@ import {
   canModerateLive,
   endLiveStream,
   hideLiveComment,
+  isLiveStreamFresh,
   joinAsViewer,
   pinLiveComment,
   postLiveComment,
   publishViewerCount,
   sendLiveReaction,
   setLiveMediaState,
+  startHostHeartbeat,
   subscribeToLiveComments,
   subscribeToStream,
   subscribeToViewerCount,
@@ -39,7 +41,16 @@ import { Ionicons } from "@expo/vector-icons";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { RtcSurfaceView, VideoSourceType } from "react-native-agora";
 import { useAgoraLive } from "@/utils/useAgoraLive";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import {
+  discardRecording,
+  replayPostRoute,
+  retryLiveReplay,
+  saveLiveReplay,
+  useReplayJob,
+  type LiveRecording,
+} from "@/utils/liveReplay";
+import { useAppActive } from "@/utils/presence";
+import { useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -52,6 +63,8 @@ import {
   Text,
   TextInput,
   View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from "react-native";
 import Reanimated, {
   Easing,
@@ -73,6 +86,9 @@ const getParam = (value?: string | string[]) =>
 /** At most this many hearts in flight, however hard people are tapping. */
 const MAX_FLOATING_HEARTS = 12;
 
+/** Within this many points of the bottom still counts as reading the latest. */
+const COMMENTS_BOTTOM_SLACK = 48;
+
 type FloatingHeart = { key: number };
 
 export default function LiveStreamScreen() {
@@ -91,7 +107,9 @@ export default function LiveStreamScreen() {
   const [comments, setComments] = useState<LiveComment[]>([]);
   const [draft, setDraft] = useState("");
   const [hearts, setHearts] = useState<FloatingHeart[]>([]);
-  const [confirmEnd, setConfirmEnd] = useState(false);
+  // Which "end" is being confirmed: the stop button, or the host trying to
+  // leave the screen, which ends the live too.
+  const [confirmEnd, setConfirmEnd] = useState<"stop" | "leave" | null>(null);
   // The comment whose long-press menu is open.
   const [menuComment, setMenuComment] = useState<LiveComment | null>(null);
 
@@ -151,6 +169,38 @@ export default function LiveStreamScreen() {
     });
   }, [isHost, streamId]);
 
+  // ── Host still here ─────────────────────────────────────────────────────
+  // While the host has this screen open and in front, the stream keeps
+  // saying so. In the background the camera stops anyway, so the signal
+  // stops with it; a host who doesn't come back drops out of the feed.
+  const appActive = useAppActive();
+  const hostIsLive = isHost && stream?.status === "live";
+  useEffect(() => {
+    if (!hostIsLive || !appActive || !streamId) return;
+    return startHostHeartbeat(streamId);
+  }, [hostIsLive, appActive, streamId]);
+
+  // A viewer on a live whose host has gone quiet is told so, rather than
+  // being left on "waiting for the camera" indefinitely.
+  const freshnessNow = useRelativeTimeNow(10_000);
+  const hostAway = !isHost && !!stream && !isLiveStreamFresh(stream, freshnessNow);
+
+  // Leaving is ending, for the host: the camera stops when this screen
+  // closes, so a live left behind would only be an empty card. Every way out
+  // — the ⌄ button, Android's back, a swipe — asks first.
+  const navigation = useNavigation();
+  const pendingLeaveRef = useRef<any>(null);
+  const leaveAllowedRef = useRef(false);
+  useEffect(() => {
+    if (!hostIsLive) return;
+    return navigation.addListener("beforeRemove", (event) => {
+      if (leaveAllowedRef.current) return;
+      event.preventDefault();
+      pendingLeaveRef.current = event.data.action;
+      setConfirmEnd("leave");
+    });
+  }, [navigation, hostIsLive]);
+
   // ── Hearts ──────────────────────────────────────────────────────────────
   // Each increment of the counter floats one heart. Comparing against the
   // previous value means a viewer sees everyone else's taps, not just theirs.
@@ -191,12 +241,49 @@ export default function LiveStreamScreen() {
     instance.play();
   });
 
+  // Only while the stream is live. Once it ends, everyone leaves the channel —
+  // including the host, whose camera would otherwise keep sending to nobody
+  // until they closed the screen — and the host's recording is finished.
   const agoraChannel =
-    stream?.provider === "agora" ? stream.channelName ?? stream.id : null;
+    stream?.status === "live" && stream.provider === "agora"
+      ? stream.channelName ?? stream.id
+      : null;
+
+  // ── Replay ──────────────────────────────────────────────────────────────
+  // The host's broadcast is recorded while live. It becomes a replay post
+  // only if the host ended the live themselves; one a moderator stopped is
+  // thrown away.
+  const hostEndedRef = useRef(false);
+  const replaySourceRef = useRef<LiveStream | null>(null);
+  useEffect(() => {
+    replaySourceRef.current = stream;
+  });
+  const handleRecordingFinished = useCallback((recording: LiveRecording) => {
+    const source = replaySourceRef.current;
+    const uid = auth.currentUser?.uid;
+    if (!hostEndedRef.current || !source || !uid || source.hostId !== uid) {
+      discardRecording(recording.fileUri);
+      return;
+    }
+    saveLiveReplay({
+      streamId: source.id,
+      title: source.title,
+      recording,
+      author: { uid, name: source.hostName, role: source.hostRole },
+      stats: {
+        peakViewers: Math.max(source.peakViewers, peakRef.current),
+        commentCount: source.commentCount,
+        reactionCount: source.reactionCount,
+      },
+    });
+  }, []);
+  const replayJob = useReplayJob(isHost ? streamId : null);
+
   const agora = useAgoraLive(
     agoraChannel,
     isHost ? "host" : "audience",
     user?.uid ?? null,
+    { record: isHost, onRecordingFinished: handleRecordingFinished },
   );
 
   // The host watches their own camera; everyone else watches the host's.
@@ -237,10 +324,57 @@ export default function LiveStreamScreen() {
     setLiveMediaState(streamId, { cameraOff: next }).catch(() => undefined);
   }, [streamId, cameraOff, setCameraOff]);
 
+  // ── Following the chat ──────────────────────────────────────────────────
+  // New comments scroll into view while you are at the bottom. Scrolled up to
+  // read something, you stay put and a pill offers the way back down. Your
+  // own comment always brings you to the bottom.
+  const commentListRef = useRef<FlatList<LiveComment>>(null);
+  const atBottomRef = useRef(true);
+  const followOwnRef = useRef(false);
+  const newestSeenRef = useRef<string | null>(null);
+  const [newCommentsBelow, setNewCommentsBelow] = useState(false);
+
+  const scrollCommentsToEnd = useCallback((animated = true) => {
+    commentListRef.current?.scrollToEnd({ animated });
+    atBottomRef.current = true;
+    setNewCommentsBelow(false);
+  }, []);
+
+  const handleCommentsScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+      const fromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+      atBottomRef.current = fromBottom < COMMENTS_BOTTOM_SLACK;
+      if (atBottomRef.current) setNewCommentsBelow(false);
+    },
+    [],
+  );
+
+  // Runs once the list has laid out new content, which is the first moment a
+  // scroll to the end reaches the comment that just arrived.
+  const newestCommentId = comments[comments.length - 1]?.id ?? null;
+  const handleCommentsSizeChange = useCallback(() => {
+    if (!newestCommentId || newestCommentId === newestSeenRef.current) return;
+    const firstLoad = newestSeenRef.current === null;
+    newestSeenRef.current = newestCommentId;
+    if (firstLoad || atBottomRef.current || followOwnRef.current) {
+      followOwnRef.current = false;
+      scrollCommentsToEnd(!firstLoad);
+    } else {
+      setNewCommentsBelow(true);
+    }
+  }, [newestCommentId, scrollCommentsToEnd]);
+
+  // The keyboard shrinks the list; someone at the bottom should stay there.
+  const handleCommentsLayout = useCallback(() => {
+    if (atBottomRef.current) commentListRef.current?.scrollToEnd({ animated: false });
+  }, []);
+
   // ── Actions ─────────────────────────────────────────────────────────────
   const send = useCallback(() => {
     const text = draft.trim();
     if (!text || !streamId || !user?.uid) return;
+    followOwnRef.current = true;
     setDraft("");
     postLiveComment({
       streamId,
@@ -253,7 +387,25 @@ export default function LiveStreamScreen() {
 
   const confirmEndStream = useCallback(async () => {
     if (!streamId) return;
-    setConfirmEnd(false);
+    setConfirmEnd(null);
+    // Marked before the stream flips to ended, which is what stops the
+    // recording; that is where it is decided whether it becomes a replay.
+    if (isHost) hostEndedRef.current = true;
+
+    if (confirmEnd === "leave") {
+      // Carry on with the exit that was held back, without waiting for the
+      // server: the write is queued either way, and if it never lands (no
+      // signal) the quiet heartbeat takes the live off the feed. The replay
+      // keeps saving after the screen closes.
+      endLiveStream(streamId).catch(() => undefined);
+      leaveAllowedRef.current = true;
+      const action = pendingLeaveRef.current;
+      pendingLeaveRef.current = null;
+      if (action) navigation.dispatch(action);
+      else router.back();
+      return;
+    }
+
     try {
       if (isHost) {
         await endLiveStream(streamId);
@@ -263,7 +415,12 @@ export default function LiveStreamScreen() {
     } catch {
       // The listener will show the real state either way.
     }
-  }, [streamId, isHost, user?.uid, viewerName]);
+  }, [streamId, confirmEnd, isHost, user?.uid, viewerName, navigation, router]);
+
+  const cancelEndStream = useCallback(() => {
+    pendingLeaveRef.current = null;
+    setConfirmEnd(null);
+  }, []);
 
   const pinnedId = stream?.pinnedComment?.id ?? null;
 
@@ -373,6 +530,10 @@ export default function LiveStreamScreen() {
 
   if (stream.status !== "live") {
     const blocked = stream.status === "blocked";
+    // The replay, once there is one people can watch: straight from this
+    // phone's upload for the host, or from the stream for everyone else.
+    const replayPostId =
+      replayJob?.phase === "posted" ? replayJob.postId : stream.replayPostId;
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.centered}>
@@ -395,6 +556,94 @@ export default function LiveStreamScreen() {
             {stream.peakViewers} peak · {stream.commentCount} comments ·{" "}
             {stream.reactionCount} hearts
           </Text>
+
+          {replayJob && replayJob.phase !== "posted" && (
+            <View style={styles.replayCard}>
+              {replayJob.phase === "saving" ||
+              replayJob.phase === "uploading" ||
+              replayJob.phase === "posting" ? (
+                <>
+                  <View style={styles.replayCardHeader}>
+                    <ActivityIndicator size="small" color={theme.primary} />
+                    <Text style={styles.replayCardTitle}>
+                      {replayJob.phase === "posting"
+                        ? "Posting your replay…"
+                        : replayJob.phase === "uploading"
+                          ? `Uploading your replay… ${Math.round(replayJob.progress * 100)}%`
+                          : "Saving your replay…"}
+                    </Text>
+                  </View>
+                  <View
+                    style={styles.replayTrack}
+                    accessibilityRole="progressbar"
+                    accessibilityValue={{ min: 0, max: 100, now: Math.round(replayJob.progress * 100) }}
+                  >
+                    <View
+                      style={[
+                        styles.replayFill,
+                        { width: `${Math.round(Math.max(0.03, replayJob.progress) * 100)}%` },
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.replayCardText}>
+                    Keep BondED open until it finishes. You can leave this screen.
+                  </Text>
+                </>
+              ) : replayJob.phase === "review" ? (
+                <>
+                  <View style={styles.replayCardHeader}>
+                    <Ionicons name="hourglass-outline" size={18} color={theme.warning} />
+                    <Text style={styles.replayCardTitle}>Replay sent for review</Text>
+                  </View>
+                  <Text style={styles.replayCardText}>
+                    It will appear on the feed once a moderator approves it.
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <View style={styles.replayCardHeader}>
+                    <Ionicons
+                      name={replayJob.phase === "failed" ? "cloud-offline-outline" : "information-circle-outline"}
+                      size={18}
+                      color={replayJob.phase === "failed" ? theme.danger : theme.textMuted}
+                    />
+                    <Text style={styles.replayCardTitle}>
+                      {replayJob.phase === "failed" ? "Replay not saved yet" : "No replay"}
+                    </Text>
+                  </View>
+                  {!!replayJob.message && (
+                    <Text style={styles.replayCardText}>{replayJob.message}</Text>
+                  )}
+                  {replayJob.phase === "failed" && (
+                    <Pressable
+                      style={({ pressed }) => [styles.replayRetry, pressed && styles.pressed]}
+                      onPress={() => retryLiveReplay(stream.id)}
+                      accessibilityRole="button"
+                    >
+                      <Ionicons name="refresh" size={15} color={theme.onPrimary} />
+                      <Text style={styles.replayRetryText}>Try again</Text>
+                    </Pressable>
+                  )}
+                </>
+              )}
+            </View>
+          )}
+
+          {replayPostId && (
+            <Pressable
+              style={({ pressed }) => [styles.replayButton, pressed && styles.pressed]}
+              onPress={() => router.push(replayPostRoute(replayPostId) as any)}
+              accessibilityRole="button"
+            >
+              <Ionicons name="play-circle" size={19} color={theme.primary} />
+              <Text style={styles.replayButtonText}>
+                {replayJob?.phase === "posted"
+                  ? "Your replay is on the feed · View"
+                  : "Watch replay"}
+              </Text>
+            </Pressable>
+          )}
+
           <Pressable style={styles.primaryButton} onPress={() => router.back()}>
             <Text style={styles.primaryButtonText}>Back to feed</Text>
           </Pressable>
@@ -453,16 +702,57 @@ export default function LiveStreamScreen() {
               >
                 {agora.error
                   ? agora.error
-                  : agoraChannel
-                    ? isHost
-                      ? "Starting your camera…"
-                      : "Waiting for the host's camera…"
-                    : "This stream has no video."}
+                  : hostAway
+                    ? `${stream.hostName} left the live. It will close if they don't come back soon.`
+                    : agoraChannel
+                      ? isHost
+                        ? "Starting your camera…"
+                        : "Waiting for the host's camera…"
+                      : "This stream has no video."}
               </Text>
               {agora.error && !isHost && (
                 <Text style={styles.stagePlaceholderHint}>
                   The comments below still work.
                 </Text>
+              )}
+              {isHost && (agora.permission === "denied" || agora.permission === "blocked") && (
+                <>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.permissionButton,
+                      pressed && styles.permissionButtonPressed,
+                    ]}
+                    // Asked again right here while Android still allows it;
+                    // once it has stopped asking, straight to BondED's settings.
+                    onPress={
+                      agora.permission === "blocked"
+                        ? agora.openPermissionSettings
+                        : agora.retryPermissions
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      agora.permission === "blocked"
+                        ? "Open BondED settings to allow camera and microphone"
+                        : "Turn on camera and microphone"
+                    }
+                  >
+                    <Ionicons
+                      name={agora.permission === "blocked" ? "settings-outline" : "videocam"}
+                      size={17}
+                      color={theme.onPrimary}
+                    />
+                    <Text style={styles.permissionButtonText}>
+                      {agora.permission === "blocked"
+                        ? "Open settings"
+                        : "Turn on camera & microphone"}
+                    </Text>
+                  </Pressable>
+                  {agora.permission === "blocked" && (
+                    <Text style={styles.stagePlaceholderHint}>
+                      Tap Permissions, allow Camera and Microphone, then come back.
+                    </Text>
+                  )}
+                </>
               )}
             </View>
           )}
@@ -492,7 +782,7 @@ export default function LiveStreamScreen() {
             {(isHost || canModerate) && (
               <Pressable
                 style={styles.iconButton}
-                onPress={() => setConfirmEnd(true)}
+                onPress={() => setConfirmEnd("stop")}
                 hitSlop={10}
                 accessibilityLabel={isHost ? "End stream" : "End this stream"}
               >
@@ -507,6 +797,17 @@ export default function LiveStreamScreen() {
 
           <View style={styles.statusRow}>
             <LiveTimer startedAt={stream.startedAt} />
+            {isHost && agora.recording && (
+              // Only the host sees this; it says the replay is being kept.
+              <View
+                style={styles.statusPill}
+                accessible
+                accessibilityLabel="Recording a replay"
+              >
+                <View style={styles.recDot} />
+                <Text style={styles.statusPillText}>REC</Text>
+              </View>
+            )}
             {micMuted && (
               <View style={styles.statusPill}>
                 <Ionicons name="mic-off" size={12} color={theme.onChrome} />
@@ -592,19 +893,38 @@ export default function LiveStreamScreen() {
             )}
           </View>
         )}
-        <FlatList
-          style={styles.commentList}
-          contentContainerStyle={styles.commentListContent}
-          data={comments}
-          renderItem={renderComment}
-          keyExtractor={(item) => item.id}
-          showsVerticalScrollIndicator={false}
-          ListEmptyComponent={
-            <Text style={styles.commentEmpty}>
-              No comments yet. Say something.
-            </Text>
-          }
-        />
+        <View style={styles.commentArea}>
+          <FlatList
+            ref={commentListRef}
+            style={styles.commentList}
+            contentContainerStyle={styles.commentListContent}
+            data={comments}
+            renderItem={renderComment}
+            keyExtractor={(item) => item.id}
+            showsVerticalScrollIndicator={false}
+            onScroll={handleCommentsScroll}
+            scrollEventThrottle={32}
+            onContentSizeChange={handleCommentsSizeChange}
+            onLayout={handleCommentsLayout}
+            keyboardShouldPersistTaps="handled"
+            ListEmptyComponent={
+              <Text style={styles.commentEmpty}>
+                No comments yet. Say something.
+              </Text>
+            }
+          />
+          {newCommentsBelow && (
+            <Pressable
+              style={({ pressed }) => [styles.newCommentsPill, pressed && styles.newCommentsPillPressed]}
+              onPress={() => scrollCommentsToEnd()}
+              accessibilityRole="button"
+              accessibilityLabel="Jump to new comments"
+            >
+              <Text style={styles.newCommentsText}>New comments</Text>
+              <Ionicons name="arrow-down" size={14} color={theme.onPrimary} />
+            </Pressable>
+          )}
+        </View>
 
         <View style={styles.composer}>
           <TextInput
@@ -643,18 +963,30 @@ export default function LiveStreamScreen() {
       />
 
       <ConfirmDialog
-        visible={confirmEnd}
+        visible={confirmEnd !== null}
         variant="destructive"
-        title={isHost ? "End your stream?" : "End this stream?"}
-        description={
-          isHost
-            ? "Viewers will be told the stream has finished."
-            : "Everyone watching will be told a moderator ended it. This cannot be undone."
+        title={
+          confirmEnd === "leave"
+            ? "End your live?"
+            : isHost
+              ? "End your stream?"
+              : "End this stream?"
         }
-        confirmText={isHost ? "End stream" : "End it"}
-        cancelText="Keep watching"
+        description={
+          confirmEnd === "leave"
+            ? "Leaving this screen ends your live for everyone watching."
+            : isHost
+              ? "Viewers will be told the stream has finished."
+              : "Everyone watching will be told a moderator ended it. This cannot be undone."
+        }
+        confirmText={
+          confirmEnd === "leave" ? "End live" : isHost ? "End stream" : "End it"
+        }
+        cancelText={
+          confirmEnd === "leave" ? "Stay live" : isHost ? "Keep streaming" : "Keep watching"
+        }
         onConfirm={confirmEndStream}
-        onCancel={() => setConfirmEnd(false)}
+        onCancel={cancelEndStream}
       />
     </SafeAreaView>
   );
@@ -787,7 +1119,19 @@ const makeStyles = (c: ThemeTokens) =>
       lineHeight: 19,
     },
     stagePlaceholderError: { color: c.onChrome, fontSize: 13.5 },
-    stagePlaceholderHint: { color: c.onChromeMuted, fontSize: 12 },
+    stagePlaceholderHint: { color: c.onChromeMuted, fontSize: 12, textAlign: "center" },
+    permissionButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      marginTop: 6,
+      minHeight: 44,
+      paddingHorizontal: 18,
+      borderRadius: 22,
+      backgroundColor: c.danger,
+    },
+    permissionButtonPressed: { opacity: 0.85 },
+    permissionButtonText: { color: c.onPrimary, fontSize: 14, fontWeight: "800" },
 
     topBar: {
       position: "absolute",
@@ -878,6 +1222,12 @@ const makeStyles = (c: ThemeTokens) =>
     },
     // Tabular figures, so the pill doesn't twitch in width every second.
     timerText: { fontVariant: ["tabular-nums"] },
+    recDot: {
+      width: 7,
+      height: 7,
+      borderRadius: 4,
+      backgroundColor: "#ff4d4f",
+    },
     hostRail: {
       position: "absolute",
       top: 54,
@@ -916,7 +1266,27 @@ const makeStyles = (c: ThemeTokens) =>
       height: 240,
     },
 
+    commentArea: { flex: 1 },
     commentList: { flex: 1 },
+    newCommentsPill: {
+      position: "absolute",
+      bottom: 10,
+      alignSelf: "center",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 18,
+      backgroundColor: c.primary,
+      shadowColor: "#000",
+      shadowOpacity: 0.18,
+      shadowRadius: 6,
+      shadowOffset: { width: 0, height: 2 },
+      elevation: 3,
+    },
+    newCommentsPillPressed: { opacity: 0.85 },
+    newCommentsText: { color: c.onPrimary, fontSize: 12.5, fontWeight: "800" },
     commentListContent: { paddingVertical: 10, paddingHorizontal: 14, gap: 10 },
     commentRow: { flexDirection: "row", alignItems: "flex-start", gap: 9 },
     commentAvatar: { width: 28, height: 28, borderRadius: 14 },
@@ -977,6 +1347,52 @@ const makeStyles = (c: ThemeTokens) =>
     endedTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "900" },
     endedText: { color: c.textSecondary, fontSize: 14, textAlign: "center" },
     endedStats: { color: c.textMuted, fontSize: 12.5, marginTop: 2 },
+    pressed: { opacity: 0.8 },
+    replayCard: {
+      alignSelf: "stretch",
+      marginTop: 10,
+      padding: 14,
+      gap: 8,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surface,
+    },
+    replayCardHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+    replayCardTitle: { flex: 1, color: c.textPrimary, fontSize: 14.5, fontWeight: "800" },
+    replayCardText: { color: c.textSecondary, fontSize: 12.5, lineHeight: 18 },
+    replayTrack: {
+      height: 6,
+      borderRadius: 3,
+      overflow: "hidden",
+      backgroundColor: c.surfaceSunken,
+    },
+    replayFill: { height: "100%", borderRadius: 3, backgroundColor: c.primary },
+    replayRetry: {
+      alignSelf: "flex-start",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      marginTop: 2,
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 12,
+      backgroundColor: c.primary,
+    },
+    replayRetryText: { color: c.onPrimary, fontSize: 13, fontWeight: "800" },
+    replayButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      marginTop: 10,
+      paddingHorizontal: 18,
+      paddingVertical: 11,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: c.borderStrong,
+      backgroundColor: c.surface,
+    },
+    replayButtonText: { color: c.primary, fontSize: 14, fontWeight: "800" },
     primaryButton: {
       marginTop: 10,
       paddingHorizontal: 22,

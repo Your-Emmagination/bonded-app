@@ -28,6 +28,7 @@ import {
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
+import BeaOrb from "./components/BeaOrb";
 import ConfirmDialog from "./components/ConfirmDialog";
 import { ListSkeleton } from "./components/Skeleton";
 import { auth } from "../../Firebase_configure";
@@ -194,11 +195,15 @@ export default function SupportScreen() {
           {composing ? (
             <>
               {!!escalatedQuestion && (
+                // B.E.A. handing over: the unsure face, with its "?".
                 <View style={styles.escalatedCard}>
-                  <Ionicons name="sparkles-outline" size={17} color={theme.accent} />
+                  <BeaOrb size={52} mood="unsure" animated />
                   <Text style={styles.escalatedText}>
-                    We&apos;ve filled in what you asked BEA. Add anything else that
-                    helps.
+                    <Text style={styles.escalatedLead}>
+                      B.E.A. couldn&apos;t answer this one.
+                    </Text>{" "}
+                    We&apos;ve filled in what you asked so staff can pick it up. Add
+                    anything else that helps.
                   </Text>
                 </View>
               )}
@@ -586,7 +591,9 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 14,
     padding: 13,
   },
-  escalatedText: { flex: 1, color: c.accent, fontSize: 12.5, lineHeight: 18 },
+  // Dark text on the gold wash: gold on gold was too faint to read.
+  escalatedText: { flex: 1, color: c.textSecondary, fontSize: 12.5, lineHeight: 18 },
+  escalatedLead: { color: c.textPrimary, fontWeight: "700" },
 
   label: {
     color: c.primary,

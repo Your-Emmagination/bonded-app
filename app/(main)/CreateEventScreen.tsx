@@ -4,14 +4,13 @@ import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import * as Haptics from "expo-haptics";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { addDoc, collection, doc, getDoc, getDocs, query, serverTimestamp, updateDoc, where } from "firebase/firestore";
+import { addDoc, collection, doc, getDoc, serverTimestamp, updateDoc } from "firebase/firestore";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
     Keyboard,
     KeyboardAvoidingView,
-    Modal,
     Platform,
     ScrollView,
     StyleSheet,
@@ -29,11 +28,14 @@ import { createBroadcastEventNotifications } from "@/utils/notifications";
 import { sendBroadcastEventPushNotifications } from "@/utils/pushNotifications";
 import { getUserData } from "@/utils/rbac";
 import { auth, db } from "../../Firebase_configure";
+import { getEventTimingWindow } from "@/utils/eventTiming";
 
 type CalendarEvent = {
   title: string;
+  subEvent?: string;
   description?: string;
   date: string;
+  endDate?: string;
   startTime?: string;
   endTime?: string;
   category: "morning" | "afternoon" | "evening" | "all-day";
@@ -179,85 +181,41 @@ const CreateEventScreen = () => {
   const { styles, colors } = useStyles();
   const router = useRouter();
   const { isOffline } = useNetworkStatus();
-  const { eventId, parentId } = useLocalSearchParams<{
+  const { eventId } = useLocalSearchParams<{
     eventId?: string | string[];
-    parentId?: string | string[];
   }>();
   const editingEventId = Array.isArray(eventId) ? eventId[0] : eventId;
-  // Set when "Add a part" is tapped on a main event, so the link is pre-filled.
-  const presetParentId = Array.isArray(parentId) ? parentId[0] : parentId;
   const savingRef = useRef(false);
+  const formScrollRef = useRef<ScrollView>(null);
+  const subEventInputRef = useRef<TextInput>(null);
   // Live, so a role change lands here too — a demoted account is turned away
   // even if it had this form open.
   const currentUserRole = useCurrentUserRole();
   const [form, setForm] = useState<CalendarEvent>({
     title: "",
+    subEvent: "",
     description: "",
     date: toLocalDateString(new Date()),
+    endDate: toLocalDateString(new Date()),
     category: "morning",
     notifyUsers: false,
-    parentEventId: presetParentId || null,
+    parentEventId: null,
   });
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showEndDatePicker, setShowEndDatePicker] = useState(false);
   const [showStartTimePicker, setShowStartTimePicker] = useState(false);
   const [showEndTimePicker, setShowEndTimePicker] = useState(false);
   const [loading, setLoading] = useState(false);
   const [titleTouched, setTitleTouched] = useState(false);
   const [titleFocused, setTitleFocused] = useState(false);
+  const [subEventFocused, setSubEventFocused] = useState(false);
   const [detailsFocused, setDetailsFocused] = useState(false);
-  const [parentOptions, setParentOptions] = useState<
-    { id: string; title: string; date: string; status?: string }[]
-  >([]);
-  const [parentPickerVisible, setParentPickerVisible] = useState(false);
-  const [parentSearch, setParentSearch] = useState("");
   const [isAllDay, setIsAllDay] = useState(false);
-
-  const selectedParent = useMemo(
-    () => parentOptions.find((option) => option.id === form.parentEventId) || null,
-    [parentOptions, form.parentEventId],
-  );
-
-  const filteredParents = useMemo(() => {
-    const needle = parentSearch.trim().toLowerCase();
-    if (!needle) return parentOptions;
-    return parentOptions.filter((option) =>
-      option.title.toLowerCase().includes(needle),
-    );
-  }, [parentOptions, parentSearch]);
 
   const derivedCategory = useMemo(
     () => deriveCategory(isAllDay, form.startTime),
     [isAllDay, form.startTime],
   );
-
-  // Main events this one could belong to. Fetched once rather than subscribed:
-  // the list is short and a live listener would only churn a form.
-  useEffect(() => {
-    const loadParents = async () => {
-      try {
-        const snapshot = await getDocs(
-          query(collection(db, "events"), where("status", "in", ["published", "draft"])),
-        );
-        setParentOptions(
-          snapshot.docs
-            .map((eventDoc) => ({ id: eventDoc.id, ...(eventDoc.data() as any) }))
-            // Only a top-level event can be a parent, and an event can never be
-            // its own parent. One level of nesting keeps the calendar simple.
-            .filter((option) => !option.parentEventId && option.id !== editingEventId)
-            .sort((first, second) => String(first.date).localeCompare(String(second.date)))
-            .map((option) => ({
-              id: option.id,
-              title: String(option.title || "Untitled"),
-              date: String(option.date || ""),
-              status: option.status,
-            })),
-        );
-      } catch (error) {
-        console.warn("[CreateEvent] Could not load main events:", error);
-      }
-    };
-    void loadParents();
-  }, [editingEventId]);
 
   useEffect(() => {
     if (!editingEventId) return;
@@ -266,10 +224,17 @@ const CreateEventScreen = () => {
         const snapshot = await getDoc(doc(db, "events", editingEventId));
         if (snapshot.exists()) {
           const event = snapshot.data() as CalendarEvent;
+          const legacyWindow = getEventTimingWindow(event);
+          const legacyEndDate = !event.endDate && event.startTime && event.endTime &&
+            event.endTime <= event.startTime && legacyWindow
+            ? toLocalDateString(new Date(legacyWindow.endMs))
+            : event.date;
           setForm({
             title: event.title || "",
+            subEvent: event.subEvent || "",
             description: event.description || "",
             date: event.date || toLocalDateString(new Date()),
+            endDate: event.endDate || legacyEndDate || toLocalDateString(new Date()),
             startTime: event.startTime,
             endTime: event.endTime,
             category: event.category || "morning",
@@ -301,6 +266,7 @@ const CreateEventScreen = () => {
   }, [currentUserRole, canManageEvents, router]);
 
   const selectedDate = useMemo(() => parseDate(form.date), [form.date]);
+  const selectedEndDate = useMemo(() => parseDate(form.endDate || form.date), [form.endDate, form.date]);
   const dateDisplay = useMemo(
     () => ({
       month: selectedDate.toLocaleDateString("en-US", { month: "short" }).toUpperCase(),
@@ -327,6 +293,14 @@ const CreateEventScreen = () => {
     }
   };
 
+  const handleEndDateChange = (_event: unknown, selected?: Date) => {
+    setShowEndDatePicker(false);
+    if (selected) {
+      setForm((previous) => ({ ...previous, endDate: toLocalDateString(selected) }));
+      void Haptics.selectionAsync();
+    }
+  };
+
   const handleTimeChange = (
     _event: unknown,
     selected: Date | undefined,
@@ -348,7 +322,7 @@ const CreateEventScreen = () => {
     setTitleTouched(true);
 
     if (!form.title.trim()) {
-      Alert.alert("Error", "Title is required.");
+      Alert.alert("Main event title needed", "Enter a main event title.");
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       return;
     }
@@ -357,29 +331,14 @@ const CreateEventScreen = () => {
       return;
     }
 
-    const partOfId = String(form.parentEventId || "");
-    // A part is a session, and a session has a clock. Without both times the
-    // whole day counts as its window, so it would read as happening now from
-    // midnight to midnight — useless for "which game is on right now".
-    if (partOfId && (!form.startTime || !form.endTime)) {
-      Alert.alert(
-        "Start and end time needed",
-        "A part needs both times so students can see what is happening right now.",
-      );
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    if (status === "published" && !isAllDay && (!form.startTime || !form.endTime)) {
+      Alert.alert("Schedule needed", "Select a start time and an end time.");
       return;
     }
-    // A published part under an unpublished main event would appear on the
-    // calendar with nothing to belong to.
-    if (partOfId && status === "published") {
-      const parent = parentOptions.find((option) => option.id === partOfId);
-      if (parent?.status === "draft") {
-        Alert.alert(
-          "Publish the main event first",
-          `"${parent.title}" is still a draft, so this part would appear on its own with no context.`,
-        );
-        return;
-      }
+    const schedule = getEventTimingWindow({ ...form, category: derivedCategory }, false);
+    if (status === "published" && (!schedule || schedule.endMs <= schedule.startMs)) {
+      Alert.alert("Check the schedule", "End date and time must be after the start.");
+      return;
     }
     // Firestore has no offline persistence here, so a "saved" event would be
     // lost without ever reaching the server.
@@ -412,12 +371,18 @@ const CreateEventScreen = () => {
       // ever written once, at creation.
       const eventData = {
         ...form,
+        title: form.title.trim(),
+        subEvent: form.subEvent?.trim() || "",
+        description: form.description?.trim() || "",
+        startTime: isAllDay ? "" : form.startTime || "",
+        endTime: isAllDay ? "" : form.endTime || "",
+        endDate: form.endDate || form.date,
         status,
         // Derived from the start time rather than picked separately.
         category: derivedCategory,
         // Normalised to null so "standalone" is one value everywhere, never a
         // mix of null, undefined and "".
-        parentEventId: partOfId || null,
+        parentEventId: form.parentEventId || null,
       };
       const createdEventRef = editingEventId
         ? { id: editingEventId }
@@ -448,13 +413,13 @@ const CreateEventScreen = () => {
               profileImage: currentUserData?.profileImage || null,
             },
             entityId: createdEventRef.id,
-            title: form.title,
+            title: eventData.title,
             description: form.description,
             eventDate: form.date,
           }),
           sendBroadcastEventPushNotifications({
             entityId: createdEventRef.id,
-            title: form.title,
+            title: eventData.title,
             description: form.description,
             eventDate: form.date,
             excludeUserIds: [auth.currentUser.uid],
@@ -515,12 +480,13 @@ const CreateEventScreen = () => {
             <Ionicons name="arrow-back" size={22} color={colors.maroon} />
           </TouchableOpacity>
           <View style={styles.headerCopy}>
-            <Text style={styles.headerTitle}>Create Event</Text>
+            <Text style={styles.headerTitle}>{editingEventId ? "Edit Event" : "Create Event"}</Text>
             <Text style={styles.headerSubtitle}>Add an event to the school calendar</Text>
           </View>
         </View>
 
         <ScrollView
+          ref={formScrollRef}
           contentContainerStyle={styles.formContent}
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
@@ -528,7 +494,7 @@ const CreateEventScreen = () => {
           style={styles.formContainer}
         >
           <View style={styles.titleSection}>
-            <SectionHeading title="Event name" />
+            <SectionHeading title="Main Event Title" />
             <TextInput
               accessibilityLabel="Event title, required"
               onBlur={() => {
@@ -537,6 +503,7 @@ const CreateEventScreen = () => {
               }}
               onChangeText={(value) => handleInputChange("title", value)}
               onFocus={() => setTitleFocused(true)}
+              onSubmitEditing={() => subEventInputRef.current?.focus()}
               placeholder="Enter event title"
               placeholderTextColor="#a68d85"
               returnKeyType="next"
@@ -555,16 +522,31 @@ const CreateEventScreen = () => {
             ) : (
               <Text style={styles.fieldHint}>Give your event a clear, memorable name.</Text>
             )}
+            <Text style={styles.optionalFieldLabel}>Sub Event (Optional)</Text>
+            <TextInput
+              ref={subEventInputRef}
+              accessibilityLabel="Sub event, optional"
+              onBlur={() => setSubEventFocused(false)}
+              onChangeText={(value) => handleInputChange("subEvent", value)}
+              onFocus={() => setSubEventFocused(true)}
+              placeholder="Add a sub event"
+              placeholderTextColor={colors.muted}
+              returnKeyType="done"
+              style={[styles.subEventInput, subEventFocused && styles.inputFocused]}
+              value={form.subEvent || ""}
+            />
           </View>
 
-          <SectionHeading title="Schedule" spaced />
+          <SectionHeading title="SCHEDULE" spaced />
           <View style={styles.scheduleCard}>
+            <Text style={styles.scheduleSectionLabel}>Starts</Text>
             <TouchableOpacity
               accessibilityHint="Opens the date picker"
               accessibilityLabel={`Date, ${dateDisplay.weekday}, ${dateDisplay.long}`}
               accessibilityRole="button"
               activeOpacity={0.75}
               onPress={() => {
+                Keyboard.dismiss();
                 setShowDatePicker(true);
                 void Haptics.selectionAsync();
               }}
@@ -591,38 +573,48 @@ const CreateEventScreen = () => {
             {!isAllDay && (
               <>
                 <View style={styles.divider} />
-                <View style={styles.timePairRow}>
                   <TimeCard
-                    label="Starts"
+                    label="Start"
                     value={formatTime(form.startTime)}
                     empty={!form.startTime}
-                    required={!!form.parentEventId}
-                    onPress={() => setShowStartTimePicker(true)}
+                    required
+                    onPress={() => { Keyboard.dismiss(); setShowStartTimePicker(true); }}
                   />
-                  <TimeCard
-                    label="Ends"
-                    value={formatTime(form.endTime)}
-                    empty={!form.endTime}
-                    required={!!form.parentEventId}
-                    onPress={() => setShowEndTimePicker(true)}
-                  />
-                </View>
               </>
             )}
 
             <View style={styles.divider} />
+            <Text style={styles.scheduleSectionLabel}>Ends</Text>
+            <TouchableOpacity
+              accessibilityLabel={`End date, ${selectedEndDate.toLocaleDateString("en-US", { dateStyle: "long" })}`}
+              accessibilityRole="button"
+              activeOpacity={0.75}
+              onPress={() => { Keyboard.dismiss(); setShowEndDatePicker(true); void Haptics.selectionAsync(); }}
+              style={styles.dateRow}
+            >
+              <View style={styles.rowIcon}><Ionicons name="calendar" size={18} color={colors.maroon} /></View>
+              <Text style={styles.dateRowValue} numberOfLines={1}>
+                {selectedEndDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
+              </Text>
+              <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+            </TouchableOpacity>
+            {showEndDatePicker && (
+              <DateTimePicker value={selectedEndDate} mode="date" display="default" onChange={handleEndDateChange} />
+            )}
+            {!isAllDay && (
+              <>
+                <View style={styles.divider} />
+                <TimeCard label="End" value={formatTime(form.endTime)} empty={!form.endTime} required onPress={() => { Keyboard.dismiss(); setShowEndTimePicker(true); }} />
+              </>
+            )}
+            <View style={styles.divider} />
             <View style={styles.allDayRow}>
               <View style={styles.allDayCopy}>
                 <Text style={styles.allDayTitle}>All day</Text>
-                <Text style={styles.allDayHint}>
-                  {form.parentEventId
-                    ? "A part always needs a start and end time"
-                    : "No start or end time"}
-                </Text>
+                <Text style={styles.allDayHint}>Runs from the start date through the end date</Text>
               </View>
               <Switch
                 accessibilityLabel="All day event"
-                disabled={!!form.parentEventId}
                 ios_backgroundColor={colors.border}
                 onValueChange={(value) => {
                   setIsAllDay(value);
@@ -666,68 +658,13 @@ const CreateEventScreen = () => {
             )}
           </View>
 
-          <SectionHeading title="Part of a bigger event?" spaced />
-          {/* A row that opens a searchable list. The old horizontal chips meant
-              scrolling sideways through every event to find one. */}
-          <TouchableOpacity
-            accessibilityLabel={
-              selectedParent ? `Part of ${selectedParent.title}` : "Standalone event"
-            }
-            accessibilityRole="button"
-            activeOpacity={0.75}
-            onPress={() => {
-              setParentSearch("");
-              setParentPickerVisible(true);
-            }}
-            style={styles.pickerRow}
-          >
-            <View
-              style={[
-                styles.rowIcon,
-                !!selectedParent && { backgroundColor: "#efe3f5" },
-              ]}
-            >
-              <Ionicons
-                name={selectedParent ? "albums" : "calendar-outline"}
-                size={18}
-                color={selectedParent ? "#7b3fa0" : colors.maroon}
-              />
-            </View>
-            <View style={styles.pickerRowCopy}>
-              <Text style={styles.pickerRowValue} numberOfLines={1}>
-                {selectedParent ? selectedParent.title : "Standalone event"}
-              </Text>
-              <Text style={styles.pickerRowHint} numberOfLines={1}>
-                {selectedParent
-                  ? "Tap to change or remove"
-                  : "Not part of a bigger event"}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
-          </TouchableOpacity>
-
-          <SectionHeading title="Details (optional)" spaced />
-          <TextInput
-            accessibilityLabel="Event description"
-            multiline
-            numberOfLines={5}
-            onBlur={() => setDetailsFocused(false)}
-            onChangeText={(value) => handleInputChange("description", value)}
-            onFocus={() => setDetailsFocused(true)}
-            placeholder="Enter event description (optional)"
-            placeholderTextColor="#a68d85"
-            style={[styles.descriptionInput, detailsFocused && styles.inputFocused]}
-            textAlignVertical="top"
-            value={form.description}
-          />
-
-          <SectionHeading title="Publishing" spaced />
+          <SectionHeading title="NOTIFICATIONS" spaced />
           <View style={styles.notifyCard}>
             <View style={styles.notifyIcon}>
               <Ionicons name="megaphone-outline" size={20} color={colors.maroon} />
             </View>
             <View style={styles.notifyCopy}>
-              <Text style={styles.notifyTitle}>Notify all users</Text>
+              <Text style={styles.notifyTitle}>Notify All Users</Text>
               <Text style={styles.notifyText}>Send an update when this event is published.</Text>
             </View>
             <Switch
@@ -742,6 +679,23 @@ const CreateEventScreen = () => {
               value={Boolean(form.notifyUsers)}
             />
           </View>
+
+          <SectionHeading title="DETAILS" spaced />
+          <Text style={styles.optionalFieldLabel}>Details (Optional)</Text>
+          <TextInput
+            accessibilityLabel="Event description"
+            multiline
+            numberOfLines={5}
+            onBlur={() => setDetailsFocused(false)}
+            onChangeText={(value) => handleInputChange("description", value)}
+            onFocus={() => { setDetailsFocused(true); setTimeout(() => formScrollRef.current?.scrollToEnd({ animated: true }), 260); }}
+            placeholder="Enter event description (optional)"
+            placeholderTextColor="#a68d85"
+            style={[styles.descriptionInput, detailsFocused && styles.inputFocused]}
+            textAlignVertical="top"
+            value={form.description}
+          />
+
 
         </ScrollView>
 
@@ -772,119 +726,11 @@ const CreateEventScreen = () => {
             ) : (
               <Ionicons name="paper-plane-outline" size={18} color={colors.onDark} />
             )}
-            <Text style={styles.submitButtonText}>{loading ? "Saving..." : "Publish"}</Text>
+            <Text style={styles.submitButtonText}>{loading ? "Saving..." : editingEventId ? "Update Event" : "Create Event"}</Text>
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
 
-      <Modal
-        visible={parentPickerVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setParentPickerVisible(false)}
-      >
-        <View style={styles.pickerBackdrop}>
-          <View style={styles.pickerSheet}>
-            <View style={styles.pickerHandle} />
-            <Text style={styles.pickerTitle}>Part of a bigger event?</Text>
-
-            <View style={styles.pickerSearch}>
-              <Ionicons name="search" size={17} color={colors.muted} />
-              <TextInput
-                accessibilityLabel="Search main events"
-                autoCorrect={false}
-                onChangeText={setParentSearch}
-                placeholder="Search events"
-                placeholderTextColor="#a68d85"
-                style={styles.pickerSearchInput}
-                value={parentSearch}
-              />
-              {!!parentSearch && (
-                <TouchableOpacity
-                  accessibilityLabel="Clear search"
-                  accessibilityRole="button"
-                  hitSlop={8}
-                  onPress={() => setParentSearch("")}
-                >
-                  <Ionicons name="close-circle" size={18} color={colors.muted} />
-                </TouchableOpacity>
-              )}
-            </View>
-
-            <ScrollView
-              keyboardShouldPersistTaps="handled"
-              style={styles.pickerList}
-            >
-              <TouchableOpacity
-                accessibilityRole="button"
-                accessibilityState={{ selected: !form.parentEventId }}
-                activeOpacity={0.75}
-                onPress={() => {
-                  handleInputChange("parentEventId", "");
-                  setParentPickerVisible(false);
-                  void Haptics.selectionAsync();
-                }}
-                style={styles.pickerOption}
-              >
-                <Ionicons name="calendar-outline" size={18} color={colors.maroon} />
-                <Text style={styles.pickerOptionText}>Standalone event</Text>
-                {!form.parentEventId && (
-                  <Ionicons name="checkmark-circle" size={20} color={colors.maroon} />
-                )}
-              </TouchableOpacity>
-
-              {filteredParents.map((option) => {
-                const selected = form.parentEventId === option.id;
-                return (
-                  <TouchableOpacity
-                    accessibilityRole="button"
-                    accessibilityState={{ selected }}
-                    activeOpacity={0.75}
-                    key={option.id}
-                    onPress={() => {
-                      handleInputChange("parentEventId", option.id);
-                      setParentPickerVisible(false);
-                      void Haptics.selectionAsync();
-                    }}
-                    style={styles.pickerOption}
-                  >
-                    <Ionicons name="albums-outline" size={18} color="#7b3fa0" />
-                    <View style={styles.pickerOptionCopy}>
-                      <Text style={styles.pickerOptionText} numberOfLines={1}>
-                        {option.title}
-                      </Text>
-                      <Text style={styles.pickerOptionMeta} numberOfLines={1}>
-                        {option.date}
-                        {option.status === "draft" ? " · draft" : ""}
-                      </Text>
-                    </View>
-                    {selected && (
-                      <Ionicons name="checkmark-circle" size={20} color={colors.maroon} />
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-
-              {filteredParents.length === 0 && (
-                <Text style={styles.pickerEmpty}>
-                  {parentSearch
-                    ? `No events match "${parentSearch}"`
-                    : "No other events yet."}
-                </Text>
-              )}
-            </ScrollView>
-
-            <TouchableOpacity
-              accessibilityRole="button"
-              activeOpacity={0.8}
-              onPress={() => setParentPickerVisible(false)}
-              style={styles.pickerClose}
-            >
-              <Text style={styles.pickerCloseText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
 
     </SafeAreaView>
   );
@@ -901,6 +747,24 @@ const makeStyles = (t: ThemeTokens) => {
     marginBottom: 8,
   },
   fieldLabelSpaced: { marginTop: 26 },
+  optionalFieldLabel: { color: c.ink, fontSize: 14, fontWeight: "700", marginTop: 22, marginBottom: 8 },
+  subEventInput: {
+    minHeight: 54,
+    paddingHorizontal: 15,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: c.border,
+    backgroundColor: c.surface,
+    color: c.ink,
+    fontSize: 16,
+  },
+  scheduleSectionLabel: {
+    paddingHorizontal: 15,
+    paddingTop: 15,
+    color: c.ink,
+    fontSize: 14,
+    fontWeight: "800",
+  },
   rowIcon: {
     width: 38,
     height: 38,
@@ -917,16 +781,13 @@ const makeStyles = (t: ThemeTokens) => {
     paddingHorizontal: 14,
   },
   dateRowValue: { flex: 1, color: c.ink, fontSize: 16, fontWeight: "700" },
-  timePairRow: { flexDirection: "row", gap: 10, padding: 14 },
   timeCard: {
     flex: 1,
     minHeight: 68,
     justifyContent: "center",
     paddingHorizontal: 13,
     borderRadius: 14,
-    backgroundColor: c.cream,
-    borderWidth: 1,
-    borderColor: c.border,
+    backgroundColor: c.surface,
   },
   timeCardLabel: {
     color: c.maroon,
@@ -956,91 +817,6 @@ const makeStyles = (t: ThemeTokens) => {
   },
   derivedDot: { width: 9, height: 9, borderRadius: 5 },
   derivedText: { flex: 1, color: c.muted, fontSize: 13 },
-  pickerRow: {
-    minHeight: 70,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 14,
-    borderRadius: 18,
-    backgroundColor: c.surface,
-    borderWidth: 1,
-    borderColor: c.border,
-  },
-  pickerRowCopy: { flex: 1, minWidth: 0 },
-  pickerRowValue: { color: c.ink, fontSize: 16, fontWeight: "700" },
-  pickerRowHint: { color: c.muted, fontSize: 13, marginTop: 2 },
-  pickerBackdrop: {
-    flex: 1,
-    justifyContent: "flex-end",
-    backgroundColor: "rgba(22, 4, 3, 0.55)",
-  },
-  pickerSheet: {
-    maxHeight: "82%",
-    paddingTop: 10,
-    paddingHorizontal: 18,
-    paddingBottom: 18,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    backgroundColor: c.surface,
-  },
-  pickerHandle: {
-    alignSelf: "center",
-    width: 42,
-    height: 4,
-    borderRadius: 2,
-    marginBottom: 14,
-    backgroundColor: c.border,
-  },
-  pickerTitle: {
-    color: c.ink,
-    fontSize: 18,
-    fontWeight: "800",
-    marginBottom: 12,
-  },
-  pickerSearch: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 9,
-    minHeight: 48,
-    paddingHorizontal: 13,
-    borderRadius: 14,
-    backgroundColor: c.cream,
-    borderWidth: 1,
-    borderColor: c.border,
-  },
-  pickerSearchInput: { flex: 1, color: c.ink, fontSize: 15 },
-  pickerList: { marginTop: 12 },
-  pickerOption: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    minHeight: 58,
-    paddingHorizontal: 13,
-    marginBottom: 8,
-    borderRadius: 14,
-    backgroundColor: c.cream,
-    borderWidth: 1,
-    borderColor: c.border,
-  },
-  pickerOptionCopy: { flex: 1, minWidth: 0 },
-  pickerOptionText: { flex: 1, color: c.ink, fontSize: 15, fontWeight: "700" },
-  pickerOptionMeta: { color: c.muted, fontSize: 13, marginTop: 2 },
-  pickerEmpty: {
-    color: c.muted,
-    fontSize: 14,
-    textAlign: "center",
-    paddingVertical: 26,
-  },
-  pickerClose: {
-    minHeight: 50,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 6,
-    borderRadius: 14,
-    backgroundColor: c.soft,
-  },
-  pickerCloseText: { color: c.maroon, fontSize: 15, fontWeight: "800" },
   contentShell: { flex: 1, backgroundColor: c.cream },
   roleLoading: { alignItems: "center", justifyContent: "center" },
   header: {
@@ -1073,8 +849,8 @@ const makeStyles = (t: ThemeTokens) => {
   headerTitle: { color: c.ink, fontSize: 20, fontWeight: "800", letterSpacing: -0.3 },
   headerSubtitle: { color: c.muted, fontSize: 13, marginTop: 2 },
   formContainer: { flex: 1 },
-  formContent: { paddingHorizontal: 18, paddingTop: 24, paddingBottom: 30 },
-  titleSection: { marginBottom: 28 },
+  formContent: { paddingHorizontal: 18, paddingTop: 24, paddingBottom: 56 },
+  titleSection: { marginBottom: 2 },
   titleInput: {
     minHeight: 64,
     marginTop: 7,

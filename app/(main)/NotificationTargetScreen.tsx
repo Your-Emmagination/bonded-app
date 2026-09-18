@@ -15,6 +15,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
+import { showAppToast } from "@/utils/toastEvents";
 import CommentModal from "./components/CommentModal";
 import PostCard from "./components/PostCard";
 
@@ -23,6 +24,8 @@ type TargetParams = {
   entityType?: string | string[];
   entityId?: string | string[];
   parentId?: string | string[];
+  /** Opened from somewhere other than a notification, e.g. a live's replay. */
+  origin?: string | string[];
 };
 
 type ResolvedTarget = {
@@ -59,6 +62,7 @@ export default function NotificationTargetScreen() {
   const entityType = single(params.entityType);
   const entityId = single(params.entityId);
   const parentId = single(params.parentId);
+  const fromLiveReplay = single(params.origin) === "live-replay";
 
   useEffect(() => {
     let cancelled = false;
@@ -144,6 +148,12 @@ export default function NotificationTargetScreen() {
           console.warn("Unable to resolve notification destination:", resolveError);
         }
         if (!cancelled) {
+          if (fromLiveReplay) {
+            // A replay that was removed: back to the live it came from.
+            showAppToast({ message: "This replay is no longer available." });
+            router.back();
+            return;
+          }
           router.replace({
             pathname: "/(main)/(tabs)/NotificationsScreen",
             params: { unavailable: String(Date.now()) },
@@ -156,7 +166,7 @@ export default function NotificationTargetScreen() {
     return () => {
       cancelled = true;
     };
-  }, [entityId, entityType, parentId, router]);
+  }, [entityId, entityType, fromLiveReplay, parentId, router]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -164,7 +174,7 @@ export default function NotificationTargetScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton} hitSlop={8}>
           <Ionicons name="arrow-back" size={23} color={theme.primary} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Notification</Text>
+        <Text style={styles.headerTitle}>{fromLiveReplay ? "Live replay" : "Notification"}</Text>
         <View style={styles.headerSpacer} />
       </View>
 
@@ -180,17 +190,27 @@ export default function NotificationTargetScreen() {
           <View style={styles.contextBanner}>
             <View style={styles.contextIconCircle}>
               <Ionicons
-                name={target.replyId ? "return-up-back-outline" : target.commentId ? "chatbubble-outline" : "document-text-outline"}
+                name={
+                  fromLiveReplay
+                    ? "radio-outline"
+                    : target.replyId
+                      ? "return-up-back-outline"
+                      : target.commentId
+                        ? "chatbubble-outline"
+                        : "document-text-outline"
+                }
                 size={16}
                 color={theme.textSecondary}
               />
             </View>
             <Text style={styles.contextBannerText}>
-              {target.replyId
-                ? "Jumped here from a reply notification"
-                : target.commentId
-                  ? "Jumped here from a comment notification"
-                  : "Jumped here from a notification"}
+              {fromLiveReplay
+                ? "The recording of a live stream"
+                : target.replyId
+                  ? "Jumped here from a reply notification"
+                  : target.commentId
+                    ? "Jumped here from a comment notification"
+                    : "Jumped here from a notification"}
             </Text>
           </View>
 

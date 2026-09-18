@@ -18,6 +18,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   increment,
   limit as fsLimit,
   onSnapshot,
@@ -59,9 +60,20 @@ export type LiveStream = {
   playbackUrl: string | null;
   /** Set once a recording of a finished stream exists. */
   replayUrl: string | null;
+  /**
+   * The feed post carrying the replay. Written only once that post is
+   * approved, so an unreviewed video is never reachable from the stream.
+   */
+  replayPostId: string | null;
 
   startedAt: any;
   endedAt: any;
+  /**
+   * The host's last "still here", refreshed while their live screen is open.
+   * Null for a moment after the host's own write; missing on streams started
+   * before the signal existed.
+   */
+  hostSeenAt: any;
   /** Who ended it, when that was not the host. */
   endedBy: string | null;
   endedByName: string | null;
@@ -103,6 +115,16 @@ export const VIEWER_STALE_MS = 45_000;
 /** How often a watching client refreshes its presence doc. */
 export const VIEWER_HEARTBEAT_MS = 20_000;
 
+/** How often the host's screen says it is still there. */
+export const HOST_HEARTBEAT_MS = 20_000;
+
+/**
+ * A live whose host has been silent this long is treated as over. Long enough
+ * to ride out a couple of missed heartbeats on weak Wi-Fi, short enough that
+ * a crashed app doesn't leave a dead card at the top of the feed for long.
+ */
+export const HOST_STALE_MS = 90_000;
+
 export type LiveComment = {
   id: string;
   authorId: string;
@@ -126,8 +148,11 @@ const toStream = (id: string, data: any): LiveStream => ({
   channelName: data?.channelName ?? null,
   playbackUrl: data?.playbackUrl ?? null,
   replayUrl: data?.replayUrl ?? null,
+  replayPostId: typeof data?.replayPostId === "string" ? data.replayPostId : null,
   startedAt: data?.startedAt,
   endedAt: data?.endedAt,
+  // Undefined and null mean different things here; see isLiveStreamFresh.
+  hostSeenAt: data?.hostSeenAt,
   endedBy: data?.endedBy ?? null,
   endedByName: data?.endedByName ?? null,
   viewerCount: Number(data?.viewerCount || 0),
@@ -189,6 +214,7 @@ export async function startLiveStream(input: StartLiveInput): Promise<string> {
     playbackUrl: input.playbackUrl ?? null,
     replayUrl: null,
     startedAt: serverTimestamp(),
+    hostSeenAt: serverTimestamp(),
     endedAt: null,
     endedBy: null,
     endedByName: null,
@@ -210,6 +236,26 @@ export async function endLiveStream(streamId: string): Promise<void> {
     endedAt: serverTimestamp(),
     viewerCount: 0,
   });
+}
+
+/**
+ * Keeps telling everyone the host is still on their live screen. Returns the
+ * function that stops it.
+ *
+ * Needed because a host can vanish without ending anything — the app crashes,
+ * is swiped away, or the phone dies — and the stream document would otherwise
+ * say "live" forever. Rather than trusting the app to clean up after itself,
+ * the feed trusts only a host it has heard from recently.
+ */
+export function startHostHeartbeat(streamId: string): () => void {
+  const touch = () =>
+    updateDoc(doc(db, "liveStreams", streamId), {
+      hostSeenAt: serverTimestamp(),
+    }).catch(() => undefined);
+
+  touch();
+  const timer = setInterval(touch, HOST_HEARTBEAT_MS);
+  return () => clearInterval(timer);
 }
 
 /**
@@ -280,12 +326,18 @@ export async function unpinLiveComment(streamId: string): Promise<void> {
   await updateDoc(doc(db, "liveStreams", streamId), { pinnedComment: null });
 }
 
-/** Records the replay URL after a finished stream has been processed. */
-export async function setLiveReplayUrl(
+/**
+ * Links a finished stream to its replay: the video, and the feed post that
+ * carries it. See utils/liveReplay.ts.
+ */
+export async function setLiveReplay(
   streamId: string,
-  replayUrl: string,
+  replay: { replayUrl: string; replayPostId: string },
 ): Promise<void> {
-  await updateDoc(doc(db, "liveStreams", streamId), { replayUrl });
+  await updateDoc(doc(db, "liveStreams", streamId), {
+    replayUrl: replay.replayUrl,
+    replayPostId: replay.replayPostId,
+  });
 }
 
 // ── Reading ───────────────────────────────────────────────────────────────
@@ -309,6 +361,39 @@ export function subscribeToActiveStreams(
     },
     (error) => console.error("Live streams listener failed:", error),
   );
+}
+
+/**
+ * Whether a live's host has been heard from recently enough to show it.
+ *
+ * A null `hostSeenAt` is the host's own device, a moment after writing it and
+ * before the server has stamped it, so it counts as fresh. A missing one is a
+ * stream from before the signal existed, which nothing will ever refresh.
+ */
+export function isLiveStreamFresh(stream: LiveStream, nowMs: number): boolean {
+  if (stream.status !== "live") return false;
+  if (stream.hostSeenAt === null) return true;
+  const seen = timestampMs(stream.hostSeenAt);
+  return seen > 0 && nowMs - seen < HOST_STALE_MS;
+}
+
+/**
+ * The lives this person has open, fresh or not. Used before going live, so
+ * nobody ends up broadcasting twice.
+ *
+ * Two equality filters need no composite index.
+ */
+export async function findMyLiveStreams(hostId: string): Promise<LiveStream[]> {
+  const snapshot = await getDocs(
+    query(
+      collection(db, "liveStreams"),
+      where("hostId", "==", hostId),
+      where("status", "==", "live"),
+    ),
+  );
+  return snapshot.docs
+    .map((item) => toStream(item.id, item.data()))
+    .sort((a, b) => timestampMs(b.startedAt) - timestampMs(a.startedAt));
 }
 
 /** One stream. Also how viewers learn it was ended or blocked. */

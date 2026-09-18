@@ -9,13 +9,24 @@
 // screen asks for `surface` rather than for a particular cream.
 //
 // Tokens are named for what they MEAN, never for what colour they are. A
-// token called `cream` would be a lie in four of the five themes below.
+// token called `cream` would be a lie in most of the themes below.
 //
 // NOT related to `themeColor` in utils/directMessages.ts — that is the colour
 // a user picks for one conversation's bubbles, and it keeps working
 // unchanged in every appearance here.
 
-export type ThemeId = "system" | "light" | "dim" | "midnight" | "sepia";
+export type ThemeId =
+  | "system"
+  | "light"
+  | "dim"
+  | "midnight"
+  | "sepia"
+  // The campus colour themes: light palettes in other academic colours.
+  | "forest"
+  | "navy"
+  | "teal"
+  | "plum"
+  | "terracotta";
 
 /** The palette a screen actually renders with. "system" resolves to one of these. */
 export type ResolvedThemeId = Exclude<ThemeId, "system">;
@@ -36,12 +47,12 @@ export type ThemeTokens = {
   /**
    * Text and icons on a `primary` fill — a filled button, your own chat
    * bubble, a solid badge. Light in every theme, because `primary` is a
-   * mid-to-dark red everywhere.
+   * mid-to-dark colour everywhere.
    */
   onPrimary: string;
   /**
    * Text and icons on an `accent` fill. Dark in every theme: the accent is
-   * a light gold in all four, so this is the one place the ink inverts.
+   * a light gold in all of them, so this is the one place the ink inverts.
    *
    * Splitting this from `onPrimary` matters. A single "text on a coloured
    * thing" token has to be light for the maroon and dark for the gold, and
@@ -266,11 +277,226 @@ const sepia: ThemeTokens = {
   isDark: false,
 };
 
+// ── Campus colours ───────────────────────────────────────────────────────
+// Five light palettes in other academic colours, for people who want BondED
+// in something other than maroon. Each keeps the app's shape — a dark bar,
+// white cards on a tinted page, a gold accent — and changes the colour, so
+// they read as the same app. None has a dark version; like Light and Sepia
+// they stay light, and "Use system" still chooses between Light and Dim.
+//
+// Every text colour here clears 4.5:1 against the surface it sits on. Each
+// palette's warning is a deeper amber than a highlight would be, because it
+// is used for words ("Pending review"), not just fills.
+
+// Deep forest green and warm gold — a library, not an eco brand.
+const forest: ThemeTokens = {
+  background: "#F5F4EC",
+  surface: "#FFFFFF",
+  surfaceRaised: "#FFFFFF",
+  surfaceSunken: "#EDF1EE",
+
+  textPrimary: "#17241E",
+  textSecondary: "#38463F",
+  textMuted: "#607068",
+  onPrimary: "#FFFFFF",
+  onAccent: "#17241E",
+
+  border: "#D7E0DA",
+  borderStrong: "#BDC7C1",
+
+  chrome: "#234E3B",
+  onChrome: "#FFFFFF",
+  onChromeMuted: "#CFD8D4",
+  chromeBorder: "#426756",
+  primary: "#234E3B",
+  accent: "#D2A74A",
+
+  danger: "#B84747",
+  success: "#2E7D55",
+  warning: "#9C6D20",
+  info: "#2F6690",
+
+  accentSoft: "#F6EDDB",
+  successSoft: "#E6EFEB",
+  dangerSoft: "#F8EDED",
+
+  scrim: "rgba(23,36,30,0.55)",
+  skeleton: "#E8EEE9",
+
+  statusBarStyle: "dark",
+  isDark: false,
+};
+
+// Institutional navy and muted gold. Named for the colour rather than the
+// hour, so nobody mistakes it for a dark mode next to Midnight.
+const navy: ThemeTokens = {
+  background: "#F4F6F8",
+  surface: "#FFFFFF",
+  surfaceRaised: "#FFFFFF",
+  surfaceSunken: "#EEF1F5",
+
+  textPrimary: "#17202B",
+  textSecondary: "#3B4552",
+  textMuted: "#636F7E",
+  onPrimary: "#FFFFFF",
+  onAccent: "#17202B",
+
+  border: "#D8DFE7",
+  borderStrong: "#BFC7D1",
+
+  chrome: "#162A46",
+  onChrome: "#FFFFFF",
+  onChromeMuted: "#CCD0D6",
+  chromeBorder: "#374860",
+  primary: "#162A46",
+  accent: "#D3A74F",
+
+  danger: "#C25151",
+  success: "#338469",
+  warning: "#9B6E28",
+  info: "#2E63A6",
+
+  accentSoft: "#F6EDDC",
+  successSoft: "#E7F0ED",
+  dangerSoft: "#F9EEEE",
+
+  scrim: "rgba(23,32,43,0.55)",
+  skeleton: "#E9EDF2",
+
+  statusBarStyle: "dark",
+  isDark: false,
+};
+
+// A dark, contemporary teal with gold. Its success is a truer green than
+// the palette's own teal, or "online" would disappear into the branding.
+const teal: ThemeTokens = {
+  background: "#F4F8F7",
+  surface: "#FFFFFF",
+  surfaceRaised: "#FFFFFF",
+  surfaceSunken: "#EAF2F0",
+
+  textPrimary: "#172725",
+  textSecondary: "#394A48",
+  textMuted: "#5E716E",
+  onPrimary: "#FFFFFF",
+  onAccent: "#172725",
+
+  border: "#CEE0DD",
+  borderStrong: "#B6C8C5",
+
+  chrome: "#176B67",
+  onChrome: "#FFFFFF",
+  onChromeMuted: "#CCDEDE",
+  chromeBorder: "#37807C",
+  primary: "#176B67",
+  accent: "#D6A84D",
+
+  danger: "#BB4C52",
+  success: "#357A3B",
+  warning: "#986D26",
+  info: "#2F63A0",
+
+  accentSoft: "#F7EEDB",
+  successSoft: "#E7EFE7",
+  dangerSoft: "#F8EDEE",
+
+  scrim: "rgba(23,39,37,0.55)",
+  skeleton: "#E3EFED",
+
+  statusBarStyle: "dark",
+  isDark: false,
+};
+
+// Deep plum and antique gold — academic robes, not violet.
+const plum: ThemeTokens = {
+  background: "#F8F5F7",
+  surface: "#FFFFFF",
+  surfaceRaised: "#FFFFFF",
+  surfaceSunken: "#F1EDF2",
+
+  textPrimary: "#2A222D",
+  textSecondary: "#4B424F",
+  textMuted: "#736878",
+  onPrimary: "#FFFFFF",
+  onAccent: "#2A222D",
+
+  border: "#DED5E0",
+  borderStrong: "#C7BDC9",
+
+  chrome: "#573B63",
+  onChrome: "#FFFFFF",
+  onChromeMuted: "#DAD4DD",
+  chromeBorder: "#6F5679",
+  primary: "#573B63",
+  accent: "#D3A552",
+
+  danger: "#B74B55",
+  success: "#39795A",
+  warning: "#9A6D29",
+  info: "#3A62A0",
+
+  accentSoft: "#F6EDDC",
+  successSoft: "#E7EFEB",
+  dangerSoft: "#F8EDEE",
+
+  scrim: "rgba(42,34,45,0.55)",
+  skeleton: "#EEE8EF",
+
+  statusBarStyle: "dark",
+  isDark: false,
+};
+
+// Brick clay and ochre on parchment. Lighter and rosier than Sepia's rust
+// so the two don't look alike, and with a crimson danger so a delete button
+// never passes for a normal one.
+const terracotta: ThemeTokens = {
+  background: "#F8F3EC",
+  surface: "#FFFFFF",
+  surfaceRaised: "#FFFFFF",
+  surfaceSunken: "#F2EAE3",
+
+  textPrimary: "#30231F",
+  textSecondary: "#4F403A",
+  textMuted: "#75635C",
+  onPrimary: "#FFFFFF",
+  onAccent: "#30231F",
+
+  border: "#E1D5CC",
+  borderStrong: "#C9BCB3",
+
+  chrome: "#9C5444",
+  onChrome: "#FFFFFF",
+  onChromeMuted: "#F0E5E3",
+  chromeBorder: "#AA6C5E",
+  primary: "#9C5444",
+  accent: "#C99A45",
+
+  danger: "#B0304A",
+  success: "#55775A",
+  warning: "#9F6C26",
+  info: "#3B5F8F",
+
+  accentSoft: "#F4EBDA",
+  successSoft: "#EBEFEB",
+  dangerSoft: "#F7EAED",
+
+  scrim: "rgba(48,35,31,0.55)",
+  skeleton: "#EFE5DC",
+
+  statusBarStyle: "dark",
+  isDark: false,
+};
+
 export const THEMES: Record<ResolvedThemeId, ThemeTokens> = {
   light,
   dim,
   midnight,
   sepia,
+  forest,
+  navy,
+  teal,
+  plum,
+  terracotta,
 };
 
 export type ThemeOption = {
@@ -278,7 +504,16 @@ export type ThemeOption = {
   label: string;
   description: string;
   icon: string;
-  /** Three colours for the swatch in Settings: background, surface, accent. */
+  /**
+   * The group it is listed under in Settings: the brightness choices the app
+   * has always had, or the campus colours.
+   */
+  group: "brightness" | "campus";
+  /**
+   * Three colours that identify it, shown as dots in Settings. Brightness
+   * themes show their background, surface and accent; campus themes show
+   * their bar colour, accent and background, since the bar is what changes.
+   */
   swatch: [string, string, string];
 };
 
@@ -286,8 +521,9 @@ export type ThemeOption = {
  * What Settings shows, in this order.
  *
  * "Use system" first because it is the right answer for most people and the
- * one that needs no thought. The rest run light to dark, so the list reads
- * as a scale rather than an unordered set.
+ * one that needs no thought. The brightness themes run light to dark, so the
+ * list reads as a scale rather than an unordered set; the campus colours
+ * follow as their own group.
  */
 export const THEME_OPTIONS: ThemeOption[] = [
   {
@@ -295,6 +531,7 @@ export const THEME_OPTIONS: ThemeOption[] = [
     label: "Use system",
     description: "Follows your phone's light or dark setting",
     icon: "phone-portrait-outline",
+    group: "brightness",
     swatch: [light.background, midnight.background, light.accent],
   },
   {
@@ -302,6 +539,7 @@ export const THEME_OPTIONS: ThemeOption[] = [
     label: "Light",
     description: "The usual warm cream",
     icon: "sunny-outline",
+    group: "brightness",
     swatch: [light.background, light.surfaceSunken, light.accent],
   },
   {
@@ -309,6 +547,7 @@ export const THEME_OPTIONS: ThemeOption[] = [
     label: "Sepia",
     description: "Warm and easy on the eyes for reading at night",
     icon: "book-outline",
+    group: "brightness",
     swatch: [sepia.background, sepia.surfaceSunken, sepia.accent],
   },
   {
@@ -316,6 +555,7 @@ export const THEME_OPTIONS: ThemeOption[] = [
     label: "Dim",
     description: "Soft dark that keeps the app's warmth",
     icon: "moon-outline",
+    group: "brightness",
     swatch: [dim.background, dim.surfaceRaised, dim.accent],
   },
   {
@@ -323,7 +563,48 @@ export const THEME_OPTIONS: ThemeOption[] = [
     label: "Midnight",
     description: "True black — saves battery on OLED screens",
     icon: "contrast-outline",
+    group: "brightness",
     swatch: [midnight.background, midnight.surfaceRaised, midnight.accent],
+  },
+  {
+    id: "forest",
+    label: "Forest Scholar",
+    description: "Library green and warm gold",
+    icon: "leaf-outline",
+    group: "campus",
+    swatch: [forest.chrome, forest.accent, forest.background],
+  },
+  {
+    id: "navy",
+    label: "Campus Navy",
+    description: "Institutional navy and muted gold",
+    icon: "school-outline",
+    group: "campus",
+    swatch: [navy.chrome, navy.accent, navy.background],
+  },
+  {
+    id: "teal",
+    label: "Campus Teal",
+    description: "Fresh, modern teal and gold",
+    icon: "water-outline",
+    group: "campus",
+    swatch: [teal.chrome, teal.accent, teal.background],
+  },
+  {
+    id: "plum",
+    label: "Academic Plum",
+    description: "Deep plum and antique gold",
+    icon: "color-palette-outline",
+    group: "campus",
+    swatch: [plum.chrome, plum.accent, plum.background],
+  },
+  {
+    id: "terracotta",
+    label: "Terracotta Campus",
+    description: "Brick clay and ochre on parchment",
+    icon: "business-outline",
+    group: "campus",
+    swatch: [terracotta.chrome, terracotta.accent, terracotta.background],
   },
 ];
 
@@ -340,14 +621,14 @@ export function resolveTheme(
 
 export const DEFAULT_THEME: ThemeId = "system";
 
+const THEME_IDS: ReadonlySet<string> = new Set(THEME_OPTIONS.map((option) => option.id));
+
+/**
+ * Whether a stored value is a theme this build knows. Anything else — an
+ * older build's leftover, a corrupted value — falls back to the default.
+ */
 export function isThemeId(value: unknown): value is ThemeId {
-  return (
-    value === "system" ||
-    value === "light" ||
-    value === "dim" ||
-    value === "midnight" ||
-    value === "sepia"
-  );
+  return typeof value === "string" && THEME_IDS.has(value);
 }
 
 /**

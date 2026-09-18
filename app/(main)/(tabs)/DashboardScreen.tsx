@@ -1243,7 +1243,7 @@ const handleYearLevelChange = useCallback(
                       <Ionicons
                         name={isExpanded ? "chevron-up" : "chevron-down"}
                         size={18}
-                        color="#8f3a2b"
+                        color={theme.textSecondary}
                       />
                     </TouchableOpacity>
 
@@ -1278,7 +1278,7 @@ const handleYearLevelChange = useCallback(
         <Ionicons
           name="school-outline"
           size={16}
-          color={isSelected ? "#fffaf7" : "#5f0909"}
+          color={isSelected ? theme.onPrimary : theme.primary}
         />
         <Text
           style={[
@@ -1313,7 +1313,7 @@ const handleYearLevelChange = useCallback(
                                 <Ionicons
                                   name={roleOption.icon}
                                   size={16}
-                                  color={selected ? "#fffaf7" : getRoleColor(roleOption.value)}
+                                  color={selected ? theme.onPrimary : getRoleColor(roleOption.value)}
                                 />
                                 <Text
                                   style={[
@@ -1329,7 +1329,7 @@ const handleYearLevelChange = useCallback(
                         </View>
                         {isBusy ? (
                           <View style={styles.manageUserBusyRow}>
-                            <ActivityIndicator size="small" color="#8f3a2b" />
+                            <ActivityIndicator size="small" color={theme.textSecondary} />
                             <Text style={styles.manageUserBusyText}>
                               Updating role...
                             </Text>

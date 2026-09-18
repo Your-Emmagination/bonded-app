@@ -424,6 +424,56 @@ export const uploadPostVideo = async (uri: string): Promise<string> => {
 };
 
 /**
+ * Uploads a video and reports how far along it is, from 0 to 1.
+ *
+ * Made for live replays, which run to tens of megabytes: a bar that moves is
+ * the difference between waiting and giving up. Otherwise the same unsigned
+ * upload into the same folder as uploadPostVideo.
+ */
+export const uploadVideoWithProgress = async (
+  uri: string,
+  onProgress?: (fraction: number) => void,
+): Promise<string> => {
+  const endpoint = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/video/upload`;
+  const task = FileSystem.createUploadTask(
+    endpoint,
+    uri,
+    {
+      uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+      fieldName: "file",
+      mimeType: "video/mp4",
+      parameters: {
+        upload_preset: CLOUDINARY_UPLOAD_PRESET,
+        folder: "post_videos",
+      },
+      headers: { Accept: "application/json" },
+    },
+    (progress) => {
+      if (progress.totalBytesExpectedToSend > 0) {
+        onProgress?.(progress.totalBytesSent / progress.totalBytesExpectedToSend);
+      }
+    },
+  );
+
+  const result = await task.uploadAsync();
+  if (!result) throw new Error("The upload was cancelled.");
+
+  let data: any;
+  try {
+    data = JSON.parse(result.body);
+  } catch {
+    throw new Error(`Upload failed: received invalid response (HTTP ${result.status})`);
+  }
+  if (result.status >= 400 || data?.error) {
+    throw new Error(`Upload failed: ${data?.error?.message || `status ${result.status}`}`);
+  }
+  if (typeof data?.secure_url !== "string" || !data.secure_url.startsWith("https://")) {
+    throw new Error("Upload failed: no video URL was returned. Please try again.");
+  }
+  return data.secure_url;
+};
+
+/**
  * Upload post file (non-image) specifically
  * Usage: const url = await uploadPostFile(fileUri);
  */

@@ -12,11 +12,16 @@
 // of who is live; this only carries pictures. If Agora is swapped out later,
 // this file goes and nothing else does.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PermissionsAndroid, Platform } from "react-native";
+import { AppState, Linking, PermissionsAndroid, Platform } from "react-native";
 import {
   ChannelProfileType,
   ClientRoleType,
   createAgoraRtcEngine,
+  MediaRecorderContainerFormat,
+  MediaRecorderStreamType,
+  RecorderState,
+  RecorderStreamType,
+  type IMediaRecorder,
   type IRtcEngine,
 } from "react-native-agora";
 
@@ -26,6 +31,22 @@ import {
   fetchAgoraToken,
   getAgoraAppId,
 } from "./agoraConfig";
+import {
+  discardRecording,
+  fileUriToPath,
+  newReplayFileUri,
+  REPLAY_MAX_DURATION_MS,
+  sweepStaleReplayFiles,
+  type LiveRecording,
+} from "./liveReplay";
+
+/**
+ * The host's video bitrate, in Kbps. Pinned rather than left to Agora's
+ * default so a recorded replay has a predictable size (see liveReplay.ts),
+ * and so a broadcast holds up on campus Wi-Fi. 960×540 at 15 fps looks sharp
+ * on a phone at this rate.
+ */
+const HOST_VIDEO_BITRATE_KBPS = 900;
 
 /**
  * Turns an Agora error code into something a person can act on.
@@ -62,6 +83,13 @@ function agoraErrorMessage(code: number, message?: string): string {
 
 export type AgoraRole = "host" | "audience";
 
+/**
+ * Where the host's camera and microphone access stands.
+ * "denied" can be asked again in the app; "blocked" means Android has stopped
+ * showing its prompt and only the system settings can change the answer.
+ */
+export type MediaPermission = "unknown" | "granted" | "denied" | "blocked";
+
 export type AgoraLiveState = {
   /** True once this client is in the channel. */
   joined: boolean;
@@ -74,6 +102,16 @@ export type AgoraLiveState = {
   /** False while permissions, token and join are still in flight. */
   ready: boolean;
 
+  /** The host's camera and microphone access. Viewers are never asked. */
+  permission: MediaPermission;
+  /** Asks for camera and microphone again, and joins if they are given. */
+  retryPermissions: () => void;
+  /** Opens BondED's page in the system settings, for a blocked permission. */
+  openPermissionSettings: () => void;
+
+  /** True while the host's broadcast is being recorded for a replay. */
+  recording: boolean;
+
   /**
    * Host controls. Each acts on the running engine and is a no-op before the
    * engine exists, so a button pressed during start-up does nothing rather
@@ -84,19 +122,51 @@ export type AgoraLiveState = {
   setCameraOff: (off: boolean) => void;
 };
 
-/** Camera and microphone, which Android must ask for at runtime. */
-async function ensureMediaPermissions(role: AgoraRole): Promise<boolean> {
-  if (Platform.OS !== "android") return true;
-  const wanted = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
-  // An audience member publishes nothing, so asking for their camera would be
-  // a prompt with no purpose behind it.
-  if (role === "host") wanted.push(PermissionsAndroid.PERMISSIONS.CAMERA);
+/** What a host needs from Android before broadcasting. */
+const hostPermissions = () => [
+  PermissionsAndroid.PERMISSIONS.CAMERA,
+  PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+];
 
+/**
+ * Camera and microphone, which Android must ask for at runtime.
+ *
+ * Only a host is asked. A viewer publishes nothing, and asking them for the
+ * microphone anyway meant somebody who tapped "Don't allow" could not watch.
+ */
+async function ensureMediaPermissions(role: AgoraRole): Promise<MediaPermission> {
+  if (Platform.OS !== "android" || role !== "host") return "granted";
+  const wanted = hostPermissions();
   const result = await PermissionsAndroid.requestMultiple(wanted);
-  return wanted.every(
-    (permission) => result[permission] === PermissionsAndroid.RESULTS.GRANTED,
-  );
+  const outcomes = wanted.map((permission) => result[permission]);
+  if (outcomes.every((outcome) => outcome === PermissionsAndroid.RESULTS.GRANTED)) {
+    return "granted";
+  }
+  // After a second refusal Android answers for the person without showing
+  // anything, so asking again from the app can no longer work.
+  return outcomes.some((outcome) => outcome === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN)
+    ? "blocked"
+    : "denied";
 }
+
+/** Whether the host's permissions are in place, without prompting. */
+async function hasHostPermissions(): Promise<boolean> {
+  if (Platform.OS !== "android") return true;
+  const checks = await Promise.all(
+    hostPermissions().map((permission) => PermissionsAndroid.check(permission)),
+  );
+  return checks.every(Boolean);
+}
+
+export type AgoraLiveOptions = {
+  /** Record the host's broadcast, for a replay. Ignored for viewers. */
+  record?: boolean;
+  /**
+   * Called with the finished recording when the engine shuts down — the live
+   * ended, or the screen closed. Without it the file is thrown away.
+   */
+  onRecordingFinished?: (recording: LiveRecording) => void;
+};
 
 /**
  * Joins `channelName` in the given role and keeps the engine alive for as long
@@ -109,12 +179,25 @@ export function useAgoraLive(
   channelName: string | null,
   role: AgoraRole,
   firebaseUid: string | null,
+  options: AgoraLiveOptions = {},
 ): AgoraLiveState {
   const engineRef = useRef<IRtcEngine | null>(null);
   const [joined, setJoined] = useState(false);
   const [remoteUid, setRemoteUid] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [permission, setPermission] = useState<MediaPermission>("unknown");
+  // Bumped to run the whole start-up again after permissions change.
+  const [attempt, setAttempt] = useState(0);
+  const [recording, setRecording] = useState(false);
+
+  const record = role === "host" && options.record === true;
+  // The latest handler, read when the engine shuts down rather than being a
+  // reason to restart it.
+  const onRecordingFinishedRef = useRef(options.onRecordingFinished);
+  useEffect(() => {
+    onRecordingFinishedRef.current = options.onRecordingFinished;
+  });
 
   const localUid = firebaseUid ? agoraUidFor(firebaseUid) : 0;
 
@@ -129,16 +212,89 @@ export function useAgoraLive(
     let cancelled = false;
     let engine: IRtcEngine | null = null;
 
-    const start = async () => {
-      if (!(await ensureMediaPermissions(role))) {
-        if (!cancelled) {
-          setError(
-            role === "host"
-              ? "Camera and microphone access are needed to go live."
-              : "Microphone access is needed to join.",
-          );
-          setReady(true);
+    // ── Replay recording ────────────────────────────────────────────────
+    // Agora writes the host's own outgoing audio and video to a file on the
+    // phone. It starts once the host is in the channel and stops when the
+    // engine shuts down; whoever asked for it decides what the file becomes.
+    let recorder: IMediaRecorder | null = null;
+    let recordingUri: string | null = null;
+    let recordingStartedAt = 0;
+    let recordedMs = 0;
+
+    const startRecording = (uid: number) => {
+      if (!record || !engine || recorder) return;
+      const fileUri = newReplayFileUri(channelName);
+      if (!fileUri) return;
+      try {
+        const next = engine.createMediaRecorder({
+          channelId: channelName,
+          uid,
+          type: RecorderStreamType.Rtc,
+        });
+        next.setMediaRecorderObserver({
+          onRecorderStateChanged: (_channel, _uid, state) => {
+            // A stop is always worth hearing, even after shutdown began.
+            if (cancelled && state === RecorderState.RecorderStateStart) return;
+            setRecording(state === RecorderState.RecorderStateStart);
+          },
+          onRecorderInfoUpdated: (_channel, _uid, info) => {
+            if (typeof info.durationMs === "number") recordedMs = info.durationMs;
+          },
+        });
+        const code = next.startRecording({
+          storagePath: fileUriToPath(fileUri),
+          containerFormat: MediaRecorderContainerFormat.FormatMp4,
+          streamType: MediaRecorderStreamType.StreamTypeBoth,
+          maxDurationMs: REPLAY_MAX_DURATION_MS,
+          recorderInfoUpdateInterval: 1000,
+        });
+        if (code < 0) {
+          engine.destroyMediaRecorder(next);
+          return;
         }
+        recorder = next;
+        recordingUri = fileUri;
+        recordingStartedAt = Date.now();
+        void sweepStaleReplayFiles();
+      } catch {
+        // A live without a replay is still a live.
+      }
+    };
+
+    const finishRecording = () => {
+      const current = recorder;
+      const fileUri = recordingUri;
+      recorder = null;
+      recordingUri = null;
+      if (!current || !fileUri) return;
+      try {
+        current.stopRecording();
+      } catch {
+        // Stopping a recorder that already hit its time limit can throw.
+      }
+      try {
+        engine?.destroyMediaRecorder(current);
+      } catch {
+        // Nothing depends on this having worked.
+      }
+      const durationMs =
+        recordedMs || Math.min(Date.now() - recordingStartedAt, REPLAY_MAX_DURATION_MS);
+      const handler = onRecordingFinishedRef.current;
+      if (handler) handler({ fileUri, durationMs });
+      else discardRecording(fileUri);
+    };
+
+    const start = async () => {
+      const access = await ensureMediaPermissions(role);
+      if (cancelled) return;
+      setPermission(access);
+      if (access !== "granted") {
+        setError(
+          access === "blocked"
+            ? "Camera or microphone access is turned off for BondED. Turn both on in Settings to go live."
+            : "BondED needs your camera and microphone to go live.",
+        );
+        setReady(true);
         return;
       }
 
@@ -147,10 +303,11 @@ export function useAgoraLive(
       engine.initialize({ appId });
 
       engine.registerEventHandler({
-        onJoinChannelSuccess: () => {
+        onJoinChannelSuccess: (connection) => {
           if (!cancelled) {
             setJoined(true);
             setReady(true);
+            startRecording(connection?.localUid ?? localUid);
           }
         },
         // The host is the only publisher, so the first remote user to appear
@@ -184,6 +341,11 @@ export function useAgoraLive(
       engine.enableVideo();
 
       if (role === "host") {
+        engine.setVideoEncoderConfiguration({
+          dimensions: { width: 960, height: 540 },
+          frameRate: 15,
+          bitrate: HOST_VIDEO_BITRATE_KBPS,
+        });
         engine.startPreview();
       }
 
@@ -239,6 +401,8 @@ export function useAgoraLive(
 
     return () => {
       cancelled = true;
+      // Before leaving: the recorder needs the engine to close its file.
+      finishRecording();
       const current = engineRef.current;
       engineRef.current = null;
       if (!current) return;
@@ -252,7 +416,36 @@ export function useAgoraLive(
         // about it and nothing depends on it having worked.
       }
     };
-  }, [channelName, role, firebaseUid, localUid, appId]);
+  }, [channelName, role, firebaseUid, localUid, appId, attempt, record]);
+
+  // Starts over from the permission prompt. The state is cleared here, in the
+  // handler, so the screen goes back to "starting" the moment it is tapped.
+  const retryPermissions = useCallback(() => {
+    setError(null);
+    setReady(false);
+    setPermission("unknown");
+    setAttempt((count) => count + 1);
+  }, []);
+
+  const openPermissionSettings = useCallback(() => {
+    Linking.openSettings().catch(() => undefined);
+  }, []);
+
+  // Coming back from the settings page with access turned on joins without
+  // another tap. Only listened for while access is missing.
+  const needsAccess = permission === "denied" || permission === "blocked";
+  useEffect(() => {
+    if (!needsAccess) return;
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state !== "active") return;
+      hasHostPermissions()
+        .then((granted) => {
+          if (granted) retryPermissions();
+        })
+        .catch(() => undefined);
+    });
+    return () => subscription.remove();
+  }, [needsAccess, retryPermissions]);
 
   const switchCamera = useCallback(() => {
     engineRef.current?.switchCamera();
@@ -277,6 +470,10 @@ export function useAgoraLive(
     localUid,
     error: unconfigured ? "Live video is not configured for this build." : error,
     ready: unconfigured ? true : ready,
+    permission,
+    retryPermissions,
+    openPermissionSettings,
+    recording,
     switchCamera,
     setMicMuted,
     setCameraOff,

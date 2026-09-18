@@ -50,6 +50,7 @@ import {
     requestFirestoreModerationDecision,
     type ModerationDecision
 } from "@/utils/contentModeration";
+import { localCopyOf, type ComposerAttachments } from "@/utils/composerUploads";
 import SafetyDialog from "./SafetyDialog";
 import {
     confirmLostAndFoundResolution,
@@ -82,6 +83,7 @@ import {
     orderBy,
     query,
     serverTimestamp,
+    setDoc,
     startAfter,
     updateDoc,
     where,
@@ -138,6 +140,9 @@ const buildCurrentUserPreview = (authUser: typeof auth.currentUser) => {
 
 type Comment = {
   id: string;
+  postId?: string;
+  /** Only on the copy of your comment shown while its attachments upload. */
+  sending?: boolean;
   text: string;
   userId: string;
   realUserId?: string;
@@ -276,10 +281,17 @@ function CommentItemComponent({
   const avatarUri = isIdentityVisible ? liveAvatar : null;
 
   const liked = item.likes?.includes(user?.uid);
+  // Your comment while its photos upload: shown, but not saved yet, so
+  // there is nothing to like, reply to or open.
+  const sending = item.sending === true;
 
   const imageFiles = (item.files || []).filter((f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif"));
   const gifFiles = (item.files || []).filter((f) => f.mimeType.includes("gif"));
   const docFiles = (item.files || []).filter((f) => !f.mimeType.startsWith("image/"));
+  // For a photo you just sent: the copy on your phone, shown until the
+  // uploaded one loads.
+  const gifLocalCopy = localCopyOf(gifFiles[0]?.url);
+  const imageLocalCopy = localCopyOf(imageFiles[0]?.url);
   const [imageHeight, setImageHeight] = useState(200);
 
   useEffect(() => {
@@ -300,7 +312,7 @@ function CommentItemComponent({
   };
 
   return (
-    <View style={[styles.commentItem, isHighlighted && styles.commentItemHighlighted]}>
+    <View style={[styles.commentItem, isHighlighted && styles.commentItemHighlighted, sending && styles.commentSending]}>
       <View style={styles.commentTopRow}>
         <TouchableOpacity
           onPress={() => canClickProfile && onProfileClick(item, authorData?.studentID)}
@@ -324,7 +336,7 @@ function CommentItemComponent({
                 </Text>
               )
             ) : (
-              <Ionicons name="person" size={16} color="#9b766c" />
+              <Ionicons name="person" size={16} color={theme.textMuted} />
             )}
           </View>
         </TouchableOpacity>
@@ -335,7 +347,7 @@ function CommentItemComponent({
               onPress={() => canClickProfile && onProfileClick(item, authorData?.studentID)}
               disabled={!canClickProfile}
             >
-              <Text style={[styles.commentName, { color: isIdentityVisible ? roleColor : "#9b766c" }]}>
+              <Text style={[styles.commentName, { color: isIdentityVisible ? roleColor : theme.textMuted }]}>
                 {displayName}
               </Text>
             </TouchableOpacity>
@@ -351,13 +363,13 @@ function CommentItemComponent({
                 <Ionicons
                   name={revealed ? "eye-off-outline" : "eye-outline"}
                   size={14}
-                  color={revealed ? "#e0a53d" : "#9b766c"}
+                  color={revealed ? theme.accent : theme.textMuted}
                 />
               </TouchableOpacity>
             )}
           </View>
 
-          <Text style={styles.commentRole}>{getTimeAgo(item.createdAt)}</Text>
+          <Text style={styles.commentRole}>{sending ? "Sending…" : getTimeAgo(item.createdAt)}</Text>
         </View>
       </View>
 
@@ -374,7 +386,13 @@ function CommentItemComponent({
 
       {gifFiles.length > 0 && (
         <View style={styles.commentGifContainer}>
-          <Image source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }} style={styles.commentGif} contentFit="cover" />
+          <Image
+            source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }}
+            placeholder={gifLocalCopy ? { uri: gifLocalCopy } : undefined}
+            placeholderContentFit="cover"
+            style={styles.commentGif}
+            contentFit="cover"
+          />
         </View>
       )}
 
@@ -382,10 +400,13 @@ function CommentItemComponent({
         <TouchableOpacity
           activeOpacity={0.9}
           onPress={() => onImagePress?.(imageFiles.map(f => f.url), 0)}
+          disabled={sending}
           style={styles.commentImageContainer}
         >
           <Image
             source={{ uri: feedImage(imageFiles[0].url, FEED_IMAGE_WIDTH) }}
+            placeholder={imageLocalCopy ? { uri: imageLocalCopy } : undefined}
+            placeholderContentFit="cover"
             style={[styles.commentImageFull, { height: imageHeight }]}
             contentFit="cover"
           />
@@ -408,6 +429,7 @@ function CommentItemComponent({
                 key={idx}
                 style={styles.commentDocItem}
                 onPress={() => onFilePress?.(file.url, displayName)}
+                disabled={sending}
               >
                 <Ionicons
                   name={details.icon}
@@ -417,7 +439,7 @@ function CommentItemComponent({
                 <Text style={styles.commentDocText} numberOfLines={1}>
                   {displayName}
                 </Text>
-                <Ionicons name="download-outline" size={14} color="#9b766c" />
+                <Ionicons name="download-outline" size={14} color={theme.textMuted} />
               </TouchableOpacity>
             );
           })}
@@ -448,18 +470,18 @@ function CommentItemComponent({
 
       <AiReplyCard reply={item.aiReply} compact />
 
-      <View style={styles.actionRow}>
+      <View style={styles.actionRow} pointerEvents={sending ? "none" : "auto"}>
         <TouchableOpacity style={styles.actionBtn} onPress={() => onLike(item.id)}>
           <Ionicons
             name={liked ? "heart" : "heart-outline"}
             size={16}
-            color={liked ? "#e0a53d" : "#9b766c"}
+            color={liked ? theme.accent : theme.textMuted}
           />
           <Text style={styles.actionText}>{item.likes?.length || 0}</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.actionBtn} onPress={() => onReply(item)}>
-          <Ionicons name="chatbubble-outline" size={14} color="#9b766c" />
+          <Ionicons name="chatbubble-outline" size={14} color={theme.textMuted} />
           <Text style={styles.actionText}>{item.replyCount || 0}</Text>
         </TouchableOpacity>
 
@@ -467,7 +489,7 @@ function CommentItemComponent({
           style={styles.actionBtn}
           onPress={() => onOptionsPress(item, authorRole)}
         >
-          <Ionicons name="ellipsis-horizontal" size={16} color="#9b766c" />
+          <Ionicons name="ellipsis-horizontal" size={16} color={theme.textMuted} />
         </TouchableOpacity>
       </View>
     </View>
@@ -494,7 +516,7 @@ const TaggedUsersDisplay = ({
   return (
     <View style={styles.taggedBox}>
       <View style={styles.taggedContent}>
-        <Ionicons name="people-outline" size={14} color="#e0a53d" />
+        <Ionicons name="people-outline" size={14} color={theme.accent} />
         <Text style={styles.taggedLabel}>with </Text>
 
         {visible.map((tag, idx) => (
@@ -535,6 +557,9 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const { styles, theme } = useStyles();
   const [internalVisible, setInternalVisible] = useState(visible);
   const [comments, setComments] = useState<Comment[]>([]);
+  // Your comments whose attachments are still uploading, shown until the
+  // saved comment arrives under the same id.
+  const [sendingComments, setSendingComments] = useState<Comment[]>([]);
   const [displayedComments, setDisplayedComments] = useState<Comment[]>([]);
   const [loading, setLoading] = useState(true);
   const { isOffline } = useNetworkStatus();
@@ -768,6 +793,13 @@ const CommentModal: React.FC<CommentModalProps> = ({
       setComments(fetchedComments);
       setLoading(false);
       saveCachedComments(postId, fetchedComments);
+      // A saved comment takes over from the copy shown while it uploaded.
+      const savedIds = new Set(snapshot.docs.map((d) => d.id));
+      setSendingComments((prev) =>
+        prev.some((comment) => savedIds.has(comment.id))
+          ? prev.filter((comment) => !savedIds.has(comment.id))
+          : prev,
+      );
     });
 
     return () => {
@@ -777,15 +809,18 @@ const CommentModal: React.FC<CommentModalProps> = ({
   }, [postId, user?.role, user?.uid]);
 
   useEffect(() => {
-    let sorted = [...comments];
+    // Your comments still uploading sit alongside the saved ones.
+    const stillSending = sendingComments.filter(
+      (comment) => comment.postId === postId && !comments.some((saved) => saved.id === comment.id),
+    );
+    let sorted = [...comments, ...stillSending];
+    // A comment with no server time yet was just sent, so it is the newest.
+    const commentTime = (comment: Comment) =>
+      comment.createdAt?.toMillis?.() ?? Number.MAX_SAFE_INTEGER;
 
     switch (sortBy) {
       case "latest":
-        sorted.sort((a, b) => {
-          const timeA = a.createdAt?.toMillis?.() || 0;
-          const timeB = b.createdAt?.toMillis?.() || 0;
-          return timeB - timeA;
-        });
+        sorted.sort((a, b) => commentTime(b) - commentTime(a));
         break;
 
       case "relevant":
@@ -797,11 +832,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         break;
 
       case "all":
-        sorted.sort((a, b) => {
-          const timeA = a.createdAt?.toMillis?.() || 0;
-          const timeB = b.createdAt?.toMillis?.() || 0;
-          return timeA - timeB;
-        });
+        sorted.sort((a, b) => commentTime(a) - commentTime(b));
         break;
     }
 
@@ -816,7 +847,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
     }
 
     setDisplayedComments(sorted);
-  }, [comments, sortBy, initialCommentId]);
+  }, [comments, sendingComments, postId, sortBy, initialCommentId]);
 
   useEffect(() => {
     if (!internalVisible || !initialCommentId || !autoOpenReplyThread) {
@@ -886,8 +917,34 @@ const CommentModal: React.FC<CommentModalProps> = ({
   // Whether the person writing is staff, for how their comment starts out.
   const authorIsStaff = isStaff(parseUserRole(user?.role));
 
-  const handleSend = async (commentData: any) => {
+  const handleSend = async (draft: any, attachments: ComposerAttachments) => {
     if (!user?.uid) return;
+
+    // The id is picked up front, so the copy shown while attachments upload
+    // and the saved comment are the same row.
+    const commentRef = doc(collection(db, "comments"));
+    const dropSendingCopy = () =>
+      setSendingComments((prev) => prev.filter((comment) => comment.id !== commentRef.id));
+    if (attachments.local.length > 0) {
+      // Text on its own already appears at once from Firestore's local write.
+      // Photos would wait for their upload, so show them from the phone.
+      setSendingComments((prev) => [
+        ...prev,
+        {
+          ...draft,
+          id: commentRef.id,
+          postId,
+          files: attachments.local,
+          createdAt: new Date(),
+          sending: true,
+        },
+      ]);
+    }
+    const files = await attachments.upload().catch((error) => {
+      dropSendingCopy();
+      throw error;
+    });
+    const commentData = { ...draft, files };
 
     const shouldTriggerAi =
       hasAiAssistantMention(commentData.text) ||
@@ -902,7 +959,10 @@ const CommentModal: React.FC<CommentModalProps> = ({
     // by the trusted Worker; a staff comment is written approved, since the
     // Worker would approve it unread.
     Object.assign(newComment, initialModerationFields(authorIsStaff));
-    const commentRef = await addDoc(collection(db, "comments"), newComment);
+    await setDoc(commentRef, newComment).catch((error) => {
+      dropSendingCopy();
+      throw error;
+    });
 
     void (async () => {
       let moderationDecision: ModerationDecision;
@@ -1581,7 +1641,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         <Ionicons
           name="time-outline"
           size={14}
-          color={sortBy === "latest" ? "#e0a53d" : "#9b766c"}
+          color={sortBy === "latest" ? theme.accent : theme.textMuted}
         />
         <Text
           style={[
@@ -1603,7 +1663,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         <Ionicons
           name="trending-up-outline"
           size={14}
-          color={sortBy === "relevant" ? "#e0a53d" : "#9b766c"}
+          color={sortBy === "relevant" ? theme.accent : theme.textMuted}
         />
         <Text
           style={[
@@ -1625,7 +1685,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         <Ionicons
           name="list-outline"
           size={14}
-          color={sortBy === "all" ? "#e0a53d" : "#9b766c"}
+          color={sortBy === "all" ? theme.accent : theme.textMuted}
         />
         <Text
           style={[
@@ -1706,7 +1766,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         ListHeaderComponent={
           loading && !isOffline ? (
             <ActivityIndicator
-              color="#e0a53d"
+              color={theme.accent}
               style={{ marginTop: 40 }}
             />
           ) : displayedComments.length === 0 ? (
@@ -1714,7 +1774,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
               <Ionicons
                 name="chatbubbles-outline"
                 size={48}
-                color="#9b766c"
+                color={theme.textMuted}
               />
               <Text style={styles.emptyText}>No comments yet</Text>
               <Text style={styles.emptySubText}>
@@ -1725,7 +1785,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
         }
         onEndReached={loadMoreComments}
         onEndReachedThreshold={0.5}
-        ListFooterComponent={loadingMore ? <ActivityIndicator color="#e0a53d" style={{ marginVertical: 16 }} /> : null}
+        ListFooterComponent={loadingMore ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 16 }} /> : null}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -2079,6 +2139,9 @@ modalContainer: {
     shadowOpacity: 0.18,
     shadowRadius: 12,
     elevation: 3,
+  },
+  commentSending: {
+    opacity: 0.6,
   },
   commentTopRow: { flexDirection: "row", alignItems: "flex-start", marginBottom: 10, gap: 12 },
   avatar: {

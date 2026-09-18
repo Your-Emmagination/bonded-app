@@ -2514,7 +2514,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(95, 9, 9, 0.12)",
+    borderBottomColor: c.border,
     backgroundColor: c.surface,
   },
   headerBackBtn: {
@@ -2581,7 +2581,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(95, 9, 9, 0.12)",
+    borderBottomColor: c.border,
   },
   searchHeaderInput: {
     flex: 1,
@@ -2760,7 +2760,7 @@ const makeStyles = (c: ThemeTokens) =>
     gap: 7,
     alignSelf: "flex-start",
     maxWidth: "100%",
-    backgroundColor: "rgba(95,9,9,0.06)",
+    backgroundColor: c.surfaceSunken,
     borderRadius: 14,
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -2949,7 +2949,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "rgba(95,9,9,0.12)",
+    borderTopColor: c.border,
     gap: 8,
   },
   replyBannerBar: {
@@ -2975,7 +2975,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingTop: 8,
     backgroundColor: c.surface,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "rgba(95, 9, 9, 0.12)",
+    borderTopColor: c.border,
     gap: 4,
   },
   composerAttachBtn: {
@@ -3269,7 +3269,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 16,
     paddingVertical: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(95, 9, 9, 0.12)",
+    borderBottomColor: c.border,
   },
   modalTitle: {
     fontSize: 18,
@@ -3573,7 +3573,7 @@ const makeStyles = (c: ThemeTokens) =>
     justifyContent: "space-between",
     paddingVertical: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(95, 9, 9, 0.08)",
+    borderBottomColor: c.border,
   },
   forwardRowLeft: {
     flexDirection: "row",

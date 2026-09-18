@@ -1831,11 +1831,14 @@ match /userNotificationSettings/{userId} {
         request.resource.data.reactionCount >= resource.data.reactionCount;
     }
 
+    // hostSeenAt is the host's "still here" heartbeat; a live that stops
+    // receiving it drops out of the feed. replayPostId links the ended live
+    // to the feed post carrying its recording.
     function liveHostFields() {
       return liveChangedKeys().hasOnly([
         'status', 'endedAt', 'provider', 'channelName', 'playbackUrl',
-        'replayUrl', 'viewerCount', 'peakViewers',
-        'micMuted', 'cameraOff', 'pinnedComment'
+        'replayUrl', 'replayPostId', 'viewerCount', 'peakViewers',
+        'micMuted', 'cameraOff', 'pinnedComment', 'hostSeenAt'
       ]);
     }
 

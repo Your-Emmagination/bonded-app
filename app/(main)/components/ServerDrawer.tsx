@@ -15,6 +15,7 @@ import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+    ActivityIndicator,
     Alert,
     Animated,
     Dimensions,
@@ -60,6 +61,7 @@ export type ServerMemberPreview = {
   profileDocId?: string | null;
   role?: string | null;
   course?: string | null;
+  studentID?: string | null;
   avatarUri?: string | null;
   isOnline?: boolean;
 };
@@ -133,6 +135,13 @@ type ServerDrawerProps = {
   onLeaveServer?: (serverId: string) => void | Promise<void>;
   pendingJoinRequests?: ServerJoinRequestRecord[];
   serverMembers?: ServerMemberPreview[];
+  /** People a manager could add to the selected server. */
+  addableMembers?: ServerMemberPreview[];
+  /** Adds people straight in; resolves false if nothing was added. */
+  onAddMembers?: (serverId: string, userIds: string[]) => Promise<boolean>;
+  onRemoveMember?: (serverId: string, userId: string) => void | Promise<void>;
+  /** So a manager is never offered "remove" on themselves. */
+  currentUserId?: string | null;
 };
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -601,11 +610,14 @@ const ChannelRow = React.memo(ChannelRowComponent);
 function MemberRowComponent({
   member,
   onOpenProfile,
+  onRemove,
 }: {
   member: ServerMemberPreview;
   onOpenProfile?: (userId?: string, profileDocId?: string) => void;
+  /** Only passed to a manager, and never for the owner or themselves. */
+  onRemove?: (member: ServerMemberPreview) => void;
 }) {
-  const { styles } = useStyles();
+  const { styles, theme } = useStyles();
   return (
     <TouchableOpacity
       style={styles.memberRow}
@@ -636,10 +648,76 @@ function MemberRowComponent({
         </Text>
       </View>
       {member.isOnline ? <View style={styles.memberOnlineDot} /> : null}
+      {onRemove && (
+        <TouchableOpacity
+          style={styles.memberRemoveButton}
+          onPress={() => onRemove(member)}
+          hitSlop={6}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel={`Remove ${member.name} from this server`}
+        >
+          <Ionicons name="person-remove-outline" size={18} color={theme.danger} />
+        </TouchableOpacity>
+      )}
     </TouchableOpacity>
   );
 }
 const MemberRow = React.memo(MemberRowComponent);
+
+/** One person in "Add members": tap anywhere on the row to tick them. */
+function AddMemberRowComponent({
+  member,
+  selected,
+  accent,
+  onToggle,
+}: {
+  member: ServerMemberPreview;
+  selected: boolean;
+  accent: string;
+  onToggle: (userId: string) => void;
+}) {
+  const { styles, theme } = useStyles();
+  const userId = member.userId || member.id;
+  const meta = [member.studentID, member.course || member.role].filter(Boolean).join(" • ");
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.memberRow, pressed && styles.addRowPressed]}
+      onPress={() => onToggle(userId)}
+      accessibilityRole="checkbox"
+      accessibilityState={{ checked: selected }}
+      accessibilityLabel={`${member.name}${meta ? `, ${meta}` : ""}`}
+    >
+      <View style={styles.memberAvatar}>
+        {member.avatarUri ? (
+          <Image
+            source={{ uri: avatarThumb(member.avatarUri, AVATAR_SIZE_SMALL) }}
+            style={styles.memberAvatarImage}
+            recyclingKey={member.id}
+          />
+        ) : (
+          <Text style={styles.memberAvatarText}>
+            {(member.name?.[0] || "M").toUpperCase()}
+          </Text>
+        )}
+      </View>
+      <View style={styles.memberCopy}>
+        <Text style={styles.memberName} numberOfLines={1}>
+          {member.name}
+        </Text>
+        <Text style={styles.memberMeta} numberOfLines={1}>
+          {meta || "Member"}
+        </Text>
+      </View>
+      <Ionicons
+        name={selected ? "checkmark-circle" : "ellipse-outline"}
+        size={24}
+        color={selected ? accent : theme.borderStrong}
+      />
+    </Pressable>
+  );
+}
+const AddMemberRow = React.memo(AddMemberRowComponent);
 
 function ServerDrawerComponent({
   visible,
@@ -666,6 +744,10 @@ function ServerDrawerComponent({
   onLeaveServer,
   pendingJoinRequests = [],
   serverMembers = [],
+  addableMembers = [],
+  onAddMembers,
+  onRemoveMember,
+  currentUserId,
 }: ServerDrawerProps) {
   const { styles, theme } = useStyles();
   const insets = useSafeAreaInsets();
@@ -685,6 +767,12 @@ function ServerDrawerComponent({
   const [editVisible, setEditVisible] = useState(false);
   const [threadVisible, setThreadVisible] = useState(false);
   const [membersVisible, setMembersVisible] = useState(false);
+  // The members sheet shows the roster, or — for a manager — the picker for
+  // adding people. One sheet with two faces rather than a modal on a modal.
+  const [membersMode, setMembersMode] = useState<"list" | "add">("list");
+  const [addQuery, setAddQuery] = useState("");
+  const [addSelection, setAddSelection] = useState<Set<string>>(() => new Set());
+  const [addingMembers, setAddingMembers] = useState(false);
 
   const [createName, setCreateName] = useState("");
   const [createDesc, setCreateDesc] = useState("");
@@ -1102,12 +1190,116 @@ function ServerDrawerComponent({
     [selectedChannelId, selectedServer?.accent, selectedServer?.canManage, canEnterThreads, onSelectChannel, openEditChannel, theme.textSecondary],
   );
 
-  const renderMemberItem = useCallback(
-    ({ item }: { item: ServerMemberPreview }) => (
-      <MemberRow member={item} onOpenProfile={onOpenUserProfile} />
-    ),
-    [onOpenUserProfile],
+  // ── Members: roster, adding, removing ──────────────────────────────────
+  const canManageMembers = !!selectedServer?.canManage && !!onAddMembers;
+  const membersServerId = selectedServer?.id ?? null;
+  const selectedServerName = selectedServer?.name ?? "this server";
+  const selectedServerOwnerId = selectedServer?.ownerId ?? null;
+  const selectedServerIsPublic = selectedServer?.isPublic !== false;
+
+  const openMembers = useCallback(() => {
+    setMembersMode("list");
+    setMembersVisible(true);
+  }, []);
+
+  const closeMembers = useCallback(() => {
+    setMembersVisible(false);
+    setMembersMode("list");
+    setAddQuery("");
+    setAddSelection(new Set());
+  }, []);
+
+  const confirmRemoveMember = useCallback(
+    (member: ServerMemberPreview) => {
+      const memberId = member.userId;
+      if (!membersServerId || !memberId || !onRemoveMember) return;
+      setConfirmDialog({
+        title: "Remove member?",
+        description: selectedServerIsPublic
+          ? `${member.name} will lose access to ${selectedServerName} until they join again.`
+          : `${member.name} will lose access to ${selectedServerName}. It's private, so they can only come back if someone adds them again.`,
+        confirmText: "Remove",
+        cancelText: "Cancel",
+        destructive: true,
+        onConfirm: () => {
+          setConfirmDialog(null);
+          void onRemoveMember(membersServerId, memberId);
+        },
+      });
+    },
+    [onRemoveMember, membersServerId, selectedServerIsPublic, selectedServerName],
   );
+
+  const renderMemberItem = useCallback(
+    ({ item }: { item: ServerMemberPreview }) => {
+      // Never the owner, and never yourself — leaving has its own button.
+      const removable =
+        canManageMembers &&
+        !!onRemoveMember &&
+        !!item.userId &&
+        item.userId !== currentUserId &&
+        item.userId !== selectedServerOwnerId;
+      return (
+        <MemberRow
+          member={item}
+          onOpenProfile={onOpenUserProfile}
+          onRemove={removable ? confirmRemoveMember : undefined}
+        />
+      );
+    },
+    [
+      canManageMembers,
+      confirmRemoveMember,
+      currentUserId,
+      onOpenUserProfile,
+      onRemoveMember,
+      selectedServerOwnerId,
+    ],
+  );
+
+  const filteredAddable = useMemo(() => {
+    const query = addQuery.trim().toLowerCase();
+    if (!query) return addableMembers;
+    return addableMembers.filter((member) =>
+      [member.name, member.studentID, member.course, member.role].some((value) =>
+        String(value || "").toLowerCase().includes(query),
+      ),
+    );
+  }, [addQuery, addableMembers]);
+
+  const toggleAddSelection = useCallback((userId: string) => {
+    setAddSelection((current) => {
+      const next = new Set(current);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  }, []);
+
+  const selectedAccent = selectedServer?.accent ?? theme.primary;
+  const renderAddItem = useCallback(
+    ({ item }: { item: ServerMemberPreview }) => (
+      <AddMemberRow
+        member={item}
+        selected={addSelection.has(item.userId || item.id)}
+        accent={selectedAccent}
+        onToggle={toggleAddSelection}
+      />
+    ),
+    [addSelection, selectedAccent, toggleAddSelection],
+  );
+
+  const submitAddMembers = useCallback(async () => {
+    if (!membersServerId || addSelection.size === 0 || !onAddMembers || addingMembers) return;
+    setAddingMembers(true);
+    const added = await onAddMembers(membersServerId, [...addSelection]).catch(() => false);
+    setAddingMembers(false);
+    if (added) {
+      setAddSelection(new Set());
+      setAddQuery("");
+      setMembersMode("list");
+    }
+  }, [addSelection, addingMembers, onAddMembers, membersServerId]);
 
   const renderHeader = useCallback(() => {
     if (!selectedServer) return null;
@@ -1118,7 +1310,7 @@ function ServerDrawerComponent({
         canEnterThreads={canEnterThreads}
         canLeaveServer={canLeaveServer}
         pendingJoinRequests={pendingJoinRequests}
-        onOpenMembers={() => setMembersVisible(true)}
+        onOpenMembers={openMembers}
         onRequestJoin={onRequestJoin}
         onOpenUserProfile={onOpenUserProfile}
         onApproveJoinRequest={onApproveJoinRequest}
@@ -1136,6 +1328,7 @@ function ServerDrawerComponent({
     onOpenUserProfile,
     onRejectJoinRequest,
     onRequestJoin,
+    openMembers,
     pendingJoinRequests,
     selectedServer,
   ]);
@@ -1452,7 +1645,9 @@ function ServerDrawerComponent({
               <View style={{ flex: 1 }}>
                 <Text style={styles.switchTitle}>Public server</Text>
                 <Text style={styles.switchHint}>
-                  Anyone can request access, but staff still approves entry.
+                  {createPublic
+                    ? "Anyone can request access, but staff still approves entry."
+                    : "Private: hidden from students. Add members from the server's member list."}
                 </Text>
               </View>
               <Switch
@@ -1686,7 +1881,9 @@ function ServerDrawerComponent({
               <View style={{ flex: 1 }}>
                 <Text style={styles.switchTitle}>Public server</Text>
                 <Text style={styles.switchHint}>
-                  Public servers still use approval before entry.
+                  {editPublic
+                    ? "Public servers still use approval before entry."
+                    : "Private: hidden from students. Add members from the server's member list."}
                 </Text>
               </View>
               <Switch
@@ -1972,40 +2169,163 @@ function ServerDrawerComponent({
         </View>
       </Modal>
 
-      <Modal visible={membersVisible} transparent animationType="fade" onRequestClose={() => setMembersVisible(false)}>
-        <View style={styles.modalOverlay}>
+      <Modal
+        visible={membersVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => (membersMode === "add" ? setMembersMode("list") : closeMembers())}
+      >
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
           <View style={styles.modalCard}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Server Members</Text>
-                <Text style={styles.memberModalSubtitle}>
-                  {selectedServer?.name || "Community"} roster
-                </Text>
-              </View>
-              <TouchableOpacity onPress={() => setMembersVisible(false)}>
-                <Ionicons name="close" size={22} color={theme.textSecondary} />
-              </TouchableOpacity>
-            </View>
-
-            <FlatList
-              style={styles.memberList}
-              data={membersVisible ? serverMembers : []}
-              keyExtractor={keyExtractorId}
-              renderItem={renderMemberItem}
-              showsVerticalScrollIndicator={false}
-              initialNumToRender={10}
-              maxToRenderPerBatch={6}
-              windowSize={5}
-              removeClippedSubviews={Platform.OS === "android"}
-              ListEmptyComponent={
-                <View style={styles.memberEmptyState}>
-                  <Ionicons name="people-outline" size={28} color={theme.textMuted} />
-                  <Text style={styles.memberEmptyText}>No member list available yet.</Text>
+            {membersMode === "list" ? (
+              <>
+                <View style={styles.modalHeader}>
+                  <View style={styles.memberHeaderCopy}>
+                    <Text style={styles.modalTitle}>Server Members</Text>
+                    <Text style={styles.memberModalSubtitle} numberOfLines={1}>
+                      {selectedServer?.name || "Community"} roster
+                    </Text>
+                  </View>
+                  {canManageMembers && (
+                    <TouchableOpacity
+                      style={[styles.addMembersButton, { backgroundColor: selectedAccent }]}
+                      onPress={() => setMembersMode("add")}
+                      activeOpacity={0.85}
+                      accessibilityRole="button"
+                      accessibilityLabel="Add members"
+                    >
+                      <Ionicons name="person-add-outline" size={15} color={theme.onPrimary} />
+                      <Text style={styles.addMembersButtonText}>Add</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity
+                    onPress={closeMembers}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Close members"
+                  >
+                    <Ionicons name="close" size={22} color={theme.textSecondary} />
+                  </TouchableOpacity>
                 </View>
-              }
-            />
+
+                {canManageMembers && !selectedServerIsPublic && (
+                  // What makes a private server private, said where it's managed.
+                  <View style={styles.privateNote}>
+                    <Ionicons name="lock-closed-outline" size={14} color={theme.textSecondary} />
+                    <Text style={styles.privateNoteText}>
+                      Private: only the people you add here can see this server.
+                    </Text>
+                  </View>
+                )}
+
+                <FlatList
+                  style={styles.memberList}
+                  data={membersVisible ? serverMembers : []}
+                  keyExtractor={keyExtractorId}
+                  renderItem={renderMemberItem}
+                  showsVerticalScrollIndicator={false}
+                  initialNumToRender={10}
+                  maxToRenderPerBatch={6}
+                  windowSize={5}
+                  removeClippedSubviews={Platform.OS === "android"}
+                  ListEmptyComponent={
+                    <View style={styles.memberEmptyState}>
+                      <Ionicons name="people-outline" size={28} color={theme.textMuted} />
+                      <Text style={styles.memberEmptyText}>No member list available yet.</Text>
+                    </View>
+                  }
+                />
+              </>
+            ) : (
+              <>
+                <View style={styles.modalHeader}>
+                  <TouchableOpacity
+                    onPress={() => setMembersMode("list")}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Back to members"
+                  >
+                    <Ionicons name="arrow-back" size={22} color={theme.textSecondary} />
+                  </TouchableOpacity>
+                  <View style={[styles.memberHeaderCopy, styles.addHeaderCopy]}>
+                    <Text style={styles.modalTitle}>Add members</Text>
+                    <Text style={styles.memberModalSubtitle} numberOfLines={1}>
+                      to {selectedServerName}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={closeMembers}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Close"
+                  >
+                    <Ionicons name="close" size={22} color={theme.textSecondary} />
+                  </TouchableOpacity>
+                </View>
+
+                <TextInput
+                  style={styles.input}
+                  value={addQuery}
+                  onChangeText={setAddQuery}
+                  placeholder="Search by name, student ID or course"
+                  placeholderTextColor={theme.textMuted}
+                  autoCorrect={false}
+                  returnKeyType="search"
+                  accessibilityLabel="Search people to add"
+                />
+
+                <FlatList
+                  style={styles.memberList}
+                  data={membersVisible ? filteredAddable : []}
+                  keyExtractor={keyExtractorId}
+                  renderItem={renderAddItem}
+                  extraData={addSelection}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                  initialNumToRender={12}
+                  maxToRenderPerBatch={10}
+                  windowSize={7}
+                  ListEmptyComponent={
+                    <View style={styles.memberEmptyState}>
+                      <Ionicons name="people-outline" size={28} color={theme.textMuted} />
+                      <Text style={styles.memberEmptyText}>
+                        {addQuery.trim()
+                          ? "No one matches that search."
+                          : "Everyone is already a member."}
+                      </Text>
+                    </View>
+                  }
+                />
+
+                <TouchableOpacity
+                  style={[
+                    styles.addMembersSubmit,
+                    { backgroundColor: selectedAccent },
+                    (addSelection.size === 0 || addingMembers) && styles.addMembersSubmitIdle,
+                  ]}
+                  onPress={submitAddMembers}
+                  disabled={addSelection.size === 0 || addingMembers}
+                  activeOpacity={0.85}
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: addSelection.size === 0, busy: addingMembers }}
+                >
+                  {addingMembers ? (
+                    <ActivityIndicator color={theme.onPrimary} />
+                  ) : (
+                    <Text style={styles.addMembersSubmitText}>
+                      {addSelection.size === 0
+                        ? "Select people to add"
+                        : `Add ${addSelection.size} ${addSelection.size === 1 ? "member" : "members"}`}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </>
+            )}
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
       <ConfirmDialog
         visible={!!confirmDialog}
@@ -2759,6 +3079,69 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontSize: 13.5,
     textAlign: "center",
+  },
+  memberHeaderCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  addHeaderCopy: {
+    marginLeft: 12,
+  },
+  addMembersButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 14,
+    marginRight: 12,
+  },
+  addMembersButtonText: {
+    color: c.onPrimary,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  privateNote: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    marginBottom: 6,
+    borderRadius: 12,
+    backgroundColor: c.surfaceSunken,
+  },
+  privateNoteText: {
+    flex: 1,
+    color: c.textSecondary,
+    fontSize: 12.5,
+    lineHeight: 17,
+  },
+  memberRemoveButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.dangerSoft,
+  },
+  addRowPressed: {
+    opacity: 0.7,
+  },
+  addMembersSubmit: {
+    marginTop: 14,
+    minHeight: 48,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  addMembersSubmitIdle: {
+    opacity: 0.5,
+  },
+  addMembersSubmitText: {
+    color: c.onPrimary,
+    fontSize: 14.5,
+    fontWeight: "800",
   },
   colorRow: {
     flexDirection: "row",

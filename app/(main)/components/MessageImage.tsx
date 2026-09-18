@@ -41,6 +41,8 @@ type MessageImageProps = {
   style?: StyleProp<ViewStyle>;
   /** Passed through so FlatList recycling does not show the previous photo. */
   recyclingKey?: string;
+  /** A copy already on the phone, shown until `uri` has loaded. */
+  placeholderUri?: string;
 };
 
 export default function MessageImage({
@@ -50,6 +52,7 @@ export default function MessageImage({
   sourceHeight,
   style,
   recyclingKey,
+  placeholderUri,
 }: MessageImageProps) {
   const { styles } = useStyles();
   // Messages sent before dimensions were stored have none, so the image is
@@ -83,6 +86,8 @@ export default function MessageImage({
         // the picture and nothing needs trimming. Only a clamped extreme
         // falls back to cover.
         contentFit={cropped ? "cover" : "contain"}
+        placeholder={placeholderUri ? { uri: placeholderUri } : undefined}
+        placeholderContentFit={cropped ? "cover" : "contain"}
         recyclingKey={recyclingKey}
         onLoad={(event) => {
           // expo-image reports the source's natural size here. Skipped when

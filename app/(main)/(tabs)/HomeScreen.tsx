@@ -1,6 +1,6 @@
 // HomeScreen.tsx
 import { resolveAvatarUri } from "@/utils/avatar";
-import { avatarThumb } from "@/utils/cloudinaryImages";
+import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
 import { consumeServerDrawerReopenRequest } from "@/utils/communityNavigation";
 import {
   appendThreadToSections,
@@ -23,9 +23,11 @@ import {
   subscribeToTotalUnreadMessages,
 } from "@/utils/directMessages";
 import { subscribeHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
+import { getPresenceState, type PresenceData } from "@/utils/messengerState";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import {
+  createNotification,
   removeLikeNotification,
   upsertLikeNotification,
 } from "@/utils/notifications";
@@ -48,7 +50,7 @@ import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "expo-image";
-import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
   collection,
@@ -68,6 +70,7 @@ import {
   Timestamp,
   updateDoc,
   where,
+  writeBatch,
 } from "firebase/firestore";
 import {
   memo,
@@ -78,6 +81,7 @@ import {
   useState,
   useSyncExternalStore,
   type ComponentProps,
+  type ReactNode,
 } from "react";
 import {
   ActivityIndicator,
@@ -86,18 +90,28 @@ import {
   FlatList,
   Linking,
   Modal,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
-  View
+  View,
+  type StyleProp,
+  type ViewStyle,
 } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import { runOnJS } from "react-native-reanimated";
+import Reanimated, {
+  Easing,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from "react-native-reanimated";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
 import AnnouncementCarousel, { AnnouncementItem } from "../components/AnnouncementCarousel";
+import BeaOrb from "../components/BeaOrb";
 import CommentModal from "../components/CommentModal";
 import ConfirmDialog, { type ConfirmDialogVariant } from "../components/ConfirmDialog";
 import HomeSearchProvider, {
@@ -115,10 +129,8 @@ import ServerDrawer, {
 import { FeedSkeleton } from "../components/Skeleton";
 import LiveCard from "../components/LiveCard";
 import { useThemeColors } from "@/contexts/ThemeContext";
-import {
-  subscribeToActiveStreams,
-  type LiveStream,
-} from "@/utils/liveStreams";
+import { type LiveStream } from "@/utils/liveStreams";
+import { useActiveLiveStreams } from "@/utils/useActiveLiveStreams";
 import {
   getLostFoundStatus,
   isLostFoundArchived,
@@ -132,6 +144,8 @@ const { width: SCREEN_WIDTH } = Dimensions.get("window");
 // Width of one card in the horizontal "Trending this week" scroller.
 const TRENDING_CARD_WIDTH = Math.min(320, Math.round(SCREEN_WIDTH * 0.82));
 const SELECTED_SERVER_KEY = "bonded.selectedCommunityServer";
+/** The local date on which B.E.A.'s brief was last closed; it stays hidden that day. */
+const HOME_BRIEF_HIDDEN_KEY = "bonded.homeBrief.hiddenOn";
 const DEFAULT_CHANNEL_KEY = "general";
 const HOME_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
 // Unread channel badges only count messages from this many recent days, so
@@ -231,6 +245,9 @@ export type SearchableStudent = {
   role?: string;
   isOnline?: boolean;
   lastSeen?: any;
+  // What Messenger reads to decide who is active; see onlineRoster.
+  activeStatusEnabled?: boolean;
+  presenceSessions?: PresenceData["presenceSessions"];
 };
 
 type CommunityThreadMessageLite = {
@@ -263,6 +280,22 @@ const getSingleParam = (value?: string | string[]) =>
   Array.isArray(value) ? value[0] : value;
 
 const getTimestampValue = (value: any) => value?.toMillis?.() || 0;
+
+/** Local YYYY-MM-DD, the format event dates are stored in. */
+const localDateKey = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+    date.getDate(),
+  ).padStart(2, "0")}`;
+
+const countOf = (count: number, one: string, many: string) =>
+  `${count > 99 ? "99+" : count} ${count === 1 ? one : many}`;
+
+type BriefItem = {
+  id: "events" | "announcements" | "messages" | "live";
+  emoji: string;
+  label: string;
+  onPress: () => void;
+};
 
 const isSameCalendarDay = (timestamp: any, target: Date): boolean => {
   if (!timestamp || typeof timestamp.toDate !== "function") return false;
@@ -595,6 +628,174 @@ const FeedPostCard = memo(function FeedPostCard({
   return <PostCard {...cardProps} videoCardVisible={!videosPaused && isOnScreen} />;
 });
 
+// ── Campus Presence ──────────────────────────────────────────────────────────
+
+type CampusPresenceStudent = SearchableStudent & {
+  isOnline: boolean;
+  /** Active Status turned off: shown as offline, with no last-seen time. */
+  activityHidden: boolean;
+};
+
+type CampusPresenceRowProps = {
+  student: CampusPresenceStudent;
+  styles: ReturnType<typeof makeStyles>;
+  theme: ThemeTokens;
+  /** A label above this row, where the list moves from active to recent. */
+  section: "online" | "recent" | null;
+  showDivider: boolean;
+  onlineCount: number;
+  lastSeenLabel: string;
+  canMessage: boolean;
+  onOpenProfile: (student: CampusPresenceStudent) => void;
+  onMessage: (student: CampusPresenceStudent) => void;
+};
+
+/**
+ * One person in Campus Presence. The row opens their profile; the chat button
+ * beside it opens a DM, and only that — it never also opens the profile.
+ *
+ * Online is said in words as well as green, so it doesn't rest on colour.
+ */
+const CampusPresenceRow = memo(function CampusPresenceRow({
+  student,
+  styles,
+  theme,
+  section,
+  showDivider,
+  onlineCount,
+  lastSeenLabel,
+  canMessage,
+  onOpenProfile,
+  onMessage,
+}: CampusPresenceRowProps) {
+  const fullName = `${student.firstname} ${student.lastname}`.trim() || "Student";
+  const online = student.isOnline;
+  const detail = student.course || student.role || "Campus member";
+
+  return (
+    <>
+      {section && (
+        <View style={styles.presenceSection}>
+          <Text style={styles.presenceSectionText}>
+            {section === "online" ? "Active now" : "Recently active"}
+          </Text>
+          {section === "online" && (
+            <View style={styles.presenceSectionCount}>
+              <Text style={[styles.presenceSectionCountText, styles.presenceOnlineInk]}>
+                {onlineCount}
+              </Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      <Pressable
+        onPress={() => onOpenProfile(student)}
+        style={({ pressed }) => [styles.presenceRow, pressed && styles.presenceRowPressed]}
+        accessibilityRole="button"
+        accessibilityLabel={`${fullName}, ${detail}, ${online ? "online, active now" : lastSeenLabel}`}
+        accessibilityHint="Opens their profile"
+      >
+        {showDivider && <View style={styles.presenceDivider} />}
+
+        <View style={styles.presenceAvatarWrap}>
+          <View style={styles.presenceAvatar}>
+            {student.profileImage ? (
+              <Image
+                source={{ uri: avatarThumb(student.profileImage, AVATAR_SIZE_SMALL) }}
+                style={styles.presenceAvatarImage}
+                contentFit="cover"
+                recyclingKey={student.id}
+              />
+            ) : (
+              <Text style={styles.presenceAvatarText}>
+                {(student.firstname?.[0] || fullName[0] || "S").toUpperCase()}
+              </Text>
+            )}
+          </View>
+          {online && <View style={styles.presenceAvatarDot} />}
+        </View>
+
+        <View style={styles.presenceCopy}>
+          <Text
+            style={[styles.presenceName, !online && styles.presenceNameIdle]}
+            numberOfLines={1}
+          >
+            {fullName}
+          </Text>
+          <Text style={styles.presenceDetail} numberOfLines={1}>
+            {detail}
+          </Text>
+          <View style={styles.presenceStatusRow}>
+            {online ? (
+              <>
+                <View style={styles.presenceOnlinePill}>
+                  <View style={styles.presenceOnlinePillDot} />
+                  <Text style={[styles.presenceOnlinePillText, styles.presenceOnlineInk]}>
+                    Online
+                  </Text>
+                </View>
+                <Text style={[styles.presenceActiveText, styles.presenceOnlineInk]}>
+                  Active now
+                </Text>
+              </>
+            ) : (
+              <>
+                <Ionicons name="time-outline" size={12} color={theme.textMuted} />
+                <Text style={styles.presenceLastSeen} numberOfLines={1}>
+                  {lastSeenLabel}
+                </Text>
+              </>
+            )}
+          </View>
+        </View>
+
+        {canMessage && (
+          <Pressable
+            onPress={() => onMessage(student)}
+            hitSlop={6}
+            style={({ pressed }) => [
+              styles.presenceMessageButton,
+              pressed && styles.presenceMessageButtonPressed,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={`Message ${fullName}`}
+          >
+            <Ionicons name="chatbubble-ellipses-outline" size={19} color={theme.primary} />
+          </Pressable>
+        )}
+      </Pressable>
+    </>
+  );
+});
+
+/**
+ * Campus Presence's card, easing up into place as it opens. The modal fades
+ * the backdrop; this only adds a short lift, so nothing waits on it.
+ */
+function PresencePanelEntrance({
+  style,
+  children,
+}: {
+  style: StyleProp<ViewStyle>;
+  children: ReactNode;
+}) {
+  const progress = useSharedValue(0);
+  useEffect(() => {
+    progress.value = withTiming(1, { duration: 200, easing: Easing.out(Easing.cubic) });
+  }, [progress]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    opacity: 0.4 + 0.6 * progress.value,
+    transform: [
+      { translateY: 12 * (1 - progress.value) },
+      { scale: 0.97 + 0.03 * progress.value },
+    ],
+  }));
+
+  return <Reanimated.View style={[style, animatedStyle]}>{children}</Reanimated.View>;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HomeScreen = () => {
@@ -729,9 +930,13 @@ const HomeScreen = () => {
   const [currentImageViewerPostId, setCurrentImageViewerPostId] = useState<
     string | null
   >(null);
-  const [onlineUsersCount, setOnlineUsersCount] = useState(0);
   const [onlineUsersModalVisible, setOnlineUsersModalVisible] = useState(false);
-  const [upcomingEventsCount, setUpcomingEventsCount] = useState(0);
+  // Upcoming feeds the calendar badge; today feeds B.E.A.'s brief.
+  const [eventCounts, setEventCounts] = useState({ upcoming: 0, today: 0 });
+  const upcomingEventsCount = eventCounts.upcoming;
+  // Whether B.E.A.'s brief in the welcome card was closed today. null until
+  // the saved choice has been read, and shown meanwhile.
+  const [briefHidden, setBriefHidden] = useState<boolean | null>(null);
   const [totalUnreadMessages, setTotalUnreadMessages] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [highlightedPostId, setHighlightedPostId] = useState<string | null>(
@@ -774,15 +979,13 @@ const HomeScreen = () => {
   const menuOpacity = useRef(new Animated.Value(0)).current;
   const menuTranslateY = useRef(new Animated.Value(0)).current;
 
-  // Welcome-card micro animations: a one-time entrance plus very subtle
-  // campus pulse / floating decoration loops. Only opacity and transforms
-  // are animated so the native driver can keep this lightweight.
+  // Welcome-card micro animations: a one-time entrance plus a very subtle
+  // floating decoration loop. Only opacity and transforms are animated so the
+  // native driver can keep this lightweight. B.E.A. animates itself.
   const welcomeOpacity = useRef(new Animated.Value(0)).current;
   const welcomeTranslateY = useRef(new Animated.Value(12)).current;
   const welcomeCopyOpacity = useRef(new Animated.Value(0)).current;
   const welcomeCopyTranslateY = useRef(new Animated.Value(6)).current;
-  const campusPulseScale = useRef(new Animated.Value(1)).current;
-  const campusPulseHaloOpacity = useRef(new Animated.Value(0.24)).current;
   const welcomeFloat = useRef(new Animated.Value(0)).current;
 
   const feedListRef = useRef<FlatList<FeedItem>>(null);
@@ -834,37 +1037,6 @@ const HomeScreen = () => {
       ]),
     ]);
 
-    const pulse = Animated.loop(
-      Animated.sequence([
-        Animated.delay(900),
-        Animated.parallel([
-          Animated.timing(campusPulseScale, {
-            toValue: 1.08,
-            duration: 900,
-            useNativeDriver: true,
-          }),
-          Animated.timing(campusPulseHaloOpacity, {
-            toValue: 0.52,
-            duration: 900,
-            useNativeDriver: true,
-          }),
-        ]),
-        Animated.parallel([
-          Animated.timing(campusPulseScale, {
-            toValue: 1,
-            duration: 900,
-            useNativeDriver: true,
-          }),
-          Animated.timing(campusPulseHaloOpacity, {
-            toValue: 0.24,
-            duration: 900,
-            useNativeDriver: true,
-          }),
-        ]),
-        Animated.delay(2200),
-      ]),
-    );
-
     const floatingDecoration = Animated.loop(
       Animated.sequence([
         Animated.timing(welcomeFloat, {
@@ -881,17 +1053,13 @@ const HomeScreen = () => {
     );
 
     entrance.start();
-    pulse.start();
     floatingDecoration.start();
 
     return () => {
       entrance.stop();
-      pulse.stop();
       floatingDecoration.stop();
     };
   }, [
-    campusPulseHaloOpacity,
-    campusPulseScale,
     welcomeCopyOpacity,
     welcomeCopyTranslateY,
     welcomeFloat,
@@ -1207,6 +1375,36 @@ const selectedChannel = useMemo(() => {
       .sort((first, second) => first.name.localeCompare(second.name));
   }, [searchableStudentsMap, selectedServer?.ownerId, selectedServerId, serverDrawerVisible, serverMemberships]);
 
+  // Everybody a manager could add to the open server: every student account
+  // that isn't already a member, and not the manager themselves. Only built
+  // while the drawer is open on a server this person manages.
+  const selectedServerCanManage = selectedServer?.canManage === true;
+  const addableServerMembers = useMemo<ServerMemberPreview[]>(() => {
+    if (!serverDrawerVisible || !selectedServerCanManage) return [];
+    const memberIds = new Set<string>();
+    for (const member of selectedServerMembers) {
+      memberIds.add(member.id);
+      if (member.userId) memberIds.add(member.userId);
+    }
+    return searchableStudents
+      .filter((student) => {
+        const uid = student.userId || student.id;
+        return !!uid && uid !== user?.uid && !memberIds.has(uid) && !memberIds.has(student.id);
+      })
+      .map((student) => ({
+        id: student.id,
+        userId: student.userId || student.id,
+        profileDocId: student.id,
+        name:
+          `${student.firstname} ${student.lastname}`.trim() || student.studentID || "Student",
+        role: student.role || null,
+        course: student.course || null,
+        studentID: student.studentID || null,
+        avatarUri: resolveAvatarUri(student),
+      }))
+      .sort((first, second) => first.name.localeCompare(second.name));
+  }, [searchableStudents, selectedServerCanManage, selectedServerMembers, serverDrawerVisible, user?.uid]);
+
   const listenersSetup = useRef(false);
   const unsubscribePostsRef = useRef<(() => void) | null>(null);
   const unsubscribePollsRef = useRef<(() => void) | null>(null);
@@ -1470,29 +1668,15 @@ const selectedChannel = useMemo(() => {
     return () => subscription.remove();
   }, [flushStagedFeedItems, searchExpanded]);
 
-  // ── Online users count
+  // ── Upcoming events count, and how many of them are today
   useEffect(() => {
     if (!user || isOffline) {
-      setOnlineUsersCount(0);
+      setEventCounts({ upcoming: 0, today: 0 });
       return;
     }
-    const q = query(
-      collection(db, "students"),
-      where("isOnline", "==", true),
-    );
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setOnlineUsersCount(snapshot.size);
-    });
-    return unsubscribe;
-  }, [user, isOffline]);
-
-  // ── Upcoming events count
-  useEffect(() => {
-    if (!user || isOffline) {
-      setUpcomingEventsCount(0);
-      return;
-    }
-    const today = new Date().toISOString().split("T")[0];
+    // Local, like the stored dates. The UTC date is still yesterday until
+    // 8 AM in the Philippines, which counted yesterday's events as upcoming.
+    const today = localDateKey(new Date());
     const q = query(
       collection(db, "events"),
       where("date", ">=", today),
@@ -1504,16 +1688,18 @@ const selectedChannel = useMemo(() => {
       // equality filter on status alongside the date range would need a
       // composite index, and these documents are already fetched. Events
       // written before `status` existed count as published.
-      setUpcomingEventsCount(
-        snapshot.docs.filter((eventDoc) => {
-          const data = eventDoc.data();
-          // Parts are counted through their main event, or a week with seven
-          // sessions would read as seven upcoming events.
-          return (
-            (data.status ?? "published") === "published" && !data.parentEventId
-          );
-        }).length,
-      );
+      const upcoming = snapshot.docs.filter((eventDoc) => {
+        const data = eventDoc.data();
+        // Parts are counted through their main event, or a week with seven
+        // sessions would read as seven upcoming events.
+        return (
+          (data.status ?? "published") === "published" && !data.parentEventId
+        );
+      });
+      setEventCounts({
+        upcoming: upcoming.length,
+        today: upcoming.filter((eventDoc) => eventDoc.data().date === today).length,
+      });
     });
     return unsubscribe;
   }, [user, isOffline]);
@@ -1636,6 +1822,8 @@ const selectedChannel = useMemo(() => {
               role: data.role ? String(data.role) : undefined,
               isOnline: data.isOnline === true,
               lastSeen: data.lastSeen,
+              activeStatusEnabled: data.activeStatusEnabled,
+              presenceSessions: data.presenceSessions,
             };
           }),
         );
@@ -2132,6 +2320,11 @@ const selectedChannel = useMemo(() => {
         setStagedPosts((current) =>
           current.length === 0 && heldPosts.length === 0 ? current : heldPosts,
         );
+        // Before the first snapshot, the only posts in the list are the
+        // offline copy from last time. They are not pages this listener
+        // loaded: loadMoreFeed does not know them, and would page the same
+        // posts in again as duplicates. So the first snapshot replaces them.
+        const isFirstPostsSnapshot = !hasHydratedPostsRef.current;
         hasHydratedPostsRef.current = true;
 
         setFeedItems((prev) => {
@@ -2148,7 +2341,9 @@ const selectedChannel = useMemo(() => {
           // back to one page under the reader. The floor is measured against
           // the whole window (fetchedPosts), not just the part being shown,
           // so staging cannot shift it.
-          const olderPosts = itemsBelowLiveWindow(prev, "post", fetchedPosts);
+          const olderPosts = isFirstPostsSnapshot
+            ? []
+            : itemsBelowLiveWindow(prev, "post", fetchedPosts);
           const knownPostIds = new Set(
             [...livePosts, ...olderPosts].map((post) => post.id),
           );
@@ -2234,6 +2429,8 @@ const selectedChannel = useMemo(() => {
         setStagedPolls((current) =>
           current.length === 0 && heldPolls.length === 0 ? current : heldPolls,
         );
+        // As for posts: the first snapshot replaces the offline copy.
+        const isFirstPollsSnapshot = !hasHydratedPollsRef.current;
         hasHydratedPollsRef.current = true;
 
         setFeedItems((prev) => {
@@ -2245,7 +2442,9 @@ const selectedChannel = useMemo(() => {
                   item.type === "poll" && item.id === notificationPollId,
               )
             : undefined;
-          const olderPolls = itemsBelowLiveWindow(prev, "poll", fetchedPolls);
+          const olderPolls = isFirstPollsSnapshot
+            ? []
+            : itemsBelowLiveWindow(prev, "poll", fetchedPolls);
           const knownPollIds = new Set(
             [...livePolls, ...olderPolls].map((poll) => poll.id),
           );
@@ -2338,8 +2537,18 @@ const selectedChannel = useMemo(() => {
       });
 
       if (morePosts.length || morePolls.length) {
+        // Anything already in the list is replaced by the fresh copy rather
+        // than joined by it: the same key twice makes the list show a post
+        // twice (and React warn about it).
+        const incomingKeys = new Set(
+          [...morePosts, ...morePolls].map((item) => `${item.type}:${item.id}`),
+        );
         setFeedItems((prev) =>
-          sortFeedItems([...prev, ...morePosts, ...morePolls]),
+          sortFeedItems([
+            ...prev.filter((item) => !incomingKeys.has(`${item.type}:${item.id}`)),
+            ...morePosts,
+            ...morePolls,
+          ]),
         );
       }
     } catch (error) {
@@ -3453,6 +3662,185 @@ const handleSelectChannel = useCallback(
     [currentUserRole, exitServerView, isOffline, selectedServerId, user?.uid],
   );
 
+  // ── Adding and removing members ──────────────────────────────────────────
+  // How anybody gets into a private server: students can't see one to ask,
+  // so its managers add them. Works on public servers too, as a shortcut past
+  // approving requests one at a time. Same people as approval: admins, the
+  // owner, and teachers or moderators who have joined.
+  const handleAddServerMembers = useCallback(
+    async (serverId: string, userIds: string[]): Promise<boolean> => {
+      if (!user?.uid) return false;
+      if (isOffline) {
+        showInfo("No Connection", "You need internet access to add members.");
+        return false;
+      }
+      const server = communityServers.find((item) => item.id === serverId);
+      if (!server?.canManage) {
+        showInfo("Not Allowed", "Only this server's managers can add members.");
+        return false;
+      }
+
+      const alreadyIn = new Set(
+        serverMemberships
+          .filter((membership) => membership.serverId === serverId && membership.status !== "removed")
+          .map((membership) => membership.userId),
+      );
+      const toAdd = [...new Set(userIds)].filter((id) => id && !alreadyIn.has(id));
+      if (toAdd.length === 0) return true;
+
+      const askedToJoin = new Set(
+        serverJoinRequests
+          .filter((request) => request.serverId === serverId)
+          .map((request) => request.userId),
+      );
+
+      const batch = writeBatch(db);
+      for (const memberId of toAdd) {
+        batch.set(
+          doc(db, "communityServerMemberships", `${serverId}_${memberId}`),
+          {
+            serverId,
+            userId: memberId,
+            status: "joined",
+            joinedAt: serverTimestamp(),
+            approvedBy: user.uid,
+            addedBy: user.uid,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
+        // Adding somebody answers the request they sent, so it doesn't sit
+        // in Join Requests afterwards.
+        if (askedToJoin.has(memberId)) {
+          batch.set(
+            doc(db, "communityServerJoinRequests", `${serverId}_${memberId}`),
+            {
+              status: "approved",
+              approvedBy: user.uid,
+              approvedAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true },
+          );
+        }
+      }
+
+      try {
+        await batch.commit();
+      } catch (error) {
+        console.error("Adding server members failed:", error);
+        showInfo("Could Not Add Members", "Check your connection and try again.");
+        return false;
+      }
+
+      // Separate from the batch: a built-in server has no document of its
+      // own to count on, and that must not undo the memberships above.
+      updateDoc(doc(db, "communityServers", serverId), {
+        memberCount: increment(toAdd.length),
+        updatedAt: serverTimestamp(),
+      }).catch(() => undefined);
+
+      // Each person is told where they were added; tapping it opens the
+      // server's general channel.
+      const channels = (server.sections || []).flatMap((section) => section.channels || []);
+      const entryChannel =
+        channels.find((channel) => channel.id === `${serverId}_general` || channel.label === "general") ||
+        channels[0];
+      const actorName =
+        `${currentUserProfile?.firstname || ""} ${currentUserProfile?.lastname || ""}`.trim() ||
+        user.displayName ||
+        "A staff member";
+      toAdd.forEach((memberId) => {
+        createNotification({
+          recipientId: memberId,
+          actor: {
+            id: user.uid,
+            name: actorName,
+            profileImage: resolveAvatarUri(currentUserProfile),
+          },
+          type: "activity",
+          entityType: "thread_message",
+          entityId: serverId,
+          parentId: serverId,
+          channelId: entryChannel?.id ?? null,
+          message: `added you to ${server.name}`,
+          preview: `Added you to ${server.name}`,
+        }).catch((error) => console.warn("Member-added notification failed:", error));
+      });
+
+      showInfo(
+        toAdd.length === 1 ? "Member Added" : "Members Added",
+        `${toAdd.length === 1 ? "1 person was" : `${toAdd.length} people were`} added to ${server.name}.`,
+        undefined,
+        "success",
+      );
+      return true;
+    },
+    [
+      communityServers,
+      currentUserProfile,
+      isOffline,
+      serverJoinRequests,
+      serverMemberships,
+      user?.displayName,
+      user?.uid,
+    ],
+  );
+
+  const handleRemoveServerMember = useCallback(
+    async (serverId: string, memberId: string) => {
+      if (!user?.uid) return;
+      if (isOffline) {
+        showInfo("No Connection", "You need internet access to remove members.");
+        return;
+      }
+      const server = communityServers.find((item) => item.id === serverId);
+      if (!server?.canManage) {
+        showInfo("Not Allowed", "Only this server's managers can remove members.");
+        return;
+      }
+      if (memberId === user.uid) {
+        showInfo("Use Leave Server", "To leave this server yourself, use Leave Server.");
+        return;
+      }
+      if (memberId === server.ownerId) {
+        showInfo("Not Allowed", "The server's owner can't be removed.");
+        return;
+      }
+      const wasMember = serverMemberships.some(
+        (membership) =>
+          membership.serverId === serverId &&
+          membership.userId === memberId &&
+          membership.status !== "removed",
+      );
+      if (!wasMember) return;
+
+      try {
+        await setDoc(
+          doc(db, "communityServerMemberships", `${serverId}_${memberId}`),
+          {
+            serverId,
+            userId: memberId,
+            status: "removed",
+            removedAt: serverTimestamp(),
+            removedBy: user.uid,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
+      } catch (error) {
+        console.error("Removing server member failed:", error);
+        showInfo("Could Not Remove", "Check your connection and try again.");
+        return;
+      }
+      updateDoc(doc(db, "communityServers", serverId), {
+        memberCount: increment(-1),
+        updatedAt: serverTimestamp(),
+      }).catch(() => undefined);
+    },
+    [communityServers, isOffline, serverMemberships, user?.uid],
+  );
+
   const handleMenuAction = (action: string) => {
     if (isOffline) {
       showInfo("No Connection", "Cannot create posts while offline.");
@@ -3762,15 +4150,114 @@ const handleSelectChannel = useCallback(
     });
   }, [relativeTimeNow]);
 
+  // Online means what Messenger means by it: a phone that checked in within
+  // the last 90 seconds, from someone who hasn't turned Active Status off.
+  // The raw isOnline flag stays true when an app is killed without signing
+  // off, which is why this list and the count used to run higher than
+  // Messenger's. Somebody with Active Status off shows as offline with no
+  // last-seen time, the same as in Messenger.
   const onlineRoster = useMemo(
     () =>
-      [...searchableStudents].sort((first, second) => {
-        if (first.isOnline !== second.isOnline) {
-          return first.isOnline ? -1 : 1;
-        }
-        return getTimestampValue(second.lastSeen) - getTimestampValue(first.lastSeen);
-      }),
-    [searchableStudents],
+      searchableStudents
+        .map((student) => {
+          const activityHidden = student.activeStatusEnabled === false;
+          return {
+            ...student,
+            isOnline: getPresenceState(student, relativeTimeNow).active,
+            lastSeen: activityHidden ? null : student.lastSeen,
+            activityHidden,
+          };
+        })
+        .sort((first, second) => {
+          if (first.isOnline !== second.isOnline) {
+            return first.isOnline ? -1 : 1;
+          }
+          return getTimestampValue(second.lastSeen) - getTimestampValue(first.lastSeen);
+        }),
+    [searchableStudents, relativeTimeNow],
+  );
+
+  // The header's number and the green rows come from the same list, so they
+  // always agree.
+  const onlineUsersCount = useMemo(
+    () => onlineRoster.filter((student) => student.isOnline).length,
+    [onlineRoster],
+  );
+
+  const closeCampusPresence = useCallback(() => setOnlineUsersModalVisible(false), []);
+
+  const openPresenceProfile = useCallback(
+    (student: CampusPresenceStudent) => {
+      setOnlineUsersModalVisible(false);
+      handleProfileClick(student.id, false);
+    },
+    [handleProfileClick],
+  );
+
+  const presenceViewerUid = user?.uid;
+  const messageFromPresence = useCallback(
+    (student: CampusPresenceStudent) => {
+      if (!presenceViewerUid) return;
+      setOnlineUsersModalVisible(false);
+      const targetUid = student.userId || student.id;
+      const fullName = `${student.firstname} ${student.lastname}`.trim() || "Student";
+      try {
+        router.push({
+          pathname: "/(main)/DirectChatScreen" as any,
+          params: getDirectChatParams(presenceViewerUid, {
+            uid: targetUid, displayName: fullName,
+            profileImage: student.profileImage || null, role: student.role,
+          }),
+        });
+      } catch (err) {
+        console.error("Failed to start chat from online modal:", err);
+      }
+    },
+    [router, presenceViewerUid],
+  );
+
+  const renderPresenceRow = useCallback(
+    ({ item, index }: { item: CampusPresenceStudent; index: number }) => {
+      const previous = onlineRoster[index - 1];
+      // Section labels where the list changes from active to recent.
+      const section = item.isOnline
+        ? index === 0
+          ? "online"
+          : null
+        : index === 0 || previous?.isOnline
+          ? "recent"
+          : null;
+      return (
+        <CampusPresenceRow
+          student={item}
+          styles={styles}
+          theme={theme}
+          section={section}
+          showDivider={index > 0 && !section}
+          onlineCount={onlineUsersCount}
+          lastSeenLabel={
+            item.isOnline
+              ? ""
+              : item.activityHidden
+                ? "Offline"
+                : formatLastSeen(item.lastSeen)
+          }
+          canMessage={!!presenceViewerUid && (item.userId || item.id) !== presenceViewerUid}
+          onOpenProfile={openPresenceProfile}
+          onMessage={messageFromPresence}
+        />
+      );
+    },
+    [
+      formatLastSeen,
+      messageFromPresence,
+      onlineRoster,
+      onlineUsersCount,
+      openPresenceProfile,
+      presenceViewerUid,
+      styles,
+      theme,
+    ],
   );
 
   const handleFlairFilterPress = useCallback(
@@ -3974,8 +4461,9 @@ const handleSelectChannel = useCallback(
   // Whoever is broadcasting right now. Live sits above everything else in
   // the header because it is the only thing on this screen that stops being
   // true while you look at it.
-  const [activeStreams, setActiveStreams] = useState<LiveStream[]>([]);
-  useEffect(() => subscribeToActiveStreams(setActiveStreams), []);
+  // Only lives whose host is still there; one left behind by a crashed app
+  // drops out on its own.
+  const activeStreams = useActiveLiveStreams();
 
   const openLiveStream = useCallback(
     (stream: LiveStream) => {
@@ -3987,6 +4475,96 @@ const handleSelectChannel = useCallback(
     [router],
   );
 
+  // ── B.E.A.'s brief in the welcome card
+  // Only counts Home already listens to, so it costs no extra reads.
+  const homeFocused = useIsFocused();
+
+  // Read on every visit to Home, so a brief closed yesterday is back today
+  // even if the app stayed open overnight.
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      AsyncStorage.getItem(HOME_BRIEF_HIDDEN_KEY)
+        .then((hiddenOn) => {
+          if (active) setBriefHidden(hiddenOn === localDateKey(new Date()));
+        })
+        .catch(() => {
+          if (active) setBriefHidden(false);
+        });
+      return () => {
+        active = false;
+      };
+    }, []),
+  );
+
+  const hideBrief = useCallback(() => {
+    setBriefHidden(true);
+    AsyncStorage.setItem(HOME_BRIEF_HIDDEN_KEY, localDateKey(new Date())).catch((error) =>
+      console.error("Error saving the hidden brief:", error),
+    );
+  }, []);
+
+  // Tapping B.E.A. brings a closed brief back.
+  const handleWelcomeOrbPress = useCallback(() => {
+    if (!briefHidden) return;
+    setBriefHidden(false);
+    AsyncStorage.removeItem(HOME_BRIEF_HIDDEN_KEY).catch(() => undefined);
+  }, [briefHidden]);
+
+  const openBeaChat = useCallback(() => {
+    router.navigate("/(main)/(tabs)/AiChatScreen");
+  }, [router]);
+
+  // Each item opens what it names, and only items with something in them
+  // appear. Events today win over events later on.
+  const briefItems = useMemo<BriefItem[]>(() => {
+    const items: BriefItem[] = [];
+    if (eventCounts.today > 0 || eventCounts.upcoming > 0) {
+      items.push({
+        id: "events",
+        emoji: "📅",
+        label:
+          eventCounts.today > 0
+            ? `${countOf(eventCounts.today, "event", "events")} today`
+            : countOf(eventCounts.upcoming, "upcoming event", "upcoming events"),
+        onPress: () => router.push("/EventCalendarScreen"),
+      });
+    }
+    if (activeAnnouncements.length > 0) {
+      items.push({
+        id: "announcements",
+        emoji: "📢",
+        label: countOf(activeAnnouncements.length, "announcement", "announcements"),
+        onPress: () => handleAnnouncementCardPress(activeAnnouncements[0]),
+      });
+    }
+    if (totalUnreadMessages > 0) {
+      items.push({
+        id: "messages",
+        emoji: "💬",
+        label: countOf(totalUnreadMessages, "unread message", "unread messages"),
+        onPress: () => router.push("/(main)/MessagesScreen" as any),
+      });
+    }
+    if (activeStreams.length > 0) {
+      items.push({
+        id: "live",
+        emoji: "",
+        label: `${activeStreams.length} live now`,
+        onPress: () => openLiveStream(activeStreams[0]),
+      });
+    }
+    return items;
+  }, [
+    activeAnnouncements,
+    activeStreams,
+    eventCounts,
+    handleAnnouncementCardPress,
+    openLiveStream,
+    router,
+    totalUnreadMessages,
+  ]);
+
   const renderFeedHeader = useCallback(() => {
     const displayNameParts =
       user?.displayName?.trim().split(/\s+/).filter(Boolean) || [];
@@ -3996,6 +4574,8 @@ const handleSelectChannel = useCallback(
       currentUserProfile?.lastname?.trim() ||
       displayNameParts[displayNameParts.length - 1] ||
       "";
+    // Offline, every count reads zero, which would wrongly say "caught up".
+    const showBrief = !briefHidden && !isOffline;
 
     return (
       <>
@@ -4044,25 +4624,34 @@ const handleSelectChannel = useCallback(
         />
 
         <View style={styles.feedWelcomeCopy}>
-          <View style={styles.feedWelcomeTopline}>
+          <View style={styles.feedWelcomeRow}>
+            {/* Smiles and hops when something is waiting; a tap makes it
+                react, and brings back a brief that was closed. */}
+            <BeaOrb
+              size={50}
+              mood={showBrief && briefItems.length > 0 ? "happy" : "idle"}
+              animated={homeFocused}
+              onPress={handleWelcomeOrbPress}
+              accessibilityLabel={
+                briefHidden ? "B.E.A. Shows today's brief again" : "B.E.A."
+              }
+            />
             <Animated.View
               style={[
-                styles.feedWelcomeIcon,
-                { transform: [{ scale: campusPulseScale }] },
+                styles.feedWelcomeHeading,
+                {
+                  opacity: welcomeCopyOpacity,
+                  transform: [{ translateY: welcomeCopyTranslateY }],
+                },
               ]}
             >
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  styles.feedWelcomeIconHalo,
-                  { opacity: campusPulseHaloOpacity },
-                ]}
-              />
-              <Ionicons name="school-outline" size={15} color={theme.accent} />
+              <View style={styles.feedEyebrowPill}>
+                <Text style={styles.feedEyebrow}>CAMPUS COMMUNITY</Text>
+              </View>
+              <Text style={styles.feedWelcomeTitle}>
+                {lastName ? `Good day, ${lastName} 👋` : "Good day 👋"}
+              </Text>
             </Animated.View>
-            <View style={styles.feedEyebrowPill}>
-              <Text style={styles.feedEyebrow}>CAMPUS COMMUNITY</Text>
-            </View>
           </View>
 
           <Animated.View
@@ -4071,14 +4660,55 @@ const handleSelectChannel = useCallback(
               transform: [{ translateY: welcomeCopyTranslateY }],
             }}
           >
-            <Text style={styles.feedWelcomeTitle}>
-              {lastName ? `Good day, ${lastName} 👋` : "Good day 👋"}
-            </Text>
-            <Text style={styles.feedWelcomeSubtitle}>
-              Stay connected with campus news, events, conversations, and student updates.
-            </Text>
+            {!showBrief ? (
+              <Text style={styles.feedWelcomeSubtitle}>
+                Stay connected with campus news, events, conversations, and student updates.
+              </Text>
+            ) : briefItems.length > 0 ? (
+              <>
+                <Text style={styles.briefLabel}>HERE’S YOUR DAY</Text>
+                <View style={styles.briefChips}>
+                  {briefItems.map((item) => (
+                    <TouchableOpacity
+                      key={item.id}
+                      style={[styles.briefChip, item.id === "live" && styles.briefChipLive]}
+                      onPress={item.onPress}
+                      activeOpacity={0.75}
+                      accessibilityRole="button"
+                      accessibilityLabel={item.label}
+                    >
+                      {item.id === "live" ? (
+                        <View style={styles.briefLiveDot} />
+                      ) : (
+                        <Text style={styles.briefChipEmoji}>{item.emoji}</Text>
+                      )}
+                      <Text style={styles.briefChipText}>{item.label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </>
+            ) : (
+              <View style={styles.briefCaughtUp}>
+                <Text style={styles.briefCaughtUpTitle}>You’re all caught up.</Text>
+                <Text style={styles.briefCaughtUpText}>
+                  No events, announcements or unread messages waiting for you.
+                </Text>
+              </View>
+            )}
           </Animated.View>
         </View>
+
+        {showBrief && (
+          <TouchableOpacity
+            style={styles.briefDismiss}
+            onPress={hideBrief}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityLabel="Hide today's brief until tomorrow"
+          >
+            <Ionicons name="close" size={14} color={theme.textMuted} />
+          </TouchableOpacity>
+        )}
       </Animated.View>
 
       {activeStreams.length > 0 && (
@@ -4216,9 +4846,15 @@ const handleSelectChannel = useCallback(
     openLiveStream,
     styles,
     theme,
+    briefHidden,
+    briefItems,
     currentUserProfile?.lastname,
     handleAnnouncementCardPress,
     handleFlairFilterPress,
+    handleWelcomeOrbPress,
+    hideBrief,
+    homeFocused,
+    isOffline,
     lostFoundFilter,
     onlineUsersCount,
     renderTrendingPost,
@@ -4485,15 +5121,21 @@ return (
                 !hasMorePolls ? (
                 // Otherwise the list simply stops and the reader cannot tell
                 // "you have seen everything" from "still loading" or "broken".
-                <View style={styles.feedFooter}>
-                  <Ionicons
-                    name="checkmark-circle-outline"
-                    size={17}
-                    color={theme.accent}
-                  />
-                  <Text style={styles.feedFooterText}>
-                    You&apos;re all caught up
+                <View style={styles.feedEnd}>
+                  <BeaOrb size={72} mood="happy" animated={homeFocused} tappable />
+                  <Text style={styles.feedEndTitle}>That’s everything for now</Text>
+                  <Text style={styles.feedEndText}>
+                    Check back later for new posts, or ask B.E.A. about anything on campus.
                   </Text>
+                  <TouchableOpacity
+                    style={styles.feedEndButton}
+                    onPress={openBeaChat}
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                  >
+                    <Ionicons name="sparkles" size={15} color={theme.primary} />
+                    <Text style={styles.feedEndButtonText}>Ask B.E.A. something</Text>
+                  </TouchableOpacity>
                 </View>
               ) : null
             }
@@ -4568,107 +5210,75 @@ return (
         visible={onlineUsersModalVisible}
         transparent
         animationType="fade"
-        onRequestClose={() => setOnlineUsersModalVisible(false)}
+        statusBarTranslucent
+        onRequestClose={closeCampusPresence}
       >
-        <View style={styles.onlineModalOverlay}>
-          <View style={styles.onlineModalCard}>
-            <View style={styles.onlineModalHeader}>
-              <View>
-                <Text style={styles.onlineModalTitle}>Campus Presence</Text>
-                <Text style={styles.onlineModalSubtitle}>
-                  {onlineUsersCount} online right now
-                </Text>
+        <View style={styles.presenceOverlay}>
+          {/* Tapping outside the card closes it. Not announced separately:
+              the close button says the same thing. */}
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={closeCampusPresence}
+            accessible={false}
+          />
+          <PresencePanelEntrance style={styles.presenceCard}>
+            <View style={styles.presenceHeader}>
+              <View style={styles.presenceHeaderIcon}>
+                <Ionicons name="people" size={20} color={theme.primary} />
               </View>
-              <TouchableOpacity onPress={() => setOnlineUsersModalVisible(false)}>
-                <Ionicons name="close" size={24} color={theme.textSecondary} />
-              </TouchableOpacity>
+              <View style={styles.presenceHeaderCopy}>
+                <Text style={styles.presenceTitle} accessibilityRole="header">
+                  Campus Presence
+                </Text>
+                <View style={styles.presenceLiveRow}>
+                  <View style={styles.presenceLiveDotRing}>
+                    <View style={styles.presenceLiveDot} />
+                  </View>
+                  <Text style={styles.presenceSubtitle} numberOfLines={1}>
+                    <Text style={[styles.presenceSubtitleCount, styles.presenceOnlineInk]}>
+                      {onlineUsersCount}
+                    </Text>
+                    {" online right now"}
+                  </Text>
+                </View>
+              </View>
+              <Pressable
+                onPress={closeCampusPresence}
+                hitSlop={8}
+                style={({ pressed }) => [
+                  styles.presenceClose,
+                  pressed && styles.presenceClosePressed,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Close Campus Presence"
+              >
+                <Ionicons name="close" size={20} color={theme.textSecondary} />
+              </Pressable>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {onlineRoster.map((student) => {
-                const fullName = `${student.firstname} ${student.lastname}`.trim() || "Student";
-                return (
-                  <TouchableOpacity
-                    key={student.id}
-                    style={styles.onlineUserRow}
-                    activeOpacity={0.82}
-                    onPress={() => {
-                      setOnlineUsersModalVisible(false);
-                      handleProfileClick(student.id, false);
-                    }}
-                  >
-                    <View style={styles.onlineAvatarWrap}>
-                      {student.profileImage ? (
-                        <Image
-                          source={{ uri: avatarThumb(student.profileImage, 48) }}
-                          style={styles.onlineAvatarImage}
-                        />
-                      ) : (
-                        <Text style={styles.onlineAvatarText}>
-                          {(student.firstname?.[0] || fullName[0] || "S").toUpperCase()}
-                        </Text>
-                      )}
-                    </View>
-                    <View style={styles.onlineUserCopy}>
-                      <Text style={styles.onlineUserName}>{fullName}</Text>
-                      <Text style={styles.onlineUserMeta}>
-                        {student.course || student.role || "Campus member"}
-                      </Text>
-                    </View>
-                    <View style={styles.onlineStatusWrap}>
-                      <View
-                        style={[
-                          styles.onlineStatusPill,
-                          student.isOnline
-                            ? styles.onlineStatusPillActive
-                            : styles.onlineStatusPillIdle,
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.onlineStatusText,
-                            student.isOnline
-                              ? styles.onlineStatusTextActive
-                              : styles.onlineStatusTextIdle,
-                          ]}
-                        >
-                          {student.isOnline ? "Online" : "Offline"}
-                        </Text>
-                      </View>
-                      <Text style={styles.onlineLastSeenText}>
-                        {student.isOnline ? "Active now" : formatLastSeen(student.lastSeen)}
-                      </Text>
-                    </View>
-
-                    {user?.uid && (student.userId || student.id) !== user.uid && (
-                      <TouchableOpacity
-                        style={styles.onlineMessageButton}
-                        activeOpacity={0.7}
-                        onPress={() => {
-                          setOnlineUsersModalVisible(false);
-                          const targetUid = student.userId || student.id;
-                          try {
-                            router.push({
-                              pathname: "/(main)/DirectChatScreen" as any,
-                              params: getDirectChatParams(user.uid, {
-                                uid: targetUid, displayName: fullName,
-                                profileImage: student.profileImage || null, role: student.role,
-                              }),
-                            });
-                          } catch (err) {
-                            console.error("Failed to start chat from online modal:", err);
-                          }
-                        }}
-                        accessibilityLabel={`Message ${fullName}`}
-                      >
-                        <Ionicons name="chatbubble-ellipses-outline" size={18} color={theme.primary} />
-                      </TouchableOpacity>
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </View>
+            <FlatList
+              data={onlineRoster}
+              keyExtractor={(item) => item.id}
+              renderItem={renderPresenceRow}
+              style={styles.presenceList}
+              contentContainerStyle={[
+                styles.presenceListContent,
+                onlineRoster.length === 0 && styles.presenceListEmpty,
+              ]}
+              showsVerticalScrollIndicator={false}
+              initialNumToRender={12}
+              maxToRenderPerBatch={12}
+              windowSize={7}
+              ListEmptyComponent={
+                <View style={styles.presenceEmpty}>
+                  <View style={styles.presenceEmptyIcon}>
+                    <Ionicons name="people-outline" size={26} color={theme.textMuted} />
+                  </View>
+                  <Text style={styles.presenceEmptyText}>No campus members to show</Text>
+                </View>
+              }
+            />
+          </PresencePanelEntrance>
         </View>
       </Modal>
 
@@ -4700,6 +5310,10 @@ return (
         onLeaveServer={handleLeaveServer}
         pendingJoinRequests={selectedServerJoinRequests}
         serverMembers={selectedServerMembers}
+        addableMembers={addableServerMembers}
+        onAddMembers={handleAddServerMembers}
+        onRemoveMember={handleRemoveServerMember}
+        currentUserId={user?.uid ?? null}
       />
 
       {/* ── Image Viewer Modal ───────────────────────────────────────────── */}
@@ -4910,32 +5524,17 @@ const makeStyles = (c: ThemeTokens) =>
     width: "100%",
     zIndex: 1,
   },
-  feedWelcomeTopline: {
+  feedWelcomeRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    marginBottom: 9,
+    gap: 12,
   },
-  feedWelcomeIcon: {
-    position: "relative",
-    width: 29,
-    height: 29,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: c.accentSoft,
-    borderWidth: 1,
-    borderColor: c.accentSoft,
-  },
-  feedWelcomeIconHalo: {
-    position: "absolute",
-    top: -4,
-    right: -4,
-    bottom: -4,
-    left: -4,
-    borderRadius: 14,
-    borderWidth: 2,
-    borderColor: c.accent,
+  feedWelcomeHeading: {
+    flex: 1,
+    alignItems: "flex-start",
+    gap: 5,
+    // Clear of the close button in the corner.
+    paddingRight: 22,
   },
   feedEyebrowPill: {
     paddingHorizontal: 9,
@@ -4962,8 +5561,75 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontSize: 13.25,
     lineHeight: 19.5,
-    marginTop: 6,
+    marginTop: 12,
     maxWidth: 520,
+  },
+  briefDismiss: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    zIndex: 2,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.surfaceSunken,
+  },
+  briefLabel: {
+    color: c.textMuted,
+    fontSize: 10.5,
+    fontWeight: "800",
+    letterSpacing: 0.7,
+    marginTop: 14,
+  },
+  briefChips: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 7,
+    marginTop: 8,
+  },
+  briefChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  briefChipLive: {
+    borderColor: c.danger,
+  },
+  briefLiveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: c.danger,
+  },
+  briefChipEmoji: {
+    fontSize: 13,
+  },
+  briefChipText: {
+    color: c.textPrimary,
+    fontSize: 12.5,
+    fontWeight: "700",
+  },
+  briefCaughtUp: {
+    marginTop: 12,
+  },
+  briefCaughtUpTitle: {
+    color: c.textPrimary,
+    fontSize: 13.5,
+    fontWeight: "800",
+  },
+  briefCaughtUpText: {
+    color: c.textMuted,
+    fontSize: 12.5,
+    lineHeight: 18,
+    marginTop: 2,
   },
   // "Trending this week" band — visually distinct from the vertical feed:
   // its own tinted strip with a header and a horizontal card scroller.
@@ -5078,114 +5744,280 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 13.5,
     fontWeight: "700",
   },
-  onlineModalOverlay: {
+  presenceOverlay: {
     flex: 1,
-    backgroundColor: "rgba(10, 2, 2, 0.72)",
+    backgroundColor: c.scrim,
+    alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 18,
+    paddingHorizontal: 16,
+    paddingVertical: 24,
   },
-  onlineModalCard: {
-    maxHeight: "76%",
+  presenceCard: {
+    width: "100%",
+    maxWidth: 440,
+    maxHeight: "78%",
     backgroundColor: c.surface,
-    borderRadius: 24,
-    padding: 18,
+    borderRadius: 26,
     borderWidth: 1,
     borderColor: c.border,
+    overflow: "hidden",
+    shadowColor: "#000",
+    shadowOpacity: c.isDark ? 0.45 : 0.16,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
   },
-  onlineModalHeader: {
+  presenceHeader: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 14,
+    gap: 12,
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: c.borderStrong,
   },
-  onlineModalTitle: {
+  presenceHeaderIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    backgroundColor: c.accentSoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  presenceHeaderCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  presenceTitle: {
     color: c.textPrimary,
     fontSize: 19,
     fontWeight: "800",
+    letterSpacing: 0.2,
   },
-  onlineModalSubtitle: {
-    color: c.textMuted,
-    fontSize: 13,
-    marginTop: 3,
-  },
-  onlineUserRow: {
+  presenceLiveRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: c.surfaceSunken,
-    gap: 12,
+    gap: 7,
+    marginTop: 4,
   },
-  onlineAvatarWrap: {
-    width: 48,
-    height: 48,
-    borderRadius: 18,
+  presenceLiveDotRing: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: c.successSoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  presenceLiveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: c.success,
+  },
+  presenceSubtitle: {
+    flexShrink: 1,
+    color: c.textMuted,
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  presenceSubtitleCount: {
+    fontWeight: "800",
+  },
+  // Green words on a pale green wash. The light palettes need a deeper
+  // green than their accent to stay readable at this size.
+  presenceOnlineInk: {
+    color: c.isDark ? c.success : "#17663a",
+  },
+  presenceClose: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: c.surfaceSunken,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  presenceClosePressed: {
+    backgroundColor: c.borderStrong,
+  },
+  presenceList: {
+    flexGrow: 0,
+    flexShrink: 1,
+  },
+  presenceListContent: {
+    paddingTop: 4,
+    paddingBottom: 14,
+  },
+  presenceListEmpty: {
+    flexGrow: 1,
+  },
+  presenceSection: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 18,
+    paddingTop: 14,
+    paddingBottom: 6,
+  },
+  presenceSectionText: {
+    color: c.textMuted,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
+  presenceSectionCount: {
+    minWidth: 22,
+    height: 18,
+    paddingHorizontal: 6,
+    borderRadius: 9,
+    backgroundColor: c.successSoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  presenceSectionCountText: {
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  presenceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginHorizontal: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderRadius: 16,
+  },
+  presenceRowPressed: {
+    backgroundColor: c.surfaceSunken,
+  },
+  // Starts after the avatar (10 padding + 50 avatar + 12 gap), so the photos
+  // read as one column rather than boxed rows.
+  presenceDivider: {
+    position: "absolute",
+    top: 0,
+    left: 72,
+    right: 10,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: c.borderStrong,
+  },
+  presenceAvatarWrap: {
+    width: 50,
+    height: 50,
+  },
+  presenceAvatar: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
     backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
   },
-  onlineAvatarImage: {
+  presenceAvatarImage: {
     width: "100%",
     height: "100%",
   },
-  onlineAvatarText: {
+  presenceAvatarText: {
     color: c.primary,
-    fontSize: 17,
+    fontSize: 18,
     fontWeight: "800",
   },
-  onlineUserCopy: {
-    flex: 1,
+  // The ring is the card's own colour, so the dot stays visible on any photo.
+  presenceAvatarDot: {
+    position: "absolute",
+    right: 0,
+    bottom: 1,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: c.success,
+    borderWidth: 2.5,
+    borderColor: c.surface,
   },
-  onlineUserName: {
-    color: c.primary,
-    fontSize: 15.5,
+  presenceCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  presenceName: {
+    color: c.textPrimary,
+    fontSize: 15,
     fontWeight: "700",
   },
-  onlineUserMeta: {
+  presenceNameIdle: {
+    color: c.textSecondary,
+    fontWeight: "600",
+  },
+  presenceDetail: {
     color: c.textMuted,
     fontSize: 12.5,
-    marginTop: 3,
+    marginTop: 1,
   },
-  onlineStatusWrap: {
-    alignItems: "flex-end",
-    maxWidth: 110,
+  presenceStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 5,
   },
-  onlineMessageButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+  presenceOnlinePill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: c.successSoft,
+  },
+  presenceOnlinePillDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: c.success,
+  },
+  presenceOnlinePillText: {
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  presenceActiveText: {
+    fontSize: 11.5,
+    fontWeight: "600",
+  },
+  presenceLastSeen: {
+    flexShrink: 1,
+    color: c.textMuted,
+    fontSize: 11.5,
+  },
+  presenceMessageButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    backgroundColor: c.accentSoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  presenceMessageButtonPressed: {
+    opacity: 0.7,
+    transform: [{ scale: 0.96 }],
+  },
+  presenceEmpty: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    paddingVertical: 36,
+  },
+  presenceEmptyIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     backgroundColor: c.surfaceSunken,
     alignItems: "center",
     justifyContent: "center",
-    marginLeft: 4,
   },
-  onlineStatusPill: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-  },
-  onlineStatusPillActive: {
-    backgroundColor: c.successSoft,
-  },
-  onlineStatusPillIdle: {
-    backgroundColor: c.border,
-  },
-  onlineStatusText: {
-    fontSize: 11.5,
-    fontWeight: "700",
-  },
-  onlineStatusTextActive: {
-    color: "#17663a",
-  },
-  onlineStatusTextIdle: {
+  presenceEmptyText: {
     color: c.textSecondary,
-  },
-  onlineLastSeenText: {
-    color: c.textMuted,
-    fontSize: 11,
-    textAlign: "right",
-    marginTop: 4,
+    fontSize: 14,
+    fontWeight: "600",
   },
   calendarButton: {
     width: 46,
@@ -5456,10 +6288,42 @@ emptyStateText: {
     gap: 7,
     paddingVertical: 18,
   },
-  feedFooterText: {
-    color: c.accent,
+  feedEnd: {
+    alignItems: "center",
+    paddingTop: 22,
+    paddingBottom: 34,
+    paddingHorizontal: 32,
+  },
+  feedEndTitle: {
+    color: c.textPrimary,
+    fontSize: 16,
+    fontWeight: "800",
+    marginTop: 8,
+    textAlign: "center",
+  },
+  feedEndText: {
+    color: c.textMuted,
     fontSize: 13,
-    fontWeight: "600",
+    lineHeight: 19,
+    marginTop: 4,
+    textAlign: "center",
+  },
+  feedEndButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    marginTop: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: c.accentSoft,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  feedEndButtonText: {
+    color: c.primary,
+    fontSize: 13.5,
+    fontWeight: "800",
   },
   offlineStatusBar: {
     flexDirection: "row",

@@ -18,11 +18,7 @@ import {
 } from "@/utils/aiAssistant";
 import { resolveAvatarUri } from "@/utils/avatar";
 import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
-import {
-    uploadPostFile,
-    uploadPostGif,
-    uploadPostImage,
-} from "@/utils/cloudinaryUpload";
+import { prepareComposerAttachments, type ComposerAttachments } from "@/utils/composerUploads";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { Ionicons } from "@expo/vector-icons";
 import { pickUploadDocuments, isAttachmentUnavailableError } from "@/utils/uploadAttachments";
@@ -59,7 +55,6 @@ type PartialComment = {
   profileImage?: string | null;
   isAnonymous?: boolean;
   replyCount?: number;
-  files?: { url: string; mimeType: string; name?: string }[];
   link?: { url: string; title: string };
   taggedUsers?: { id: string; name: string; studentID: string }[];
 };
@@ -80,7 +75,9 @@ type MentionDraft = Student & {
 interface CommentComposerProps {
   // Resolve false when the message wasn't sent (e.g. offline) and the screen
   // has already told the user why; the composer then gives the text back.
-  onSend?: (commentData: PartialComment) => Promise<void | boolean>;
+  // Attachments arrive un-uploaded: the screen shows the comment with the
+  // phone's copies first, then calls attachments.upload() before saving it.
+  onSend?: (commentData: PartialComment, attachments: ComposerAttachments) => Promise<void | boolean>;
   currentUser: any;
   maxFiles?: number;
   placeholder?: string;
@@ -422,22 +419,9 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
 
     setUploading(true);
     try {
-      const uploadedUrls = [];
-
-      for (const file of draft.files) {
-        let uploadedUrl: string;
-        if (file.mimeType.startsWith("image/")) {
-          uploadedUrl = await uploadPostImage(file.uri);
-        } else {
-          uploadedUrl = await uploadPostFile(file.uri);
-        }
-        uploadedUrls.push({ url: uploadedUrl, mimeType: file.mimeType, name: file.name });
-      }
-
-      if (draft.selectedGif) {
-        const uploadedGifUrl = await uploadPostGif(draft.selectedGif);
-        uploadedUrls.push({ url: uploadedGifUrl, mimeType: "image/gif", name: "animated.gif" });
-      }
+      // Not uploaded here: the screen shows the comment at once and uploads
+      // these before it saves.
+      const attachments = prepareComposerAttachments(draft.files, draft.selectedGif);
 
       const nextTaggedUsers = hasAiAssistantMention(draft.text)
         ? draft.taggedUsers.some((taggedUser) => isAiAssistantId(taggedUser.id))
@@ -472,7 +456,6 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         profileImage: draft.isAnonymous ? null : resolveAvatarUri(currentUser),
         isAnonymous: draft.isAnonymous,
         replyCount: 0,
-        files: uploadedUrls,
         taggedUsers: uniqueTaggedUsers.map((u) => ({
           id: u.id,
           name: isAiAssistantId(u.id)
@@ -488,7 +471,7 @@ const CommentComposer: React.FC<CommentComposerProps> = ({
         commentData.link = draft.attachedLink;
       }
 
-      const sent = await onSend(commentData);
+      const sent = await onSend(commentData, attachments);
       if (sent === false) restoreDraft();
     } catch (error: any) {
       console.error("Comment error:", error);
@@ -1167,7 +1150,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 12,
     paddingVertical: 9,
     borderWidth: 1,
-    borderColor: "rgba(95,9,9,0.18)",
+    borderColor: c.borderStrong,
   },
   placeholderText: {
     flex: 1,
@@ -1234,7 +1217,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surface,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "rgba(95,9,9,0.12)",
+    borderColor: c.border,
   },
   anonymousBtnText: {
     color: c.textSecondary,

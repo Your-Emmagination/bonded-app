@@ -2,8 +2,8 @@ import { useMemo } from "react";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { AI_ASSISTANT_NAME } from "@/utils/aiAssistant";
-import { Ionicons } from "@expo/vector-icons";
-import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import BeaOrb from "./BeaOrb";
 import ExpandableText from "./ExpandableText";
 
 type AiReply = {
@@ -19,10 +19,13 @@ export default function AiReplyCard({
   reply?: AiReply | null;
   compact?: boolean;
 }) {
-  const { styles, theme } = useStyles();
+  const { styles } = useStyles();
   if (!reply) return null;
 
-  const isGenerating = reply.status === "generating";
+  // Comments and replies mark a reply on its way as "processing"; older
+  // documents use "generating". Only the second was recognised before, so the
+  // waiting state never showed under a comment.
+  const isGenerating = reply.status === "generating" || reply.status === "processing";
   const hasText = Boolean(reply.text?.trim());
 
   if (!isGenerating && !hasText) return null;
@@ -30,16 +33,18 @@ export default function AiReplyCard({
   return (
     <View style={[styles.card, compact && styles.cardCompact]}>
       <View style={styles.header}>
-        <View style={styles.badge}>
-          <Ionicons name="sparkles" size={13} color={theme.onPrimary} />
-        </View>
+        {/* Still once answered: a feed can hold many of these, and only the
+            one still being written should move. */}
+        <BeaOrb
+          size={28}
+          mood={isGenerating ? "thinking" : "idle"}
+          animated={isGenerating}
+          style={styles.badge}
+        />
         <Text style={styles.title}>{AI_ASSISTANT_NAME}</Text>
       </View>
       {isGenerating ? (
-        <View style={styles.pendingRow}>
-          <ActivityIndicator size="small" color={theme.primary} />
-          <Text style={styles.pendingText}>Generating a reply...</Text>
-        </View>
+        <Text style={styles.pendingText}>Thinking of a reply…</Text>
       ) : (
         <ExpandableText
           text={reply.text || ""}
@@ -85,12 +90,6 @@ const makeStyles = (c: ThemeTokens) =>
     marginBottom: 8,
   },
   badge: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: c.primary,
     marginRight: 8,
   },
   title: {
@@ -109,14 +108,10 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 13,
     fontWeight: "700",
   },
-  pendingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
   pendingText: {
-    marginLeft: 10,
     color: c.textSecondary,
     fontSize: 13,
     fontWeight: "600",
+    fontStyle: "italic",
   },
 });

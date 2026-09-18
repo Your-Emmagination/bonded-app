@@ -532,7 +532,10 @@ function normalizeRemoteServer(
       : "available";
 
   const isPublic = server.isPublic ?? true;
-  if (!isPublic && !isAdmin && !isStaff && !isOwner) {
+  // A private server is invite-only: hidden from everyone except staff, its
+  // owner, and the people added to it. Members were missing from this list,
+  // so somebody added to a private server still could not see it.
+  if (!isPublic && !isAdmin && !isStaff && !isOwner && !joined) {
     return null;
   }
   const visible =

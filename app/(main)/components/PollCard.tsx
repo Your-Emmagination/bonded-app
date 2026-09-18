@@ -1236,7 +1236,7 @@ const handleAddOption = async () => {
 
                   size={16}
 
-                  color="#8f3a2b"
+                  color={theme.textSecondary}
 
                 />
 
@@ -1260,7 +1260,7 @@ const handleAddOption = async () => {
 
                     <View style={styles.voterEmptyState}>
 
-                      <Ionicons name="people-outline" size={16} color="#9b766c" />
+                      <Ionicons name="people-outline" size={16} color={theme.textMuted} />
 
                       <Text style={styles.voterEmptyStateText}>
 
@@ -1430,7 +1430,7 @@ const handleAddOption = async () => {
 
         {addingOption ? (
 
-          <ActivityIndicator size="small" color="#5f0909" />
+          <ActivityIndicator size="small" color={theme.primary} />
 
         ) : (
 
@@ -1698,7 +1698,7 @@ const handleAddOption = async () => {
 
                 <Text style={styles.reportReasonText}>{label}</Text>
 
-                <Ionicons name="chevron-forward" size={18} color="#9b766c" />
+                <Ionicons name="chevron-forward" size={18} color={theme.textMuted} />
 
               </TouchableOpacity>
 
@@ -1710,7 +1710,7 @@ const handleAddOption = async () => {
 
               <View style={styles.reportSubmitting}>
 
-                <ActivityIndicator color="#e0a53d" />
+                <ActivityIndicator color={theme.accent} />
 
                 <Text style={styles.reportSubmittingText}>Submitting report...</Text>
 

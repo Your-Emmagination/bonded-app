@@ -32,12 +32,15 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
+import { getEventTimingStatus, getEventTimingWindow } from "@/utils/eventTiming";
 
 type CalendarEvent = {
   id: string;
   title: string;
+  subEvent?: string;
   description?: string;
   date: string;
+  endDate?: string;
   startTime?: string;
   endTime?: string;
   category: "morning" | "afternoon" | "evening" | "all-day";
@@ -136,77 +139,19 @@ const formatTime = (value?: string) => {
 };
 
 const formatEventTime = (event: CalendarEvent) => {
-  if (event.category === "all-day") return "All day";
+  if (event.category === "all-day") return event.endDate && event.endDate !== event.date
+    ? `All day · through ${formatCompactDate(event.endDate)}` : "All day";
 
   const startTime = formatTime(event.startTime);
   const endTime = formatTime(event.endTime);
 
-  if (startTime && endTime) return `${startTime} – ${endTime}`;
+  if (startTime && endTime) return event.endDate && event.endDate !== event.date
+    ? `${startTime} – ${formatCompactDate(event.endDate)}, ${endTime}`
+    : `${startTime} – ${endTime}`;
   if (startTime) return startTime;
   if (endTime) return `Ends ${endTime}`;
 
   return "Time not set";
-};
-
-const parseClockMinutes = (value?: string) => {
-  const time = value?.trim();
-  if (!time) return null;
-
-  const match = time.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
-  if (!match) return null;
-
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
-
-  if (minute > 59 || hour > 24 || (hour === 24 && minute !== 0)) {
-    return null;
-  }
-
-  return hour * 60 + minute;
-};
-
-const getEventWindow = (event: CalendarEvent) => {
-  const dateParts = parseLocalDateParts(event.date);
-  if (!dateParts) return null;
-
-  const hasStartTime = Boolean(event.startTime?.trim());
-  const hasEndTime = Boolean(event.endTime?.trim());
-  const startMinutes = parseClockMinutes(event.startTime);
-  const endMinutes = parseClockMinutes(event.endTime);
-
-  if (
-    (hasStartTime && startMinutes === null) ||
-    (hasEndTime && endMinutes === null)
-  ) {
-    return null;
-  }
-
-  const { year, monthIndex, day } = dateParts;
-  const dayStart = new Date(year, monthIndex, day).getTime();
-  const nextDayStart = new Date(year, monthIndex, day + 1).getTime();
-
-  if (event.category === "all-day" || (!hasStartTime && !hasEndTime)) {
-    return { startMs: dayStart, endMs: nextDayStart };
-  }
-
-  const startMs = hasStartTime
-    ? new Date(year, monthIndex, day, 0, startMinutes || 0).getTime()
-    : dayStart;
-  let endMs = hasEndTime
-    ? new Date(year, monthIndex, day, 0, endMinutes || 0).getTime()
-    : nextDayStart;
-
-  if (hasStartTime && hasEndTime && endMs <= startMs) {
-    endMs = new Date(
-      year,
-      monthIndex,
-      day + 1,
-      0,
-      endMinutes || 0,
-    ).getTime();
-  }
-
-  return { startMs, endMs };
 };
 
 const getEventLifecycle = (
@@ -216,7 +161,7 @@ const getEventLifecycle = (
   if (event.status === "draft") return "draft";
   if (event.status === "archived") return "archived";
 
-  const eventWindow = getEventWindow(event);
+  const eventWindow = getEventTimingWindow(event);
   if (!eventWindow) return "published";
 
   if (currentTimeMs >= eventWindow.endMs) return "finished";
@@ -715,11 +660,13 @@ const EventCalendarScreen = () => {
 
   const getStatusDetails = (event: CalendarEvent) => {
     const lifecycle = getEventLifecycle(event, currentTimeMs);
+    const timing = getEventTimingStatus(event, currentTimeMs);
 
     if (lifecycle === "draft") {
       return {
         lifecycle,
         label: "DRAFT",
+        supportingText: "",
         icon: "create-outline" as const,
         color: theme.textMuted,
         surfaceColor: theme.surfaceRaised,
@@ -731,6 +678,7 @@ const EventCalendarScreen = () => {
       return {
         lifecycle,
         label: "ARCHIVED",
+        supportingText: "",
         icon: "archive-outline" as const,
         color: theme.textSecondary,
         surfaceColor: theme.surfaceSunken,
@@ -741,7 +689,8 @@ const EventCalendarScreen = () => {
     if (lifecycle === "ongoing") {
       return {
         lifecycle,
-        label: "ONGOING",
+        label: "Ongoing",
+        supportingText: timing?.supportingText || "",
         icon: "radio-button-on" as const,
         color: theme.success,
         surfaceColor: theme.successSoft,
@@ -752,7 +701,8 @@ const EventCalendarScreen = () => {
     if (lifecycle === "finished") {
       return {
         lifecycle,
-        label: "FINISHED",
+        label: "Ended",
+        supportingText: timing?.supportingText || "",
         icon: "checkmark-done-circle-outline" as const,
         color: theme.textMuted,
         surfaceColor: theme.surfaceSunken,
@@ -760,10 +710,23 @@ const EventCalendarScreen = () => {
       };
     }
 
+    if (timing?.status === "starting-soon") {
+      return {
+        lifecycle,
+        label: timing.label,
+        supportingText: timing.supportingText,
+        icon: "time-outline" as const,
+        color: theme.warning,
+        surfaceColor: theme.surfaceRaised,
+        borderColor: theme.border,
+      };
+    }
+
     return {
       lifecycle,
-      label: "PUBLISHED",
-      icon: "checkmark-circle-outline" as const,
+      label: "Upcoming",
+      supportingText: timing?.supportingText || "",
+      icon: "calendar-outline" as const,
       color: theme.primary,
       surfaceColor: theme.surfaceRaised,
       borderColor: theme.border,
@@ -825,8 +788,8 @@ const EventCalendarScreen = () => {
                       {event.title}
                     </Text>
                     <Text style={styles.nowMeta} numberOfLines={1}>
-                      {parentTitle ? `${parentTitle} · ` : ""}
-                      {endsAt ? `until ${endsAt}` : "all day"}
+                      {event.subEvent?.trim() ? `${event.subEvent.trim()} · ` : parentTitle ? `${parentTitle} · ` : ""}
+                      {getEventTimingStatus(event, currentTimeMs)?.supportingText || (endsAt ? `until ${endsAt}` : "all day")}
                     </Text>
                   </View>
                 </TouchableOpacity>
@@ -999,7 +962,6 @@ const EventCalendarScreen = () => {
 
               {eventsForDate.map((event) => {
                 const statusDetails = getStatusDetails(event);
-                const isLive = statusDetails.lifecycle === "ongoing";
                 const isDone = statusDetails.lifecycle === "finished";
                 // A main event has parts; it shows a date range rather than a
                 // clock, which is what tells a student it is the big one.
@@ -1031,6 +993,12 @@ const EventCalendarScreen = () => {
                     />
 
                     <View style={styles.rowBody}>
+                      <Text style={styles.rowName} numberOfLines={2}>
+                        {event.title}
+                      </Text>
+                      {!!event.subEvent?.trim() && (
+                        <Text style={styles.rowContext} numberOfLines={1}>{event.subEvent.trim()}</Text>
+                      )}
                       <View style={styles.rowTopRow}>
                         <Text style={styles.rowTime} numberOfLines={1}>
                           {span
@@ -1038,21 +1006,22 @@ const EventCalendarScreen = () => {
                             : formatEventTime(event)}
                         </Text>
 
-                        {isLive ? (
-                          <View style={styles.liveTag}>
-                            <View style={styles.liveTagDot} />
-                            <Text style={styles.liveTagText}>LIVE</Text>
-                          </View>
-                        ) : isDone ? (
-                          <Text style={styles.doneTag}>Finished</Text>
-                        ) : event.status === "draft" ? (
+                        {event.status === "draft" ? (
                           <Text style={styles.draftTag}>Draft</Text>
                         ) : null}
                       </View>
 
-                      <Text style={styles.rowName} numberOfLines={2}>
-                        {event.title}
-                      </Text>
+                      {event.status !== "draft" && (
+                        <View style={styles.rowStatusLine}>
+                          <View style={[styles.rowStatusPill, { backgroundColor: statusDetails.surfaceColor, borderColor: statusDetails.color }]}>
+                            <Ionicons name={statusDetails.icon} size={13} color={statusDetails.color} />
+                            <Text style={[styles.rowStatusText, { color: statusDetails.color }]}>{statusDetails.label}</Text>
+                          </View>
+                          {!!statusDetails.supportingText && (
+                            <Text style={styles.rowContext} numberOfLines={1}>{statusDetails.supportingText}</Text>
+                          )}
+                        </View>
+                      )}
 
                       {span ? (
                         <Text style={styles.rowContext} numberOfLines={1}>
@@ -1391,20 +1360,23 @@ const EventCalendarScreen = () => {
                         )}
                     </View>
                   </View>
+                  {!!event.subEvent?.trim() && (
+                    <Text style={styles.eventDescription}>{event.subEvent.trim()}</Text>
+                  )}
 
                   <View style={styles.badgesRow}>
                     <View
                       style={[
                         styles.statusBadge,
-                        { backgroundColor: statusDetails.color },
+                        { backgroundColor: statusDetails.surfaceColor, borderColor: statusDetails.color, borderWidth: 1 },
                       ]}
                     >
                       <Ionicons
                         name={statusDetails.icon}
                         size={12}
-                        color={theme.onChrome}
+                        color={statusDetails.color}
                       />
-                      <Text style={styles.statusText}>{statusDetails.label}</Text>
+                      <Text style={[styles.statusText, { color: statusDetails.color }]}>{statusDetails.label}</Text>
                     </View>
                     <View
                       style={[
@@ -1417,6 +1389,9 @@ const EventCalendarScreen = () => {
                       </Text>
                     </View>
                   </View>
+                  {!!statusDetails.supportingText && (
+                    <Text style={styles.eventDescription}>{statusDetails.supportingText}</Text>
+                  )}
 
                   {/* Every part of this event, in time order, so one tap on
                       "Intramurals" shows the whole schedule. */}
@@ -1449,26 +1424,6 @@ const EventCalendarScreen = () => {
                     </View>
                   )}
 
-                  {/* Only a main event can take parts — one level deep. */}
-                  {canManageEvents() && !event.parentEventId && (
-                    <TouchableOpacity
-                      style={styles.addPartButton}
-                      activeOpacity={0.75}
-                      onPress={() => {
-                        setModalVisible(false);
-                        router.push({
-                          pathname: "/CreateEventScreen",
-                          params: { parentId: event.id },
-                        });
-                      }}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Add a part to ${event.title}`}
-                    >
-                      <Ionicons name="add-circle-outline" size={18} color={theme.primary} />
-                      <Text style={styles.addPartText}>Add a part</Text>
-                    </TouchableOpacity>
-                  )}
-
                   {event.description && (
                     <Text style={styles.eventDescription}>
                       {event.description}
@@ -1487,7 +1442,7 @@ const EventCalendarScreen = () => {
                         </View>
                         <View style={styles.metaCopy}>
                           <Text style={styles.metaLabel}>Schedule</Text>
-                          <Text style={styles.metaText}>All day</Text>
+                          <Text style={styles.metaText}>{formatEventTime(event)}</Text>
                         </View>
                       </View>
                     ) : (
@@ -1519,6 +1474,7 @@ const EventCalendarScreen = () => {
                           <View style={styles.metaCopy}>
                             <Text style={styles.metaLabel}>End time</Text>
                             <Text style={styles.metaText}>
+                              {event.endDate && event.endDate !== event.date ? `${formatCompactDate(event.endDate)} · ` : ""}
                               {formatTime(event.endTime) || "Not set"}
                             </Text>
                           </View>
@@ -1555,19 +1511,6 @@ const EventCalendarScreen = () => {
 const makeStyles = (c: ThemeTokens) =>
   StyleSheet.create({
   monthSection: { marginBottom: 8 },
-  addPartButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 7,
-    minHeight: 44,
-    marginTop: 12,
-    borderRadius: 12,
-    backgroundColor: c.surfaceSunken,
-    borderWidth: 1,
-    borderColor: c.border,
-  },
-  addPartText: { color: c.primary, fontSize: 14, fontWeight: "700" },
   pastSection: {
     marginTop: 22,
     paddingTop: 16,
@@ -1629,6 +1572,9 @@ const makeStyles = (c: ThemeTokens) =>
   rowBody: { flex: 1, minWidth: 0, paddingVertical: 12, paddingHorizontal: 13 },
   rowTopRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   rowTime: { flex: 1, color: c.textMuted, fontSize: 15, fontWeight: "600" },
+  rowStatusLine: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 7, marginTop: 6 },
+  rowStatusPill: { flexDirection: "row", alignItems: "center", alignSelf: "flex-start", gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12, borderWidth: 1 },
+  rowStatusText: { fontSize: 11, fontWeight: "800" },
   rowName: {
     color: c.textPrimary,
     fontSize: 17,
@@ -1638,20 +1584,6 @@ const makeStyles = (c: ThemeTokens) =>
   },
   rowContext: { color: c.textMuted, fontSize: 13, marginTop: 3 },
   rowEdit: { paddingHorizontal: 13, paddingVertical: 12 },
-  liveTag: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: c.successSoft,
-    borderWidth: 1,
-    borderColor: c.success,
-  },
-  liveTagDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: c.success },
-  liveTagText: { color: c.success, fontSize: 12, fontWeight: "800" },
-  doneTag: { color: c.textMuted, fontSize: 12, fontWeight: "600" },
   draftTag: { color: c.textMuted, fontSize: 12, fontWeight: "700" },
   nowPanel: {
     marginBottom: 22,

@@ -129,6 +129,16 @@ type Post = {
   // Auto-generated video captions (written server-side after upload).
   captionStatus?: CaptionStatus;
   captions?: CaptionSegment[];
+  // Set on a post made from a finished live — see utils/liveReplay.ts.
+  liveReplay?: { streamId?: string; durationMs?: number; peakViewers?: number };
+};
+
+/** "12:04" for a replay's length. */
+const formatReplayLength = (durationMs?: number) => {
+  const totalSeconds = Math.max(0, Math.round((durationMs || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 };
 interface VideoPlayerProps {
   videoUrl: string;
@@ -572,6 +582,23 @@ const PostCard = React.memo<PostCardProps>(({
                 {postFlair.label}
               </Text>
             </View>
+
+            {post.liveReplay && (
+              <View
+                style={[styles.postFlairBadge, styles.liveReplayBadge]}
+                accessible
+                accessibilityLabel={`Live replay, ${formatReplayLength(post.liveReplay.durationMs)} long${
+                  post.liveReplay.peakViewers ? `, ${post.liveReplay.peakViewers} watched live` : ""
+                }`}
+              >
+                <View style={styles.liveReplayDot} />
+                <Text style={[styles.postFlairText, styles.liveReplayText]}>
+                  {`Live replay · ${formatReplayLength(post.liveReplay.durationMs)}${
+                    post.liveReplay.peakViewers ? ` · ${post.liveReplay.peakViewers} watched` : ""
+                  }`}
+                </Text>
+              </View>
+            )}
 
             {isLostFound && (
               <TouchableOpacity
@@ -1275,7 +1302,7 @@ const PostHeader: React.FC<{
               <Ionicons
                 name="pin"
                 size={11}
-                color="#fffaf7"
+                color={theme.onPrimary}
               />
               <Text style={styles.pinnedBadgeText}>
                 Pinned
@@ -1459,13 +1486,13 @@ const PostHeader: React.FC<{
                   />
                 </View>
                 <Text style={styles.reportReasonText}>{label}</Text>
-                <Ionicons name="chevron-forward" size={18} color="#9b766c" />
+                <Ionicons name="chevron-forward" size={18} color={theme.textMuted} />
               </TouchableOpacity>
             ))}
 
             {reportSubmitting && (
               <View style={styles.reportSubmitting}>
-                <ActivityIndicator color="#e0a53d" />
+                <ActivityIndicator color={theme.accent} />
                 <Text style={styles.reportSubmittingText}>Submitting report...</Text>
               </View>
             )}
@@ -1640,6 +1667,9 @@ const makeStyles = (c: ThemeTokens) =>
   postFlairEmoji: { fontSize: 12 },
   postFlairText: { color: c.textSecondary, fontSize: 11, fontWeight: "800" },
   postFlairTextOfficial: { color: c.accent },
+  liveReplayBadge: { backgroundColor: c.dangerSoft, borderColor: c.dangerSoft },
+  liveReplayDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: c.danger },
+  liveReplayText: { color: c.danger },
   postContentContainer: { marginTop: 4, marginBottom: 8 },
   postContent: { color: c.textPrimary, fontSize: 15, lineHeight: 21 },
   toggleContainer: { alignSelf: "flex-start", marginTop: 4 },

@@ -5,6 +5,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ActivityIndicator,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Switch,
@@ -12,12 +13,23 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import Reanimated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withSequence,
+  withTiming,
+} from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ListSkeleton } from "./components/Skeleton";
 import { auth } from "../../Firebase_configure";
 import { subscribeToMyTicketBadge } from "@/utils/supportTickets";
 import { useTheme } from "@/contexts/ThemeContext";
-import { THEME_OPTIONS, type ThemeTokens } from "@/utils/theme";
+import {
+  THEME_OPTIONS,
+  type ThemeId,
+  type ThemeOption,
+  type ThemeTokens,
+} from "@/utils/theme";
 import {
   fetchNotificationSoundId,
   setNotificationSoundId,
@@ -30,6 +42,94 @@ import {
   isPushNotificationsSupported,
   registerDeviceForPushNotifications,
 } from "../../utils/pushNotifications";
+
+const THEME_GROUPS: { key: ThemeOption["group"]; label: string }[] = [
+  { key: "brightness", label: "LIGHT & DARK" },
+  { key: "campus", label: "CAMPUS COLOURS" },
+];
+
+/**
+ * One theme in the Appearance grid: three dots of its own colours, its name,
+ * and a check once chosen. Picking one recolours the whole screen at once,
+ * so the card itself gives a small settle and the check fades in — enough to
+ * show which tap took, without animating the app.
+ */
+const ThemeChoiceCard = React.memo(function ThemeChoiceCard({
+  option,
+  selected,
+  onSelect,
+  styles,
+  theme,
+}: {
+  option: ThemeOption;
+  selected: boolean;
+  onSelect: (id: ThemeId) => void;
+  styles: ReturnType<typeof makeStyles>;
+  theme: ThemeTokens;
+}) {
+  const settle = useSharedValue(1);
+  const check = useSharedValue(selected ? 1 : 0);
+  const firstRunRef = useRef(true);
+  useEffect(() => {
+    check.value = withTiming(selected ? 1 : 0, { duration: 180 });
+    // Not on first show: only a card that has just been picked settles.
+    if (selected && !firstRunRef.current) {
+      settle.value = withSequence(
+        withTiming(0.98, { duration: 70 }),
+        withTiming(1, { duration: 150 }),
+      );
+    }
+    firstRunRef.current = false;
+  }, [check, selected, settle]);
+
+  const cardStyle = useAnimatedStyle(() => ({ transform: [{ scale: settle.value }] }));
+  const checkStyle = useAnimatedStyle(() => ({
+    opacity: check.value,
+    transform: [{ scale: 0.6 + 0.4 * check.value }],
+  }));
+
+  return (
+    <Reanimated.View style={[styles.themeCardWrap, cardStyle]}>
+      <Pressable
+        onPress={() => onSelect(option.id)}
+        style={({ pressed }) => [
+          styles.themeCard,
+          selected && styles.themeCardSelected,
+          pressed && styles.themeCardPressed,
+        ]}
+        accessibilityRole="radio"
+        accessibilityState={{ selected }}
+        accessibilityLabel={`${option.label}. ${option.description}`}
+      >
+        <View style={styles.themeCardTop}>
+          {/* The palette's own colours: a name alone doesn't say what
+              "Dim" or "Campus Teal" looks like. */}
+          <View style={styles.themeDots}>
+            {option.swatch.map((shade, index) => (
+              <View
+                key={`${option.id}-${index}`}
+                style={[
+                  styles.themeDot,
+                  index > 0 && styles.themeDotOverlap,
+                  { backgroundColor: shade },
+                ]}
+              />
+            ))}
+          </View>
+          <Reanimated.View style={checkStyle}>
+            <Ionicons name="checkmark-circle" size={20} color={theme.primary} />
+          </Reanimated.View>
+        </View>
+        <Text style={styles.themeCardLabel} numberOfLines={1}>
+          {option.label}
+        </Text>
+        <Text style={styles.themeCardDesc} numberOfLines={2}>
+          {option.description}
+        </Text>
+      </Pressable>
+    </Reanimated.View>
+  );
+});
 
 const SettingsScreen = () => {
   const router = useRouter();
@@ -146,46 +246,23 @@ const SettingsScreen = () => {
             : "Applies to this device only"}
         </Text>
 
-        <View style={styles.goldCard}>
-          {THEME_OPTIONS.map((option, index) => {
-            const selected = themeChoice === option.id;
-            return (
-              <View key={option.id}>
-                <TouchableOpacity
-                  accessibilityRole="radio"
-                  accessibilityState={{ selected }}
-                  accessibilityLabel={`${option.label}. ${option.description}`}
-                  style={styles.soundRow}
-                  activeOpacity={0.75}
-                  onPress={() => setThemeChoice(option.id)}
-                >
-                  {/* Three bands of the actual palette — a name alone does not
-                      tell anyone what "Dim" looks like. */}
-                  <View style={styles.themeSwatch}>
-                    {option.swatch.map((shade, shadeIndex) => (
-                      <View
-                        key={`${option.id}-${shadeIndex}`}
-                        style={[styles.themeSwatchBand, { backgroundColor: shade }]}
-                      />
-                    ))}
-                  </View>
-
-                  <View style={{ marginLeft: 12, flex: 1 }}>
-                    <Text style={styles.rowLabel}>{option.label}</Text>
-                    <Text style={styles.rowSubtext}>{option.description}</Text>
-                  </View>
-
-                  {selected ? (
-                    <Ionicons name="checkmark-circle" size={22} color={theme.primary} />
-                  ) : (
-                    <View style={styles.unselectedCircle} />
-                  )}
-                </TouchableOpacity>
-                {index < THEME_OPTIONS.length - 1 && <View style={styles.rowDivider} />}
-              </View>
-            );
-          })}
-        </View>
+        {THEME_GROUPS.map((group) => (
+          <View key={group.key} accessibilityRole="radiogroup">
+            <Text style={styles.themeGroupLabel}>{group.label}</Text>
+            <View style={styles.themeGrid}>
+              {THEME_OPTIONS.filter((option) => option.group === group.key).map((option) => (
+                <ThemeChoiceCard
+                  key={option.id}
+                  option={option}
+                  selected={themeChoice === option.id}
+                  onSelect={setThemeChoice}
+                  styles={styles}
+                  theme={theme}
+                />
+              ))}
+            </View>
+          </View>
+        ))}
       </View>
 
       <View style={styles.section}>
@@ -252,8 +329,8 @@ const SettingsScreen = () => {
             <Switch
               value={pushEnabled}
               onValueChange={handleTogglePush}
-              trackColor={{ false: "#e8d3b2", true: "#e0a53d" }}
-              thumbColor="#fffaf7"
+              trackColor={{ false: theme.borderStrong, true: theme.accent }}
+              thumbColor={theme.surfaceRaised}
             />
           </View>
         </View>
@@ -292,7 +369,7 @@ const SettingsScreen = () => {
                             : "musical-notes-outline"
                         }
                         size={18}
-                        color="#5f0909"
+                        color={theme.primary}
                       />
                     </View>
                     <View style={{ marginLeft: 12, flex: 1 }}>
@@ -302,12 +379,12 @@ const SettingsScreen = () => {
                       </Text>
                     </View>
                     {isSaving ? (
-                      <ActivityIndicator color="#e0a53d" size="small" />
+                      <ActivityIndicator color={theme.accent} size="small" />
                     ) : isSelected ? (
                       <Ionicons
                         name="checkmark-circle"
                         size={22}
-                        color="#e0a53d"
+                        color={theme.accent}
                       />
                     ) : (
                       <View style={styles.unselectedCircle} />
@@ -391,18 +468,56 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     paddingVertical: 12,
   },
-  rowDivider: { height: 1, backgroundColor: "rgba(224,165,61,0.25)" },
-  // A stack of three bands from the palette itself, so each option shows what
-  // it actually looks like rather than asking people to guess from a name.
-  themeSwatch: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "rgba(95,9,9,0.15)",
+  rowDivider: { height: 1, backgroundColor: c.border },
+  themeGroupLabel: {
+    color: c.textMuted,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+    marginTop: 6,
+    marginBottom: 8,
   },
-  themeSwatchBand: { flex: 1 },
+  themeGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    rowGap: 10,
+    marginBottom: 8,
+  },
+  themeCardWrap: { width: "48.5%" },
+  themeCard: {
+    minHeight: 96,
+    padding: 12,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: c.border,
+    backgroundColor: c.surface,
+  },
+  // Chosen: a heavier border in the identity colour and a faint tint, as well
+  // as the check, so it doesn't rest on colour alone.
+  themeCardSelected: {
+    borderWidth: 2,
+    borderColor: c.primary,
+    backgroundColor: c.accentSoft,
+  },
+  themeCardPressed: { opacity: 0.85 },
+  themeCardTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  themeDots: { flexDirection: "row", alignItems: "center" },
+  themeDot: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: c.surface,
+  },
+  themeDotOverlap: { marginLeft: -6 },
+  themeCardLabel: { color: c.textPrimary, fontSize: 13.5, fontWeight: "700" },
+  themeCardDesc: { color: c.textMuted, fontSize: 11, lineHeight: 15, marginTop: 2 },
   iconBox: {
     width: 36,
     height: 36,

@@ -748,7 +748,7 @@ const onRefresh = useCallback(() => {
       case "mention":
         return { icon: "#00d470", bg: "#00d47020" };
       case "event":
-        return { icon: theme.accent, bg: "#e0a53d20" };
+        return { icon: theme.accent, bg: `${theme.accent}20` };
       case "emergency":
         return { icon: "#ff2d2d", bg: "#ff2d2d22" };
       case "moderation":
@@ -1232,7 +1232,7 @@ avatarImage: {
   borderRadius: 22,
   backgroundColor: c.border,
   borderWidth: 1,
-  borderColor: "rgba(95,9,9,0.08)",
+  borderColor: c.border,
 },
 avatarPlaceholder: {
   width: 44,
@@ -1358,7 +1358,7 @@ previewBox: {
     borderBottomColor: c.borderStrong,
   },
   filterOptionActive: {
-    backgroundColor: "rgba(95, 9, 9, 0.08)",
+    backgroundColor: c.surfaceSunken,
   },
   filterOptionText: {
     flex: 1,

@@ -13,7 +13,7 @@ import {
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { subscribeTabScrollToTop } from "@/utils/tabScrollEvents";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
     addDoc,
@@ -54,6 +54,7 @@ import ReanimatedAnimated, {
 } from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
+import BeaOrb from "../components/BeaOrb";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { ChatSkeleton } from "../components/Skeleton";
 
@@ -377,12 +378,15 @@ const TimeAgoText = React.memo(function TimeAgoText({ createdAt }: { createdAt: 
 const ChatBubble = React.memo(function ChatBubble({
   item,
   askedQuestion,
+  isLatestAnswer = false,
   onFeedback,
   onEscalate,
 }: {
   item: ChatMessage;
   /** The user message this answer replies to, prefilled into a ticket. */
   askedQuestion?: string;
+  /** B.E.A.'s newest answer: its face is the one that moves. */
+  isLatestAnswer?: boolean;
   onFeedback: (messageId: string, feedback: ChatFeedback | null) => void;
   onEscalate: (question: string) => void;
 }) {
@@ -405,8 +409,15 @@ const ChatBubble = React.memo(function ChatBubble({
       ]}
     >
       {!isOwnMessage && (
+        // Unsure when it couldn't answer; the newest answer smiles and hops
+        // once. Older answers keep a still face, so a long conversation
+        // isn't a column of moving orbs.
         <View style={styles.avatar}>
-          <Ionicons name="sparkles" size={15} color={theme.primary} />
+          <BeaOrb
+            size={30}
+            mood={unanswered ? "unsure" : isLatestAnswer ? "happy" : "idle"}
+            animated={isLatestAnswer}
+          />
         </View>
       )}
       <View style={styles.messageContentWrap}>
@@ -487,11 +498,11 @@ const ChatBubble = React.memo(function ChatBubble({
 });
 
 function TypingBubble() {
-  const { styles, theme } = useStyles();
+  const { styles } = useStyles();
   return (
     <FadeSlideIn style={[styles.messageRow, styles.messageRowOther]}>
       <View style={styles.avatar}>
-        <Ionicons name="sparkles" size={15} color={theme.primary} />
+        <BeaOrb size={30} mood="thinking" animated />
       </View>
       <View style={styles.messageContentWrap}>
         <View style={styles.messageBubble}>
@@ -503,14 +514,16 @@ function TypingBubble() {
   );
 }
 
+/**
+ * A new conversation: B.E.A. itself, large and moving, above its greeting.
+ * The first thing somebody sees here is who they are talking to.
+ */
 function EmptyState() {
-  const { styles, theme } = useStyles();
+  const { styles } = useStyles();
   return (
     <View style={styles.emptyState}>
-      <View style={styles.avatar}>
-        <Ionicons name="sparkles" size={15} color={theme.primary} />
-      </View>
-      <View style={styles.messageContentWrap}>
+      <BeaOrb size={128} mood="idle" animated tappable />
+      <View style={styles.emptyGreeting}>
         <View style={styles.messageBubble}>
           <Text style={styles.messageAuthor}>{AI_ASSISTANT_NAME}</Text>
           <Text style={styles.messageText}>{GREETING_TEXT}</Text>
@@ -551,6 +564,19 @@ export default function AiChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [inputText, setInputText] = useState("");
+  const inputRef = useRef<TextInput>(null);
+  // A search on Home that found nothing hands its words over, to send or
+  // edit. Set during render rather than in an effect so the box is never
+  // empty first; `askId` makes the same words asked twice a new question.
+  const { ask, askId } = useLocalSearchParams<{ ask?: string; askId?: string }>();
+  const [handledAskId, setHandledAskId] = useState<string | undefined>(undefined);
+  if (ask && askId && askId !== handledAskId) {
+    setHandledAskId(askId);
+    setInputText(ask);
+  }
+  useEffect(() => {
+    if (handledAskId) inputRef.current?.focus();
+  }, [handledAskId]);
   const [sending, setSending] = useState(false);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -1267,6 +1293,14 @@ export default function AiChatScreen() {
     [router],
   );
 
+  // B.E.A.'s newest answer — the one whose face moves.
+  const latestAnswerId = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role !== "user") return messages[index].id;
+    }
+    return null;
+  }, [messages]);
+
   const renderItem = useCallback(
     ({ item, index }: { item: ChatMessage; index: number }) => {
       // The list renders newest-last, so the question that produced an answer
@@ -1276,19 +1310,23 @@ export default function AiChatScreen() {
         <ChatBubble
           item={item}
           askedQuestion={previous?.role === "user" ? previous.text : undefined}
+          // Hidden while the next answer is on its way, when the thinking
+          // B.E.A. below is the one that should be moving.
+          isLatestAnswer={item.id === latestAnswerId && !sending}
           onFeedback={handleFeedback}
           onEscalate={handleEscalate}
         />
       );
     },
-    [handleEscalate, handleFeedback, messages],
+    [handleEscalate, handleFeedback, latestAnswerId, messages, sending],
   );
 
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
       <View style={styles.header}>
+        {/* Thinks along with the reply below, and floats otherwise. */}
         <View style={styles.headerAvatar}>
-          <Ionicons name="sparkles" size={18} color={theme.accent} />
+          <BeaOrb size={34} mood={sending ? "thinking" : "idle"} animated tappable />
         </View>
         <View style={styles.headerCopy}>
           <Text style={styles.headerTitle}>{AI_ASSISTANT_NAME}</Text>
@@ -1394,6 +1432,7 @@ export default function AiChatScreen() {
             />
           </TouchableOpacity>
           <TextInput
+            ref={inputRef}
             value={inputText}
             onChangeText={setInputText}
             placeholder={`Message ${AI_ASSISTANT_NAME}...`}
@@ -1569,11 +1608,13 @@ const makeStyles = (c: ThemeTokens) =>
     borderBottomWidth: 1,
     borderBottomColor: c.chromeBorder,
   },
+  // A light disc behind the header orb: the orb is the theme's main colour,
+  // which is also the bar's colour in the light themes.
   headerAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "rgba(224, 165, 61, 0.18)",
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: c.surfaceRaised,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
@@ -1612,7 +1653,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingVertical: 8,
     backgroundColor: c.dangerSoft,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(95,9,9,0.12)",
+    borderBottomColor: c.border,
   },
   offlineBannerText: {
     flex: 1,
@@ -1654,8 +1695,13 @@ const makeStyles = (c: ThemeTokens) =>
     zIndex: 20,
   },
   emptyState: {
-    flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
+    gap: 14,
+    paddingTop: 12,
+  },
+  emptyGreeting: {
+    alignSelf: "stretch",
+    maxWidth: 420,
   },
   messageRow: {
     marginBottom: 14,
@@ -1668,13 +1714,13 @@ const makeStyles = (c: ThemeTokens) =>
   messageRowOther: {
     justifyContent: "flex-start",
   },
+  // Holds B.E.A.'s face beside its messages; the orb is its own shape, so
+  // there is no disc behind it.
   avatar: {
     width: 30,
     height: 30,
-    borderRadius: 15,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: c.borderStrong,
     marginRight: 8,
   },
   messageContentWrap: {
@@ -1830,7 +1876,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surface,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: "rgba(95,9,9,0.16)",
+    borderColor: c.borderStrong,
   },
   sendButton: {
     width: 40,
