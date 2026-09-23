@@ -1067,7 +1067,7 @@ const makeStyles = (c: ThemeTokens) =>
   headerSearchInput: {
     flex: 1,
     color: c.textPrimary,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "500",
     marginLeft: 10,
     paddingVertical: 0,
@@ -1088,7 +1088,7 @@ const makeStyles = (c: ThemeTokens) =>
     right: 14,
     backgroundColor: c.surface,
     borderRadius: 24,
-    padding: 14,
+    padding: 16,
     borderWidth: 1.5,
     borderColor: c.border,
     shadowColor: "#2d0905",
@@ -1174,7 +1174,7 @@ const makeStyles = (c: ThemeTokens) =>
     padding: 16,
     borderWidth: 1.5,
     borderColor: c.border,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   searchOverviewIcon: {
     width: 42,
@@ -1257,7 +1257,7 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "600",
   },
   quickFilterTextActive: {
-    color: c.surfaceSunken,
+    color: c.onPrimary,
     fontWeight: "700",
   },
   timeChip: {
@@ -1284,12 +1284,12 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "600",
   },
   timeChipTextActive: {
-    color: c.surfaceSunken,
+    color: c.onPrimary,
   },
 
   /* Results */
   searchSection: {
-    marginTop: 14,
+    marginTop: 16,
   },
   searchSectionHeader: {
     flexDirection: "row",
@@ -1311,7 +1311,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   searchSectionTitle: {
     color: c.textPrimary,
-    fontSize: 16.5,
+    fontSize: 16,
     fontWeight: "800",
   },
   searchSectionSubtitle: {
@@ -1324,7 +1324,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     backgroundColor: c.surfaceRaised,
     borderRadius: 22,
-    padding: 14,
+    padding: 16,
     marginBottom: 10,
     borderWidth: 1,
     borderColor: c.border,
@@ -1336,7 +1336,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.accentSoft,
     alignItems: "center",
     justifyContent: "center",
-    marginRight: 14,
+    marginRight: 16,
   },
   personAvatarImage: {
     width: "100%",
@@ -1344,7 +1344,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   personAvatarText: {
     color: c.primary,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "800",
   },
   personResultCopy: {
@@ -1359,7 +1359,7 @@ const makeStyles = (c: ThemeTokens) =>
   personResultSubtitle: {
     color: c.textMuted,
     fontSize: 13.5,
-    lineHeight: 19,
+    lineHeight: 20,
     marginTop: 3,
   },
   searchFeedCardWrap: {
@@ -1368,7 +1368,7 @@ const makeStyles = (c: ThemeTokens) =>
   searchTopicCard: {
     backgroundColor: c.surface,
     borderRadius: 22,
-    padding: 18,
+    padding: 16,
     borderWidth: 1.5,
     borderColor: c.borderStrong,
     marginTop: 16,
@@ -1387,20 +1387,20 @@ const makeStyles = (c: ThemeTokens) =>
   emptySearchState: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 56,
-    paddingHorizontal: 26,
+    paddingVertical: 32,
+    paddingHorizontal: 20,
   },
   emptyTitle: {
     color: c.primary,
     fontSize: 18,
     fontWeight: "800",
-    marginTop: 14,
+    marginTop: 16,
     textAlign: "center",
   },
   emptySubtitle: {
     color: c.textMuted,
     fontSize: 14.5,
-    lineHeight: 21,
+    lineHeight: 20,
     marginTop: 8,
     textAlign: "center",
   },
@@ -1408,7 +1408,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginTop: 18,
+    marginTop: 20,
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 999,

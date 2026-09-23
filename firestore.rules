@@ -18,15 +18,50 @@ service cloud.firestore {
         ];
     }
 
+    // The profile document is the source of truth for a role: Manage Users
+    // changes it there. The role claim on the sign-in token is stamped once,
+    // at registration, and never updated — so it only counts for an account
+    // that has no profile yet. Trusting it first let a demoted teacher keep
+    // pinning posts and every other staff power.
+    function hasProfileDoc() {
+      return exists(/databases/$(database)/documents/students/$(request.auth.uid)) ||
+        (
+          request.auth.token.email != null &&
+          exists(/databases/$(database)/documents/students/$(request.auth.token.email.split('@')[0]))
+        );
+    }
+
     function isAdmin() {
       return signedIn() && (
-        (('role' in request.auth.token) && request.auth.token.role == 'admin') ||
         isAdminDoc(request.auth.uid) ||
         (
           request.auth.token.email != null &&
           isAdminDoc(request.auth.token.email.split('@')[0])
+        ) ||
+        (
+          !hasProfileDoc() &&
+          ('role' in request.auth.token) && request.auth.token.role == 'admin'
         )
       );
+    }
+
+    // Anonymous content carries its writer's permanent anonymous name (see
+    // utils/anonymousHandle.ts). It must be the writer's own, read from
+    // their private userSecrets document, so nobody can post as another
+    // anonymous persona.
+    function validAnonymousHandle(data) {
+      return !('anonymousHandle' in data) || (
+        data.anonymousHandle is string &&
+        exists(/databases/$(database)/documents/userSecrets/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/userSecrets/$(request.auth.uid)).data.anonymousHandle == data.anonymousHandle
+      );
+    }
+
+    // An update that leaves the name alone is fine — liking an anonymous post
+    // mustn't fail. Changing it is only allowed to the updater's own name.
+    function validAnonymousHandleChange(before, after) {
+      return after.get('anonymousHandle', null) == before.get('anonymousHandle', null) ||
+        validAnonymousHandle(after);
     }
 
     function isStaffDoc(docId) {
@@ -38,15 +73,18 @@ service cloud.firestore {
 
     function isStaff() {
       return signedIn() && (
-        (('role' in request.auth.token) && request.auth.token.role in [
-          'moderator',
-          'teacher',
-          'admin'
-        ]) ||
         isStaffDoc(request.auth.uid) ||
         (
-          request.auth.token.email != null && 
+          request.auth.token.email != null &&
           isStaffDoc(request.auth.token.email.split('@')[0])
+        ) ||
+        (
+          !hasProfileDoc() &&
+          ('role' in request.auth.token) && request.auth.token.role in [
+            'moderator',
+            'teacher',
+            'admin'
+          ]
         )
       );
     }
@@ -107,6 +145,12 @@ service cloud.firestore {
         'event_moments', 'community', 'fun_humor', 'achievement',
         'lost_found', 'projects', 'sports', 'announcement'
       ] && (data.flair != 'announcement' || isStaff());
+    }
+
+    // Polls no longer have a flair. Older polls keep theirs; a new or edited
+    // poll may leave it out, and one that is there must still be a real flair.
+    function validPollFlair(data) {
+      return !('flair' in data) || validPostFlair(data);
     }
 
     function hasStudentRole(userId) {
@@ -293,16 +337,107 @@ service cloud.firestore {
       return channelId.matches('.*(_rules|_announcement|_announcements).*');
     }
 
-    function canPostInThreadChannel(serverId, channelId) {
-      return !isStaffOnlyChannel(channelId) ||
-        isStaff() ||
+    // A channel's type, from the list the server saves next to its channels
+    // (the rules can't search the channel list itself). Null for a server
+    // that hasn't saved the list yet.
+    function threadChannelType(serverId, channelId) {
+      return exists(/databases/$(database)/documents/communityServers/$(serverId))
+        ? get(/databases/$(database)/documents/communityServers/$(serverId)).data
+            .get('channelAccess', {}).get(channelId, null)
+        : null;
+    }
+
+    function isServerOwner(serverId) {
+      return exists(/databases/$(database)/documents/communityServers/$(serverId)) &&
         (
-          exists(/databases/$(database)/documents/communityServers/$(serverId)) &&
-          (
-            get(/databases/$(database)/documents/communityServers/$(serverId)).data.createdBy == request.auth.uid ||
-            get(/databases/$(database)/documents/communityServers/$(serverId)).data.ownerId == request.auth.uid
-          )
+          get(/databases/$(database)/documents/communityServers/$(serverId)).data.createdBy == request.auth.uid ||
+          get(/databases/$(database)/documents/communityServers/$(serverId)).data.ownerId == request.auth.uid
         );
+    }
+
+    // Who may post in a channel. Read-only and Rules: staff and the server's
+    // owner. Staff only: nobody here, because those messages live in
+    // communityStaffMessages. A server that hasn't saved its list yet falls
+    // back to the old check by channel name.
+    // ── Polls in channels ─────────────────────────────────────────────
+    // A poll is a message with `poll` (question, 2–6 options, their ids,
+    // one answer or several, a closing time) and `pollVoters`: each
+    // person's answer under their own id. See utils/channelPolls.ts.
+    function validPollCreate(data) {
+      return data.poll is map &&
+        data.poll.question is string &&
+        data.poll.question.size() > 0 && data.poll.question.size() <= 200 &&
+        data.poll.options is list &&
+        data.poll.options.size() >= 2 && data.poll.options.size() <= 6 &&
+        data.poll.optionIds is list &&
+        data.poll.optionIds.size() == data.poll.options.size() &&
+        data.poll.allowMultiple is bool &&
+        data.poll.get('allowUsersToAddOption', false) is bool &&
+        data.poll.closesAt is timestamp && data.poll.closesAt > request.time &&
+        data.get('pollVoters', {}) == {};
+    }
+
+    function isOpenPoll(data) {
+      return ('poll' in data) && request.time < data.poll.closesAt;
+    }
+
+    // Your own answer and nobody else's: real options of this poll, no
+    // repeats, and one answer unless the poll allows several.
+    function validOwnVote(before, after) {
+      let votersBefore = before.get('pollVoters', {});
+      let votersAfter = after.get('pollVoters', {});
+      let mine = votersAfter.get(request.auth.uid, []);
+      return votersAfter.diff(votersBefore).affectedKeys().hasOnly([request.auth.uid]) &&
+        mine is list &&
+        mine.size() <= (before.poll.allowMultiple ? before.poll.optionIds.size() : 1) &&
+        mine.toSet().size() == mine.size() &&
+        mine.hasOnly(before.poll.optionIds);
+    }
+
+    // Ending a poll early: only its closing time changes, to now.
+    function validPollEnd(before, after) {
+      return isOpenPoll(before) &&
+        after.diff(before).affectedKeys().hasOnly(['poll']) &&
+        after.poll.diff(before.poll).affectedKeys().hasOnly(['closesAt']) &&
+        after.poll.closesAt == request.time;
+    }
+
+    // A member may append one attributed option to an open poll that opted
+    // into suggestions. Existing options and every other poll field remain
+    // byte-for-byte unchanged; votes are outside this update entirely.
+    function validPollOptionAdd(before, after) {
+      let beforeOptions = before.poll.options;
+      let afterOptions = after.poll.options;
+      let beforeIds = before.poll.optionIds;
+      let afterIds = after.poll.optionIds;
+      let addedOption = afterOptions[afterOptions.size() - 1];
+      let addedId = afterIds[afterIds.size() - 1];
+      return isOpenPoll(before) &&
+        before.poll.get('allowUsersToAddOption', false) == true &&
+        after.diff(before).affectedKeys().hasOnly(['poll']) &&
+        after.poll.diff(before.poll).affectedKeys().hasOnly(['options', 'optionIds']) &&
+        afterOptions.size() == beforeOptions.size() + 1 &&
+        afterOptions.size() <= 10 &&
+        afterIds.size() == beforeIds.size() + 1 &&
+        afterIds.size() == afterIds.toSet().size() &&
+        beforeOptions.toSet().difference(afterOptions.toSet()).size() == 0 &&
+        beforeIds.toSet().difference(afterIds.toSet()).size() == 0 &&
+        addedOption is map &&
+        addedOption.keys().hasOnly(['id', 'text', 'isUserAdded', 'addedBy']) &&
+        addedOption.id == addedId &&
+        addedOption.text is string &&
+        addedOption.text.size() > 0 && addedOption.text.size() <= 80 &&
+        addedOption.isUserAdded == true &&
+        addedOption.addedBy == request.auth.uid;
+    }
+
+    function canPostInThreadChannel(serverId, channelId) {
+      let type = threadChannelType(serverId, channelId);
+      return type != 'staff' && (
+        (type == null ? !isStaffOnlyChannel(channelId) : !(type in ['announcement', 'rules'])) ||
+        isStaff() ||
+        isServerOwner(serverId)
+      );
     }
 
     // =========================================================
@@ -318,6 +453,53 @@ service cloud.firestore {
     // =========================================================
     // COMMUNITY SERVERS
     // =========================================================
+
+    // Staff only channels. Their messages are kept apart from everyone
+    // else's, so a student's phone never downloads them: only app-wide staff
+    // may read or write here, and only in a channel the server marks as
+    // Staff only. Nobody posts anonymously, and staff messages skip the
+    // moderation queue, as they do everywhere.
+    match /communityStaffMessages/{messageId} {
+      allow read, list: if signedIn() && isStaff();
+
+      allow create: if signedIn() && isStaff() &&
+        request.resource.data.serverId is string &&
+        request.resource.data.channelId is string &&
+        request.resource.data.createdAt is timestamp &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.get('isAnonymous', false) == false &&
+        threadChannelType(request.resource.data.serverId, request.resource.data.channelId) == 'staff' &&
+        (!('poll' in request.resource.data) || validPollCreate(request.resource.data));
+
+      // The author edits their own message; any staff member may react or
+      // pin. Nobody can move a message to another channel or author.
+      allow update: if signedIn() && isStaff() &&
+        request.resource.data.serverId == resource.data.serverId &&
+        request.resource.data.channelId == resource.data.channelId &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.get('realUserId', null) == resource.data.get('realUserId', null) &&
+        (
+          // The author edits their own message, but can't touch the votes.
+          (
+            isContentOwner(resource.data) &&
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['pollVoters'])
+          ) ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'reactions', 'pinned', 'pinnedAt', 'pinnedBy', 'pinnedByName'
+          ]) ||
+          (
+            validPollOptionAdd(resource.data, request.resource.data)
+          ) ||
+          (
+            isOpenPoll(resource.data) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pollVoters']) &&
+            validOwnVote(resource.data, request.resource.data)
+          ) ||
+          validPollEnd(resource.data, request.resource.data)
+        );
+
+      allow delete: if signedIn() && isStaff();
+    }
 
     match /communityServers/{serverId} {
 
@@ -451,6 +633,7 @@ service cloud.firestore {
   );
 
   allow create: if signedIn() &&
+    validAnonymousHandle(request.resource.data) &&
     request.resource.data.createdAt is timestamp &&
     request.resource.data.serverId is string &&
     request.resource.data.channelId is string &&
@@ -471,7 +654,8 @@ service cloud.firestore {
       isServerMember(request.resource.data.serverId) ||
       isStaff()
     ) &&
-    canPostInThreadChannel(request.resource.data.serverId, request.resource.data.channelId);
+    canPostInThreadChannel(request.resource.data.serverId, request.resource.data.channelId) &&
+    (!('poll' in request.resource.data) || validPollCreate(request.resource.data));
 
   allow update: if signedIn() && (
     (
@@ -501,11 +685,36 @@ service cloud.firestore {
       ])
     ) ||
     (
+      // Members may append one option only when the poll creator enabled it.
+      (isServerMember(resource.data.serverId) || isStaff()) &&
+      validPollOptionAdd(resource.data, request.resource.data)
+    ) ||
+    (
+      // Voting in a channel poll: any member, or staff. Voting isn't
+      // posting, so it works in Read-only and Rules channels too.
+      (isServerMember(resource.data.serverId) || isStaff()) &&
+      isOpenPoll(resource.data) &&
+      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pollVoters']) &&
+      validOwnVote(resource.data, request.resource.data)
+    ) ||
+    (
+      // Ending a poll early: its author, the server's owner, or staff.
+      (isContentOwner(resource.data) || canManageServerPins(resource.data.serverId)) &&
+      validPollEnd(resource.data, request.resource.data)
+    ) ||
+    (
       // Pins (Task 3): a server owner/creator or app-wide staff can pin or
       // unpin any message in that server's channels. Same narrow principle as
       // the reactions branch — this branch can ONLY write the pin fields, so
       // it never loosens the author-only edit branch above.
-      canManageServerPins(resource.data.serverId) &&
+      // In a Collaborative channel, any member may pin: it's a shared board.
+      (
+        canManageServerPins(resource.data.serverId) ||
+        (
+          isServerMember(resource.data.serverId) &&
+          threadChannelType(resource.data.serverId, resource.data.channelId) == 'media'
+        )
+      ) &&
       request.resource.data.diff(resource.data).affectedKeys().hasOnly([
         'pinned', 'pinnedAt', 'pinnedBy', 'pinnedByName'
       ])
@@ -656,7 +865,9 @@ service cloud.firestore {
         return !exists(messagePath) && latest.senderId == request.auth.uid &&
           latest.createdAt == request.time && after.updatedAt == request.time &&
           message.senderId == request.auth.uid && message.createdAt == request.time &&
-          (latest.text == message.text || (message.text == '' && latest.text in ['Sent an image', 'Sent a file']));
+          (latest.text == message.text ||
+            (message.text == '' && latest.text in ['Sent an image', 'Sent a file']) ||
+            (message.text == '' && message.get('link', null) != null && latest.text == 'Sent a link'));
       }
 
       function validSendUpdate() {
@@ -683,6 +894,15 @@ service cloud.firestore {
           ownMapChange('archivedThrough') &&
           resource.data.lastMessage.createdAt > resource.data.get('deletedThrough', {}).get(request.auth.uid, timestamp.value(0)) &&
           (archived == null || archived == resource.data.lastMessage.createdAt);
+      }
+
+      // Pinning a chat to the top of your own list: only your own entry in
+      // pinnedAt changes — set to the server time, or removed to unpin.
+      function validPinForMe() {
+        let after = request.resource.data.get('pinnedAt', {});
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pinnedAt']) &&
+          ownMapChange('pinnedAt') &&
+          (!(request.auth.uid in after) || after[request.auth.uid] == request.time);
       }
 
       function validDeletedPreview() {
@@ -735,12 +955,39 @@ service cloud.firestore {
 
       // Participants can update conversation metadata (lastMessage, unreadCounts, nicknames, themes, pins, mutes)
       allow update: if signedIn() && request.auth.uid in resource.data.participants &&
-        (validMetadataUpdate() || validSendUpdate() || validDeletedPreview() || validDeleteForMe() || validEditUpdate() || validArchiveForMe());
+        (validMetadataUpdate() || validSendUpdate() || validDeletedPreview() || validDeleteForMe() || validEditUpdate() || validArchiveForMe() || validPinForMe());
 
       // Normal users delete their own view through deletedThrough, never the shared thread.
       allow delete: if signedIn() && isStaff();
 
       match /messages/{messageId} {
+        function validDirectLink() {
+          let link = request.resource.data.get('link', null);
+          return link == null || (
+            link is map &&
+            link.keys().hasOnly(['url', 'title']) &&
+            link.url is string && link.url.size() >= 9 && link.url.size() <= 2048 &&
+            link.url.matches('^https?://[^ ]+$') &&
+            link.get('title', '') is string && link.get('title', '').size() <= 200
+          );
+        }
+
+        function validDirectMentions() {
+          let mentions = request.resource.data.get('mentions', []);
+          let parent = getAfter(/databases/$(database)/documents/directConversations/$(conversationId)).data;
+          let recipient = parent.participants[0] == request.auth.uid
+            ? parent.participants[1] : parent.participants[0];
+          return mentions is list && mentions.size() <= 1 && (
+            mentions.size() == 0 || (
+              mentions[0] is map &&
+              mentions[0].keys().hasOnly(['id', 'name']) &&
+              mentions[0].id == recipient &&
+              mentions[0].name is string &&
+              mentions[0].name.size() > 0 && mentions[0].name.size() <= 200
+            )
+          );
+        }
+
         function validReaction(emoji) {
           let before = resource.data.get('reactions', {}).get(emoji, []);
           let after = request.resource.data.get('reactions', {}).get(emoji, []);
@@ -764,8 +1011,9 @@ service cloud.firestore {
           return resource.data.senderId == request.auth.uid && resource.data.get('deleted', false) == false &&
             resource.data.text.size() > 0 &&
             resource.data.createdAt > parent.get('deletedThrough', {}).get(request.auth.uid, timestamp.value(0)) &&
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'edited', 'editedAt']) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'mentions', 'edited', 'editedAt']) &&
             request.resource.data.text is string && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 2000 &&
+            validDirectMentions() &&
             request.resource.data.edited == true && request.resource.data.editedAt == request.time &&
             parent.lastEditedMessageId == messageId && parent.contentUpdatedAt == request.time;
         }
@@ -781,7 +1029,8 @@ service cloud.firestore {
           request.resource.data.createdAt == request.time &&
           request.resource.data.text is string && request.resource.data.text.size() <= 2000 &&
           request.resource.data.files is list && request.resource.data.files.size() <= 10 &&
-          (request.resource.data.text.size() > 0 || request.resource.data.files.size() > 0) &&
+          (request.resource.data.text.size() > 0 || request.resource.data.files.size() > 0 || request.resource.data.get('link', null) != null) &&
+          validDirectLink() && validDirectMentions() &&
           request.resource.data.status == 'sent' &&
           request.resource.data.seenBy.keys().hasOnly([request.auth.uid]) &&
           request.resource.data.seenBy[request.auth.uid] == request.time &&
@@ -848,7 +1097,10 @@ service cloud.firestore {
         'mustChangePassword', 'passwordCheckedAt', 'recoveryEmail',
         'recoveryEmailVerified', 'recoveryEmailVerifiedAt',
         'yearlvl', 'promotionHold', 'previousYearlvl', 'promotedAt',
-        'lastPromotionRunId'
+        'lastPromotionRunId',
+        // Set by an admin's account recovery (through the Worker). Someone
+        // signed in on a locked or signed-out account must not undo it.
+        'accountLocked', 'accountLockedAt', 'sessionsRevokedAt'
       ]) && validSetupChanges()) ||
     isAdmin()
   );
@@ -860,6 +1112,16 @@ service cloud.firestore {
     isAdmin()
   );
 }
+
+    // A person's personal email and recovery details. The public profile
+    // above is readable by everyone signed in, so these live here instead:
+    // only the account's owner and admins can read them, and only the Worker
+    // (which isn't bound by these rules) writes them.
+    match /studentPrivate/{studentId} {
+      allow get: if signedIn() && (isStudentOwner(studentId) || isAdmin());
+      allow list: if signedIn() && isAdmin();
+      allow write: if false;
+    }
 
 
 
@@ -913,6 +1175,7 @@ match /userNotificationSettings/{userId} {
       // Spark-compatible architecture: clients may create/edit only PENDING
       // posts. The Cloudflare Worker uses a server credential to approve them or leave them pending for human review. A modified client cannot self-approve a post.
       allow create: if signedIn() &&
+        validAnonymousHandle(request.resource.data) &&
         request.resource.data.realUserId == request.auth.uid &&
         (
           request.resource.data.userId == request.auth.uid ||
@@ -931,7 +1194,7 @@ match /userNotificationSettings/{userId} {
         ) &&
         request.resource.data.moderationStatus == 'pending';
 
-      allow update: if signedIn() && (
+      allow update: if signedIn() && validAnonymousHandleChange(resource.data, request.resource.data) && (
         isStaffModerationReview(resource.data) ||
         (
           isStaff() &&
@@ -964,7 +1227,8 @@ match /userNotificationSettings/{userId} {
               'searchTerms',
               'files',
               'taggedUsers',
-              'isAnonymous',
+              'mentionedUserIds',
+              'isAnonymous', 'anonymousHandle',
               'link',
               'updatedAt',
               'moderationStatus',
@@ -1095,6 +1359,7 @@ match /userNotificationSettings/{userId} {
       // re-reads and moderates them before changing the status. Staff
       // comments may enter approved — see validInitialModeration().
       allow create: if signedIn() &&
+        validAnonymousHandle(request.resource.data) &&
         request.resource.data.postId is string &&
         request.resource.data.userId is string &&
         (request.resource.data.userId == request.auth.uid || request.resource.data.userId == 'anonymous') &&
@@ -1104,14 +1369,14 @@ match /userNotificationSettings/{userId} {
         request.resource.data.likes is list &&
         validInitialModeration();
 
-      allow update: if signedIn() && (
+      allow update: if signedIn() && validAnonymousHandleChange(resource.data, request.resource.data) && (
         isStaffModerationReview(resource.data) ||
         (
           isContentOwner(resource.data) &&
           request.resource.data.userId == resource.data.userId &&
           request.resource.data.realUserId == resource.data.realUserId &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'text', 'files', 'taggedUsers', 'isAnonymous', 'link',
+            'text', 'files', 'taggedUsers', 'isAnonymous', 'anonymousHandle', 'link',
             'updatedAt', 'moderationStatus', 'moderationReasons',
             'moderatedAtMs', 'moderationModel', 'moderationRuleSource', 'aiReply'
           ]) &&
@@ -1155,6 +1420,7 @@ match /userNotificationSettings/{userId} {
 
       // Replies follow the same server-authoritative moderation flow.
       allow create: if signedIn() &&
+        validAnonymousHandle(request.resource.data) &&
         request.resource.data.commentId is string &&
         request.resource.data.userId is string &&
         (request.resource.data.userId == request.auth.uid || request.resource.data.userId == 'anonymous') &&
@@ -1163,14 +1429,14 @@ match /userNotificationSettings/{userId} {
         request.resource.data.createdAt is timestamp &&
         validInitialModeration();
 
-      allow update: if signedIn() && (
+      allow update: if signedIn() && validAnonymousHandleChange(resource.data, request.resource.data) && (
         isStaffModerationReview(resource.data) ||
         (
           isContentOwner(resource.data) &&
           request.resource.data.userId == resource.data.userId &&
           request.resource.data.realUserId == resource.data.realUserId &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'text', 'files', 'taggedUsers', 'isAnonymous', 'link',
+            'text', 'files', 'taggedUsers', 'isAnonymous', 'anonymousHandle', 'link',
             'updatedAt', 'moderationStatus', 'moderationReasons',
             'moderatedAtMs', 'moderationModel', 'moderationRuleSource', 'aiReply'
           ]) &&
@@ -1257,14 +1523,15 @@ match /userNotificationSettings/{userId} {
       // Polls are created as pending. The Cloudflare Worker re-reads the
       // poll and uses OpenModeration before changing moderationStatus.
       allow create: if signedIn() &&
+        validAnonymousHandle(request.resource.data) &&
         request.resource.data.userId is string &&
         request.resource.data.userId == request.auth.uid &&
         request.resource.data.question is string &&
         request.resource.data.createdAt is timestamp &&
         request.resource.data.moderationStatus == 'pending' &&
-        validPostFlair(request.resource.data);
+        validPollFlair(request.resource.data);
 
-      allow update: if signedIn() && (
+      allow update: if signedIn() && validAnonymousHandleChange(resource.data, request.resource.data) && (
         (
           resource.data.userId == request.auth.uid &&
           request.resource.data.userId == resource.data.userId &&
@@ -1277,7 +1544,7 @@ match /userNotificationSettings/{userId} {
             'durationMs',
             'expiresAt',
             'username',
-            'isAnonymous',
+            'isAnonymous', 'anonymousHandle',
             'flair',
             'updatedAt',
             'moderationStatus',
@@ -1287,7 +1554,7 @@ match /userNotificationSettings/{userId} {
             'totalVotes'
           ]) &&
           request.resource.data.moderationStatus == 'pending' &&
-          validPostFlair(request.resource.data) &&
+          validPollFlair(request.resource.data) &&
           (
             !request.resource.data.diff(resource.data).affectedKeys().hasAny([
               'options',
@@ -1321,6 +1588,20 @@ match /userNotificationSettings/{userId} {
           (
             request.resource.data.commentCount == resource.data.commentCount + 1 ||
             request.resource.data.commentCount == resource.data.commentCount - 1
+          )
+        ) ||
+        (
+          // Pinning, as for posts: staff only, and this branch can touch
+          // nothing but the pin itself.
+          isStaff() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'pinnedAt', 'pinnedBy', 'pinExpiresAt'
+          ]) &&
+          (
+            (request.resource.data.pinnedAt == request.time &&
+              request.resource.data.pinnedBy == request.auth.uid) ||
+            (request.resource.data.pinnedAt == null &&
+              request.resource.data.get('pinnedBy', null) == null)
           )
         ) ||
         isStaffModerationReview(resource.data)
@@ -1559,8 +1840,60 @@ match /userNotificationSettings/{userId} {
     // account (which bypasses these rules). Codes are stored hashed and are
     // never exposed to any client, so all direct client access is denied.
 
+    // "Anonymous4821": the number must be reserved to this person in the
+    // same write (anonymousNumbers below), so no two people share one.
+    function isOwnAnonymousNumberHandle(userId, handle) {
+      return handle is string &&
+        handle.matches('^Anonymous[1-9][0-9]{3,4}$') &&
+        getAfter(/databases/$(database)/documents/anonymousNumbers/$(handle.split('Anonymous')[1])).data.uid == userId;
+    }
+
+    // Each account's permanent anonymous name. Only its owner can read it, so
+    // the name can't be traced back to a person.
+    match /userSecrets/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create: if signedIn() && request.auth.uid == userId &&
+        request.resource.data.keys().hasOnly(['anonymousHandle', 'createdAt']) &&
+        isOwnAnonymousNumberHandle(userId, request.resource.data.anonymousHandle);
+      // One switch from an old word name, or from the earlier spaced number,
+      // to the compact numeric name. A compact number never changes.
+      allow update: if signedIn() && request.auth.uid == userId &&
+        resource.data.anonymousHandle is string &&
+        (resource.data.anonymousHandle.matches('^[A-Za-z]+-[A-Za-z]+-[0-9]{4}$') ||
+          resource.data.anonymousHandle.matches('^Anonymous [1-9][0-9]{3,4}$')) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['anonymousHandle', 'migratedAt']) &&
+        request.resource.data.get('migratedAt', request.time) == request.time &&
+        isOwnAnonymousNumberHandle(userId, request.resource.data.anonymousHandle);
+      allow delete: if false;
+    }
+
+    // Which number belongs to whom stays private: nobody can read these.
+    // A number is claimed only together with the claimer's own name, and
+    // claiming one that's taken is an update, which is refused.
+    match /anonymousNumbers/{number} {
+      allow read: if false;
+      allow create: if signedIn() &&
+        number.matches('^[1-9][0-9]{3,4}$') &&
+        request.resource.data.keys().hasOnly(['uid', 'createdAt']) &&
+        request.resource.data.uid == request.auth.uid &&
+        getAfter(/databases/$(database)/documents/userSecrets/$(request.auth.uid)).data.anonymousHandle == 'Anonymous' + number;
+      allow update, delete: if false;
+    }
+
     match /authCodes/{codeId} {
       allow read, write: if false;
+    }
+
+    // =========================================================
+    // ACCOUNT RECOVERY LOG
+    // =========================================================
+    // Who reset, locked, unlocked or signed out an account, and when. Written
+    // only by the Worker's admin-account-recovery mode; admins read it in
+    // Manage Users. Nobody can edit or delete an entry.
+
+    match /accountRecoveryLog/{entryId} {
+      allow read: if isAdmin();
+      allow write: if false;
     }
 
     match /chatbotKnowledgeCache/{cacheKey} {
@@ -1838,7 +2171,8 @@ match /userNotificationSettings/{userId} {
       return liveChangedKeys().hasOnly([
         'status', 'endedAt', 'provider', 'channelName', 'playbackUrl',
         'replayUrl', 'replayPostId', 'viewerCount', 'peakViewers',
-        'micMuted', 'cameraOff', 'pinnedComment', 'hostSeenAt'
+        'micMuted', 'cameraOff', 'pinnedComment', 'hostSeenAt',
+        'broadcastStartedAt'
       ]);
     }
 

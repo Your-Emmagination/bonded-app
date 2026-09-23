@@ -34,7 +34,6 @@ import { doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -44,6 +43,10 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { auth, db } from "../../Firebase_configure";
@@ -85,7 +88,8 @@ export default function EditProfileScreen() {
   const { tab } = useLocalSearchParams<{ tab?: string | string[] }>();
   const [selectedTab, setSelectedTab] = useState<TabKey>(() => parseTab(tab));
 
-  const { profileId: accountProfileId } = useAccountSetup();
+  // Includes the private record (personal email, recovery details).
+  const { profileId: accountProfileId, profile: accountProfile } = useAccountSetup();
   const { isOffline } = useNetworkStatus();
   const user = auth.currentUser;
   const profileDocId =
@@ -251,9 +255,9 @@ export default function EditProfileScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      <KeyboardAvoidingView
+      <KeyboardAvoidingView automaticOffset
         style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        behavior="padding"
         enabled={Platform.OS !== "web"}
       >
         <ScrollView
@@ -303,9 +307,13 @@ export default function EditProfileScreen() {
                   key={profileDocId}
                   studentID={student?.studentID || profileDocId}
                   initialEmail={
-                    student?.recoveryEmail || profileEmail({ email: student?.email })
+                    accountProfile?.recoveryEmail ||
+                    student?.recoveryEmail ||
+                    profileEmail({ email: accountProfile?.email ?? student?.email })
                   }
-                  initialVerified={student?.recoveryEmailVerified}
+                  initialVerified={
+                    accountProfile?.recoveryEmailVerified ?? student?.recoveryEmailVerified
+                  }
                 />
               ) : (
                 <ActivityIndicator color={theme.accent} style={styles.loader} />
@@ -724,7 +732,7 @@ const makeStyles = (c: ThemeTokens) =>
       flex: 1,
       textAlign: "center",
       color: c.onChrome,
-      fontSize: 17,
+      fontSize: 16,
       fontWeight: "800",
     },
     headerSpacer: { width: 34 },
@@ -815,7 +823,7 @@ const makeStyles = (c: ThemeTokens) =>
     primaryBtn: {
       backgroundColor: c.primary,
       borderRadius: 12,
-      paddingVertical: 14,
+      paddingVertical: 16,
       alignItems: "center",
       justifyContent: "center",
       marginTop: 6,
@@ -825,7 +833,7 @@ const makeStyles = (c: ThemeTokens) =>
     secondaryBtn: {
       backgroundColor: c.surfaceSunken,
       borderRadius: 12,
-      paddingVertical: 14,
+      paddingVertical: 16,
       alignItems: "center",
       justifyContent: "center",
       borderWidth: 1,
@@ -852,7 +860,7 @@ const makeStyles = (c: ThemeTokens) =>
       alignItems: "center",
       gap: 12,
       backgroundColor: c.surfaceSunken,
-      padding: 14,
+      padding: 16,
       borderRadius: 12,
       marginBottom: 10,
       borderWidth: 1,

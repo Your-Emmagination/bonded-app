@@ -539,7 +539,11 @@ async function createServerMentionNotifications({
 
   if (!recipientIds.size) return;
 
-  const actorName = clean(postData.isAnonymous ? "Anonymous" : postData.authorName || postData.username) || "Someone";
+  const actorName = clean(
+    postData.isAnonymous
+      ? postData.anonymousHandle || postData.username || "Anonymous"
+      : postData.authorName || postData.username,
+  ).replace(/^Anonymous\s+([1-9][0-9]{3,4})$/, "Anonymous$1") || "Someone";
   const preview = notificationPreview(postData.content);
   const batch = db.batch();
 

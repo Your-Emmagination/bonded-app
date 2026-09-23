@@ -806,7 +806,7 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    padding: 28,
+    padding: 24,
     gap: 10,
   },
   deniedTitle: { color: c.textPrimary, fontSize: 16, fontWeight: "900" },
@@ -814,7 +814,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontSize: 13,
     textAlign: "center",
-    lineHeight: 19,
+    lineHeight: 20,
   },
 
   topBar: {
@@ -838,7 +838,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.borderStrong,
     borderRadius: 18,
-    padding: 15,
+    padding: 16,
   },
   heroIcon: {
     width: 48,
@@ -853,7 +853,7 @@ const makeStyles = (c: ThemeTokens) =>
   heroText: {
     color: c.textMuted,
     fontSize: 12.5,
-    lineHeight: 18,
+    lineHeight: 16,
     marginTop: 3,
   },
 
@@ -871,7 +871,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.border,
     borderRadius: 18,
-    padding: 14,
+    padding: 16,
   },
 
   pickerRow: { flexDirection: "row", alignItems: "center", gap: 12 },
@@ -894,7 +894,7 @@ const makeStyles = (c: ThemeTokens) =>
   pickerHint: {
     color: c.textMuted,
     fontSize: 11.5,
-    lineHeight: 17,
+    lineHeight: 16,
     marginTop: 12,
   },
 
@@ -905,7 +905,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontSize: 12.5,
     textAlign: "center",
-    lineHeight: 18,
+    lineHeight: 16,
   },
 
   previewRow: {
@@ -962,7 +962,7 @@ const makeStyles = (c: ThemeTokens) =>
   previewNote: {
     color: c.textMuted,
     fontSize: 11.5,
-    lineHeight: 17,
+    lineHeight: 16,
     paddingHorizontal: 2,
   },
 
@@ -973,7 +973,7 @@ const makeStyles = (c: ThemeTokens) =>
     gap: 8,
     backgroundColor: c.primary,
     borderRadius: 15,
-    paddingVertical: 14,
+    paddingVertical: 16,
     marginTop: 4,
   },
   primaryButtonDisabled: { backgroundColor: c.borderStrong },
@@ -998,7 +998,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.borderStrong,
     borderRadius: 18,
-    padding: 14,
+    padding: 16,
     gap: 7,
   },
   statusCardRunning: { backgroundColor: c.successSoft, borderColor: c.success },
@@ -1023,7 +1023,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.success,
     borderRadius: 18,
-    padding: 14,
+    padding: 16,
     gap: 6,
     marginTop: 4,
   },

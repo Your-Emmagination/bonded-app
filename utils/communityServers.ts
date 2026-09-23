@@ -1,6 +1,39 @@
 export type CommunityMembershipState = "joined" | "pending" | "available";
 
-export type ChannelType = "text" | "announcement" | "rules" | "media";
+/**
+ * What a channel is for, and so who may post in it. The saved values are the
+ * original ones; what people see is newer:
+ *   text          Open           everyone posts
+ *   announcement  Read-only      staff post; students react and forward
+ *   rules         Rules          read-only, with the rules look
+ *   media         Collaborative  everyone posts, and anyone can pin
+ *   staff         Staff only     admins, moderators, teachers; hidden from students
+ */
+export type ChannelType = "text" | "announcement" | "rules" | "media" | "staff";
+
+/** The choices in Create Channel and Edit Channel, in this order. */
+export const CHANNEL_TYPE_OPTIONS: {
+  type: ChannelType;
+  title: string;
+  icon: string;
+  emoji: string;
+  hint: string;
+}[] = [
+  { type: "text", title: "Open", icon: "chatbubbles-outline", emoji: "💬", hint: "Everyone can post, reply and react" },
+  { type: "announcement", title: "Read-only", icon: "megaphone-outline", emoji: "📢", hint: "Staff post; students react and forward" },
+  { type: "rules", title: "Rules", icon: "shield-checkmark-outline", emoji: "📜", hint: "Guidelines; staff post, students react" },
+  { type: "media", title: "Collaborative", icon: "folder-open-outline", emoji: "📂", hint: "Shared files and links; anyone can pin" },
+  { type: "staff", title: "Staff only", icon: "lock-closed-outline", emoji: "🔒", hint: "Admins, moderators and teachers; hidden from students" },
+];
+
+export function getChannelTypeTitle(channelType?: ChannelType): string {
+  return CHANNEL_TYPE_OPTIONS.find((option) => option.type === channelType)?.title || "Open";
+}
+
+/** App-wide staff: the only people who see Staff only channels. */
+export function isStaffRole(role?: string | null): boolean {
+  return ["admin", "teacher", "moderator"].includes(String(role || "").toLowerCase());
+}
 
 export type CommunityChannel = {
   id: string;
@@ -53,6 +86,8 @@ export type CommunityServer = {
   createdBy?: string;
   canManage?: boolean;
   isDeleted?: boolean;
+  /** Each channel's type by id, for the database rules. See buildChannelAccess. */
+  channelAccess?: Record<string, string>;
 };
 
 export type CustomCommunityServer = CommunityServer & {
@@ -79,6 +114,7 @@ export type ServerJoinRequestRecord = {
   requestedByRole?: string;
   requesterName?: string;
   course?: string;
+  yearLevel?: string;
 };
 
 const DEFAULT_CHANNEL_ICON = "chatbubbles-outline";
@@ -92,7 +128,9 @@ export function getChannelIcon(channelType?: ChannelType, fallbackIcon = DEFAULT
     case "announcement":
       return "megaphone-outline";
     case "media":
-      return "images-outline";
+      return "folder-open-outline";
+    case "staff":
+      return "lock-closed-outline";
     case "text":
     default:
       return fallbackIcon || DEFAULT_CHANNEL_ICON;
@@ -106,26 +144,83 @@ export function getChannelDefaultEmoji(channelType?: ChannelType): string {
     case "announcement":
       return "📢";
     case "media":
-      return "📸";
+      return "📂";
+    case "staff":
+      return "🔒";
     case "text":
     default:
       return DEFAULT_CHANNEL_EMOJI;
   }
 }
 
-export function isStaffOnlyChannel(channel?: { channelType?: string; label?: string; id?: string } | null): boolean {
-  if (!channel) return false;
-  if (channel.channelType === "rules" || channel.channelType === "announcement") return true;
+type ChannelLike = { channelType?: string; label?: string; id?: string } | null | undefined;
+
+/**
+ * A channel's type. Channels made before types were saved are recognised by
+ * name, the way they always were.
+ */
+export function resolveChannelType(channel: ChannelLike): ChannelType {
+  if (!channel) return "text";
+  const saved = channel.channelType;
+  if (saved === "text" || saved === "announcement" || saved === "rules" || saved === "media" || saved === "staff") {
+    return saved;
+  }
   const lowerLabel = (channel.label || "").toLowerCase();
   const lowerId = (channel.id || "").toLowerCase();
-  return (
-    lowerLabel === "rules" ||
+  if (lowerLabel === "rules" || lowerId.endsWith("_rules")) return "rules";
+  if (
     lowerLabel === "announcement" ||
     lowerLabel === "announcements" ||
-    lowerId.endsWith("_rules") ||
     lowerId.endsWith("_announcement") ||
     lowerId.endsWith("_announcements")
-  );
+  ) {
+    return "announcement";
+  }
+  if (lowerLabel === "media" || lowerId.endsWith("_media")) return "media";
+  return "text";
+}
+
+/** Students can't post here: Read-only, Rules and Staff only channels. */
+export function isStaffOnlyChannel(channel: ChannelLike): boolean {
+  const type = resolveChannelType(channel);
+  return type === "rules" || type === "announcement" || type === "staff";
+}
+
+/** Hidden from students altogether. */
+export function isStaffChannel(channel: ChannelLike): boolean {
+  return resolveChannelType(channel) === "staff";
+}
+
+/**
+ * Every channel's type by id, saved on the server next to its channels. The
+ * database rules read it to decide who may post (they can't search the
+ * channel list), so it's rewritten whenever the channels change.
+ */
+export function buildChannelAccess(sections: CommunitySection[] | undefined): Record<string, ChannelType> {
+  const access: Record<string, ChannelType> = {};
+  for (const section of sections || []) {
+    for (const channel of section.channels || []) {
+      if (channel?.id) access[channel.id] = resolveChannelType(channel);
+    }
+  }
+  return access;
+}
+
+/** The same list, as a string, to tell whether a saved one is out of date. */
+export function channelAccessKey(access: Record<string, string> | null | undefined): string {
+  return Object.keys(access || {})
+    .sort()
+    .map((id) => `${id}=${access?.[id]}`)
+    .join("|");
+}
+
+/** A server's channels as this person may see them: no Staff only channels for students. */
+export function sectionsVisibleTo(sections: CommunitySection[], role?: string | null): CommunitySection[] {
+  if (isStaffRole(role)) return sections;
+  return sections.map((section) => ({
+    ...section,
+    channels: (section.channels || []).filter((channel) => !isStaffChannel(channel)),
+  }));
 }
 
 const buildDefaultSections = (serverId: string): CommunitySection[] => [
@@ -555,6 +650,10 @@ function normalizeRemoteServer(
 
   return ensureCustomServerShape({
     ...server,
+    // Staff only channels never reach a student's lists.
+    ...(Array.isArray(server.sections) && server.sections.length > 0
+      ? { sections: sectionsVisibleTo(server.sections, userRole) }
+      : {}),
     autoJoined: membershipState === "joined",
     membershipLabel:
       server.membershipLabel ??

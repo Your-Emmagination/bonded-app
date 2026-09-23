@@ -614,6 +614,10 @@ export default function BookmarksScreen() {
             keyExtractor={(item) => item.id}
             renderItem={renderItem}
             contentContainerStyle={styles.listContent}
+            // Comments and replies open from inside these cards, and React Native
+            // still counts this list as their parent for taps: left at "never",
+            // the first tap on Send only closed the keyboard.
+            keyboardShouldPersistTaps="handled"
           />
         </View>
       )}
@@ -797,7 +801,7 @@ const makeStyles = (c: ThemeTokens) =>
     marginTop: 6,
     backgroundColor: c.primary,
     borderRadius: 12,
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
     paddingVertical: 10,
   },
   clearFiltersButtonText: { color: c.surface, fontSize: 13.5, fontWeight: "700" },
@@ -812,7 +816,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
     paddingTop: 10,
     paddingBottom: 22,
     maxHeight: "80%",
@@ -876,10 +880,10 @@ const makeStyles = (c: ThemeTokens) =>
   sortRowText: { flex: 1, color: c.textPrimary, fontSize: 14, fontWeight: "600" },
   sortRowTextActive: { color: c.primary, fontWeight: "800" },
   sheetDoneButton: {
-    marginTop: 18,
+    marginTop: 20,
     backgroundColor: c.primary,
     borderRadius: 14,
-    paddingVertical: 14,
+    paddingVertical: 16,
     alignItems: "center",
   },
   sheetDoneButtonText: { color: c.surface, fontSize: 15, fontWeight: "800" },

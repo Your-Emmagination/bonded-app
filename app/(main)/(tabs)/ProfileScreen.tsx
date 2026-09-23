@@ -150,7 +150,8 @@ const isApprovedPost = (post: Post): boolean => {
 
 const ProfileScreen = () => {
   const { styles, theme } = useStyles();
-  const { profileId: accountProfileId } = useAccountSetup();
+  // Includes the private record (personal email, recovery details).
+  const { profileId: accountProfileId, profile: accountProfile } = useAccountSetup();
   const { returnTo } = useLocalSearchParams<{ returnTo?: string | string[] }>();
   const { isOffline } = useNetworkStatus();
   const [user, setUser] = useState<FirebaseUser | null>(null);
@@ -818,7 +819,10 @@ const ProfileScreen = () => {
     }, [handleScreenBack]),
   );
 
-  const displayEmail = profileEmail({ email: student?.email, recoveryEmail: student?.recoveryEmail }) || "No email added";
+  const displayEmail = profileEmail({
+    email: accountProfile?.email ?? student?.email,
+    recoveryEmail: accountProfile?.recoveryEmail ?? student?.recoveryEmail,
+  }) || "No email added";
 
   return (
     <SafeAreaView style={styles.container}>
@@ -867,6 +871,10 @@ const ProfileScreen = () => {
           keyExtractor={(post) => post.id}
           renderItem={renderMyPost}
           contentContainerStyle={styles.scroll}
+          // Comments and replies open from inside these cards, and React Native
+          // still counts this list as their parent for taps: left at "never",
+          // the first tap on Send only closed the keyboard.
+          keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
           initialNumToRender={4}
           maxToRenderPerBatch={4}
@@ -1393,7 +1401,7 @@ const makeStyles = (c: ThemeTokens) =>
     letterSpacing: 0.5,
   },
   headerSubtext: {
-    color: c.borderStrong,
+    color: c.onChromeMuted,
     fontSize: 12,
     textAlign: "center",
     marginTop: 2,
@@ -1638,7 +1646,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.borderStrong,
     borderRadius: 14,
-    paddingVertical: 13,
+    paddingVertical: 16,
     marginTop: 12,
   },
   loadMoreButtonText: {

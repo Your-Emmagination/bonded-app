@@ -56,8 +56,10 @@ type BeaOrbProps = {
   /** Float, blink, glow and orbit. Leave off for copies that should sit still. */
   animated?: boolean;
   /**
-   * Tapping makes B.E.A. react: a squash-and-wiggle, a smile and a light
-   * vibration. With motion turned off it still smiles and vibrates.
+   * Tapping makes B.E.A. react, with a different action each tap — a
+   * wiggle, a jump, a spin, a wink, a sparkle burst, hearts — and a light
+   * vibration. Six quick taps make it dizzy. With motion turned off it
+   * still smiles (or winks) and vibrates.
    */
   tappable?: boolean;
   /** Also run on tap, after the reaction starts. Implies `tappable`. */
@@ -76,6 +78,28 @@ const RING = { cx: 60, cy: 76, rx: 54, ry: 14, tilt: -14 };
 const RING_TRANSFORM = `rotate(${RING.tilt} ${RING.cx} ${RING.cy})`;
 /** Below this, the glow, sparkles and "?" are too small to read and are left out. */
 const COMPACT_BELOW = 48;
+
+// ── Tap actions ────────────────────────────────────────────────────────────
+type TapAction = "wiggle" | "jump" | "spin" | "wink" | "sparkle" | "hearts";
+/** Played in turn, one per tap. Sparkles and hearts need room, so small orbs skip them. */
+const TAP_ACTIONS: TapAction[] = ["wiggle", "jump", "spin", "wink", "sparkle", "hearts"];
+const COMPACT_TAP_ACTIONS: TapAction[] = ["wiggle", "jump", "spin", "wink"];
+/** This many taps within DIZZY_WINDOW_MS and B.E.A. gets dizzy. */
+const DIZZY_TAPS = 6;
+const DIZZY_WINDOW_MS = 2500;
+/** What the face shows while it reacts, and for how long. */
+type TapFace = "happy" | "wink" | "dizzy";
+const TAP_FACE: Record<TapAction | "dizzy", { face: TapFace; ms: number }> = {
+  wiggle: { face: "happy", ms: 950 },
+  jump: { face: "happy", ms: 1000 },
+  spin: { face: "happy", ms: 950 },
+  wink: { face: "wink", ms: 1000 },
+  sparkle: { face: "happy", ms: 950 },
+  hearts: { face: "happy", ms: 1300 },
+  dizzy: { face: "dizzy", ms: 1900 },
+};
+const BURST_PIECES = { sparkle: 6, hearts: 3 } as const;
+const SPARKLE_PATH = "M0 -1 Q0 0 1 0 Q0 0 0 1 Q0 0 -1 0 Q0 0 0 -1 Z";
 
 const SPARKLES = [
   { x: 16, y: 40, s: 7, offset: 0 },
@@ -138,34 +162,79 @@ export default function BeaOrb({
   const twinkle = useSharedValue(0);
   const hop = useSharedValue(0);
   const pop = useSharedValue(moving && mood === "unsure" ? 0 : 1);
+  // One value per tap action, each running 0 → 1 once.
   const reaction = useSharedValue(0);
+  const jump = useSharedValue(0);
+  const spin = useSharedValue(0);
+  const dizzy = useSharedValue(0);
+  const burst = useSharedValue(0);
 
   // ── Tapping ────────────────────────────────────────────────────────────
-  // The smile lasts a moment longer than the wiggle, so it is still there
-  // when the orb settles.
-  const [cheering, setCheering] = useState(false);
-  const cheerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Each tap plays the next action. The face (a smile, a wink, dizzy eyes)
+  // lasts a moment longer than the motion, so it's still there as it settles.
+  const [tapFace, setTapFace] = useState<TapFace | null>(null);
+  const [burstKind, setBurstKind] = useState<"sparkle" | "hearts" | null>(null);
+  const faceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const burstTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nextActionRef = useRef(0);
+  const recentTapsRef = useRef<number[]>([]);
   useEffect(
     () => () => {
-      if (cheerTimerRef.current) clearTimeout(cheerTimerRef.current);
+      if (faceTimerRef.current) clearTimeout(faceTimerRef.current);
+      if (burstTimerRef.current) clearTimeout(burstTimerRef.current);
     },
     [],
   );
+
   const handlePress = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
-    setCheering(true);
-    if (cheerTimerRef.current) clearTimeout(cheerTimerRef.current);
-    cheerTimerRef.current = setTimeout(() => setCheering(false), 950);
+    const now = Date.now();
+    recentTapsRef.current = [
+      ...recentTapsRef.current.filter((at) => now - at < DIZZY_WINDOW_MS),
+      now,
+    ];
+    let action: TapAction | "dizzy";
+    if (recentTapsRef.current.length >= DIZZY_TAPS) {
+      recentTapsRef.current = [];
+      action = "dizzy";
+    } else {
+      const actions = compact ? COMPACT_TAP_ACTIONS : TAP_ACTIONS;
+      action = actions[nextActionRef.current % actions.length];
+      nextActionRef.current += 1;
+    }
+
+    Haptics.impactAsync(
+      action === "dizzy" ? Haptics.ImpactFeedbackStyle.Heavy : Haptics.ImpactFeedbackStyle.Light,
+    ).catch(() => undefined);
+
+    const { face: nextFace, ms } = TAP_FACE[action];
+    setTapFace(nextFace);
+    if (faceTimerRef.current) clearTimeout(faceTimerRef.current);
+    faceTimerRef.current = setTimeout(() => setTapFace(null), ms);
+
     if (!reducedMotion) {
       // `set` rather than `.value =`, which the React Compiler reads as
       // changing something a hook was given.
-      reaction.set(0);
-      reaction.set(withTiming(1, { duration: 720, easing: Easing.out(Easing.quad) }));
+      const once = (value: typeof reaction, duration: number) => {
+        value.set(0);
+        value.set(withTiming(1, { duration, easing: Easing.out(Easing.quad) }));
+      };
+      if (action === "wiggle" || action === "wink") once(reaction, 720);
+      if (action === "jump") once(jump, 900);
+      if (action === "spin") once(spin, 750);
+      if (action === "dizzy") once(dizzy, 1600);
+      if (action === "sparkle" || action === "hearts") {
+        once(reaction, 720);
+        once(burst, action === "hearts" ? 1200 : 800);
+        setBurstKind(action);
+        if (burstTimerRef.current) clearTimeout(burstTimerRef.current);
+        burstTimerRef.current = setTimeout(() => setBurstKind(null), action === "hearts" ? 1250 : 850);
+      }
     }
     onPress?.();
-  }, [onPress, reaction, reducedMotion]);
-  // While it smiles after a tap, the face is the happy one whatever the mood.
-  const face: BeaMood = cheering ? "happy" : mood;
+  }, [burst, compact, dizzy, jump, onPress, reaction, reducedMotion, spin]);
+
+  // While it reacts to a tap, the face follows the tap, whatever the mood.
+  const face: BeaMood | TapFace = tapFace ?? mood;
 
   useEffect(() => {
     const all = [float, blink, glow, orbit, sway, twinkle, hop, pop];
@@ -220,21 +289,37 @@ export default function BeaOrb({
     return () => all.forEach(cancelAnimation);
   }, [blink, float, glow, hop, mood, moving, orbit, pop, sway, twinkle]);
 
-  // A tap squashes the orb, springs it up and wiggles it before it settles.
+  // Tap motions, layered on the float: a wiggle squashes, springs and
+  // wiggles; a jump crouches, leaps and lands with a squash; a spin turns
+  // right round; dizzy wobbles side to side.
   const floatStyle = useAnimatedStyle(() => {
     const steps = [0, 0.18, 0.45, 0.72, 1];
     const r = reaction.value;
+    const jumpSteps = [0, 0.15, 0.5, 0.8, 0.9, 1];
+    const j = jump.get();
+    const wobble = interpolate(dizzy.get(), [0, 0.2, 0.4, 0.6, 0.8, 1], [0, 14, -12, 9, -5, 0]);
     return {
       transform: [
         {
           translateY:
             -float.value * size * 0.03 -
             hop.value * size * 0.1 +
-            interpolate(r, steps, [0, size * 0.03, -size * 0.09, 0, 0]),
+            interpolate(r, steps, [0, size * 0.03, -size * 0.09, 0, 0]) +
+            interpolate(j, jumpSteps, [0, size * 0.04, -size * 0.34, 0, size * 0.03, 0]),
         },
-        { rotate: `${interpolate(r, steps, [0, -9, 9, -4, 0])}deg` },
-        { scaleX: interpolate(r, steps, [1, 1.12, 0.93, 1.03, 1]) },
-        { scaleY: interpolate(r, steps, [1, 0.86, 1.09, 0.98, 1]) },
+        {
+          rotate: `${interpolate(r, steps, [0, -9, 9, -4, 0]) + spin.get() * 360 + wobble}deg`,
+        },
+        {
+          scaleX:
+            interpolate(r, steps, [1, 1.12, 0.93, 1.03, 1]) *
+            interpolate(j, jumpSteps, [1, 1.12, 0.94, 1, 1.1, 1]),
+        },
+        {
+          scaleY:
+            interpolate(r, steps, [1, 0.86, 1.09, 0.98, 1]) *
+            interpolate(j, jumpSteps, [1, 0.85, 1.08, 1, 0.88, 1]),
+        },
       ],
     };
   });
@@ -366,6 +451,29 @@ export default function BeaOrb({
               <Path d="M53 84 q7 5 14 0" stroke={colors.face} strokeWidth={3} fill="none" strokeLinecap="round" opacity={0.9} />
             </Svg>
           </View>
+        ) : face === "wink" ? (
+          // One eye open, the other closed in a smile.
+          <View style={place(43, 64, 34, 26)}>
+            <Svg width="100%" height="100%" viewBox="43 64 34 26">
+              <Rect x={46} y={65} width={9.5} height={13} rx={4.75} fill={colors.face} />
+              <Path d="M64 74 q5.5 -8 11 0" stroke={colors.face} strokeWidth={3.6} fill="none" strokeLinecap="round" />
+              <Path d="M53 84 q7 5 14 0" stroke={colors.face} strokeWidth={3} fill="none" strokeLinecap="round" opacity={0.9} />
+            </Svg>
+          </View>
+        ) : face === "dizzy" ? (
+          // Swirly eyes and a wobbly mouth.
+          <View style={place(43, 64, 34, 26)}>
+            <Svg width="100%" height="100%" viewBox="43 64 34 26">
+              <Path
+                d="M46.5 71 a4.5 4.5 0 1 1 9 0 a3 3 0 1 1 -6 0 a1.5 1.5 0 1 1 3 0 M64.5 71 a4.5 4.5 0 1 1 9 0 a3 3 0 1 1 -6 0 a1.5 1.5 0 1 1 3 0"
+                stroke={colors.face}
+                strokeWidth={2.2}
+                fill="none"
+                strokeLinecap="round"
+              />
+              <Path d="M52 85 q3.5 -3 7 0 q3.5 3 7 0" stroke={colors.face} strokeWidth={2.6} fill="none" strokeLinecap="round" />
+            </Svg>
+          </View>
         ) : (
           <Reanimated.View style={[place(44, 61, 32, 20), eyesStyle]}>
             <Svg width="100%" height="100%" viewBox="44 61 32 20">
@@ -415,6 +523,18 @@ export default function BeaOrb({
           <Text style={{ color: colors.body, fontSize: 17 * u, lineHeight: 20 * u, fontWeight: "800" }}>?</Text>
         </Reanimated.View>
       )}
+
+      {burstKind &&
+        Array.from({ length: BURST_PIECES[burstKind] }).map((_, index) => (
+          <BurstPiece
+            key={`${burstKind}-${index}`}
+            kind={burstKind}
+            index={index}
+            progress={burst}
+            size={size}
+            color={burstKind === "hearts" ? theme.danger : colors.accent}
+          />
+        ))}
     </Reanimated.View>
   );
 
@@ -429,6 +549,70 @@ export default function BeaOrb({
     >
       {orb}
     </Pressable>
+  );
+}
+
+/** One piece of a tap's burst: a sparkle flying outward, or a heart floating up. */
+function BurstPiece({
+  kind,
+  index,
+  progress,
+  size,
+  color,
+}: {
+  kind: "sparkle" | "hearts";
+  index: number;
+  progress: SharedValue<number>;
+  size: number;
+  color: string;
+}) {
+  const glyph = kind === "sparkle" ? size * 0.13 : size * 0.18;
+  const pieceStyle = useAnimatedStyle(() => {
+    const p = progress.get();
+    if (kind === "sparkle") {
+      const angle = (index / BURST_PIECES.sparkle) * Math.PI * 2 - Math.PI / 2;
+      const distance = size * (0.28 + 0.34 * p);
+      return {
+        opacity: p < 0.15 ? p / 0.15 : 1 - (p - 0.15) / 0.85,
+        transform: [
+          { translateX: Math.cos(angle) * distance },
+          { translateY: Math.sin(angle) * distance },
+          { scale: 0.5 + 0.7 * (1 - p) },
+        ],
+      };
+    }
+    return {
+      opacity: p < 0.1 ? p / 0.1 : 1 - (p - 0.1) / 0.9,
+      transform: [
+        { translateX: (index - 1) * size * 0.26 + Math.sin(p * Math.PI * 2 + index) * size * 0.04 },
+        { translateY: -size * (0.25 + 0.45 * p) },
+        { scale: 0.7 + 0.5 * p },
+      ],
+    };
+  });
+  return (
+    <Reanimated.View
+      style={[
+        {
+          position: "absolute",
+          left: size / 2 - glyph / 2,
+          top: size / 2 - glyph / 2,
+          width: glyph,
+          height: glyph,
+          alignItems: "center",
+          justifyContent: "center",
+        },
+        pieceStyle,
+      ]}
+    >
+      {kind === "sparkle" ? (
+        <Svg width="100%" height="100%" viewBox="-1 -1 2 2">
+          <Path d={SPARKLE_PATH} fill={color} />
+        </Svg>
+      ) : (
+        <Text style={{ color, fontSize: glyph, lineHeight: glyph * 1.15 }}>♥</Text>
+      )}
+    </Reanimated.View>
   );
 }
 

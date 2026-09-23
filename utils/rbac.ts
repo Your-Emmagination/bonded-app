@@ -151,18 +151,21 @@ export async function getUserDataByAuthUser(user: User | null | undefined): Prom
 export async function resolveUserRoleForAuthUser(user: User | null | undefined): Promise<UserRole> {
   if (!user) return "student";
 
+  // The profile is the source of truth: Manage Users changes the role there.
+  // The token's role claim is stamped once at registration and never
+  // updated, so a demoted teacher kept "Pin to Top of Feed" and other staff
+  // controls while this trusted the claim first. It now only answers for an
+  // account that has no profile.
+  const profile = await getUserDataByAuthUser(user);
+  if (profile) return profile.role || "student";
+
   try {
     const idTokenResult = await user.getIdTokenResult(true);
-    const tokenRole = normalizeUserRole(idTokenResult.claims.role);
-    if (tokenRole !== "student" || idTokenResult.claims.role !== undefined) {
-      return tokenRole;
-    }
+    return normalizeUserRole(idTokenResult.claims.role);
   } catch (error) {
     console.error("Error fetching role from auth token:", error);
+    return "student";
   }
-
-  const profile = await getUserDataByAuthUser(user);
-  return profile?.role || "student";
 }
 
 const getDefaultPermissions = (): UserPermissions => {

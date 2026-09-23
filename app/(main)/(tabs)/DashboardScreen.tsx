@@ -6,6 +6,9 @@ import { friendlyModerationReasons, moderationMediaSummary } from "@/utils/moder
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { YEAR_LEVELS } from "@/utils/yearLevels";
 import { subscribeToStaffTicketBadge } from "@/utils/supportTickets";
+import { getPresenceState, PRESENCE_TIMEOUT_MS, type PresenceData } from "@/utils/messengerState";
+import { useAppActive } from "@/utils/presence";
+import { useRelativeTimeNow } from "@/utils/relativeTime";
 const YEAR_LEVEL_OPTIONS = YEAR_LEVELS;
 import { avatarThumb, feedImage } from "@/utils/cloudinaryImages";
 import { useNetworkStatus } from "@/utils/networkUtils";
@@ -24,6 +27,7 @@ import {
     canManageUsers,
     getPermissionsForRole,
     getRoleDisplayName,
+    getStudentDocIdFromAuthUser,
     getRoleHierarchyLevel,
     isStaff,
     parseUserRole,
@@ -31,17 +35,19 @@ import {
 } from "@/utils/rbac";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useIsFocused, useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
 import {
     collection,
     deleteDoc,
     doc,
     getCountFromServer,
+    getDocs,
     onSnapshot,
     query,
     serverTimestamp,
     setDoc,
+    Timestamp,
     updateDoc,
     where,
 } from "firebase/firestore";
@@ -60,7 +66,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
 import ConfirmDialog from "../components/ConfirmDialog";
 import ImageZoomViewer from "../components/ImageZoomViewer";
-import { DashboardSkeleton } from "../components/Skeleton";
+import { SkeletonBlock, SkeletonCard, SkeletonCircle, SkeletonGroup } from "../components/Skeleton";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -157,10 +163,60 @@ export default function DashboardScreen() {
     totalPosts: 0,
     totalPolls: 0,
     totalUsers: 0,
-    onlineUsers: 0,
     totalComments: 0,
     totalEvents: 0,
   });
+
+  // "Online Now" by the same rule as Home's Campus Presence and Messenger:
+  // heard from in the last 90 seconds, not hiding Active Status, not locked,
+  // and not you — so the two numbers agree. Checked once a minute while the
+  // Dashboard is on screen, the way Home does it. It used to listen live to
+  // every profile marked online, which re-downloaded one each time a phone
+  // checked in, and kept going on other tabs. Asking by "last seen" also
+  // skips phones that closed without signing off and stayed marked online.
+  const presenceNow = useRelativeTimeNow();
+  const dashboardFocused = useIsFocused();
+  const dashboardAppActive = useAppActive();
+  const [onlineCandidates, setOnlineCandidates] = useState<
+    (PresenceData & { id: string; userId?: string; accountLocked?: boolean })[]
+  >([]);
+  useEffect(() => {
+    if (!userRole || isOffline || !dashboardFocused || !dashboardAppActive) return;
+    let cancelled = false;
+    const check = () => {
+      getDocs(
+        query(
+          collection(db, "students"),
+          where("lastSeen", ">=", Timestamp.fromMillis(Date.now() - PRESENCE_TIMEOUT_MS)),
+        ),
+      )
+        .then((snapshot) => {
+          if (cancelled) return;
+          setOnlineCandidates(
+            snapshot.docs.map((studentDoc) => ({ id: studentDoc.id, ...(studentDoc.data() as PresenceData) })),
+          );
+        })
+        .catch((error) => console.warn("Online-now check failed:", error));
+    };
+    check();
+    const timer = setInterval(check, 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [dashboardAppActive, dashboardFocused, isOffline, userRole]);
+  const onlineNow = useMemo(() => {
+    const me = new Set(
+      [auth.currentUser?.uid, getStudentDocIdFromAuthUser(auth.currentUser)].filter(Boolean) as string[],
+    );
+    return onlineCandidates.filter(
+      (student) =>
+        !me.has(student.id) &&
+        !me.has(student.userId || "") &&
+        student.accountLocked !== true &&
+        getPresenceState(student, presenceNow).active,
+    ).length;
+  }, [onlineCandidates, presenceNow]);
   const [moderationItems, setModerationItems] = useState<
     {
       id: string;
@@ -332,13 +388,10 @@ export default function DashboardScreen() {
   const refreshStats = useCallback(async () => {
     if (!auth.currentUser) return;
     try {
-      const [posts, polls, users, online, comments, events] = await Promise.all([
+      const [posts, polls, users, comments, events] = await Promise.all([
         getCountFromServer(collection(db, "posts")),
         getCountFromServer(collection(db, "polls")),
         getCountFromServer(collection(db, "students")),
-        getCountFromServer(
-          query(collection(db, "students"), where("isOnline", "==", true)),
-        ),
         getCountFromServer(collection(db, "comments")),
         getCountFromServer(collection(db, "events")),
       ]);
@@ -346,7 +399,6 @@ export default function DashboardScreen() {
         totalPosts: posts.data().count,
         totalPolls: polls.data().count,
         totalUsers: users.data().count,
-        onlineUsers: online.data().count,
         totalComments: comments.data().count,
         totalEvents: events.data().count,
       };
@@ -862,9 +914,41 @@ const handleYearLevelChange = useCallback(
   );
 
   if (loading) {
+    // Drawn with the dashboard's own header, stat cards and action rows, so
+    // everything sits where it will be once it loads.
     return (
       <SafeAreaView style={styles.container}>
-        <DashboardSkeleton />
+        <View style={styles.contentShell}>
+          <SkeletonGroup style={styles.scrollContent}>
+            <View style={styles.header}>
+              <View>
+                <Text style={styles.title}>Dashboard</Text>
+                <SkeletonBlock width={150} height={14} style={{ marginTop: 2 }} />
+              </View>
+              <SkeletonCircle size={40} />
+            </View>
+            <View style={styles.statsGrid}>
+              {Array.from({ length: 6 }).map((_, index) => (
+                <View key={index} style={styles.statCard}>
+                  <SkeletonCircle size={40} style={{ marginBottom: 12 }} />
+                  <SkeletonBlock width={54} height={26} style={{ marginBottom: 6 }} />
+                  <SkeletonBlock width={78} height={12} />
+                </View>
+              ))}
+            </View>
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Quick Actions</Text>
+              {Array.from({ length: 4 }).map((_, index) => (
+                <SkeletonCard
+                  key={index}
+                  style={styles.actionButton}
+                  avatar={{ size: 40 }}
+                  lines={[{ width: "55%", height: 14 }]}
+                />
+              ))}
+            </View>
+          </SkeletonGroup>
+        </View>
       </SafeAreaView>
     );
   }
@@ -917,7 +1001,7 @@ const handleYearLevelChange = useCallback(
             icon="ellipse"
             iconColor="#2ecc71"
             label="Online Now"
-            value={stats.onlineUsers}
+            value={onlineNow}
           />
           <StatCard
             icon="chatbubbles"
@@ -1664,8 +1748,8 @@ const makeStyles = (c: ThemeTokens) =>
     marginBottom: 24,
     backgroundColor: c.chrome,
     borderRadius: 24,
-    paddingHorizontal: 18,
-    paddingVertical: 18,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
     borderWidth: 1,
     borderColor: c.textSecondary,
   },
@@ -1677,7 +1761,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   subtitle: {
     fontSize: 14,
-    color: c.borderStrong,
+    color: c.onChromeMuted,
     fontWeight: "500",
   },
   roleBadge: {
@@ -1711,7 +1795,7 @@ const makeStyles = (c: ThemeTokens) =>
     marginBottom: 12,
   },
   statValue: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: "bold",
     color: c.textPrimary,
     marginBottom: 4,
@@ -1763,9 +1847,9 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.border,
     borderRadius: 16,
-    padding: 14,
+    padding: 16,
     marginTop: 12,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   registerUsersButtonIcon: {
     width: 38,
@@ -1788,12 +1872,12 @@ const makeStyles = (c: ThemeTokens) =>
   manageUsersHero: {
     backgroundColor: c.chrome,
     borderRadius: 18,
-    padding: 18,
+    padding: 16,
     flexDirection: "row",
-    gap: 14,
+    gap: 16,
     borderWidth: 1,
     borderColor: c.textSecondary,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   manageUsersHeroIcon: {
     width: 48,
@@ -1808,12 +1892,12 @@ const makeStyles = (c: ThemeTokens) =>
   },
   manageUsersHeroTitle: {
     color: c.onChrome,
-    fontSize: 19,
+    fontSize: 18,
     fontWeight: "800",
     marginBottom: 4,
   },
   manageUsersHeroText: {
-    color: c.borderStrong,
+    color: c.onChromeMuted,
     fontSize: 13,
     lineHeight: 20,
   },
@@ -1821,7 +1905,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 10,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   insightPill: {
     minWidth: (SCREEN_WIDTH - 64) / 2,
@@ -1847,7 +1931,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 16,
     borderWidth: 1,
     borderColor: c.border,
-    padding: 14,
+    padding: 16,
     marginBottom: 10,
     gap: 12,
   },
@@ -1885,8 +1969,8 @@ const makeStyles = (c: ThemeTokens) =>
     paddingVertical: 8,
   },
   filterChipActive: {
-    backgroundColor: c.textSecondary,
-    borderColor: c.textSecondary,
+    backgroundColor: c.primary,
+    borderColor: c.primary,
   },
   filterChipText: {
     color: c.textSecondary,
@@ -1921,12 +2005,12 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 13,
     marginTop: 6,
     textAlign: "center",
-    lineHeight: 19,
+    lineHeight: 20,
   },
   manageUserCard: {
     backgroundColor: c.surface,
     borderRadius: 16,
-    padding: 14,
+    padding: 16,
     borderWidth: 1,
     borderColor: c.border,
     marginBottom: 12,
@@ -1997,7 +2081,7 @@ const makeStyles = (c: ThemeTokens) =>
   manageUserMeta: {
     color: c.textMuted,
     fontSize: 12.5,
-    lineHeight: 18,
+    lineHeight: 16,
   },
   manageUserBadgeRow: {
     flexDirection: "row",
@@ -2051,8 +2135,8 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "700",
   },
   manageUserExpandedPanel: {
-    marginTop: 14,
-    paddingTop: 14,
+    marginTop: 16,
+    paddingTop: 16,
     borderTopWidth: 1,
     borderTopColor: c.border,
   },
@@ -2064,7 +2148,7 @@ const makeStyles = (c: ThemeTokens) =>
   manageUserExpandedText: {
     color: c.textMuted,
     fontSize: 12.5,
-    lineHeight: 18,
+    lineHeight: 16,
     marginTop: 4,
     marginBottom: 12,
   },
@@ -2110,7 +2194,7 @@ const makeStyles = (c: ThemeTokens) =>
   manageUserHintText: {
     color: c.textMuted,
     fontSize: 12,
-    lineHeight: 18,
+    lineHeight: 16,
     marginTop: 12,
   },
   infoCard: {
@@ -2142,7 +2226,7 @@ const makeStyles = (c: ThemeTokens) =>
   comingSoonCard: {
     backgroundColor: c.surface,
     borderRadius: 12,
-    padding: 40,
+    padding: 32,
     alignItems: "center",
     borderWidth: 1,
     borderColor: c.border,
@@ -2156,7 +2240,7 @@ const makeStyles = (c: ThemeTokens) =>
   reviewCard: {
     backgroundColor: c.surface,
     borderRadius: 14,
-    padding: 14,
+    padding: 16,
     marginBottom: 12,
     borderWidth: 1,
     borderColor: c.border,
@@ -2207,7 +2291,7 @@ const makeStyles = (c: ThemeTokens) =>
   reviewBody: {
     color: c.textPrimary,
     fontSize: 14,
-    lineHeight: 21,
+    lineHeight: 20,
   },
   reviewImage: {
     width: "100%",
@@ -2220,12 +2304,12 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.danger,
     fontSize: 12,
     marginTop: 8,
-    lineHeight: 18,
+    lineHeight: 16,
   },
   reviewActions: {
     flexDirection: "row",
     gap: 10,
-    marginTop: 14,
+    marginTop: 16,
   },
   reviewButton: {
     flex: 1,

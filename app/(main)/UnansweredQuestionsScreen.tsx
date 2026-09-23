@@ -17,7 +17,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
 import ConfirmDialog from "./components/ConfirmDialog";
-import { ListSkeleton } from "./components/Skeleton";
+import { CardListSkeleton } from "./components/Skeleton";
 
 type UnansweredQuestion = {
   id: string;
@@ -122,15 +122,10 @@ export default function UnansweredQuestionsScreen() {
     }
   };
 
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <ListSkeleton showAvatar={false} count={5} />
-      </SafeAreaView>
-    );
-  }
-
-  if (!allowed) {
+  // While it loads, the real screen shows — header and the help
+  // card — and only the list is drawn as placeholder cards in the real
+  // card style, so nothing moves when the entries arrive.
+  if (!loading && !allowed) {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.centerState}>
@@ -205,7 +200,19 @@ export default function UnansweredQuestionsScreen() {
             </View>
           )}
 
-          {questions.length === 0 ? (
+          {loading ? (
+            <CardListSkeleton
+              count={4}
+              cardStyle={styles.questionCard}
+              lines={[
+                { width: "88%", height: 14 },
+                { width: "62%", height: 14, gap: 6 },
+                { width: 120, height: 10, gap: 12 },
+              ]}
+              chips={[118, 96]}
+              chipHeight={30}
+            />
+          ) : questions.length === 0 ? (
             <View style={styles.emptyCard}>
               <Ionicons name="checkmark-circle-outline" size={42} color={theme.textMuted} />
               <Text style={styles.emptyTitle}>Nothing unanswered</Text>
@@ -275,7 +282,7 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: 28,
+    paddingHorizontal: 20,
   },
   header: {
     flexDirection: "row",
@@ -295,11 +302,11 @@ const makeStyles = (c: ThemeTokens) =>
   },
   headerTitle: {
     color: c.surface,
-    fontSize: 21,
+    fontSize: 20,
     fontWeight: "800",
   },
   headerSubtitle: {
-    color: c.borderStrong,
+    color: c.onChromeMuted,
     marginTop: 2,
     fontSize: 12.5,
   },
@@ -312,8 +319,8 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 16,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    padding: 14,
-    marginBottom: 14,
+    padding: 16,
+    marginBottom: 16,
   },
   helperText: {
     color: c.textSecondary,
@@ -321,7 +328,7 @@ const makeStyles = (c: ThemeTokens) =>
     lineHeight: 20,
   },
   clusterSection: {
-    marginBottom: 18,
+    marginBottom: 20,
   },
   clusterSectionTitle: {
     color: c.primary,
@@ -332,7 +339,7 @@ const makeStyles = (c: ThemeTokens) =>
   clusterSectionHint: {
     color: c.textMuted,
     fontSize: 12.5,
-    lineHeight: 18,
+    lineHeight: 16,
     marginBottom: 12,
   },
   clusterCard: {
@@ -340,7 +347,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 16,
     borderWidth: 1,
     borderColor: c.accent,
-    padding: 14,
+    padding: 16,
     marginBottom: 12,
   },
   clusterCountBadge: {
@@ -360,7 +367,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textPrimary,
     fontSize: 15,
     fontWeight: "700",
-    lineHeight: 21,
+    lineHeight: 20,
     marginBottom: 10,
   },
   clusterTagsRow: {
@@ -401,7 +408,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 18,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    padding: 28,
+    padding: 24,
     alignItems: "center",
   },
   emptyTitle: {
@@ -421,7 +428,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 16,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    padding: 14,
+    padding: 16,
     marginBottom: 12,
   },
   questionTopRow: {
@@ -442,7 +449,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textPrimary,
     fontSize: 15,
     fontWeight: "700",
-    lineHeight: 21,
+    lineHeight: 20,
   },
   metaRow: {
     flexDirection: "row",

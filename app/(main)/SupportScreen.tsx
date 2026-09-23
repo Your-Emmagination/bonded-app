@@ -17,7 +17,6 @@ import { onAuthStateChanged } from "firebase/auth";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
   ScrollView,
   StyleSheet,
@@ -26,11 +25,15 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import BeaOrb from "./components/BeaOrb";
 import ConfirmDialog from "./components/ConfirmDialog";
-import { ListSkeleton } from "./components/Skeleton";
+import { CardListSkeleton } from "./components/Skeleton";
 import { auth } from "../../Firebase_configure";
 import { uploadPostImage } from "@/utils/cloudinaryUpload";
 import { getTimeAgo } from "@/utils/relativeTime";
@@ -180,7 +183,7 @@ export default function SupportScreen() {
         <View style={{ width: 24 }} />
       </View>
 
-      <KeyboardAvoidingView
+      <KeyboardAvoidingView automaticOffset
         style={{ flex: 1 }}
         behavior="padding"
         enabled={Platform.OS !== "web"}
@@ -375,7 +378,17 @@ export default function SupportScreen() {
               </View>
 
               {loading ? (
-                <ListSkeleton count={3} rowStyle={styles.skeletonCard} />
+                // Ticket cards in the real card style and spacing.
+                <CardListSkeleton
+                  count={3}
+                  style={styles.skeletonList}
+                  cardStyle={styles.ticketCard}
+                  lines={[
+                    { width: 84, height: 12 },
+                    { width: "68%", height: 15, gap: 9 },
+                    { width: "92%", height: 12, gap: 7 },
+                  ]}
+                />
               ) : myTickets.length === 0 ? (
                 <View style={styles.emptyCard}>
                   <Ionicons name="file-tray-outline" size={28} color={theme.textMuted} />
@@ -482,7 +495,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.borderStrong,
     borderRadius: 18,
-    padding: 15,
+    padding: 16,
   },
   heroIcon: {
     width: 48,
@@ -502,7 +515,7 @@ const makeStyles = (c: ThemeTokens) =>
     gap: 8,
     backgroundColor: c.primary,
     borderRadius: 15,
-    paddingVertical: 14,
+    paddingVertical: 16,
   },
   newButtonText: { color: c.background, fontSize: 14.5, fontWeight: "900" },
 
@@ -527,7 +540,8 @@ const makeStyles = (c: ThemeTokens) =>
   },
   unreadPillText: { color: c.danger, fontSize: 11, fontWeight: "900" },
 
-  skeletonCard: { height: 96, borderRadius: 16, marginBottom: 10 },
+  // The same space between cards as the page's own spacing.
+  skeletonList: { gap: 12 },
 
   emptyCard: {
     alignItems: "center",
@@ -536,14 +550,14 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.border,
     borderRadius: 18,
-    paddingVertical: 30,
+    paddingVertical: 24,
     paddingHorizontal: 20,
   },
   emptyTitle: { color: c.textPrimary, fontSize: 14.5, fontWeight: "900" },
   emptyText: {
     color: c.textMuted,
     fontSize: 12.5,
-    lineHeight: 18,
+    lineHeight: 16,
     textAlign: "center",
   },
 
@@ -552,7 +566,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.border,
     borderRadius: 16,
-    padding: 14,
+    padding: 16,
     gap: 5,
   },
   ticketCardUnread: { borderColor: c.danger, backgroundColor: c.surfaceRaised },
@@ -646,7 +660,7 @@ const makeStyles = (c: ThemeTokens) =>
   privacyNote: {
     color: c.textMuted,
     fontSize: 11.5,
-    lineHeight: 17,
+    lineHeight: 16,
     marginTop: 4,
   },
 
@@ -660,7 +674,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderColor: c.borderStrong,
     borderStyle: "dashed",
     borderRadius: 14,
-    paddingVertical: 14,
+    paddingVertical: 16,
   },
   attachButtonText: { color: c.accent, fontSize: 13.5, fontWeight: "800" },
   attachmentCard: {
@@ -692,7 +706,7 @@ const makeStyles = (c: ThemeTokens) =>
     gap: 8,
     backgroundColor: c.primary,
     borderRadius: 15,
-    paddingVertical: 14,
+    paddingVertical: 16,
     marginTop: 8,
   },
   primaryButtonDisabled: { backgroundColor: c.borderStrong },

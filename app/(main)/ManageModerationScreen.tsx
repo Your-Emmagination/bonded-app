@@ -36,7 +36,7 @@ import ImageZoomViewer from "./components/ImageZoomViewer";
 import VideoPostMedia from "./components/VideoPostMedia";
 import ConfirmDialog from "./components/ConfirmDialog";
 import { friendlyModerationReasons, moderationMediaSummary, safetyReviewLabel } from "@/utils/moderationReasons";
-import { ListSkeleton } from "./components/Skeleton";
+import { CardListSkeleton, SkeletonBlock, SkeletonCard } from "./components/Skeleton";
 import { createModerationNotification } from "@/utils/notifications";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { isStaff } from "@/utils/rbac";
@@ -662,14 +662,54 @@ export default function ManageModerationScreen() {
   );
 
   if (loading) {
+    // Drawn as the screen will be — its bar, its opening card, then cards in
+    // the real card style — so nothing moves when the data arrives.
     return (
       <SafeAreaView style={styles.safeArea}>
-        <ListSkeleton
-          count={5}
-          showAvatar={false}
-          contentStyle={styles.skeletonContent}
-          rowStyle={styles.skeletonCard}
-        />
+        <View style={styles.topBar}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => router.back()}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="arrow-back" size={21} color={theme.onPrimary} />
+          </TouchableOpacity>
+          <View style={styles.topBarCopy}>
+            <Text style={styles.topBarEyebrow}>STAFF WORKSPACE</Text>
+            <Text style={styles.topBarTitle}>Manage Moderation</Text>
+          </View>
+          <View style={styles.queueBadge}>
+            <Text style={styles.queueBadgeText}>–</Text>
+          </View>
+        </View>
+        <CardListSkeleton
+          count={3}
+          style={[styles.body, styles.content]}
+          header={
+            <SkeletonCard
+              style={styles.heroCard}
+              avatar={{ size: 52, radius: 18, style: { marginRight: 16 } }}
+              lines={[
+                { width: "58%", height: 15 },
+                { width: "92%", height: 11, gap: 9 },
+                { width: "74%", height: 11, gap: 6 },
+              ]}
+            />
+          }
+          cardStyle={styles.reviewCard}
+          lines={[
+            { width: 96, height: 22 },
+            { width: "94%", height: 12, gap: 12 },
+            { width: "88%", height: 12, gap: 8 },
+            { width: "62%", height: 12, gap: 8 },
+          ]}
+        >
+          <View style={styles.actionRow}>
+            <SkeletonBlock width="31%" height={39} radius={11} />
+            <SkeletonBlock width="31%" height={39} radius={11} />
+            <SkeletonBlock width="31%" height={39} radius={11} />
+          </View>
+        </CardListSkeleton>
       </SafeAreaView>
     );
   }
@@ -1182,7 +1222,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   topBarTitle: {
     color: c.background,
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: "900",
     marginTop: 2,
   },
@@ -1211,13 +1251,13 @@ const makeStyles = (c: ThemeTokens) =>
   content: { padding: 16, paddingBottom: 100 },
   heroCard: {
     flexDirection: "row",
-    gap: 14,
-    padding: 18,
+    gap: 16,
+    padding: 16,
     borderRadius: 22,
     backgroundColor: c.background,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   heroIcon: {
     width: 52,
@@ -1242,7 +1282,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 17,
     borderWidth: 1,
     borderColor: c.border,
-    padding: 14,
+    padding: 16,
   },
   metricIcon: {
     width: 34,
@@ -1330,7 +1370,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 19,
     borderWidth: 1,
     borderColor: c.border,
-    padding: 14,
+    padding: 16,
     marginBottom: 11,
   },
   skeletonContent: { padding: 16 },
@@ -1487,7 +1527,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.borderStrong,
     borderRadius: 14,
-    paddingVertical: 13,
+    paddingVertical: 16,
     marginTop: 4,
   },
   loadMoreText: { color: c.primary, fontSize: 13, fontWeight: "800" },
@@ -1541,7 +1581,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   emptyCard: {
     alignItems: "center",
-    padding: 30,
+    padding: 24,
     borderRadius: 19,
     backgroundColor: c.background,
     borderWidth: 1,

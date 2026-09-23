@@ -2,7 +2,7 @@
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
-import { beginLoginPreparation, findSetupProfile } from "@/contexts/AccountSetupContext";
+import { beginLoginPreparation, findSetupProfile, takeSignOutNotice } from "@/contexts/AccountSetupContext";
 import { checkAccountPassword } from "@/utils/passwordReset";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -15,7 +15,6 @@ import {
     ActivityIndicator,
     Animated,
     Keyboard,
-    KeyboardAvoidingView,
     Modal,
     Platform,
     ScrollView,
@@ -25,8 +24,13 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { auth } from "../Firebase_configure";
+import BrandWordmark from "./(main)/components/BrandWordmark";
 import ConfirmDialog from "./(main)/components/ConfirmDialog";
 
 const TERMS_ACCEPTED_KEY = "termsAccepted";
@@ -172,7 +176,12 @@ export default function LoginScreen() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Which field is being typed in, so it gets the gold ring and the other
+  // stays quiet. Both used to wear a gold border all the time.
+  const [focusedField, setFocusedField] = useState<"id" | "password" | null>(null);
+  // Opens with the reason when an admin has just locked or signed out this
+  // account (see AccountSetupContext), so it isn't a silent sign-out.
+  const [error, setError] = useState<string | null>(takeSignOutNotice);
   const [showTerms, setShowTerms] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string;
@@ -338,7 +347,7 @@ const handleTermsDecline = useCallback(() => {
 
       const errorMessages: Record<string, string> = {
         "auth/invalid-email": "Invalid ID format.",
-        "auth/user-disabled": "Account disabled. Contact admin.",
+        "auth/user-disabled": "This account is locked. Contact the school for help.",
         "auth/user-not-found": "No account found with this ID.",
         "auth/wrong-password": "Incorrect password.",
         "auth/invalid-credential": "Invalid ID or password.",
@@ -364,9 +373,9 @@ const handleTermsDecline = useCallback(() => {
         onDecline={handleTermsDecline}
       />
 
-      <KeyboardAvoidingView
+      <KeyboardAvoidingView automaticOffset
         style={styles.keyboardView}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior="padding"
       >
         <ScrollView
           style={styles.scrollView}
@@ -400,9 +409,9 @@ const handleTermsDecline = useCallback(() => {
                   style={styles.logo}
                   contentFit="contain"
                 />
-                <Text style={styles.brandText}>BondED</Text>
-                <Text style={styles.loginTitle}>Welcome Back</Text>
-                <Text style={styles.subtitle}>Sign in to continue</Text>
+                <BrandWordmark size={24} style={styles.brandText} />
+                <Text style={styles.loginTitle}>Welcome back</Text>
+                <Text style={styles.subtitle}>Sign in with your school ID</Text>
               </Animated.View>
 
               <Animated.View
@@ -416,11 +425,29 @@ const handleTermsDecline = useCallback(() => {
                   },
                 ]}
               >
-                <View style={[styles.inputWrapper, error && styles.inputError]}>
+                <View
+                  style={[
+                    styles.inputWrapper,
+                    focusedField === "id" && styles.inputFocused,
+                    error && styles.inputError,
+                  ]}
+                >
+                  <Ionicons
+                    name="id-card-outline"
+                    size={18}
+                    color={theme.onChromeMuted}
+                    style={styles.fieldIcon}
+                  />
+                  {/* Sign-in takes the ID the school issued — it used to say
+                      "Email", and people typed their Gmail and failed. */}
                   <TextInput
-                    placeholder="Email"
+                    placeholder="Student or employee ID"
                     placeholderTextColor={theme.onChromeMuted}
                     style={styles.input}
+                    autoComplete="username"
+                    textContentType="username"
+                    onFocus={() => setFocusedField("id")}
+                    onBlur={() => setFocusedField((field) => (field === "id" ? null : field))}
                     value={studentID}
                     onChangeText={(text) => {
                       setStudentID(text);
@@ -433,12 +460,28 @@ const handleTermsDecline = useCallback(() => {
                   />
                 </View>
 
-                <View style={[styles.inputWrapper, error && styles.inputError]}>
+                <View
+                  style={[
+                    styles.inputWrapper,
+                    focusedField === "password" && styles.inputFocused,
+                    error && styles.inputError,
+                  ]}
+                >
+                  <Ionicons
+                    name="lock-closed-outline"
+                    size={18}
+                    color={theme.onChromeMuted}
+                    style={styles.fieldIcon}
+                  />
                   <TextInput
                     placeholder="Password"
                     placeholderTextColor={theme.onChromeMuted}
                     secureTextEntry={!showPassword}
                     style={styles.input}
+                    autoComplete="password"
+                    textContentType="password"
+                    onFocus={() => setFocusedField("password")}
+                    onBlur={() => setFocusedField((field) => (field === "password" ? null : field))}
                     value={password}
                     onChangeText={(text) => {
                       setPassword(text);
@@ -498,6 +541,24 @@ const handleTermsDecline = useCallback(() => {
                   )}
                 </TouchableOpacity>
 
+                {/* For whoever is stuck here: common problems, how to reach
+                    the school, and a request they can send without an account. */}
+                <TouchableOpacity
+                  style={styles.helpLink}
+                  onPress={() =>
+                    router.push({
+                      pathname: "/SignInHelpScreen",
+                      params: { id: studentID.trim() },
+                    } as any)
+                  }
+                  activeOpacity={0.7}
+                  disabled={loading}
+                  accessibilityRole="button"
+                >
+                  <Ionicons name="help-buoy-outline" size={15} color={theme.accent} />
+                  <Text style={styles.helpLinkText}>Need help signing in?</Text>
+                </TouchableOpacity>
+
                 {/* Terms re-read link */}
                 <TouchableOpacity
                   style={styles.tosLink}
@@ -552,9 +613,9 @@ const makeTos = (c: ThemeTokens) =>
   },
   header: {
     alignItems: "center",
-    paddingTop: 28,
+    paddingTop: 24,
     paddingBottom: 16,
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(224,160,40,0.15)",
   },
@@ -598,17 +659,17 @@ const makeTos = (c: ThemeTokens) =>
     maxHeight: 380,
     flexShrink: 1,
     minHeight: 0,
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
   },
   bodyContent: {
-    paddingTop: 20,
+    paddingTop: 24,
     paddingBottom: 16,
   },
   sectionTitle: {
     fontSize: 13,
     fontWeight: "800",
     color: c.accent,
-    marginTop: 18,
+    marginTop: 20,
     marginBottom: 6,
     textTransform: "uppercase",
     letterSpacing: 0.8,
@@ -616,19 +677,19 @@ const makeTos = (c: ThemeTokens) =>
   paragraph: {
     fontSize: 14,
     color: c.onChrome,
-    lineHeight: 21,
+    lineHeight: 20,
     fontWeight: "400",
   },
   bullet: {
     fontSize: 14,
     color: c.onChrome,
-    lineHeight: 22,
+    lineHeight: 20,
     paddingLeft: 8,
     fontWeight: "400",
   },
   lastUpdated: {
-    marginTop: 28,
-    paddingTop: 14,
+    marginTop: 24,
+    paddingTop: 16,
     borderTopWidth: 1,
     borderTopColor: "rgba(184,143,135,0.16)",
   },
@@ -641,12 +702,12 @@ const makeTos = (c: ThemeTokens) =>
   actions: {
     flexDirection: "row",
     gap: 12,
-    paddingHorizontal: 24,
-    paddingTop: 18,
+    paddingHorizontal: 20,
+    paddingTop: 16,
   },
   declineBtn: {
     flex: 1,
-    paddingVertical: 13,
+    paddingVertical: 16,
     borderRadius: 10,
     borderWidth: 1.5,
     borderColor: c.chromeBorder,
@@ -660,7 +721,7 @@ const makeTos = (c: ThemeTokens) =>
   },
   acceptBtn: {
     flex: 2,
-    paddingVertical: 13,
+    paddingVertical: 16,
     borderRadius: 10,
     backgroundColor: c.accent,
     alignItems: "center",
@@ -697,7 +758,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   scrollContent: {
     flexGrow: 1,
-    paddingBottom: 20,
+    paddingBottom: 24,
   },
   content: {
     width: "100%",
@@ -707,9 +768,9 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     backgroundColor: c.chrome,
     overflow: "hidden",
-    paddingHorizontal: 28,
+    paddingHorizontal: 20,
     paddingTop: 16,
-    paddingBottom: 28,
+    paddingBottom: 24,
     justifyContent: "space-between",
   },
   topAccent: {
@@ -732,47 +793,50 @@ const makeStyles = (c: ThemeTokens) =>
   },
   logoContainer: {
     alignItems: "center",
-    paddingTop: 76,
+    paddingTop: 32,
   },
   logo: {
     width: 92,
     height: 92,
   },
   brandText: {
-    fontSize: 26,
-    color: "#40d4b9",
-    marginTop: 8,
-    fontWeight: "500",
+    marginTop: 10,
   },
   loginTitle: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: "800",
-    color: c.accent,
-    marginTop: 52,
+    color: c.onChrome,
+    marginTop: 24,
   },
   subtitle: {
-    color: c.accent,
+    color: c.onChromeMuted,
     fontSize: 15,
     marginTop: 6,
-    fontWeight: "600",
+    fontWeight: "500",
   },
   inputContainer: {
     width: "100%",
-    marginTop: 28,
+    marginTop: 24,
   },
   inputWrapper: {
     backgroundColor: c.chromeBorder,
-    borderColor: c.accent,
+    borderColor: "rgba(255,250,246,0.16)",
     borderWidth: 1.6,
-    borderRadius: 12,
+    borderRadius: 14,
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 10,
-    marginBottom: 18,
-    height: 46,
+    paddingHorizontal: 12,
+    marginBottom: 20,
+    height: 48,
+  },
+  inputFocused: {
+    borderColor: c.accent,
   },
   inputError: {
     borderColor: c.danger,
+  },
+  fieldIcon: {
+    marginRight: 10,
   },
   input: {
     flex: 1,
@@ -787,7 +851,7 @@ const makeStyles = (c: ThemeTokens) =>
   forgotPasswordLink: {
     alignSelf: "flex-end",
     marginTop: -8,
-    marginBottom: 14,
+    marginBottom: 16,
     paddingVertical: 4,
     paddingHorizontal: 2,
   },
@@ -801,7 +865,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     gap: 8,
     marginTop: -4,
-    marginBottom: 14,
+    marginBottom: 16,
     paddingHorizontal: 2,
   },
   errorText: {
@@ -812,10 +876,10 @@ const makeStyles = (c: ThemeTokens) =>
   },
   button: {
     backgroundColor: c.accent,
-    paddingVertical: 14,
+    paddingVertical: 16,
     borderRadius: 10,
     alignItems: "center",
-    marginTop: 18,
+    marginTop: 20,
     flexDirection: "row",
     justifyContent: "center",
     gap: 6,
@@ -827,7 +891,20 @@ const makeStyles = (c: ThemeTokens) =>
   buttonText: {
     color: c.onAccent,
     fontWeight: "800",
-    fontSize: 17,
+    fontSize: 16,
+  },
+  helpLink: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    marginTop: 16,
+    paddingVertical: 4,
+  },
+  helpLinkText: {
+    color: c.accent,
+    fontSize: 14,
+    fontWeight: "700",
   },
   tosLink: {
     flexDirection: "row",
@@ -842,14 +919,14 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "600",
   },
   footer: {
-    marginTop: 40,
+    marginTop: 24,
     alignItems: "center",
   },
   footerLine: {
     width: "100%",
     height: 1,
     backgroundColor: "rgba(184, 143, 135, 0.16)",
-    marginBottom: 18,
+    marginBottom: 20,
   },
   footerText: {
     color: c.onChromeMuted,

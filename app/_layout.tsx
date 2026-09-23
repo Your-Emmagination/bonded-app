@@ -17,19 +17,26 @@ import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { useEffect, useRef } from "react";
+import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { db } from "../Firebase_configure";
 import AppToast from "./(main)/components/AppToast";
+import BrandWordmark from "./(main)/components/BrandWordmark";
 
 export default function RootLayout() {
   // Outermost, so every screen and every modal can read the palette — and so
   // the stored choice is applied before the first screen paints.
   return (
     <ThemeProvider>
-      <AccountSetupProvider>
-        <RootNavigator />
-      </AccountSetupProvider>
+      {/* Reports the keyboard's position on every frame, so a typing bar can
+          move with it rather than after it. Follows the app's edge-to-edge
+          setup on its own, so screens look the same. */}
+      <KeyboardProvider>
+        <AccountSetupProvider>
+          <RootNavigator />
+        </AccountSetupProvider>
+      </KeyboardProvider>
     </ThemeProvider>
   );
 }
@@ -53,7 +60,9 @@ function RootNavigator() {
     const route = segments[0] as string | undefined;
     if (status === "loading") return;
     if (status === "signed-out") {
-      if (route !== "LoginScreen" && route !== "ForgotPasswordScreen") router.replace("/LoginScreen");
+      if (route !== "LoginScreen" && route !== "ForgotPasswordScreen" && route !== "SignInHelpScreen") {
+        router.replace("/LoginScreen");
+      }
     } else if (status === "setup" || status === "error") {
       if (route !== "ProfileSetupScreen") router.replace("/ProfileSetupScreen");
     } else if (route !== "(main)") {
@@ -229,6 +238,7 @@ function RootNavigator() {
         <Stack.Protected guard={status === "signed-out"}>
           <Stack.Screen name="LoginScreen" />
           <Stack.Screen name="ForgotPasswordScreen" />
+          <Stack.Screen name="SignInHelpScreen" />
         </Stack.Protected>
         <Stack.Protected guard={status === "setup" || status === "error"}>
           <Stack.Screen name="ProfileSetupScreen" />
@@ -252,11 +262,13 @@ function RootNavigator() {
             },
           ]}
         >
+          {/* The mark alone now — the name is text, so it reads on maroon. */}
           <Image
             source={require("../assets/images/BondEDlogo.png")}
-            style={{ width: 140, height: 140 }}
+            style={{ width: 112, height: 112 }}
             contentFit="contain"
           />
+          <BrandWordmark size={24} style={{ marginTop: 12 }} />
           <ActivityIndicator size="small" color="#e0a53d" style={{ marginTop: 24 }} />
         </View>
       )}

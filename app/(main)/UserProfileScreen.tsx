@@ -60,7 +60,13 @@ import { auth, db } from "../../Firebase_configure";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 import PollCard from "./components/PollCard";
 import PostCard from "./components/PostCard";
-import { FeedSkeleton, ProfileHeaderSkeleton } from "./components/Skeleton";
+import {
+  FeedSkeleton,
+  SkeletonBlock,
+  SkeletonCard,
+  SkeletonCircle,
+  SkeletonGroup,
+} from "./components/Skeleton";
 
 const PAGE_SIZE = 20;
 const USER_PROFILE_RETURN_ROUTE = "/(main)/UserProfileScreen";
@@ -1156,7 +1162,38 @@ const UserProfileScreen = () => {
               <View style={styles.headerBackSpacer} />
             </View>
           </View>
-          <ProfileHeaderSkeleton />
+          {/* The member's card and first section in their real styles, so
+              the profile fills in where the placeholders were. */}
+          <SkeletonGroup>
+            <View style={styles.profileCard}>
+              <View style={styles.avatarWrapper}>
+                <SkeletonCircle size={64} />
+              </View>
+              <SkeletonBlock width={170} height={22} style={{ marginBottom: 12 }} />
+              <SkeletonBlock width={120} height={32} radius={16} />
+              <SkeletonBlock width={150} height={40} radius={20} style={{ marginTop: 16 }} />
+            </View>
+            <View style={styles.section}>
+              <View style={styles.sectionTitleRow}>
+                <SkeletonBlock width={140} height={14} />
+              </View>
+              <View style={styles.goldCard}>
+                {[0, 1].map((index) => (
+                  <View key={index}>
+                    {index > 0 && <View style={styles.rowDivider} />}
+                    <SkeletonCard
+                      style={styles.infoRow}
+                      avatar={{ size: 36, radius: 10 }}
+                      lines={[
+                        { width: "32%", height: 10 },
+                        { width: "58%", height: 13, gap: 6 },
+                      ]}
+                    />
+                  </View>
+                ))}
+              </View>
+            </View>
+          </SkeletonGroup>
         </View>
       </SafeAreaView>
     );
@@ -1216,6 +1253,10 @@ const UserProfileScreen = () => {
           keyExtractor={(entry) => `${entry.type}:${entry.item.id}`}
           renderItem={renderProfileFeedItem}
           showsVerticalScrollIndicator={false}
+          // Comments and replies open from inside these cards, and React Native
+          // still counts this list as their parent for taps: left at "never",
+          // the first tap on Send only closed the keyboard.
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={styles.scrollContent}
           onScroll={handleScroll}
           scrollEventThrottle={150}
@@ -1579,7 +1620,7 @@ const makeStyles = (c: ThemeTokens) =>
     marginTop: 10,
     marginBottom: 6,
     paddingHorizontal: 14,
-    paddingVertical: 13,
+    paddingVertical: 16,
     borderRadius: 18,
     backgroundColor: c.primary,
     borderWidth: 1,
@@ -1616,7 +1657,7 @@ const makeStyles = (c: ThemeTokens) =>
     letterSpacing: 0.5,
   },
   headerSubtext: {
-    color: c.borderStrong,
+    color: c.onChromeMuted,
     fontSize: 12,
     textAlign: "center",
     marginTop: 2,
@@ -1627,7 +1668,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "center",
     gap: 12,
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
   },
   loadingText: { color: c.textMuted, fontSize: 14, fontWeight: "600" },
   errorText: { color: c.textMuted, fontSize: 16, fontWeight: "600" },
@@ -1636,7 +1677,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surface,
     marginHorizontal: 16,
     marginTop: 12,
-    paddingHorizontal: 22,
+    paddingHorizontal: 20,
     paddingVertical: 24,
     borderRadius: 24,
     borderWidth: 1,
@@ -1679,7 +1720,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   profileName: {
     color: c.textPrimary,
-    fontSize: 23,
+    fontSize: 24,
     fontWeight: "800",
     marginBottom: 10,
     textAlign: "center",
@@ -1703,10 +1744,10 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: c.primary,
-    paddingHorizontal: 22,
+    paddingHorizontal: 20,
     paddingVertical: 10,
     borderRadius: 22,
-    marginTop: 14,
+    marginTop: 16,
     gap: 8,
     shadowColor: c.primary,
     shadowOffset: { width: 0, height: 3 },
@@ -1944,8 +1985,8 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
-    paddingHorizontal: 24,
-    paddingVertical: 22,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
   },
   emptyIconCircle: {
     width: 52,

@@ -76,6 +76,18 @@ export type SupportTicket = {
   imageUrl?: string | null;
   /** Set when the ticket was raised from a question BEA could not answer. */
   sourceQuestion?: string | null;
+  /**
+   * "signin-help" for a request sent from the Sign-in Help screen by someone
+   * who couldn't sign in. It has no account behind it (userId is empty), so
+   * it is answered by email or phone, never in the app.
+   */
+  source?: string | null;
+  /** The email or phone number a sign-in request asked to be reached on. */
+  contact?: string | null;
+  /** Whether a sign-in request's ID matches a real account, and whose. */
+  accountFound?: boolean | null;
+  accountName?: string | null;
+  accountRole?: string | null;
 };
 
 export type TicketMessage = {
@@ -309,6 +321,11 @@ const toTicket = (id: string, data: any): SupportTicket => ({
   platform: data?.platform ?? null,
   imageUrl: data?.imageUrl ?? null,
   sourceQuestion: data?.sourceQuestion ?? null,
+  source: data?.source ?? null,
+  contact: data?.contact ?? null,
+  accountFound: typeof data?.accountFound === "boolean" ? data.accountFound : null,
+  accountName: data?.accountName ?? null,
+  accountRole: data?.accountRole ?? null,
 });
 
 /** The signed-in student's own tickets, newest activity first. */

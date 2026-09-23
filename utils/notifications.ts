@@ -14,6 +14,8 @@ import {
 import { auth, db } from "../Firebase_configure";
 import { getAiWorkerUrl } from "./aiConfig";
 import { EVERYONE_MENTION_ID } from "./aiAssistant";
+import { matchesEventAudience } from "./eventAudience";
+import { formatAnonymousHandle } from "./anonymousHandle";
 
 export type NotificationType =
   | "direct_message"
@@ -27,6 +29,8 @@ export type NotificationType =
   | "moderation"
   | "moderation_approved"
   | "server_deletion"
+  // A server manager removed you from a community server.
+  | "server_removal"
   // A staff reply on a Help & Support ticket.
   | "support";
 
@@ -93,6 +97,18 @@ type BroadcastEventNotificationInput = {
   description?: string | null;
   eventDate?: string | null;
   excludeUserIds?: string[];
+  /**
+   * Who to tell, already resolved by listEventRecipientIds. Passed in so the
+   * students collection is read once for both the in-app notification and
+   * the push, instead of once each.
+   */
+  recipientIds?: string[];
+  /**
+   * What happened, in the notification's own words: a new event, a change to
+   * one, or a cancellation. Every notification used to read "scheduled a new
+   * event", even the fifth time an event was edited.
+   */
+  message?: string;
 };
 
 type EmergencyNotificationInput = {
@@ -125,7 +141,9 @@ const buildLikeNotificationId = (
 
 const normalizeActorName = (actor: NotificationActor) => {
   if (actor.name?.trim()) {
-    return actor.name.trim();
+    return actor.isAnonymous
+      ? formatAnonymousHandle(actor.name)
+      : actor.name.trim();
   }
 
   return actor.isAnonymous ? "Anonymous" : "Someone";
@@ -400,19 +418,34 @@ export const resolveMentionRecipientIds = async ({
   );
 };
 
-export const createBroadcastEventNotifications = async ({
-  actor,
-  entityId,
-  title,
-  description,
-  eventDate,
+/**
+ * Everyone an event should reach. `forPrograms` empty means the whole campus;
+ * naming programs limits it to those students — staff are always included, so
+ * a teacher still hears about their own department's event.
+ *
+ * Read once and handed to both senders: a BSED-only seminar has no business
+ * buzzing every phone on campus.
+ */
+export const listEventRecipientIds = async ({
+  forPrograms = [],
   excludeUserIds = [],
-}: BroadcastEventNotificationInput) => {
+}: {
+  forPrograms?: string[];
+  excludeUserIds?: string[];
+}): Promise<string[]> => {
   const studentsSnapshot = await getDocs(collection(db, "students"));
-  const excludedIds = new Set([...excludeUserIds, actor.id].filter(Boolean));
-  const recipientIds = Array.from(
+  const excludedIds = new Set(excludeUserIds.filter(Boolean));
+
+  return Array.from(
     new Set(
       studentsSnapshot.docs
+        .filter((item) => {
+          const data = item.data();
+          const role = String(data?.role ?? "").trim().toLowerCase();
+          const isStudent = role === "" || role === "student" || role === "1";
+          if (!isStudent) return true;
+          return matchesEventAudience(forPrograms, { course: data?.course });
+        })
         .map((item) => {
           const data = item.data();
           return String(data?.userId || item.id || "").trim();
@@ -420,6 +453,22 @@ export const createBroadcastEventNotifications = async ({
         .filter((recipientId) => recipientId && !excludedIds.has(recipientId)),
     ),
   );
+};
+
+export const createBroadcastEventNotifications = async ({
+  actor,
+  entityId,
+  title,
+  description,
+  eventDate,
+  excludeUserIds = [],
+  recipientIds: providedRecipientIds,
+  message,
+}: BroadcastEventNotificationInput) => {
+  const excludedIds = new Set([...excludeUserIds, actor.id].filter(Boolean));
+  const recipientIds = (
+    providedRecipientIds ?? (await listEventRecipientIds({ excludeUserIds }))
+  ).filter((recipientId) => recipientId && !excludedIds.has(recipientId));
 
   const previewParts = [title.trim(), eventDate?.trim(), description?.trim()].filter(Boolean);
 
@@ -431,7 +480,7 @@ export const createBroadcastEventNotifications = async ({
         type: "event",
         entityType: "event",
         entityId,
-        message: "scheduled a new event",
+        message: message || "scheduled a new event",
         preview: previewParts.join(" - "),
       }),
     ),
@@ -592,6 +641,34 @@ export const createServerDeletionOutcomeNotification = async ({
   });
 };
 
+type ServerRemovalNotificationInput = {
+  recipientId: string;
+  remover: NotificationActor;
+  serverName: string;
+};
+
+/**
+ * Tells somebody a server manager removed them from a community server, so
+ * the server doesn't just vanish from their list. Informational only: they
+ * can no longer open the server, so like the deletion outcome above it
+ * carries no navigable entity id and a tap does nothing.
+ */
+export const createServerRemovalNotification = async ({
+  recipientId,
+  remover,
+  serverName,
+}: ServerRemovalNotificationInput) => {
+  await createNotification({
+    recipientId,
+    actor: remover,
+    type: "server_removal",
+    entityType: "server" as NotificationEntityType,
+    entityId: "",
+    message: `removed you from ${serverName}`,
+    preview: `Removed you from ${serverName}`,
+  });
+};
+
 export const subscribeToUnreadNotificationCount = (
   recipientId: string | null | undefined,
   onChange: (count: number) => void,
@@ -609,7 +686,12 @@ export const subscribeToUnreadNotificationCount = (
 
   return onSnapshot(
     notificationsQuery,
-    (snapshot) => onChange(snapshot.size),
+    (snapshot) => onChange(
+      snapshot.docs.filter((item) => {
+        const data = item.data();
+        return data.type !== "direct_message" && data.entityType !== "direct_message";
+      }).length,
+    ),
     (error) => {
       console.error("Error subscribing to unread notifications:", error);
       onChange(0);

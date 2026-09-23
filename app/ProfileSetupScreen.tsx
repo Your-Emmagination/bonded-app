@@ -13,7 +13,11 @@ import { StatusBar } from "expo-status-bar";
 import { signOut, updateProfile, type User } from "firebase/auth";
 import { doc, serverTimestamp, updateDoc } from "firebase/firestore";
 import { type Ref, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, BackHandler, Keyboard, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, type TextInputProps } from "react-native";
+import { ActivityIndicator, BackHandler, Keyboard,Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, type TextInputProps } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function ProfileSetupScreen() {
@@ -270,8 +274,11 @@ function SetupForm({ user, profile, profileId }: { user: User; profile: SetupPro
       // snapshot can safely unlock Home without interrupting an upload.
       // An unverified or different email keeps the root gate locked.
       await updateProfile(user, { photoURL: url });
+      // The email is not saved here: the public profile is readable by
+      // everyone signed in. The Worker saves it to the private record once
+      // it's verified.
       const fields = {
-        email: email.trim().toLowerCase(), profileImage: url, updatedAt: serverTimestamp(),
+        profileImage: url, updatedAt: serverTimestamp(),
         ...(!acceptedPreviously ? { communityRulesVersion: COMMUNITY_RULES_VERSION, communityRulesAcceptedAt: serverTimestamp() } : {}),
       };
       await updateDoc(doc(db, "students", profileId), fields);
@@ -306,7 +313,7 @@ function SetupForm({ user, profile, profileId }: { user: User; profile: SetupPro
   };
 
   return (
-    <KeyboardAvoidingView style={styles.screen} behavior="padding" enabled={Platform.OS !== "web"}>
+    <KeyboardAvoidingView automaticOffset style={styles.screen} behavior="padding" enabled={Platform.OS !== "web"}>
       <StatusBar style="dark" />
       <SafeAreaView style={styles.flex}>
         <ScrollView ref={scrollRef} style={styles.flex} onLayout={revealFocusedInput} onScroll={event => { scrollOffset.current = event.nativeEvent.contentOffset.y; }} scrollEventThrottle={16} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"} showsVerticalScrollIndicator={false}>

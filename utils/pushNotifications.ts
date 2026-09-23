@@ -39,6 +39,16 @@ type EventPushNotificationInput = {
   description?: string | null;
   eventDate?: string | null;
   excludeUserIds?: string[];
+  /**
+   * When set, only these accounts are pushed to — the event's audience, from
+   * listEventRecipientIds. Left out, it goes to the whole campus as before.
+   */
+  onlyUserIds?: string[];
+  /**
+   * The line on the lock screen. Defaults to "New event: …"; a change or a
+   * cancellation says so instead, which is the whole point of sending it.
+   */
+  headline?: string;
 };
 
 type EmergencyPushNotificationInput = {
@@ -625,9 +635,12 @@ export const sendBroadcastEventPushNotifications = async ({
   description,
   eventDate,
   excludeUserIds = [],
+  onlyUserIds,
+  headline,
 }: EventPushNotificationInput) => {
   const pushTokensSnapshot = await getDocs(collection(db, "userPushTokens"));
   const excludedIds = new Set(excludeUserIds.filter(Boolean));
+  const audience = onlyUserIds ? new Set(onlyUserIds.filter(Boolean)) : null;
   const tokensByUserId = new Map<string, Set<string>>();
 
   pushTokensSnapshot.docs.forEach((item) => {
@@ -635,6 +648,11 @@ export const sendBroadcastEventPushNotifications = async ({
     const userId = String(data?.userId || item.id || "").trim();
 
     if (!userId || excludedIds.has(userId)) {
+      return;
+    }
+
+    // Someone from another program: this event is not theirs to be woken for.
+    if (audience && !audience.has(userId)) {
       return;
     }
 
@@ -657,9 +675,9 @@ export const sendBroadcastEventPushNotifications = async ({
   ]);
 
   const pushBody = normalizeEventBody({ description, eventDate });
-  const notificationTitle = title.trim()
-    ? `New event: ${title.trim()}`
-    : "New calendar event";
+  const notificationTitle =
+    headline?.trim() ||
+    (title.trim() ? `New event: ${title.trim()}` : "New calendar event");
 
   const messages: ExpoPushMessage[] = [];
   let tokenCount = 0;

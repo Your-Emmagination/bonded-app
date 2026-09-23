@@ -35,9 +35,10 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
 import ConfirmDialog from "../components/ConfirmDialog";
-import { ListSkeleton } from "../components/Skeleton";
+import { SkeletonBlock, SkeletonCard, SkeletonGroup } from "../components/Skeleton";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
+import { formatAnonymousHandle } from "@/utils/anonymousHandle";
 
 type NotificationType =
   | "direct_message"
@@ -50,6 +51,7 @@ type NotificationType =
   | "emergency"
   | "moderation"
   | "moderation_approved"
+  | "server_removal"
   | "support";
 type TimeSection = "Today" | "Yesterday" | "This Week" | "This Month" | "Older";
 type FilterOption =
@@ -262,7 +264,10 @@ const NotificationsScreen = () => {
     let isMounted = true;
     getCachedNotifications<NotificationItem>(user.uid).then((cached) => {
       if (isMounted && cached && cached.length > 0) {
-        setNotifications((prev) => (prev.length === 0 ? cached : prev));
+        const visibleCached = cached.filter(
+          (item) => item.type !== "direct_message" && item.entityType !== "direct_message",
+        );
+        setNotifications((prev) => (prev.length === 0 ? visibleCached : prev));
         setLoading(false);
       }
     });
@@ -281,6 +286,7 @@ const NotificationsScreen = () => {
             id: notificationDoc.id,
             ...(notificationDoc.data() as Omit<NotificationItem, "id">),
           }))
+          .filter((item) => item.type !== "direct_message" && item.entityType !== "direct_message")
           .sort((first, second) => {
             const toMillis = (value: any) => {
               if (value?.toMillis) return value.toMillis();
@@ -732,6 +738,8 @@ const onRefresh = useCallback(() => {
         return "help-buoy";
       case "moderation_approved":
         return "checkmark-circle";
+      case "server_removal":
+        return "person-remove";
       default:
         return "notifications";
     }
@@ -755,6 +763,8 @@ const onRefresh = useCallback(() => {
         return { icon: theme.accent, bg: "#e0913d22" };
       case "moderation_approved":
         return { icon: "#2f855a", bg: "#2f855a20" };
+      case "server_removal":
+        return { icon: theme.danger, bg: theme.dangerSoft };
       default:
         return { icon: theme.textMuted, bg: "#b88f8720" };
     }
@@ -797,8 +807,9 @@ const onRefresh = useCallback(() => {
   // Anonymous notifications must keep their stored name — the live profile
   // would undo the anonymity.
   const liveAvatar = item.actorIsAnonymous ? null : liveProfile?.avatar || null;
-  const liveName =
-    item.actorIsAnonymous || !liveProfile?.name ? item.actorName : liveProfile.name;
+  const liveName = item.actorIsAnonymous
+    ? formatAnonymousHandle(item.actorName)
+    : liveProfile?.name || item.actorName;
   const colors = getNotificationColors(item.type);
 
   return (
@@ -900,11 +911,26 @@ const onRefresh = useCallback(() => {
         {/* Order matters: auth first, because until it answers we genuinely do
             not know whether there is anything to show. */}
         {!authResolved || (loading && !isOffline) ? (
-          <ListSkeleton
-            count={6}
-            contentStyle={styles.skeletonContent}
-            rowStyle={styles.skeletonRow}
-          />
+          // Drawn in the real notification card, avatar and day-pill styles,
+          // so each placeholder sits where a notification will.
+          <SkeletonGroup style={styles.listContent}>
+            <View style={styles.timePillContainer}>
+              <SkeletonBlock width={64} height={22} radius={11} />
+            </View>
+            {Array.from({ length: 6 }).map((_, index) => (
+              <SkeletonCard
+                key={index}
+                style={styles.notificationItem}
+                avatar={{ size: 44 }}
+                alignTop
+                lines={[
+                  { width: "88%", height: 13, gap: 3 },
+                  { width: index % 2 ? "52%" : "64%", height: 13, gap: 7 },
+                  { width: 64, height: 10, gap: 10 },
+                ]}
+              />
+            ))}
+          </SkeletonGroup>
         ) : loadError && notifications.length === 0 ? (
           renderLoadError()
         ) : isOffline && notifications.length === 0 ? (
@@ -1047,7 +1073,7 @@ timePillContainer: {
 },
 goldEdgeTimePill: {
   backgroundColor: c.border, // Light cream fill matching your theme
-  paddingHorizontal: 18,
+  paddingHorizontal: 20,
   paddingVertical: 6,
   borderRadius: 999, // Oval / pill shape
   
@@ -1081,7 +1107,7 @@ timePillText: {
     justifyContent: "space-between",
     paddingHorizontal: 16,
     paddingTop: 16,
-    paddingBottom: 18,
+    paddingBottom: 16,
     backgroundColor: c.chrome,
     borderBottomWidth: 1,
     borderBottomColor: c.textSecondary,
@@ -1095,7 +1121,7 @@ timePillText: {
     color: c.onChrome,
   },
   headerSubtitle: {
-    color: c.borderStrong,
+    color: c.onChromeMuted,
     fontSize: 12,
     marginTop: 3,
   },
@@ -1132,18 +1158,18 @@ timePillText: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
   },
   loadingText: {
     color: c.textMuted,
     fontSize: 14,
-    marginTop: 14,
+    marginTop: 16,
   },
   emptyContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: 40,
+    paddingHorizontal: 32,
   },
   emptyText: {
     color: "#999",
@@ -1158,7 +1184,7 @@ timePillText: {
     textAlign: "center",
   },
   listContent: {
-    paddingBottom: 80,
+    paddingBottom: 32,
   },
   sectionHeader: {
     backgroundColor: c.surfaceSunken,
@@ -1192,13 +1218,13 @@ timePillText: {
   borderLeftWidth: 4,
   borderLeftColor: c.accent,
   paddingHorizontal: 16,
-  paddingVertical: 14,
+  paddingVertical: 16,
  },
  notificationItem: {
   flexDirection: "row",
   alignItems: "flex-start",
   paddingHorizontal: 16,
-  paddingVertical: 14,
+  paddingVertical: 16,
   backgroundColor: c.surface,
   marginHorizontal: 16,
   marginBottom: 10,
@@ -1300,7 +1326,7 @@ previewBox: {
   previewText: {
   color: c.textMuted,
   fontSize: 13,
-  lineHeight: 18,
+  lineHeight: 16,
   fontStyle: "italic",
 },
  timestamp: {
@@ -1337,7 +1363,7 @@ previewBox: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: 20,
+    padding: 24,
     borderBottomWidth: 1,
     borderBottomColor: c.textSecondary,
     backgroundColor: c.chrome,

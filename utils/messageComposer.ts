@@ -16,11 +16,13 @@ export type DraftAttachment = {
   uri: string;
   name: string;
   mimeType: string;
+  size?: number;
   source: "camera" | "gallery" | "file" | "gif";
   uploaded?: {
     url: string;
     name: string;
     mimeType: string;
+    size?: number;
     width?: number | null;
     height?: number | null;
   };
@@ -44,6 +46,7 @@ export async function prepareDraftAttachment(
     url,
     name: attachment.name,
     mimeType: attachment.mimeType,
+    size: attachment.size,
     width: size?.width ?? null,
     height: size?.height ?? null,
   };

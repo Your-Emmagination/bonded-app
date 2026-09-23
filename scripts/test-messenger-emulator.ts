@@ -46,11 +46,13 @@ async function main() {
   const admin = client("owner");
   const alice = client("alice");
   const bob = client("bob");
+  const dave = client("dave");
   const outsider = client("outsider");
   await firestore.setDoc(firestore.doc(admin, "students", "alice"), { userId: "alice", role: "student" });
   await firestore.setDoc(firestore.doc(admin, "students", "bob"), { userId: "bob", role: "student" });
   const a = directUtils(alice);
   const b = directUtils(bob);
+  const daveUtils = directUtils(dave);
   const aliceInfo = { uid: "alice", displayName: "Alice", role: "student", studentID: "A001" };
   const bobInfo = { uid: "bob", displayName: "Bob", role: "student", studentID: "B001" };
   const route = a.getDirectChatParams("alice", bobInfo);
@@ -99,6 +101,52 @@ async function main() {
   await deny(firestore.setDoc(firestore.doc(alice, "directConversations", "invalid-empty"), legacyEmpty));
   await inbox(a, "alice", []);
   await inbox(b, "bob", []);
+
+  // A link can be the first and only content in a new conversation. The full
+  // normalized URL is saved; the optional title may be empty.
+  const carolInfo = { uid: "carol", displayName: "Carol Cruz", role: "student", studentID: "C001" };
+  const daveInfo = { uid: "dave", displayName: "Dave Diaz", role: "student", studentID: "D001" };
+  const linkConversationId = daveUtils.getDirectChatParams("dave", carolInfo).conversationId;
+  const linkConv = firestore.doc(dave, "directConversations", linkConversationId);
+  const linkMessage = (id: string) => firestore.doc(linkConv, "messages", id);
+  await daveUtils.sendDirectMessage({
+    conversationId: linkConversationId,
+    messageId: "first-link",
+    sender: daveInfo,
+    recipient: carolInfo,
+    text: "",
+    link: { url: "https://facebook.com", title: "" },
+    recipients: ["carol"],
+  });
+  assert.equal((await firestore.getDoc(linkConv)).data()?.lastMessage.text, "Sent a link");
+  assert.deepEqual((await firestore.getDoc(linkMessage("first-link"))).data()?.link, {
+    url: "https://facebook.com", title: "",
+  });
+  await daveUtils.sendDirectMessage({
+    conversationId: linkConversationId,
+    messageId: "valid-mention",
+    sender: daveInfo,
+    text: "Hi @Carol Cruz",
+    mentions: [{ id: "carol", name: "Carol Cruz" }],
+    recipients: ["carol"],
+  });
+  await deny(daveUtils.sendDirectMessage({
+    conversationId: linkConversationId,
+    messageId: "invalid-mention",
+    sender: daveInfo,
+    text: "Hi @Outsider",
+    mentions: [{ id: "outsider", name: "Outsider" }],
+    recipients: ["carol"],
+  }));
+  await deny(daveUtils.sendDirectMessage({
+    conversationId: linkConversationId,
+    messageId: "invalid-link",
+    sender: daveInfo,
+    text: "",
+    link: { url: "javascript:alert(1)", title: "Bad" },
+    recipients: ["carol"],
+  }));
+  notifications.length = 0;
 
   await send("one");
   await send("one");
@@ -295,6 +343,23 @@ async function main() {
   await inbox(a, "alice", archivedAfterRace ? [] : [conversationId]);
   await a.setDirectConversationArchived(conversationId, "alice", false);
   await inbox(secondAlice, "alice", [conversationId]);
+
+  // Pinning a chat: your own entry only, only the server's time, nothing else.
+  await a.setDirectConversationPinned(conversationId, "alice", true);
+  const pinnedConversation = (await firestore.getDoc(conv(alice))).data()!;
+  assert.equal(state.isConversationPinned(pinnedConversation, "alice"), true);
+  assert.equal(state.isConversationPinned(pinnedConversation, "bob"), false, "A pin is only for the person who pinned");
+  await deny(firestore.updateDoc(conv(bob), { "pinnedAt.alice": firestore.deleteField() }));
+  await deny(firestore.updateDoc(conv(alice), { "pinnedAt.alice": firestore.Timestamp.fromMillis(Date.now() + 60000) }));
+  await deny(firestore.updateDoc(conv(alice), { "pinnedAt.alice": firestore.serverTimestamp(), themeColor: "#123456" }));
+  await assert.rejects(directUtils(outsider).setDirectConversationPinned(conversationId, "outsider", true));
+  await a.setDirectConversationPinned(conversationId, "alice", false);
+  assert.equal(state.isConversationPinned((await firestore.getDoc(conv(alice))).data()!, "alice"), false);
+
+  // A like held to a size keeps it.
+  await a.sendDirectMessage({ conversationId, messageId: "sized-like", sender: aliceInfo, recipient: bobInfo, text: "👍", emojiSize: "large", recipients: ["bob"] });
+  assert.equal((await firestore.getDoc(message(alice, "sized-like"))).data()!.emojiSize, "large");
+
   const beforeDelete = (await firestore.getDoc(conv(alice))).data()!;
   await a.setDirectConversationArchived(conversationId, "alice", true);
   await a.deleteDirectConversationForMe(conversationId, "alice");

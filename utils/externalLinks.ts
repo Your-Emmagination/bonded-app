@@ -43,6 +43,8 @@ const ADULT_HOSTS = new Set([
   "rule34.xxx", "e-hentai.org", "nhentai.net", "hanime.tv", "javhd.com",
   "porntrex.com", "eporner.com", "tnaflix.com", "motherless.com",
   "thisav.com", "iwara.tv", "fapello.com", "erome.com",
+  // Filipino viral scandal / leak domains
+  "sulasok.mom",
 ]);
 
 // Link shorteners. Not bad in themselves — bad because they hide the

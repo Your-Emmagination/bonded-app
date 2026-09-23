@@ -1,5 +1,6 @@
 // components/ComposerBase.tsx
 import { useThemeColors } from "@/contexts/ThemeContext";
+import { getMyAnonymousHandle } from "@/utils/anonymousHandle";
 import type { ThemeTokens } from "@/utils/theme";
 import {
     AI_ASSISTANT_NAME,
@@ -17,35 +18,46 @@ import {
     isEveryoneMentionId,
 } from "@/utils/aiAssistant";
 import { resolveAvatarUri } from "@/utils/avatar";
+import { isStaffRole } from "@/utils/communityServers";
 import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
 import { prepareComposerAttachments, type ComposerAttachments } from "@/utils/composerUploads";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
+import { normalizeMessageUrl } from "@/utils/chatLinks";
+import { findBlockedLink } from "@/utils/externalLinks";
 import { Ionicons } from "@expo/vector-icons";
-import { pickUploadDocuments, isAttachmentUnavailableError } from "@/utils/uploadAttachments";
+import { pickUploadDocuments, isAttachmentTooLargeError, isAttachmentUnavailableError } from "@/utils/uploadAttachments";
 import { Image } from "expo-image";
 import {
     collection,
     getDocs,
 } from "firebase/firestore";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     FlatList,
     Modal,
+    Platform,
     StyleSheet,
     Text,
     TextInput,
     TouchableOpacity,
     View,
 } from "react-native";
+import {
+    KeyboardAvoidingView,
+    KeyboardAwareScrollView,
+} from "react-native-keyboard-controller";
 import { auth, db } from "../../../Firebase_configure";
 import ConfirmDialog from "./ConfirmDialog";
+import DragToCloseSheet from "./DragToCloseSheet";
 
 const MAX_FILES = 10;
 const MAX_CHARACTERS = 1250;
 
 export type ComposerPayload = {
   text: string;
+  /** The writer's permanent anonymous name, on anonymous content. */
+  anonymousHandle?: string;
   userId: string;
   realUserId?: string;
   username?: string;
@@ -57,6 +69,8 @@ export type ComposerPayload = {
   replyCount?: number;
   link?: { url: string; title: string };
   taggedUsers?: { id: string; name: string; studentID: string }[];
+  /** IDs inserted inline with @. Manual tags are the remaining taggedUsers. */
+  mentionedUserIds?: string[];
 };
 
 interface Student {
@@ -65,6 +79,7 @@ interface Student {
   lastname: string;
   email: string;
   studentID: string;
+  role?: string;
 }
 
 type MentionDraft = Student & {
@@ -83,11 +98,21 @@ export interface ComposerProps {
   placeholder?: string;
   replyingTo?: { id: string; name: string; text: string } | null;
   onCancelReply?: () => void;
+  /** Parent can draw its own reply bar while retaining focus behavior. */
+  showReplyBar?: boolean;
   /** Kept for existing callers; the compact input is now always visible. */
   autoExpand?: boolean;
   // Optional: fired as the user types (true) and when the box is cleared or a
   // message is sent (false). Consumers debounce/throttle any side effects.
   onTypingChange?: (isTyping: boolean) => void;
+  /**
+   * A Staff only channel: only staff can be mentioned, and there is no
+   * B.E.A., no @everyone and no anonymous mode — students can't see the
+   * channel, so none of those would make sense there.
+   */
+  staffOnly?: boolean;
+  /** Shows a Poll button in the options, for server channels. */
+  onCreatePoll?: () => void;
 }
 
 export interface ComposerLabels {
@@ -116,7 +141,10 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
   placeholder = labels.placeholder,
   replyingTo = null,
   onCancelReply,
+  showReplyBar = true,
   onTypingChange,
+  staffOnly = false,
+  onCreatePoll,
 }) => {
   const { composerStyles, theme } = useStyles();
   const [draftText, setDraftText] = useState("");
@@ -125,7 +153,11 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
   const [uploading, setUploading] = useState(false);
   const [files, setFiles] = useState<{ uri: string; mimeType: string; name: string }[]>([]);
   const [attachedLink, setAttachedLink] = useState<{ url: string; title: string } | null>(null);
+  // Inline @mentions and manual "Tag people" selections have different UI.
+  // They are combined only when the payload is built for notifications.
+  const [mentionedUsers, setMentionedUsers] = useState<Student[]>([]);
   const [taggedUsers, setTaggedUsers] = useState<Student[]>([]);
+  const [draftTaggedUsers, setDraftTaggedUsers] = useState<Student[]>([]);
   const [showTagModal, setShowTagModal] = useState(false);
   const [students, setStudents] = useState<Student[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -138,6 +170,11 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
   const [selectedGif, setSelectedGif] = useState<string | null>(null);
   const [loadingGifs, setLoadingGifs] = useState(false);
   const [gifError, setGifError] = useState<string | null>(null);
+  // Stable, so the GIF sheet's drag gesture isn't rebuilt on every keystroke.
+  const closeGifPicker = useCallback(() => {
+    setShowGifModal(false);
+    setGifError(null);
+  }, []);
   const [selection, setSelection] = useState({ start: 0, end: 0 });
   const [infoDialog, setInfoDialog] = useState<{ title: string; description: string } | null>(null);
   const showInfo = (title: string, description: string) => setInfoDialog({ title, description });
@@ -169,7 +206,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
       const currentStudentID = currentUserEmail?.split("@")[0];
 
       const studentsList = studentsSnapshot.docs
-        .map((doc) => {
+        .map((doc): Student | null => {
           const data = doc.data();
           if (!data.firstname || !data.lastname || !data.studentID) return null;
           return {
@@ -178,6 +215,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
             lastname: String(data.lastname || "").trim(),
             email: String(data.email || ""),
             studentID: String(data.studentID || ""),
+            role: String(data.role || ""),
           };
         })
         .filter((student): student is Student => {
@@ -229,6 +267,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
           uri: picked.uri || "",
           mimeType: picked.mimeType ?? "image/jpeg",
           name: picked.name ?? `photo_${Date.now()}.jpg`,
+          size: picked.size,
         }));
         setFiles([...files, ...newFiles]);
       }
@@ -262,58 +301,85 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
           uri: picked.uri || "",
           mimeType: picked.mimeType ?? "application/octet-stream",
           name: picked.name ?? `file_${Date.now()}`,
+          size: picked.size,
         }));
         setFiles([...files, ...newFiles]);
       }
     } catch (error) {
       console.error(`${labels.logPrefix} selecting files:`, error);
-      showInfo("Attachment unavailable", "Could not prepare the selected file. Please select it again.");
+      showInfo(
+        isAttachmentTooLargeError(error) ? "File too large" : "Attachment unavailable",
+        error instanceof Error ? error.message : "Could not prepare the selected file. Please select it again.",
+      );
     }
   };
 
   const handleAddLink = () => {
-    if (!linkUrl.trim()) {
-      showInfo("Error", "Please enter a valid URL");
+    const normalizedUrl = normalizeMessageUrl(linkUrl);
+    if (!normalizedUrl) {
+      showInfo("Invalid URL", "Enter a website such as facebook.com or https://facebook.com.");
       return;
     }
 
-    const urlPattern = /^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$/;
-    if (!urlPattern.test(linkUrl)) {
-      showInfo("Invalid URL", "Please enter a valid website URL");
+    const blockedLink = findBlockedLink([normalizedUrl]);
+    if (blockedLink) {
+      showInfo("This link can't be added", `${blockedLink.host} is blocked in BondED.`);
       return;
     }
 
-    let formattedUrl = linkUrl.trim();
-    if (!formattedUrl.startsWith("http://") && !formattedUrl.startsWith("https://")) {
-      formattedUrl = "https://" + formattedUrl;
-    }
-
-    setAttachedLink({ url: formattedUrl, title: linkTitle.trim() || formattedUrl });
+    setAttachedLink({ url: normalizedUrl, title: linkTitle.trim() });
     setShowLinkModal(false);
     setLinkUrl("");
     setLinkTitle("");
   };
 
-  const handleTagUser = (student: Student) => {
-    if (taggedUsers.find((u) => u.id === student.id)) {
-      setTaggedUsers(taggedUsers.filter((u) => u.id !== student.id));
-    } else {
-      setTaggedUsers([...taggedUsers, student]);
-    }
+  const openTagModal = () => {
+    setDraftTaggedUsers(taggedUsers);
+    setSearchQuery("");
+    setShowTagModal(true);
   };
 
+  const cancelTagSelection = () => {
+    setDraftTaggedUsers(taggedUsers);
+    setSearchQuery("");
+    setShowTagModal(false);
+  };
+
+  const confirmTagSelection = () => {
+    setTaggedUsers(draftTaggedUsers);
+    setSearchQuery("");
+    setShowTagModal(false);
+  };
+
+  const handleTagUser = (student: Student) => {
+    setDraftTaggedUsers((current) =>
+      current.some((u) => u.id === student.id)
+        ? current.filter((u) => u.id !== student.id)
+        : [...current, student],
+    );
+  };
+
+  // In a Staff only channel, only staff can be mentioned or tagged.
+  const mentionableStudents = staffOnly
+    ? students.filter((student) => isStaffRole(student.role))
+    : students;
+
   const allMentionables: MentionDraft[] = [
-    {
-      ...AI_ASSISTANT_STUDENT,
-      mentionToken: AI_MENTION_TOKEN,
-      label: AI_ASSISTANT_NAME,
-    },
-    {
-      ...EVERYONE_MENTION_STUDENT,
-      mentionToken: EVERYONE_MENTION_TOKEN,
-      label: EVERYONE_MENTION_NAME,
-    },
-    ...students.map((student) => ({
+    ...(staffOnly
+      ? []
+      : [
+          {
+            ...AI_ASSISTANT_STUDENT,
+            mentionToken: AI_MENTION_TOKEN,
+            label: AI_ASSISTANT_NAME,
+          },
+          {
+            ...EVERYONE_MENTION_STUDENT,
+            mentionToken: EVERYONE_MENTION_TOKEN,
+            label: EVERYONE_MENTION_NAME,
+          },
+        ]),
+    ...mentionableStudents.map((student) => ({
       ...student,
       mentionToken: getMentionTokenForStudent(
         student.studentID,
@@ -344,8 +410,8 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
         })
       : [];
 
-  const syncTaggedUsersFromText = (nextText: string) => {
-    setTaggedUsers((current) =>
+  const syncMentionedUsersFromText = (nextText: string) => {
+    setMentionedUsers((current) =>
       current.filter((taggedUser) => {
         const token = isAiAssistantId(taggedUser.id)
           ? AI_MENTION_TOKEN
@@ -367,7 +433,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
 
   const handleChangeText = (nextText: string) => {
     setDraftText(nextText);
-    syncTaggedUsersFromText(nextText);
+    syncMentionedUsersFromText(nextText);
     onTypingChange?.(nextText.trim().length > 0);
   };
 
@@ -378,7 +444,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
     const insertedText = `${person.mentionToken} `;
     const nextText = `${before}${insertedText}${after}`;
     setDraftText(nextText);
-    setTaggedUsers((current) => {
+    setMentionedUsers((current) => {
       if (current.some((entry) => entry.id === person.id)) return current;
       return [...current, person];
     });
@@ -404,13 +470,15 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
     const draft = {
       text: draftText,
       files,
+      mentionedUsers,
       taggedUsers,
       attachedLink,
       selectedGif,
-      isAnonymous,
+      isAnonymous: staffOnly ? false : isAnonymous,
     };
     setDraftText("");
     setFiles([]);
+    setMentionedUsers([]);
     setTaggedUsers([]);
     setAttachedLink(null);
     setSelectedGif(null);
@@ -425,6 +493,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
     const restoreDraft = () => {
       setDraftText((current) => (current.trim() ? current : draft.text));
       setFiles((current) => (current.length > 0 ? current : draft.files));
+      setMentionedUsers((current) => (current.length > 0 ? current : draft.mentionedUsers));
       setTaggedUsers((current) => (current.length > 0 ? current : draft.taggedUsers));
       setAttachedLink((current) => current ?? draft.attachedLink);
       setSelectedGif((current) => current ?? draft.selectedGif);
@@ -437,27 +506,36 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
       // these before it saves.
       const attachments = prepareComposerAttachments(draft.files, draft.selectedGif);
 
-      const nextTaggedUsers = hasAiAssistantMention(draft.text)
-        ? draft.taggedUsers.some((taggedUser) => isAiAssistantId(taggedUser.id))
-          ? draft.taggedUsers
-          : [...draft.taggedUsers, AI_ASSISTANT_STUDENT]
-        : draft.taggedUsers;
-      const normalizedTaggedUsers = hasEveryoneMention(draft.text)
-        ? nextTaggedUsers.some((taggedUser) => isEveryoneMentionId(taggedUser.id))
-          ? nextTaggedUsers
-          : [...nextTaggedUsers, EVERYONE_MENTION_STUDENT]
-        : nextTaggedUsers.filter((taggedUser) => !isEveryoneMentionId(taggedUser.id));
-
-      const uniqueTaggedUsers = normalizedTaggedUsers.filter(
-        (user, index, self) => index === self.findIndex((u) => u.id === user.id)
+      const nextMentionedUsers = hasAiAssistantMention(draft.text)
+        ? draft.mentionedUsers.some((user) => isAiAssistantId(user.id))
+          ? draft.mentionedUsers
+          : [...draft.mentionedUsers, AI_ASSISTANT_STUDENT]
+        : draft.mentionedUsers.filter((user) => !isAiAssistantId(user.id));
+      const normalizedMentionedUsers = hasEveryoneMention(draft.text)
+        ? nextMentionedUsers.some((user) => isEveryoneMentionId(user.id))
+          ? nextMentionedUsers
+          : [...nextMentionedUsers, EVERYONE_MENTION_STUDENT]
+        : nextMentionedUsers.filter((user) => !isEveryoneMentionId(user.id));
+      const uniqueMentionedUsers = normalizedMentionedUsers.filter(
+        (user, index, self) =>
+          index === self.findIndex((entry) => entry.id === user.id) &&
+          !(staffOnly && (isAiAssistantId(user.id) || isEveryoneMentionId(user.id))),
+      );
+      const uniqueTaggedUsers = [...uniqueMentionedUsers, ...draft.taggedUsers].filter(
+        (user, index, self) =>
+          index === self.findIndex((u) => u.id === user.id) &&
+          !(staffOnly && (isAiAssistantId(user.id) || isEveryoneMentionId(user.id)))
       );
 
+      // Anonymous content carries the writer's permanent anonymous name.
+      const anonymousHandle = draft.isAnonymous ? await getMyAnonymousHandle() : null;
       const payload: ComposerPayload = {
         text: draft.text.trim(),
         userId: draft.isAnonymous ? "anonymous" : currentUser.uid,
         realUserId: currentUser.uid,
+        ...(anonymousHandle ? { anonymousHandle } : {}),
         username: draft.isAnonymous
-          ? "Anonymous"
+          ? anonymousHandle || "Anonymous"
           : (
               `${currentUser.firstname || ""} ${currentUser.lastname || ""}`.trim() ||
               String(currentUser.username || currentUser.displayName || "").trim() ||
@@ -479,6 +557,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
             : `${u.firstname} ${u.lastname}`,
           studentID: u.studentID,
         })),
+        mentionedUserIds: uniqueMentionedUsers.map((user) => user.id),
       };
 
       if (draft.attachedLink) {
@@ -562,41 +641,21 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
     setGifError(null);
   };
 
-  const filteredStudents = students.filter((s) => {
+  const filteredStudents = mentionableStudents.filter((s) => {
     const firstname = (s.firstname || "").toLowerCase();
     const lastname = (s.lastname || "").toLowerCase();
     const studentID = (s.studentID || "").toLowerCase();
     const search = searchQuery.toLowerCase();
     return firstname.includes(search) || lastname.includes(search) || studentID.includes(search);
   });
-  const aiLabel = `${AI_ASSISTANT_STUDENT.firstname} ${AI_ASSISTANT_STUDENT.lastname}`.toLowerCase();
-  const aiMatchesSearch =
-    !searchQuery.trim() ||
-    aiLabel.includes(searchQuery.toLowerCase()) ||
-    AI_ASSISTANT_STUDENT.studentID.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    "assistant".includes(searchQuery.toLowerCase());
-  const everyoneMatchesSearch =
-    !searchQuery.trim() ||
-    EVERYONE_MENTION_NAME.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    EVERYONE_MENTION_TOKEN.slice(1).includes(searchQuery.toLowerCase()) ||
-    "all".includes(searchQuery.toLowerCase());
-  const filteredTagOptions = [
-    ...(aiMatchesSearch ? [AI_ASSISTANT_STUDENT] : []),
-    ...(everyoneMatchesSearch ? [EVERYONE_MENTION_STUDENT] : []),
-    ...filteredStudents.filter(
-      (student) => !isAiAssistantId(student.id) && !isEveryoneMentionId(student.id),
-    ),
-  ];
-  const autoTaggedUsers = hasAiAssistantMention(draftText)
-    ? taggedUsers.some((entry) => isAiAssistantId(entry.id))
-      ? taggedUsers
-      : [...taggedUsers, AI_ASSISTANT_STUDENT]
-    : taggedUsers;
-  const effectiveTaggedUsers = hasEveryoneMention(draftText)
-    ? autoTaggedUsers.some((entry) => isEveryoneMentionId(entry.id))
-      ? autoTaggedUsers
-      : [...autoTaggedUsers, EVERYONE_MENTION_STUDENT]
-    : autoTaggedUsers.filter((entry) => !isEveryoneMentionId(entry.id));
+  // B.E.A. and @everyone are mention targets, not people tags. They remain
+  // available from the inline @ picker and never create a duplicate "with" row.
+  const filteredTagOptions = filteredStudents.filter(
+    (student) => !isAiAssistantId(student.id) && !isEveryoneMentionId(student.id),
+  );
+  // Only deliberate Tag People selections get a separate preview and the
+  // "with …" line. Inline @mentions remain visible only in the message text.
+  const effectiveTaggedUsers = taggedUsers;
 
   const remainingChars = MAX_CHARACTERS - draftText.length;
   const isNearLimit = remainingChars < 100;
@@ -605,7 +664,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
     <>
       <View style={composerStyles.inputWrapper}>
         {/* Replying To Bar */}
-        {replyingTo && (
+        {showReplyBar && replyingTo && (
           <View style={composerStyles.replyingToBar}>
             <View style={composerStyles.replyingToContent}>
               <Ionicons name="chevron-forward" size={14} color={theme.accent} />
@@ -652,25 +711,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
               </TouchableOpacity>
             </View>
             <View style={composerStyles.optionsRow}>
-              <TouchableOpacity
-                style={composerStyles.optionBtn}
-                accessibilityRole="button" accessibilityLabel="Mention someone"
-                onPress={() => {
-                  setOptionsExpanded(false);
-                  textInputRef.current?.focus();
-                  const nextText =
-                    draftText.length > 0 && !draftText.endsWith(" ")
-                      ? `${draftText} @`
-                      : `${draftText}@`;
-                  handleChangeText(nextText);
-                  const cursor = nextText.length;
-                  setSelection({ start: cursor, end: cursor });
-                }}
-              >
-                <Ionicons name="at-outline" size={20} color={theme.primary} />
-                <Text style={composerStyles.optionLabel}>Mention</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={composerStyles.optionBtn} onPress={() => setShowTagModal(true)} accessibilityRole="button" accessibilityLabel="Tag people">
+              <TouchableOpacity style={composerStyles.optionBtn} onPress={openTagModal} accessibilityRole="button" accessibilityLabel="Tag people">
                 <Ionicons name="people-outline" size={20} color={theme.primary} />
                 <Text style={composerStyles.optionLabel}>Tag people</Text>
               </TouchableOpacity>
@@ -682,7 +723,22 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
                 <Text style={composerStyles.gifToolLabel}>GIF</Text>
                 <Text style={composerStyles.optionLabel}>GIFs</Text>
               </TouchableOpacity>
+              {onCreatePoll && (
+                <TouchableOpacity
+                  style={composerStyles.optionBtn}
+                  onPress={() => {
+                    setOptionsExpanded(false);
+                    onCreatePoll();
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Create a poll"
+                >
+                  <Ionicons name="stats-chart-outline" size={20} color={theme.primary} />
+                  <Text style={composerStyles.optionLabel}>Poll</Text>
+                </TouchableOpacity>
+              )}
             </View>
+              {!staffOnly && (
               <TouchableOpacity
                 style={[composerStyles.anonymousBtn, isAnonymous && composerStyles.anonymousBtnActive]}
                 onPress={() => setIsAnonymous(!isAnonymous)}
@@ -699,6 +755,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
                 <Text style={composerStyles.modeHint}>Tap to switch</Text>
                 <Ionicons name="swap-horizontal-outline" size={18} color={theme.primary} />
               </TouchableOpacity>
+              )}
             </View>}
 
             {/* File previews */}
@@ -734,7 +791,12 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
             {attachedLink && (
               <View style={composerStyles.linkPreviewRow}>
                 <Ionicons name="link" size={12} color="#4f9cff" />
-                <Text style={composerStyles.linkPreviewText} numberOfLines={1}>{attachedLink.title}</Text>
+                <View style={composerStyles.linkPreviewCopy}>
+                  {!!attachedLink.title && (
+                    <Text style={composerStyles.linkPreviewTitle} numberOfLines={1}>{attachedLink.title}</Text>
+                  )}
+                  <Text style={composerStyles.linkPreviewText} numberOfLines={2}>{attachedLink.url}</Text>
+                </View>
                 <TouchableOpacity onPress={() => setAttachedLink(null)}>
                   <Ionicons name="close-circle" size={14} color={theme.accent} />
                 </TouchableOpacity>
@@ -788,7 +850,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
             )}
 
             {/* Input row */}
-            {isAnonymous && !optionsExpanded && <TouchableOpacity style={composerStyles.anonymousIndicator}
+            {isAnonymous && !staffOnly && !optionsExpanded && <TouchableOpacity style={composerStyles.anonymousIndicator}
               onPress={() => setOptionsExpanded(true)} accessibilityLabel="Posting anonymously. Open options to change">
               <Ionicons name="eye-off-outline" size={14} color={theme.primary} />
               <Text style={composerStyles.anonymousIndicatorText}>Anonymous</Text>
@@ -857,25 +919,37 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
       </View>
 
       {/* Tag Modal */}
-      <Modal visible={showTagModal} animationType="slide" transparent onRequestClose={() => setShowTagModal(false)}>
+      <Modal visible={showTagModal} animationType="slide" transparent onRequestClose={cancelTagSelection}>
         <View style={composerStyles.modalOverlay}>
           <View style={composerStyles.tagModalContainer}>
             <View style={composerStyles.modalHeader}>
               <Text style={composerStyles.modalTitle}>
-                Tag People & AI {effectiveTaggedUsers.length > 0 && `(${effectiveTaggedUsers.length})`}
+                Tag People {draftTaggedUsers.length > 0 && `(${draftTaggedUsers.length})`}
               </Text>
-              <TouchableOpacity onPress={() => setShowTagModal(false)}>
-                <Ionicons name="close" size={24} color={theme.textMuted} />
-              </TouchableOpacity>
+              <View style={composerStyles.tagModalActions}>
+                <TouchableOpacity
+                  style={composerStyles.tagConfirmButton}
+                  onPress={confirmTagSelection}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Confirm ${draftTaggedUsers.length} selected tags`}
+                >
+                  <Text style={composerStyles.tagConfirmText}>
+                    Confirm{draftTaggedUsers.length > 0 ? ` (${draftTaggedUsers.length})` : ""}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={cancelTagSelection} accessibilityRole="button" accessibilityLabel="Cancel tag selection">
+                  <Ionicons name="close" size={24} color={theme.textMuted} />
+                </TouchableOpacity>
+              </View>
             </View>
 
             {students.length > 0 && (
               <TouchableOpacity
                 style={composerStyles.tagAllButton}
                 onPress={() => {
-                  const allTagged = students.filter((s) => !taggedUsers.find((u) => u.id === s.id));
+                  const allTagged = students.filter((s) => !draftTaggedUsers.find((u) => u.id === s.id));
                   if (allTagged.length === 0) { showInfo("Info", "Everyone is already tagged!"); return; }
-                  setTaggedUsers([...taggedUsers, ...allTagged]);
+                  setDraftTaggedUsers([...draftTaggedUsers, ...allTagged]);
                 }}
               >
                 <Ionicons name="people-circle" size={18} color={theme.onAccent} />
@@ -898,7 +972,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
               data={filteredTagOptions}
               keyExtractor={(item) => item.id}
               renderItem={({ item }) => {
-                const tagged = taggedUsers.find((u) => u.id === item.id);
+                const tagged = draftTaggedUsers.find((u) => u.id === item.id);
                 const isAiAssistant = isAiAssistantId(item.id);
                 return (
                   <TouchableOpacity style={composerStyles.studentItem} onPress={() => handleTagUser(item)}>
@@ -936,8 +1010,23 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
 
       {/* Link Modal */}
       <Modal visible={showLinkModal} animationType="fade" transparent onRequestClose={() => setShowLinkModal(false)}>
-        <View style={composerStyles.linkModalOverlay}>
-          <View style={composerStyles.linkModalContent}>
+        <KeyboardAvoidingView
+          automaticOffset
+          style={composerStyles.linkModalKeyboard}
+          behavior="padding"
+          enabled={Platform.OS !== "web"}
+        >
+          <View style={composerStyles.linkModalOverlay}>
+            <KeyboardAwareScrollView
+              style={composerStyles.linkModalScroll}
+              contentContainerStyle={composerStyles.linkModalScrollContent}
+              bottomOffset={24}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              showsVerticalScrollIndicator={false}
+              bounces={false}
+            >
+            <View style={composerStyles.linkModalContent}>
             <Text style={composerStyles.linkModalTitle}>Add Link</Text>
             <TextInput
               placeholder="https://example.com"
@@ -947,6 +1036,8 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
               style={composerStyles.linkInput}
               autoCapitalize="none"
               keyboardType="url"
+              autoCorrect={false}
+              autoFocus
             />
             <TextInput
               placeholder="Link title (optional)"
@@ -973,97 +1064,99 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
                 <Text style={composerStyles.linkModalButtonText}>Add Link</Text>
               </TouchableOpacity>
             </View>
+            </View>
+            </KeyboardAwareScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
-      {/* GIF Modal */}
-      <Modal
+      {/* GIF picker — drag its top down to close. */}
+      <DragToCloseSheet
         visible={showGifModal}
-        animationType="slide"
-        transparent
-        onRequestClose={() => { setShowGifModal(false); setGifError(null); }}
-      >
-        <View style={composerStyles.modalOverlay}>
-          <View style={composerStyles.tagModalContainer}>
-            <View style={composerStyles.modalHeader}>
-              <Text style={composerStyles.modalTitle}>Choose a GIF</Text>
-              <TouchableOpacity onPress={() => { setShowGifModal(false); setGifError(null); }}>
-                <Ionicons name="close" size={24} color={theme.textMuted} />
-              </TouchableOpacity>
-            </View>
-
-            <View style={composerStyles.gifSearchContainer}>
-              <TextInput
-                placeholder="Search GIFs..."
-                placeholderTextColor={theme.textMuted}
-                value={gifSearchQuery}
-                onChangeText={setGifSearchQuery}
-                onSubmitEditing={() => searchGifs(gifSearchQuery)}
-                style={composerStyles.searchInput}
-                returnKeyType="search"
-              />
-              <TouchableOpacity style={composerStyles.gifSearchButton} onPress={() => searchGifs(gifSearchQuery)}>
-                <Ionicons name="search" size={18} color={theme.onAccent} />
-              </TouchableOpacity>
-            </View>
-
-            {loadingGifs ? (
-              <View style={composerStyles.gifLoadingContainer}>
-                <ActivityIndicator size="large" color={theme.accent} />
-                <Text style={composerStyles.gifLoadingText}>Searching GIFs...</Text>
-              </View>
-            ) : gifError ? (
-              <View style={composerStyles.gifErrorContainer}>
-                <Ionicons name="cloud-offline-outline" size={48} color={theme.accent} />
-                <Text style={composerStyles.gifErrorTitle}>Connection Error</Text>
-                <Text style={composerStyles.gifErrorText}>{gifError}</Text>
-                <TouchableOpacity style={composerStyles.gifRetryButton} onPress={() => searchGifs(gifSearchQuery)}>
-                  <Ionicons name="refresh" size={18} color={theme.onPrimary} />
-                  <Text style={composerStyles.gifRetryText}>Try Again</Text>
-                </TouchableOpacity>
-              </View>
-            ) : gifResults.length > 0 ? (
-              <FlatList
-  initialNumToRender={8}
-  maxToRenderPerBatch={8}
-  windowSize={5}
-  data={gifResults}
-  numColumns={2}
-  keyExtractor={(item) => item.id}
-  renderItem={({ item }) => {
-    // Extract full GIF and small thumbnail preview
-    const gifUrl = item.images?.original?.url;
-    const thumbnailUrl = item.images?.fixed_height_small?.url || item.images?.fixed_width?.url;
-
-    if (!gifUrl || !thumbnailUrl) return null;
-
-    return (
-      <TouchableOpacity
-        style={composerStyles.gifItem}
-        onPress={() => handleSelectGif(gifUrl)}
-      >
-        <Image
-          source={{ uri: thumbnailUrl }}
-          style={composerStyles.gifThumbnail}
-          contentFit="cover"
-        />
-      </TouchableOpacity>
-    );
-  }}
-  contentContainerStyle={composerStyles.gifGrid}
-/>
-            ) : (
-              <View style={composerStyles.gifEmptyContainer}>
-                <Ionicons name="images-outline" size={48} color={theme.border} />
-                <Text style={composerStyles.emptyText}>
-                  {gifSearchQuery ? "No GIFs found" : "Search for GIFs to get started"}
-                </Text>
-              </View>
-            )}
+        onClose={closeGifPicker}
+        handleColor={theme.textMuted}
+        backdropColor="rgba(0,0,0,0.75)"
+        closeLabel="Close GIF picker"
+        sheetStyle={composerStyles.tagModalContainer}
+        header={
+          <View style={composerStyles.modalHeader}>
+            <Text style={composerStyles.modalTitle}>Choose a GIF</Text>
+            <TouchableOpacity onPress={closeGifPicker} accessibilityRole="button" accessibilityLabel="Close GIF picker">
+              <Ionicons name="close" size={24} color={theme.textMuted} />
+            </TouchableOpacity>
           </View>
+        }
+      >
+
+        <View style={composerStyles.gifSearchContainer}>
+          <TextInput
+            placeholder="Search GIFs..."
+            placeholderTextColor={theme.textMuted}
+            value={gifSearchQuery}
+            onChangeText={setGifSearchQuery}
+            onSubmitEditing={() => searchGifs(gifSearchQuery)}
+            style={composerStyles.searchInput}
+            returnKeyType="search"
+          />
+          <TouchableOpacity style={composerStyles.gifSearchButton} onPress={() => searchGifs(gifSearchQuery)}>
+            <Ionicons name="search" size={18} color={theme.onAccent} />
+          </TouchableOpacity>
         </View>
-      </Modal>
+
+        {loadingGifs ? (
+          <View style={composerStyles.gifLoadingContainer}>
+            <ActivityIndicator size="large" color={theme.accent} />
+            <Text style={composerStyles.gifLoadingText}>Searching GIFs...</Text>
+          </View>
+        ) : gifError ? (
+          <View style={composerStyles.gifErrorContainer}>
+            <Ionicons name="cloud-offline-outline" size={40} color={theme.accent} />
+            <Text style={composerStyles.gifErrorTitle}>Connection Error</Text>
+            <Text style={composerStyles.gifErrorText}>{gifError}</Text>
+            <TouchableOpacity style={composerStyles.gifRetryButton} onPress={() => searchGifs(gifSearchQuery)}>
+              <Ionicons name="refresh" size={18} color={theme.onPrimary} />
+              <Text style={composerStyles.gifRetryText}>Try Again</Text>
+            </TouchableOpacity>
+          </View>
+        ) : gifResults.length > 0 ? (
+          <FlatList
+initialNumToRender={8}
+maxToRenderPerBatch={8}
+windowSize={5}
+data={gifResults}
+numColumns={2}
+keyExtractor={(item) => item.id}
+renderItem={({ item }) => {
+// Extract full GIF and small thumbnail preview
+const gifUrl = item.images?.original?.url;
+const thumbnailUrl = item.images?.fixed_height_small?.url || item.images?.fixed_width?.url;
+
+if (!gifUrl || !thumbnailUrl) return null;
+
+return (
+  <TouchableOpacity
+    style={composerStyles.gifItem}
+    onPress={() => handleSelectGif(gifUrl)}
+  >
+    <Image
+      source={{ uri: thumbnailUrl }}
+      style={composerStyles.gifThumbnail}
+      contentFit="cover"
+    />
+  </TouchableOpacity>
+);
+}}
+contentContainerStyle={composerStyles.gifGrid}
+/>
+        ) : (
+          <View style={composerStyles.gifEmptyContainer}>
+            <Ionicons name="images-outline" size={40} color={theme.border} />
+            <Text style={composerStyles.emptyText}>
+              {gifSearchQuery ? "No GIFs found" : "Search for GIFs to get started"}
+            </Text>
+          </View>
+        )}
+      </DragToCloseSheet>
 
       <ConfirmDialog
         visible={!!infoDialog}
@@ -1195,7 +1288,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   optionBtn: {
     flex: 1,
-    minHeight: 60,
+    minHeight: 52,
     paddingVertical: 8,
     paddingHorizontal: 2,
     gap: 6,
@@ -1297,10 +1390,11 @@ const makeStyles = (c: ThemeTokens) =>
     marginHorizontal: 8,
   },
   linkPreviewText: {
-    flex: 1,
     color: c.primary,
     fontSize: 12,
   },
+  linkPreviewCopy: { flex: 1, minWidth: 0 },
+  linkPreviewTitle: { color: c.textPrimary, fontSize: 12, fontWeight: "700", marginBottom: 2 },
   taggedPreviewRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1455,7 +1549,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: 14,
+    padding: 16,
     borderBottomWidth: 1,
     borderBottomColor: c.borderStrong,
     backgroundColor: c.surface,
@@ -1470,7 +1564,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: c.accent,
-    marginHorizontal: 14,
+    marginHorizontal: 16,
     marginVertical: 8,
     paddingVertical: 8,
     borderRadius: 8,
@@ -1486,7 +1580,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textPrimary,
     borderRadius: 8,
     padding: 10,
-    marginHorizontal: 14,
+    marginHorizontal: 16,
     marginBottom: 8,
     fontSize: 14,
     borderWidth: 1,
@@ -1496,7 +1590,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     padding: 12,
-    marginHorizontal: 14,
+    marginHorizontal: 16,
     borderBottomColor: c.surface,
     borderBottomWidth: 1,
   },
@@ -1538,17 +1632,45 @@ const makeStyles = (c: ThemeTokens) =>
     marginTop: 20,
   },
 
+  linkModalKeyboard: { flex: 1 },
   linkModalOverlay: {
     flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
     backgroundColor: "rgba(0,0,0,0.8)",
   },
+  tagModalActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  tagConfirmButton: {
+    minWidth: 88,
+    height: 36,
+    paddingHorizontal: 14,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.primary,
+  },
+  tagConfirmText: {
+    color: c.onPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  linkModalScroll: { flex: 1 },
+  linkModalScrollContent: {
+    flexGrow: 1,
+    justifyContent: "flex-start",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === "android" ? 64 : 34,
+    paddingBottom: 24,
+  },
   linkModalContent: {
-    width: "85%",
+    width: "100%",
+    maxWidth: 390,
     backgroundColor: c.surfaceSunken,
     borderRadius: 14,
-    padding: 18,
+    padding: 16,
     borderWidth: 1,
     borderColor: c.borderStrong,
   },
@@ -1556,7 +1678,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textPrimary,
     fontSize: 16,
     fontWeight: "700",
-    marginBottom: 14,
+    marginBottom: 16,
     textAlign: "center",
   },
   linkInput: {
@@ -1602,7 +1724,7 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 40,
+    paddingVertical: 32,
   },
   gifLoadingText: {
     color: c.textMuted,
@@ -1613,8 +1735,8 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 40,
-    paddingHorizontal: 28,
+    paddingVertical: 32,
+    paddingHorizontal: 20,
   },
   gifErrorTitle: {
     color: c.accent,
@@ -1627,7 +1749,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontSize: 13,
     textAlign: "center",
-    lineHeight: 18,
+    lineHeight: 16,
     marginBottom: 16,
   },
   gifRetryButton: {
@@ -1660,7 +1782,7 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 40,
+    paddingVertical: 32,
   },
 });
 

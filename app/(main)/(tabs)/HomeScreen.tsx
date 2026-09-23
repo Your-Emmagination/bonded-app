@@ -4,7 +4,10 @@ import { AVATAR_SIZE_SMALL, avatarThumb } from "@/utils/cloudinaryImages";
 import { consumeServerDrawerReopenRequest } from "@/utils/communityNavigation";
 import {
   appendThreadToSections,
+  buildChannelAccess,
   buildCommunityServers,
+  channelAccessKey,
+  isStaffRole,
   deleteChannelFromSections,
   makeCustomCommunityServerDraft,
   updateChannelInSections,
@@ -23,11 +26,15 @@ import {
   subscribeToTotalUnreadMessages,
 } from "@/utils/directMessages";
 import { subscribeHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
-import { getPresenceState, type PresenceData } from "@/utils/messengerState";
+import { getPresenceState, PRESENCE_TIMEOUT_MS, type PresenceData } from "@/utils/messengerState";
+import { useAppActive } from "@/utils/presence";
+import { matchesEventAudience } from "@/utils/eventAudience";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useNetworkStatus } from "@/utils/networkUtils";
+import { showAppToast } from "@/utils/toastEvents";
 import {
   createNotification,
+  createServerRemovalNotification,
   removeLikeNotification,
   upsertLikeNotification,
 } from "@/utils/notifications";
@@ -220,6 +227,9 @@ type Poll = {
   durationMs: number;
   createdAt?: any;
   expiresAt?: any;
+  pinnedAt?: any;
+  pinnedBy?: string | null;
+  pinExpiresAt?: any;
   userVotes?: number[];
   commentCount?: number;
   serverId?: string | null;
@@ -407,6 +417,8 @@ const areFeedItemsEquivalent = (first: FeedItem, second: FeedItem) => {
         getTimestampValue(second.createdAt) &&
       getTimestampValue(first.expiresAt) ===
         getTimestampValue(second.expiresAt) &&
+      getTimestampValue(first.pinnedAt) === getTimestampValue(second.pinnedAt) &&
+      getTimestampValue(first.pinExpiresAt) === getTimestampValue(second.pinExpiresAt) &&
       arePollOptionsEqual(first.options || [], second.options || [])
     );
   }
@@ -472,7 +484,10 @@ const mergeFeedItemsByIdentity = (
   });
 };
 
-export const isPostPinActive = (post: Post, nowMs: number = Date.now()): boolean => {
+export const isPostPinActive = (
+  post: { pinnedAt?: any; pinExpiresAt?: any },
+  nowMs: number = Date.now(),
+): boolean => {
   if (!post.pinnedAt) return false;
   if (!post.pinExpiresAt) return true;
   const expiresMs = getTimestampValue(post.pinExpiresAt);
@@ -483,12 +498,13 @@ const sortFeedItems = (items: FeedItem[]) => {
   const nowMs = Date.now();
   return [...items].sort(
     (first, second) => {
+      // Pinned posts and pinned polls share the top of the feed.
       const firstPinned =
-        first.type === "post" && isPostPinActive(first, nowMs)
+        (first.type === "post" || first.type === "poll") && isPostPinActive(first, nowMs)
           ? getTimestampValue(first.pinnedAt)
           : 0;
       const secondPinned =
-        second.type === "post" && isPostPinActive(second, nowMs)
+        (second.type === "post" || second.type === "poll") && isPostPinActive(second, nowMs)
           ? getTimestampValue(second.pinnedAt)
           : 0;
 
@@ -533,9 +549,12 @@ type LostFoundFeedFields = {
  * precisely how somebody finds them again. Callers that leave it out (the
  * trending and staging calculations) keep their behaviour unchanged.
  */
+/** The Home filter chips: everything, only polls, or posts with one flair. */
+type FeedFilter = "all" | "polls" | PostFlairId;
+
 const isDisplayableFeedItem = (
   item: FeedItem,
-  flairFilter: "all" | PostFlairId,
+  flairFilter: FeedFilter,
   lostFoundFilter: "all" | LostFoundStatus = "all",
   archiveNowMs?: number,
 ) => {
@@ -556,8 +575,10 @@ const isDisplayableFeedItem = (
 
   if (flairFilter === "all") return true;
 
-  // Posts and polls share the same flair taxonomy. Legacy items with no
-  // flair are treated as Discussion by normalizePostFlair().
+  // Polls have no flair: they have their own chip, and the flair chips are
+  // for posts. Posts with no flair (or a retired one) count as Discussion.
+  if (flairFilter === "polls") return item.type === "poll";
+  if (item.type === "poll") return false;
   if (normalizePostFlair(item.flair) !== flairFilter) return false;
 
   if (flairFilter === "lost_found" && lostFoundFilter !== "all") {
@@ -630,11 +651,57 @@ const FeedPostCard = memo(function FeedPostCard({
 
 // ── Campus Presence ──────────────────────────────────────────────────────────
 
-type CampusPresenceStudent = SearchableStudent & {
-  isOnline: boolean;
-  /** Active Status turned off: shown as offline, with no last-seen time. */
-  activityHidden: boolean;
-};
+/** Campus Presence only lists people seen in the last day. */
+const PRESENCE_RECENT_MS = 24 * 60 * 60 * 1000;
+/** How often Home re-checks the online count while the panel is closed. */
+const PRESENCE_POLL_MS = 60 * 1000;
+
+/** One profile as Campus Presence reads it: who, and when last seen. */
+type PresenceRecord = SearchableStudent & { accountLocked?: boolean };
+
+function toPresenceRecord(id: string, data: Record<string, any>): PresenceRecord {
+  return {
+    id,
+    userId: data.userId ? String(data.userId) : undefined,
+    firstname: String(data.firstname || ""),
+    lastname: String(data.lastname || ""),
+    studentID: data.studentID ? String(data.studentID) : undefined,
+    course: data.course ? String(data.course) : undefined,
+    profileImage: data.profileImage || null,
+    role: data.role ? String(data.role) : undefined,
+    isOnline: data.isOnline === true,
+    lastSeen: data.lastSeen,
+    activeStatusEnabled: data.activeStatusEnabled,
+    presenceSessions: data.presenceSessions,
+    accountLocked: data.accountLocked === true,
+  };
+}
+
+/**
+ * Names and photos for search, mentions and the server drawer, read once.
+ * Every open app writes its "online" heartbeat to these same profiles every
+ * 30 seconds, so listening to them live re-downloaded a profile — and
+ * redrew all of Home — for every person online, twice a minute. Who's
+ * online comes from Campus Presence's own, much smaller queries instead.
+ */
+async function fetchSearchableStudents(): Promise<SearchableStudent[]> {
+  const snapshot = await getDocs(collection(db, "students"));
+  return snapshot.docs.map((item) => {
+    const data = item.data();
+    return {
+      id: item.id,
+      userId: data.userId ? String(data.userId) : undefined,
+      firstname: String(data.firstname || ""),
+      lastname: String(data.lastname || ""),
+      studentID: data.studentID ? String(data.studentID) : undefined,
+      course: data.course ? String(data.course) : undefined,
+      profileImage: data.profileImage || null,
+      role: data.role ? String(data.role) : undefined,
+    };
+  });
+}
+
+type CampusPresenceStudent = PresenceRecord & { isOnline: boolean };
 
 type CampusPresenceRowProps = {
   student: CampusPresenceStudent;
@@ -677,7 +744,7 @@ const CampusPresenceRow = memo(function CampusPresenceRow({
       {section && (
         <View style={styles.presenceSection}>
           <Text style={styles.presenceSectionText}>
-            {section === "online" ? "Active now" : "Recently active"}
+            {section === "online" ? "Active now" : "Active in the last 24 hours"}
           </Text>
           {section === "online" && (
             <View style={styles.presenceSectionCount}>
@@ -693,7 +760,7 @@ const CampusPresenceRow = memo(function CampusPresenceRow({
         onPress={() => onOpenProfile(student)}
         style={({ pressed }) => [styles.presenceRow, pressed && styles.presenceRowPressed]}
         accessibilityRole="button"
-        accessibilityLabel={`${fullName}, ${detail}, ${online ? "online, active now" : lastSeenLabel}`}
+        accessibilityLabel={`${fullName}, ${detail}, ${online ? "online" : `last active ${lastSeenLabel}`}`}
         accessibilityHint="Opens their profile"
       >
         {showDivider && <View style={styles.presenceDivider} />}
@@ -735,9 +802,6 @@ const CampusPresenceRow = memo(function CampusPresenceRow({
                     Online
                   </Text>
                 </View>
-                <Text style={[styles.presenceActiveText, styles.presenceOnlineInk]}>
-                  Active now
-                </Text>
               </>
             ) : (
               <>
@@ -808,7 +872,7 @@ const HomeScreen = () => {
   const insets = useSafeAreaInsets();
   const [user, setUser] = useState<User | null>(null);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
-  const [selectedFlairFilter, setSelectedFlairFilter] = useState<"all" | PostFlairId>("all");
+  const [selectedFlairFilter, setSelectedFlairFilter] = useState<FeedFilter>("all");
   // The status chips under Lost & Found. Only consulted while that flair is
   // the filter, and reset whenever the flair changes.
   const [lostFoundFilter, setLostFoundFilter] = useState<"all" | LostFoundStatus>("all");
@@ -931,6 +995,10 @@ const HomeScreen = () => {
     string | null
   >(null);
   const [onlineUsersModalVisible, setOnlineUsersModalVisible] = useState(false);
+  // Campus Presence. Closed: who was seen in the last 90 seconds, checked
+  // once a minute for the count. Open: everyone seen in the last day, live.
+  const [onlineNowRecords, setOnlineNowRecords] = useState<PresenceRecord[]>([]);
+  const [panelPresence, setPanelPresence] = useState<PresenceRecord[] | null>(null);
   // Upcoming feeds the calendar badge; today feeds B.E.A.'s brief.
   const [eventCounts, setEventCounts] = useState({ upcoming: 0, today: 0 });
   const upcomingEventsCount = eventCounts.upcoming;
@@ -1328,6 +1396,25 @@ const selectedChannel = useMemo(() => {
     [selectedServerId, serverJoinRequests],
   );
 
+  const relativeTimeNow = useRelativeTimeNow();
+
+  // Who is online right now, by Messenger's rule. From the panel's live list
+  // while it's open, otherwise from the minute-by-minute check.
+  const activePresenceRecords = useMemo(() => {
+    const source = onlineUsersModalVisible && panelPresence ? panelPresence : onlineNowRecords;
+    return source.filter(
+      (record) => record.accountLocked !== true && getPresenceState(record, relativeTimeNow).active,
+    );
+  }, [onlineNowRecords, onlineUsersModalVisible, panelPresence, relativeTimeNow]);
+  const onlinePresenceIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const record of activePresenceRecords) {
+      ids.add(record.id);
+      if (record.userId) ids.add(record.userId);
+    }
+    return ids;
+  }, [activePresenceRecords]);
+
   const searchableStudentsMap = useMemo(() => {
     const map = new Map<string, SearchableStudent>();
     for (const student of searchableStudents) {
@@ -1369,11 +1456,11 @@ const selectedChannel = useMemo(() => {
           role: matchedStudent?.role || null,
           course: matchedStudent?.course || null,
           avatarUri: matchedStudent ? resolveAvatarUri(matchedStudent) : null,
-          isOnline: matchedStudent?.isOnline === true,
+          isOnline: onlinePresenceIds.has(memberId),
         } satisfies ServerMemberPreview;
       })
       .sort((first, second) => first.name.localeCompare(second.name));
-  }, [searchableStudentsMap, selectedServer?.ownerId, selectedServerId, serverDrawerVisible, serverMemberships]);
+  }, [onlinePresenceIds, searchableStudentsMap, selectedServer?.ownerId, selectedServerId, serverDrawerVisible, serverMemberships]);
 
   // Everybody a manager could add to the open server: every student account
   // that isn't already a member, and not the manager themselves. Only built
@@ -1693,7 +1780,17 @@ const selectedChannel = useMemo(() => {
         // Parts are counted through their main event, or a week with seven
         // sessions would read as seven upcoming events.
         return (
-          (data.status ?? "published") === "published" && !data.parentEventId
+          (data.status ?? "published") === "published" &&
+          !data.parentEventId &&
+          // Cancelled events stay on the calendar, but they are not something
+          // to count down to.
+          data.cancelled !== true &&
+          // Another program's event is not this student's news. Staff, who
+          // have no program, still see the whole campus.
+          matchesEventAudience(data.forPrograms, {
+            course: currentUserProfile?.course,
+            isStaff: currentUserRole !== "student",
+          })
         );
       });
       setEventCounts({
@@ -1702,7 +1799,7 @@ const selectedChannel = useMemo(() => {
       });
     });
     return unsubscribe;
-  }, [user, isOffline]);
+  }, [user, isOffline, currentUserProfile?.course, currentUserRole]);
 
   // ── Direct messages unread badge listener
   useEffect(() => {
@@ -1805,36 +1902,68 @@ const selectedChannel = useMemo(() => {
       return;
     }
 
-    const unsubscribe = onSnapshot(
-      collection(db, "students"),
+    let cancelled = false;
+    fetchSearchableStudents()
+      .then((students) => {
+        if (!cancelled) setSearchableStudents(students);
+      })
+      .catch((error) => {
+        console.error("Error loading searchable students:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOffline, user]);
+
+  // The header's online count, while the panel is closed: one small query a
+  // minute for whoever checked in during the last 90 seconds, and only while
+  // Home is on screen with the app open.
+  const presenceFocused = useIsFocused();
+  const presenceAppActive = useAppActive();
+  useEffect(() => {
+    if (!user || isOffline || !presenceFocused || !presenceAppActive || onlineUsersModalVisible) {
+      return;
+    }
+    let cancelled = false;
+    const check = () => {
+      getDocs(
+        query(
+          collection(db, "students"),
+          where("lastSeen", ">=", Timestamp.fromMillis(Date.now() - PRESENCE_TIMEOUT_MS)),
+        ),
+      )
+        .then((snapshot) => {
+          if (!cancelled) {
+            setOnlineNowRecords(snapshot.docs.map((item) => toPresenceRecord(item.id, item.data())));
+          }
+        })
+        .catch((error) => console.warn("[presence] Online check failed:", error));
+    };
+    check();
+    const timer = setInterval(check, PRESENCE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [isOffline, onlineUsersModalVisible, presenceAppActive, presenceFocused, user]);
+
+  // The panel itself: everyone seen in the last day, live while it's open.
+  useEffect(() => {
+    if (!onlineUsersModalVisible || !user || isOffline) return;
+    return onSnapshot(
+      query(
+        collection(db, "students"),
+        where("lastSeen", ">=", Timestamp.fromMillis(Date.now() - PRESENCE_RECENT_MS)),
+      ),
       (snapshot) => {
-        setSearchableStudents(
-          snapshot.docs.map((item) => {
-            const data = item.data();
-            return {
-              id: item.id,
-              userId: data.userId ? String(data.userId) : undefined,
-              firstname: String(data.firstname || ""),
-              lastname: String(data.lastname || ""),
-              studentID: data.studentID ? String(data.studentID) : undefined,
-              course: data.course ? String(data.course) : undefined,
-              profileImage: data.profileImage || null,
-              role: data.role ? String(data.role) : undefined,
-              isOnline: data.isOnline === true,
-              lastSeen: data.lastSeen,
-              activeStatusEnabled: data.activeStatusEnabled,
-              presenceSessions: data.presenceSessions,
-            };
-          }),
-        );
+        setPanelPresence(snapshot.docs.map((item) => toPresenceRecord(item.id, item.data())));
       },
       (error) => {
-        console.error("Error loading searchable students:", error);
+        console.warn("[presence] Campus Presence failed:", error);
+        setPanelPresence([]);
       },
     );
-
-    return unsubscribe;
-  }, [isOffline, user]);
+  }, [isOffline, onlineUsersModalVisible, user]);
 
   useEffect(() => {
     if (!user?.uid) {
@@ -1904,6 +2033,9 @@ const selectedChannel = useMemo(() => {
                 course: item.data()?.course
                   ? String(item.data()?.course)
                   : undefined,
+                yearLevel: item.data()?.yearLevel
+                  ? String(item.data()?.yearLevel)
+                  : undefined,
               }) as ServerJoinRequestRecord,
           ),
         );
@@ -1925,6 +2057,32 @@ const selectedChannel = useMemo(() => {
   // the Firestore rules allow. Staff can read every server, so they keep one
   // unscoped listener. The key is a string so the listeners are only rebuilt
   // when the set of servers actually changes.
+  // Servers made before channel types were saved for the database have no
+  // list yet (the rules then fall back to the old check by name), and one
+  // edited from an older app version may be out of date. Staff and owners
+  // fill it in, once per change, when their servers load.
+  const channelAccessSyncedRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!user?.uid || isOffline) return;
+    const viewerIsStaff = isStaffRole(currentUserRole);
+    for (const server of remoteServers) {
+      if (server.recordType === "aiMemory" || server.isDeleted) continue;
+      if (!Array.isArray(server.sections) || server.sections.length === 0) continue;
+      const canWrite =
+        viewerIsStaff || server.ownerId === user.uid || server.createdBy === user.uid;
+      if (!canWrite) continue;
+      const wanted = buildChannelAccess(server.sections);
+      const wantedKey = channelAccessKey(wanted);
+      if (channelAccessKey(server.channelAccess) === wantedKey) continue;
+      const attempt = `${server.id}:${wantedKey}`;
+      if (channelAccessSyncedRef.current.has(attempt)) continue;
+      channelAccessSyncedRef.current.add(attempt);
+      updateDoc(doc(db, "communityServers", server.id), { channelAccess: wanted }).catch((error) =>
+        console.warn("[channels] Couldn't save channel types:", error),
+      );
+    }
+  }, [currentUserRole, isOffline, remoteServers, user?.uid]);
+
   const unreadMessageServerKey = useMemo(() => {
     const isStaffViewer = ["admin", "teacher", "moderator"].includes(
       currentUserRole || "",
@@ -2014,6 +2172,36 @@ const selectedChannel = useMemo(() => {
         },
       ),
     );
+
+    // Staff only channels keep their messages apart; staff count them too.
+    if (readableServerIds === null) {
+      unsubscribers.push(
+        onSnapshot(
+          query(
+            collection(db, "communityStaffMessages"),
+            where("createdAt", ">", since),
+            orderBy("createdAt", "asc"),
+          ),
+          (snapshot) => {
+            messagesByChunk.set(
+              -1,
+              snapshot.docs.map(
+                (item) =>
+                  ({
+                    id: item.id,
+                    serverId: item.data()?.serverId ? String(item.data()?.serverId) : null,
+                    channelId: item.data()?.channelId ? String(item.data()?.channelId) : null,
+                    userId: item.data()?.userId ? String(item.data()?.userId) : null,
+                    createdAt: item.data()?.createdAt,
+                  }) as CommunityThreadMessageLite,
+              ),
+            );
+            setCommunityThreadMessages(Array.from(messagesByChunk.values()).flat());
+          },
+          (error) => console.warn("Error loading staff channel messages:", error),
+        ),
+      );
+    }
 
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
@@ -2594,6 +2782,9 @@ const selectedChannel = useMemo(() => {
       return;
     }
     setRefreshing(true);
+    fetchSearchableStudents()
+      .then(setSearchableStudents)
+      .catch(() => undefined);
     try {
       const qPosts = query(
         collection(db, "posts"),
@@ -3115,6 +3306,7 @@ const handleSelectChannel = useCallback(
 
       await setDoc(doc(db, "communityServers", nextServer.id), stripUndefined({
         ...nextServer,
+        channelAccess: buildChannelAccess(nextServer.sections),
         // App-wide search: lowercased name for the prefix-range query.
         nameLower: (name || nextServer.name || "").trim().toLowerCase(),
         description: description?.trim() || "",
@@ -3306,13 +3498,17 @@ const handleSelectChannel = useCallback(
         channelType,
       );
 
+      // The channel list and each channel's type, saved together; the
+      // database rules read the types to decide who may post. Replaced whole,
+      // so a deleted channel leaves nothing behind.
       await setDoc(
         doc(db, "communityServers", serverId),
         {
           sections: nextSections,
+          channelAccess: buildChannelAccess(nextSections),
           updatedAt: serverTimestamp(),
         },
-        { merge: true },
+        { mergeFields: ["sections", "channelAccess", "updatedAt"] },
       );
     },
     [isOffline, remoteServers],
@@ -3344,13 +3540,17 @@ const handleSelectChannel = useCallback(
         updates,
       );
 
+      // The channel list and each channel's type, saved together; the
+      // database rules read the types to decide who may post. Replaced whole,
+      // so a deleted channel leaves nothing behind.
       await setDoc(
         doc(db, "communityServers", serverId),
         {
           sections: nextSections,
+          channelAccess: buildChannelAccess(nextSections),
           updatedAt: serverTimestamp(),
         },
-        { merge: true },
+        { mergeFields: ["sections", "channelAccess", "updatedAt"] },
       );
     },
     [isOffline, remoteServers],
@@ -3372,13 +3572,17 @@ const handleSelectChannel = useCallback(
         channelId,
       );
 
+      // The channel list and each channel's type, saved together; the
+      // database rules read the types to decide who may post. Replaced whole,
+      // so a deleted channel leaves nothing behind.
       await setDoc(
         doc(db, "communityServers", serverId),
         {
           sections: nextSections,
+          channelAccess: buildChannelAccess(nextSections),
           updatedAt: serverTimestamp(),
         },
-        { merge: true },
+        { mergeFields: ["sections", "channelAccess", "updatedAt"] },
       );
 
       if (selectedChannelId === channelId) {
@@ -3411,6 +3615,7 @@ const handleSelectChannel = useCallback(
           requestedByRole: currentUserRole || "student",
           requesterName,
           course: currentUserProfile?.course || null,
+          yearLevel: currentUserProfile?.yearlvl || null,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         },
@@ -3498,6 +3703,59 @@ const handleSelectChannel = useCallback(
           ),
         );
         showInfo("Error", "Failed to update the pinned post.");
+      }
+    },
+    [currentUserRole, user?.uid],
+  );
+
+  // The same as pinning a post: staff only, optimistic, rolled back on error.
+  const handleTogglePinnedPoll = useCallback(
+    async (pollId: string, shouldPin: boolean) => {
+      if (!user?.uid) return;
+      if (!["admin", "teacher", "moderator"].includes(currentUserRole || "")) {
+        return;
+      }
+
+      const existingPoll = feedItemsRef.current.find(
+        (item): item is PollFeedItem => item.type === "poll" && item.id === pollId,
+      );
+      const previousPinnedAt = existingPoll?.pinnedAt ?? null;
+      const previousPinnedBy = existingPoll?.pinnedBy ?? null;
+
+      try {
+        setFeedItems((currentItems) =>
+          sortFeedItems(
+            currentItems.map((item) =>
+              item.type === "poll" && item.id === pollId
+                ? {
+                    ...item,
+                    pinnedAt: shouldPin ? { toMillis: () => Date.now() } : null,
+                    pinnedBy: shouldPin ? user.uid : null,
+                    ...(!shouldPin ? { pinExpiresAt: null } : {}),
+                  }
+                : item,
+            ),
+          ),
+        );
+
+        await updateDoc(doc(db, "polls", pollId), {
+          pinnedAt: shouldPin ? serverTimestamp() : null,
+          pinnedBy: shouldPin ? user.uid : null,
+          ...(!shouldPin ? { pinExpiresAt: null } : {}),
+        });
+        showAppToast({ message: shouldPin ? "Poll pinned to the top of the feed" : "Poll unpinned" });
+      } catch (error) {
+        console.error("Error updating pinned poll:", error);
+        setFeedItems((currentItems) =>
+          sortFeedItems(
+            currentItems.map((item) =>
+              item.type === "poll" && item.id === pollId
+                ? { ...item, pinnedAt: previousPinnedAt, pinnedBy: previousPinnedBy }
+                : item,
+            ),
+          ),
+        );
+        showInfo("Error", "Failed to update the pinned poll.");
       }
     },
     [currentUserRole, user?.uid],
@@ -3837,8 +4095,21 @@ const handleSelectChannel = useCallback(
         memberCount: increment(-1),
         updatedAt: serverTimestamp(),
       }).catch(() => undefined);
+      // Otherwise the server just disappears from their list with no word why.
+      createServerRemovalNotification({
+        recipientId: memberId,
+        remover: {
+          id: user.uid,
+          name:
+            `${currentUserProfile?.firstname || ""} ${currentUserProfile?.lastname || ""}`.trim() ||
+            user.displayName ||
+            "A server manager",
+          profileImage: resolveAvatarUri(currentUserProfile),
+        },
+        serverName: server.name,
+      }).catch((error) => console.warn("Member-removed notification failed:", error));
     },
-    [communityServers, isOffline, serverMemberships, user?.uid],
+    [communityServers, currentUserProfile, isOffline, serverMemberships, user],
   );
 
   const handleMenuAction = (action: string) => {
@@ -4084,7 +4355,6 @@ const handleSelectChannel = useCallback(
     inputRange: [0, 1],
     outputRange: ["0deg", "135deg"],
   });
-  const relativeTimeNow = useRelativeTimeNow();
 
   // Keep Home post timestamps identical to ProfileScreen's "My Posts"
   // Facebook-style display:
@@ -4150,38 +4420,55 @@ const handleSelectChannel = useCallback(
     });
   }, [relativeTimeNow]);
 
+  // You aren't in your own list or count: alone, it used to say "1 online".
+  const presenceViewerIds = useMemo(
+    () =>
+      new Set(
+        [user?.uid, getStudentDocIdFromAuthUser(user), currentUserProfile?.studentID].filter(
+          Boolean,
+        ) as string[],
+      ),
+    [currentUserProfile?.studentID, user],
+  );
+  const isOtherPresence = useCallback(
+    (record: PresenceRecord) =>
+      !presenceViewerIds.has(record.id) && !presenceViewerIds.has(record.userId || ""),
+    [presenceViewerIds],
+  );
+
   // Online means what Messenger means by it: a phone that checked in within
   // the last 90 seconds, from someone who hasn't turned Active Status off.
-  // The raw isOnline flag stays true when an app is killed without signing
-  // off, which is why this list and the count used to run higher than
-  // Messenger's. Somebody with Active Status off shows as offline with no
-  // last-seen time, the same as in Messenger.
-  const onlineRoster = useMemo(
+  // The list is only people seen in the last day, not the whole campus.
+  // Left out: you, locked accounts, and anyone with Active Status off —
+  // listing them under "active in the last 24 hours" would say what they
+  // chose to hide.
+  const onlineRoster = useMemo<CampusPresenceStudent[]>(
     () =>
-      searchableStudents
-        .map((student) => {
-          const activityHidden = student.activeStatusEnabled === false;
-          return {
-            ...student,
-            isOnline: getPresenceState(student, relativeTimeNow).active,
-            lastSeen: activityHidden ? null : student.lastSeen,
-            activityHidden,
-          };
-        })
+      (panelPresence ?? [])
+        .filter(
+          (record) =>
+            isOtherPresence(record) &&
+            record.accountLocked !== true &&
+            record.activeStatusEnabled !== false,
+        )
+        .map((record) => ({
+          ...record,
+          isOnline: getPresenceState(record, relativeTimeNow).active,
+        }))
         .sort((first, second) => {
           if (first.isOnline !== second.isOnline) {
             return first.isOnline ? -1 : 1;
           }
           return getTimestampValue(second.lastSeen) - getTimestampValue(first.lastSeen);
         }),
-    [searchableStudents, relativeTimeNow],
+    [isOtherPresence, panelPresence, relativeTimeNow],
   );
 
-  // The header's number and the green rows come from the same list, so they
-  // always agree.
+  // The header's number and the panel's green rows come from the same
+  // records while it's open, so they agree.
   const onlineUsersCount = useMemo(
-    () => onlineRoster.filter((student) => student.isOnline).length,
-    [onlineRoster],
+    () => activePresenceRecords.filter(isOtherPresence).length,
+    [activePresenceRecords, isOtherPresence],
   );
 
   const closeCampusPresence = useCallback(() => setOnlineUsersModalVisible(false), []);
@@ -4189,7 +4476,8 @@ const handleSelectChannel = useCallback(
   const openPresenceProfile = useCallback(
     (student: CampusPresenceStudent) => {
       setOnlineUsersModalVisible(false);
-      handleProfileClick(student.id, false);
+      // Both ids, so the profile opens without searching for the person.
+      handleProfileClick(student.userId, false, student.id);
     },
     [handleProfileClick],
   );
@@ -4235,13 +4523,7 @@ const handleSelectChannel = useCallback(
           section={section}
           showDivider={index > 0 && !section}
           onlineCount={onlineUsersCount}
-          lastSeenLabel={
-            item.isOnline
-              ? ""
-              : item.activityHidden
-                ? "Offline"
-                : formatLastSeen(item.lastSeen)
-          }
+          lastSeenLabel={item.isOnline ? "" : formatLastSeen(item.lastSeen)}
           canMessage={!!presenceViewerUid && (item.userId || item.id) !== presenceViewerUid}
           onOpenProfile={openPresenceProfile}
           onMessage={messageFromPresence}
@@ -4261,7 +4543,7 @@ const handleSelectChannel = useCallback(
   );
 
   const handleFlairFilterPress = useCallback(
-    (flairId: "all" | PostFlairId) => {
+    (flairId: FeedFilter) => {
       // Only change the feed filter. Do not programmatically move the
       // horizontal flair row; it should stay exactly where the user left it.
       setSelectedFlairFilter(flairId);
@@ -4771,6 +5053,24 @@ const handleSelectChannel = useCallback(
             </Text>
           </TouchableOpacity>
 
+          <TouchableOpacity
+            style={[
+              styles.flairFilterChip,
+              selectedFlairFilter === "polls" && styles.flairFilterChipActive,
+            ]}
+            onPress={() => handleFlairFilterPress("polls")}
+          >
+            <Text style={styles.flairFilterEmoji}>📊</Text>
+            <Text
+              style={[
+                styles.flairFilterText,
+                selectedFlairFilter === "polls" && styles.flairFilterTextActive,
+              ]}
+            >
+              Polls
+            </Text>
+          </TouchableOpacity>
+
           {POST_FLAIRS.map((flair) => {
             const active = selectedFlairFilter === flair.id;
             return (
@@ -4918,6 +5218,7 @@ const handleSelectChannel = useCallback(
           onAddOption={addOptionToPoll}
           onDelete={handleDeletePoll}
           onEdit={handleEditPoll}
+          onTogglePin={handleTogglePinnedPoll}
           onProfileClick={handleProfileClick}
           getTimeAgo={getTimeAgo}
           isPollExpired={isPollExpired}
@@ -4934,6 +5235,7 @@ const handleSelectChannel = useCallback(
       handleLike,
       handleDeletePoll,
       handleEditPoll,
+      handleTogglePinnedPoll,
       handleDeletePost,
       handleEditPost,
       handleTogglePinnedPost,
@@ -5020,7 +5322,9 @@ return (
                 onPress={openSearchExperience}
                 accessibilityLabel="Search"
               >
-                <Ionicons name="search-circle-outline" size={24} color={theme.onAccent} />
+                {/* A plain, bold magnifier in the header colour on the gold
+                    circle — read at a glance, like the other header buttons. */}
+                <Ionicons name="search" size={21} color={theme.chrome} />
               </TouchableOpacity>
             </View>
 
@@ -5085,6 +5389,10 @@ return (
             data={visibleFeedItems}
             renderItem={renderFeedItem}
             keyExtractor={(item) => item.id}
+            // Comments and replies open from inside these cards, and React Native
+            // still counts this list as their parent for taps: left at "never",
+            // the first tap on Send only closed the keyboard.
+            keyboardShouldPersistTaps="handled"
             onScroll={handleScroll}
             onViewableItemsChanged={onFeedViewableItemsChanged}
             viewabilityConfig={feedViewabilityConfig}
@@ -5270,12 +5578,18 @@ return (
               maxToRenderPerBatch={12}
               windowSize={7}
               ListEmptyComponent={
-                <View style={styles.presenceEmpty}>
-                  <View style={styles.presenceEmptyIcon}>
-                    <Ionicons name="people-outline" size={26} color={theme.textMuted} />
+                panelPresence === null ? (
+                  <ActivityIndicator color={theme.accent} style={{ marginVertical: 24 }} />
+                ) : (
+                  <View style={styles.presenceEmpty}>
+                    <View style={styles.presenceEmptyIcon}>
+                      <Ionicons name="people-outline" size={24} color={theme.textMuted} />
+                    </View>
+                    <Text style={styles.presenceEmptyText}>
+                      No one else has been active in the last 24 hours
+                    </Text>
                   </View>
-                  <Text style={styles.presenceEmptyText}>No campus members to show</Text>
-                </View>
+                )
               }
             />
           </PresencePanelEntrance>
@@ -5476,11 +5790,11 @@ const makeStyles = (c: ThemeTokens) =>
   feedWelcome: {
     position: "relative",
     overflow: "hidden",
-    marginHorizontal: 14,
-    marginTop: 14,
+    marginHorizontal: 16,
+    marginTop: 16,
     marginBottom: 10,
-    paddingHorizontal: 18,
-    paddingVertical: 18,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
     borderRadius: 22,
     backgroundColor: c.background,
     borderWidth: 1,
@@ -5552,15 +5866,15 @@ const makeStyles = (c: ThemeTokens) =>
   },
   feedWelcomeTitle: {
     color: c.primary,
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: "900",
-    lineHeight: 28,
+    lineHeight: 24,
     letterSpacing: -0.2,
   },
   feedWelcomeSubtitle: {
     color: c.textMuted,
     fontSize: 13.25,
-    lineHeight: 19.5,
+    lineHeight: 20,
     marginTop: 12,
     maxWidth: 520,
   },
@@ -5581,7 +5895,7 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 10.5,
     fontWeight: "800",
     letterSpacing: 0.7,
-    marginTop: 14,
+    marginTop: 16,
   },
   briefChips: {
     flexDirection: "row",
@@ -5628,7 +5942,7 @@ const makeStyles = (c: ThemeTokens) =>
   briefCaughtUpText: {
     color: c.textMuted,
     fontSize: 12.5,
-    lineHeight: 18,
+    lineHeight: 16,
     marginTop: 2,
   },
   // "Trending this week" band — visually distinct from the vertical feed:
@@ -5639,7 +5953,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderBottomWidth: 1,
     borderColor: c.border,
     paddingTop: 12,
-    paddingBottom: 14,
+    paddingBottom: 16,
     marginBottom: 10,
   },
   trendingHeaderRow: {
@@ -5701,7 +6015,7 @@ const makeStyles = (c: ThemeTokens) =>
   headerLeft: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 14,
+    gap: 16,
     minWidth: 68,
   },
   headerIconButton: {
@@ -5712,14 +6026,14 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 18,
   },
   headerTitle: {
-    fontSize: 19,
+    fontSize: 18,
     fontWeight: "700",
     color: c.onChrome,
     letterSpacing: 0.8,
   },
   headerIcons: {
     flexDirection: "row",
-    gap: 14,
+    gap: 16,
     alignItems: "center",
   },
   onlineUsersContainer: {
@@ -5771,9 +6085,9 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    paddingHorizontal: 18,
-    paddingTop: 18,
-    paddingBottom: 14,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 16,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: c.borderStrong,
   },
@@ -5791,7 +6105,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   presenceTitle: {
     color: c.textPrimary,
-    fontSize: 19,
+    fontSize: 18,
     fontWeight: "800",
     letterSpacing: 0.2,
   },
@@ -5846,7 +6160,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   presenceListContent: {
     paddingTop: 4,
-    paddingBottom: 14,
+    paddingBottom: 16,
   },
   presenceListEmpty: {
     flexGrow: 1,
@@ -5855,8 +6169,8 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    paddingHorizontal: 18,
-    paddingTop: 14,
+    paddingHorizontal: 20,
+    paddingTop: 16,
     paddingBottom: 6,
   },
   presenceSectionText: {
@@ -5978,10 +6292,6 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 11,
     fontWeight: "800",
   },
-  presenceActiveText: {
-    fontSize: 11.5,
-    fontWeight: "600",
-  },
   presenceLastSeen: {
     flexShrink: 1,
     color: c.textMuted,
@@ -6004,7 +6314,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "center",
     gap: 10,
-    paddingVertical: 36,
+    paddingVertical: 32,
   },
   presenceEmptyIcon: {
     width: 56,
@@ -6102,20 +6412,20 @@ const makeStyles = (c: ThemeTokens) =>
   emptySearchState: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 56,
-    paddingHorizontal: 26,
+    paddingVertical: 32,
+    paddingHorizontal: 20,
   },
   emptyTitle: {
     color: c.primary,
     fontSize: 18,
     fontWeight: "800",
-    marginTop: 14,
+    marginTop: 16,
     textAlign: "center",
   },
   emptySubtitle: {
     color: c.textMuted,
     fontSize: 14.5,
-    lineHeight: 21,
+    lineHeight: 20,
     marginTop: 8,
     textAlign: "center",
   },
@@ -6131,7 +6441,7 @@ emptyStateContainer: {
 },
 emptyStateTitle: {
   color: c.primary,
-  fontSize: 19,
+  fontSize: 18,
   fontWeight: "700",
   marginTop: 16,
   textAlign: "center",
@@ -6166,7 +6476,7 @@ emptyStateText: {
   fabMenuContainer: {
     position: "absolute",
     right: 20,
-    gap: 14,
+    gap: 16,
     zIndex: 99,
   },
   menuItemContainer: {
@@ -6174,7 +6484,7 @@ emptyStateText: {
   },
   menuItem: {
     backgroundColor: c.chrome,
-    paddingVertical: 13,
+    paddingVertical: 16,
     paddingHorizontal: 20,
     borderRadius: 30,
     flexDirection: "row",
@@ -6199,7 +6509,7 @@ emptyStateText: {
   /* Legacy / Feed styles */
   flatListContent: {
     paddingTop: 12,
-    paddingBottom: 130,
+    paddingBottom: 32,
     backgroundColor: c.surfaceSunken,
   },
   emptyListContent: {
@@ -6209,18 +6519,18 @@ emptyStateText: {
     // data or when a selected flair had no matching posts.
     flexGrow: 1,
     paddingTop: 12,
-    paddingBottom: 130,
+    paddingBottom: 32,
     backgroundColor: c.surfaceSunken,
   },
   loadingContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 120,
+    paddingVertical: 32,
   },
   loadingText: {
     color: c.textSecondary,
-    fontSize: 16.5,
+    fontSize: 16,
     marginTop: 16,
     fontWeight: "600",
   },
@@ -6233,12 +6543,12 @@ emptyStateText: {
     justifyContent: "space-between",
     alignItems: "center",
     padding: 16,
-    paddingTop: 50,
+    paddingTop: 32,
     backgroundColor: "rgba(0,0,0,0.9)",
   },
   imageViewerCounter: {
     color: "#fff",
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "600",
   },
   imageViewerSlide: {
@@ -6286,12 +6596,12 @@ emptyStateText: {
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
-    paddingVertical: 18,
+    paddingVertical: 16,
   },
   feedEnd: {
     alignItems: "center",
-    paddingTop: 22,
-    paddingBottom: 34,
+    paddingTop: 24,
+    paddingBottom: 32,
     paddingHorizontal: 32,
   },
   feedEndTitle: {
@@ -6304,7 +6614,7 @@ emptyStateText: {
   feedEndText: {
     color: c.textMuted,
     fontSize: 13,
-    lineHeight: 19,
+    lineHeight: 20,
     marginTop: 4,
     textAlign: "center",
   },
@@ -6312,7 +6622,7 @@ emptyStateText: {
     flexDirection: "row",
     alignItems: "center",
     gap: 7,
-    marginTop: 14,
+    marginTop: 16,
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 999,

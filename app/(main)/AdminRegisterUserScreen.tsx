@@ -24,15 +24,19 @@ import { useRouter } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import {
+  KeyboardAvoidingView,
+  KeyboardAwareScrollView,
+} from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import ConfirmDialog, { type ConfirmDialogVariant } from "./components/ConfirmDialog";
 import { auth, db, firebaseConfig } from "../../Firebase_configure";
@@ -353,6 +357,7 @@ export default function AdminRegisterUserScreen() {
         "User Registered",
         `${fullName}\n\nEmail: ${result.email}\nTemporary password: ${result.temporaryPassword}\n\nThe user should change the temporary password after signing in.`,
         () => router.back(),
+        "success",
       );
     } catch (error: any) {
       showInfo("Registration Failed", error?.message || "Unable to register the user.");
@@ -447,14 +452,20 @@ export default function AdminRegisterUserScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <KeyboardAvoidingView automaticOffset style={{ flex: 1 }} behavior="padding">
         <View style={styles.header}>
           <TouchableOpacity onPress={() => router.back()}><Ionicons name="arrow-back" size={24} color={theme.textSecondary} /></TouchableOpacity>
           <Text style={styles.headerTitle}>Register User</Text>
           <View style={{ width: 24 }} />
         </View>
 
-        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        <KeyboardAwareScrollView
+          bottomOffset={20}
+          contentContainerStyle={styles.content}
+          keyboardDismissMode="on-drag"
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
           <View style={styles.hero}>
             <View style={styles.heroIcon}><Ionicons name="person-add-outline" size={26} color={theme.onPrimary} /></View>
             <View style={{ flex: 1 }}>
@@ -524,7 +535,7 @@ export default function AdminRegisterUserScreen() {
           </TouchableOpacity>
 
           {bulkSummary && <View style={styles.summary}><Text style={styles.summaryText}>Created: {bulkSummary.created}  •  Failed: {bulkSummary.failed}</Text></View>}
-        </ScrollView>
+        </KeyboardAwareScrollView>
       </KeyboardAvoidingView>
 
       <ConfirmDialog

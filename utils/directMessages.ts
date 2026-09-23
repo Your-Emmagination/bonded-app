@@ -3,6 +3,7 @@ import {
     arrayRemove,
     arrayUnion,
     collection,
+    deleteField,
     doc,
     getDocFromServer,
     getDocsFromServer,
@@ -23,7 +24,7 @@ import {
 } from "firebase/firestore";
 import { db } from "../Firebase_configure";
 import { createNotification } from "./notifications";
-import { isConversationArchived, isConversationVisible, receiptCoversMessage, timestampMillis } from "./messengerState";
+import { isConversationArchived, isConversationVisible, planOwnReaction, receiptCoversMessage, timestampMillis } from "./messengerState";
 
 export const DIRECT_MESSAGE_PAGE_SIZE = 50;
 
@@ -76,6 +77,8 @@ export type DirectConversation = {
   lastDeliveredAt?: Record<string, any>;
   deletedThrough?: Record<string, any>;
   archivedThrough?: Record<string, any>;
+  /** Per person: when they pinned this chat to the top of their list. */
+  pinnedAt?: Record<string, any>;
   mutedBy?: string[];
   pinnedMessageIds?: string[];
   createdAt?: any;
@@ -99,6 +102,14 @@ export type DirectFileAttachment = {
   height?: number | null;
 };
 
+/** How big a like (or wave) was sent: a tap is small, holding makes it bigger. */
+export type DirectEmojiSize = "small" | "medium" | "large";
+
+export type DirectMention = {
+  id: string;
+  name: string;
+};
+
 export type DirectMessage = {
   id: string;
   conversationId: string;
@@ -109,6 +120,7 @@ export type DirectMessage = {
   text: string;
   files?: DirectFileAttachment[];
   link?: { url: string; title: string };
+  mentions?: DirectMention[];
   replyTo?: { id: string; senderName: string; preview: string; mediaUrl?: string; mediaType?: "image" | "video" };
   reactions?: Record<string, string[]>;
   pinned?: boolean;
@@ -116,6 +128,8 @@ export type DirectMessage = {
   pinnedBy?: string;
   forwarded?: boolean;
   forwardedFrom?: { senderName?: string; preview?: string };
+  /** Set on a quick like or wave; the bubble draws the emoji at this size. */
+  emojiSize?: DirectEmojiSize;
   status: "sent" | "delivered" | "seen";
   seenBy?: Record<string, any>;
   createdAt: any;
@@ -312,7 +326,13 @@ export async function getDirectMessageContext(conversationId: string, messageId:
 }
 
 /** Editing preserves ordering, unread counts and receipts; the preview changes atomically. */
-export async function editDirectMessage(conversationId: string, messageId: string, userId: string, text: string) {
+export async function editDirectMessage(
+  conversationId: string,
+  messageId: string,
+  userId: string,
+  text: string,
+  mentions: DirectMention[] = [],
+) {
   const trimmed = text.trim();
   if (!trimmed || trimmed.length > 2000) throw new Error("Enter between 1 and 2,000 characters.");
   const parent = doc(db, "directConversations", conversationId);
@@ -326,7 +346,7 @@ export async function editDirectMessage(conversationId: string, messageId: strin
     if (timestampMillis(original.createdAt) <= timestampMillis(conversation.data().deletedThrough?.[userId])) {
       throw new Error("This message is no longer in your conversation history.");
     }
-    transaction.update(reference, { text: trimmed, edited: true, editedAt: serverTimestamp() });
+    transaction.update(reference, { text: trimmed, mentions, edited: true, editedAt: serverTimestamp() });
     transaction.update(parent, {
       lastEditedMessageId: messageId, contentUpdatedAt: serverTimestamp(),
       ...(conversation.data().lastMessage?.id === messageId
@@ -345,10 +365,12 @@ export async function sendDirectMessage({
   text,
   files = [],
   link,
+  mentions = [],
   replyTo,
   forwarded,
   forwardedFrom,
   messageId,
+  emojiSize,
 }: {
   conversationId: string;
   sender: { uid: string; displayName: string; profileImage?: string | null; role?: string | null; studentID?: string };
@@ -356,16 +378,18 @@ export async function sendDirectMessage({
   text: string;
   files?: DirectFileAttachment[];
   link?: { url: string; title: string };
+  mentions?: DirectMention[];
   replyTo?: { id: string; senderName: string; preview: string; mediaUrl?: string; mediaType?: "image" | "video" };
   forwarded?: boolean;
   forwardedFrom?: { senderName?: string; preview?: string };
   recipients: string[];
   messageId?: string;
+  emojiSize?: DirectEmojiSize;
 }): Promise<string> {
   const messagesCol = collection(db, "directConversations", conversationId, "messages");
   const messageRef = messageId ? doc(messagesCol, messageId) : doc(messagesCol);
   const convRef = doc(db, "directConversations", conversationId);
-  if (!text.trim() && files.length === 0) throw new Error("A message cannot be empty.");
+  if (!text.trim() && files.length === 0 && !link) throw new Error("A message cannot be empty.");
   if (text.trim().length > 2000) throw new Error("Messages must be 2,000 characters or fewer.");
 
   const messagePayload: Omit<DirectMessage, "id"> = {
@@ -377,8 +401,10 @@ export async function sendDirectMessage({
     text: text.trim(),
     files,
     ...(link ? { link } : {}),
+    ...(mentions.length > 0 ? { mentions } : {}),
     ...(replyTo ? { replyTo } : {}),
     ...(forwarded ? { forwarded: true, ...(forwardedFrom ? { forwardedFrom } : {}) } : {}),
+    ...(emojiSize ? { emojiSize } : {}),
     status: "sent",
     seenBy: { [sender.uid]: serverTimestamp() },
     reactions: {},
@@ -409,7 +435,15 @@ export async function sendDirectMessage({
     const conversationUpdate = {
       lastMessage: {
         id: messageRef.id,
-        text: text.trim() || (files.length > 0 ? (files[0].mimeType.startsWith("image/") ? "Sent an image" : "Sent a file") : ""),
+        text:
+          text.trim() ||
+          (files.length > 0
+            ? files[0].mimeType.startsWith("image/")
+              ? "Sent an image"
+              : "Sent a file"
+            : link
+              ? "Sent a link"
+              : ""),
         senderId: sender.uid,
         senderName: sender.displayName,
         createdAt: serverTimestamp(),
@@ -453,7 +487,9 @@ export async function sendDirectMessage({
         notificationId: `dm_${messageRef.id}_${recipientId}`,
         parentId: conversationId,
         message: "sent you a message",
-        preview: text.trim() || (files.length > 0 ? "Sent an attachment" : "Message"),
+        preview:
+          text.trim() ||
+          (files.length > 0 ? "Sent an attachment" : link ? "Sent a link" : "Message"),
       }).catch((e) => console.warn("[directMessages] notification error:", e));
   }
 
@@ -474,6 +510,20 @@ export async function setDirectConversationArchived(conversationId: string, user
     if (!conversation.participants.includes(userId)) throw new Error("Not a conversation participant.");
     if (!isConversationVisible(conversation, userId)) throw new Error("There are no messages to archive or restore.");
     transaction.update(ref, { [`archivedThrough.${userId}`]: archived ? conversation.lastMessage!.createdAt : null });
+  });
+}
+
+/** How many chats one person can keep pinned to the top, as in Messenger's short pinned row. */
+export const MAX_PINNED_CHATS = 3;
+
+/**
+ * Pin a chat to the top of this participant's own list, or unpin it. The
+ * other person's list is untouched. Unpinning removes the entry entirely, so
+ * "is it pinned" never depends on a server time that is still pending.
+ */
+export async function setDirectConversationPinned(conversationId: string, userId: string, pinned: boolean): Promise<void> {
+  await updateDoc(doc(db, "directConversations", conversationId), {
+    [`pinnedAt.${userId}`]: pinned ? serverTimestamp() : deleteField(),
   });
 }
 
@@ -568,7 +618,8 @@ export async function deleteDirectMessage(conversationId: string, message: Direc
 }
 
 /**
- * Toggle an emoji reaction on a direct message.
+ * React to a direct message: one reaction per person. The same emoji again
+ * takes it off; a different one replaces it, in one write.
  */
 export async function toggleDirectMessageReaction(
   conversationId: string,
@@ -578,18 +629,12 @@ export async function toggleDirectMessageReaction(
   currentReactions: Record<string, string[]> = {},
 ): Promise<void> {
   const msgRef = doc(db, "directConversations", conversationId, "messages", messageId);
-  const currentUsers = currentReactions[emoji] || [];
-  const alreadyReacted = currentUsers.includes(userId);
-
-  if (alreadyReacted) {
-    await updateDoc(msgRef, {
-      [`reactions.${emoji}`]: arrayRemove(userId),
-    });
-  } else {
-    await updateDoc(msgRef, {
-      [`reactions.${emoji}`]: arrayUnion(userId),
-    });
-  }
+  const { add, remove } = planOwnReaction(currentReactions, userId, emoji);
+  const updates: Record<string, any> = {};
+  for (const key of remove) updates[`reactions.${key}`] = arrayRemove(userId);
+  if (add) updates[`reactions.${add}`] = arrayUnion(userId);
+  if (Object.keys(updates).length === 0) return;
+  await updateDoc(msgRef, updates);
 }
 
 /**

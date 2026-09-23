@@ -1,4 +1,5 @@
 import { AI_ASSISTANT_ID, AI_ASSISTANT_NAME, isAiAssistantId } from "@/utils/aiAssistant";
+import { anonymousName, getMyAnonymousHandle } from "@/utils/anonymousHandle";
 import { getAiErrorMessage } from "@/utils/aiConfig";
 import {
     AI_REQUEST_COOLDOWN_MS,
@@ -8,12 +9,19 @@ import {
     type AiContextMessage,
 } from "@/utils/aiWorker";
 import { resolveAvatarUri } from "@/utils/avatar";
+import { formatChatTimeLabel, sameDay as isSameCalendarDay } from "@/utils/chatTime";
+import { splitMessageLinks } from "@/utils/chatLinks";
 import { AVATAR_SIZE_SMALL, avatarThumb, FEED_IMAGE_WIDTH, feedImage, videoThumb } from "@/utils/cloudinaryImages";
 import { requestServerDrawerReopen } from "@/utils/communityNavigation";
 import {
+    buildChannelAccess,
+    CHANNEL_TYPE_OPTIONS,
     deleteChannelFromSections,
     getChannelDefaultEmoji,
+    getChannelIcon,
+    isStaffChannel,
     isStaffOnlyChannel,
+    resolveChannelType,
     updateChannelInSections,
     type ChannelType
 } from "@/utils/communityServers";
@@ -24,7 +32,18 @@ import {
     moderateNewContent,
     requestFirestoreModerationDecision,
 } from "@/utils/contentModeration";
-import { localCopyOf, type ComposerAttachments } from "@/utils/composerUploads";
+import { localCopyOf, prepareComposerAttachments, type ComposerAttachments } from "@/utils/composerUploads";
+import {
+  appendUserPollOption,
+  buildChannelPoll,
+  nextPollAnswer,
+  pollIsClosed,
+  pollMessageText,
+  tallyPoll,
+  type ChannelPoll,
+  type PollDraft,
+  type PollVoters,
+} from "@/utils/channelPolls";
 import SafetyDialog from "./components/SafetyDialog";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { useNetworkStatus } from "@/utils/networkUtils";
@@ -41,6 +60,7 @@ import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { canReportContent, getUserDataByAuthUser, isStaff, normalizeUserRole, peekUserData } from "@/utils/rbac";
 import { replyPreviewMedia, replyPreviewText } from "@/utils/replyPreview";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { canNavigateToTaggedUser, manualTaggedUsers, splitTaggedMentions } from "@/utils/taggedUsers";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -51,10 +71,12 @@ import {
     arrayUnion,
     collection,
     deleteDoc,
+    deleteField,
     doc,
     FieldPath,
     onSnapshot,
     query,
+    runTransaction,
     serverTimestamp,
     setDoc,
     updateDoc,
@@ -63,7 +85,6 @@ import {
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
-    Alert,
     Animated,
     BackHandler,
     Dimensions,
@@ -97,9 +118,15 @@ import BeaOrb from "./components/BeaOrb";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import ServerMessageComposer from "./components/ServerMessageComposer";
+import ChannelPollCard from "./components/ChannelPollCard";
+import ChannelPollSheet from "./components/ChannelPollSheet";
 import ConfirmDialog from "./components/ConfirmDialog";
+import { showAppToast } from "@/utils/toastEvents";
+import DragToCloseSheet from "./components/DragToCloseSheet";
+import FileAttachmentCard from "./components/FileAttachmentCard";
 import ExpandableText from "./components/ExpandableText";
 import ImageZoomViewer from "./components/ImageZoomViewer";
+import ExternalLinkDialog, { prepareExternalLink } from "./components/ExternalLinkDialog";
 import { ChatSkeleton } from "./components/Skeleton";
 
 const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -112,6 +139,10 @@ const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get("window");
 // content wrap's maxWidth (SCREEN_WIDTH * 0.74) minus the bubble's
 // paddingHorizontal (14 * 2) and borderWidth (1 * 2).
 const MESSAGE_MEDIA_WIDTH = Math.round(SCREEN_WIDTH * 0.74 - 30);
+// Link and manual-tag rows need a real width. Leaving their width intrinsic
+// creates a Yoga measurement cycle (content-sized bubble -> flex child ->
+// content-sized bubble) that can resolve to only a few pixels on Android.
+const MESSAGE_DETAIL_CARD_WIDTH = Math.min(260, Math.round(SCREEN_WIDTH * 0.62));
 
 type TaggedUser = {
   id: string;
@@ -137,11 +168,14 @@ type ThreadMessage = {
     url: string;
     mimeType: string;
     name?: string;
+    size?: number;
     width?: number | null;
     height?: number | null;
   }[];
   link?: { url: string; title: string };
   taggedUsers?: TaggedUser[];
+  /** IDs represented inline with @. Other taggedUsers render as "with …". */
+  mentionedUserIds?: string[];
   createdAt?: any;
   serverId?: string | null;
   channelId?: string | null;
@@ -166,6 +200,9 @@ type ThreadMessage = {
   pinnedAt?: any;
   pinnedBy?: string | null;
   pinnedByName?: string | null;
+  // A poll in the channel, and everyone's answers. See utils/channelPolls.ts.
+  poll?: ChannelPoll;
+  pollVoters?: PollVoters;
   // Task 4A: set when the author edits the text after sending; drives the
   // small "(edited)" marker on the bubble.
   editedAt?: any;
@@ -251,14 +288,12 @@ function ReactionPill({
   emojis,
   total,
   mine,
-  isOwnMessage,
   messageId,
   onPress,
 }: {
   emojis: string;
   total: number;
   mine: boolean;
-  isOwnMessage: boolean;
   messageId: string;
   onPress: () => void;
 }) {
@@ -285,7 +320,6 @@ function ReactionPill({
       onPress={onPress}
       style={[
         styles.reactionPill,
-        isOwnMessage && styles.reactionPillOwn,
         mine && styles.reactionPillMine,
         popStyle,
       ]}
@@ -465,6 +499,32 @@ type GalleryEntry = {
 const msTimeAgo = (ms: number, nowMs: number) =>
   ms ? getTimeAgo({ toDate: () => new Date(ms) }, nowMs) : "";
 
+/** "1 photo", "3 photos". */
+const countLabel = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+
+/** A gap this long between two messages earns its own time label, as in DMs. */
+const TIME_LABEL_GAP_MS = 15 * 60 * 1000;
+
+const messageMillis = (message?: ThreadMessage): number =>
+  message?.createdAt?.toMillis?.() ?? 0;
+
+/**
+ * Whether a message opens a new stretch of the channel — the first one
+ * loaded, the first of a new day, or one after a long pause — and so gets a
+ * time label above it, the way DMs and Messenger show it.
+ */
+function needsTimeLabel(message: ThreadMessage, older: ThreadMessage | undefined): boolean {
+  const current = messageMillis(message);
+  if (!current) return false;
+  if (!older) return true;
+  const previous = messageMillis(older);
+  if (!previous) return false;
+  return (
+    !isSameCalendarDay(new Date(previous), new Date(current)) ||
+    current - previous >= TIME_LABEL_GAP_MS
+  );
+}
+
 const isSameSenderRun = (a?: ThreadMessage, b?: ThreadMessage) => {
   if (!a || !b) return false;
   if ((a.realUserId || a.userId) !== (b.realUserId || b.userId)) return false;
@@ -525,7 +585,7 @@ const buildAiContextMessages = (
   return recentMessages.map(
     (message): AiContextMessage => ({
       role: isAiAssistantId(message.realUserId || message.userId) ? "assistant" : "user",
-      name: message.isAnonymous ? "Anonymous" : message.username || "User",
+      name: message.isAnonymous ? anonymousName(message) : message.username || "User",
       content: summarizeThreadMessage(message),
     }),
   );
@@ -581,18 +641,20 @@ function TypingDots({ color }: { color: string }) {
   );
 }
 
+/**
+ * Under a bubble: "Sending…" while it sends, or its exact time once tapped.
+ * The time of day is the label above a new stretch of messages, as in DMs.
+ */
 const MessageTimestamp = React.memo(function MessageTimestamp({
   createdAt,
   nowMs: propNowMs,
   revealed,
-  isGroupEnd,
   isOwnMessage,
   sending,
 }: {
   createdAt: any;
   nowMs?: number;
   revealed: boolean;
-  isGroupEnd: boolean;
   isOwnMessage: boolean;
   sending?: boolean;
 }) {
@@ -622,14 +684,6 @@ const MessageTimestamp = React.memo(function MessageTimestamp({
     );
   }
 
-  if (isGroupEnd) {
-    return (
-      <Text style={[styles.messageMeta, isOwnMessage && styles.messageMetaOwn]}>
-        {getTimeAgo(createdAt, nowMs)}
-      </Text>
-    );
-  }
-
   return null;
 });
 
@@ -647,9 +701,16 @@ function MessageBubbleComponent({
   onLongPress,
   onSetReaction,
   onSwipeReply,
+  onReplyPress,
   onOpenImage,
+  onOpenUrl,
   readers,
   pinned,
+  showFullText,
+  timeLabel,
+  canVotePolls,
+  onPollVote,
+  onAddPollOption,
   liveAvatarUri,
   isStaffViewer,
 }: {
@@ -659,6 +720,7 @@ function MessageBubbleComponent({
   onProfilePress: (userId?: string, isAnonymous?: boolean) => void;
   // Tap an attachment image/GIF to open the zoom + save viewer.
   onOpenImage: (urls: string[], index: number) => void;
+  onOpenUrl: (url: string, label?: string) => void;
   nowMs?: number;
   // Message grouping: a "group" is a run of consecutive same-sender messages
   // close together in time. Start = first of the run, end = last of the run.
@@ -673,19 +735,34 @@ function MessageBubbleComponent({
   onSetReaction: (messageId: string, emoji: string) => void;
   // Feature 4: swipe the bubble sideways to reply to it.
   onSwipeReply: (messageId: string) => void;
+  onReplyPress: (messageId: string) => void;
   // Feature 5: members whose read position lands on this message.
   readers: ChannelRead[];
   // Task 3: this message is pinned in the channel — show the badge to everyone.
   pinned: boolean;
+  // Rules, announcements and pinned messages are there to be read in full.
+  showFullText: boolean;
+  // Shown centred above the message when it opens a new stretch.
+  timeLabel: string | null;
+  // Polls: members and staff vote; the screen saves the answer.
+  canVotePolls: boolean;
+  onPollVote: (messageId: string, optionId: string) => void;
+  onAddPollOption: (messageId: string, text: string) => Promise<string | null>;
   liveAvatarUri?: string | null;
   isStaffViewer?: boolean;
 }) {
   const { styles, theme } = useStyles();
+  const [tagsExpanded, setTagsExpanded] = useState(false);
   // Task 5: shared classification (also used by the Media/Files gallery).
   const imageFiles = messageImageFiles(item);
   const gifFiles = messageGifFiles(item);
   const docs = messageDocFiles(item);
-  const avatarUri = liveAvatarUri || resolveAvatarUri(item);
+  // Anonymous channel messages must never reuse the writer's live/cached
+  // profile photo. The document already stores null avatar fields, but the
+  // live profile cache is keyed by realUserId and could otherwise reveal it.
+  const avatarUri = item.isAnonymous
+    ? null
+    : liveAvatarUri || resolveAvatarUri(item);
   // Your message while its photos upload: shown, but there is nothing saved
   // yet to react to, reply to or open.
   const sending = item.sending === true;
@@ -706,6 +783,26 @@ function MessageBubbleComponent({
   // content stays aligned with the rest of the run.
   const showAvatar = !isOwnMessage && isGroupEnd;
   const showName = !isOwnMessage && isGroupEnd;
+  // Photos and GIFs sit under the bubble on their own, rounded, with no frame
+  // of the chat colour around them. A message that is only a picture has no
+  // bubble at all.
+  const photoFiles = [...gifFiles, ...imageFiles];
+  const manualTags = manualTaggedUsers(
+    item.text,
+    item.taggedUsers,
+    item.mentionedUserIds,
+  );
+  const visibleManualTags = tagsExpanded ? manualTags : manualTags.slice(0, 1);
+  const hiddenManualTagCount = Math.max(0, manualTags.length - 1);
+  const bubbleHasContent =
+    !!(item.forwarded || item.isForwarded) ||
+    pinned ||
+    !!item.text ||
+    !!item.editedAt ||
+    !!aiThinking ||
+    docs.length > 0 ||
+    !!item.link ||
+    manualTags.length > 0;
   // Reactions still holding at least one user — empty arrays are left behind
   // by arrayRemove and shouldn't count.
   const reactionEntries = Object.entries(item.reactions || {})
@@ -782,6 +879,12 @@ function MessageBubbleComponent({
   }));
 
   return (
+    <View>
+    {!!timeLabel && (
+      <Text style={styles.timeLabel} accessibilityRole="header">
+        {timeLabel}
+      </Text>
+    )}
     <GestureDetector gesture={replyGesture}>
     <ReanimatedAnimated.View
       style={[
@@ -817,7 +920,9 @@ function MessageBubbleComponent({
             style={styles.avatarWrap}
           >
             <View style={styles.avatar}>
-              {avatarUri ? (
+              {item.isAnonymous ? (
+                <Ionicons name="person" size={16} color={theme.textMuted} />
+              ) : avatarUri ? (
                 <Image
                   source={{ uri: avatarThumb(avatarUri, AVATAR_SIZE_SMALL) }}
                   style={styles.avatarImage}
@@ -863,7 +968,12 @@ function MessageBubbleComponent({
               not to what, which is no use in a busy channel. Muted, outside
               the bubble so it cannot change the bubble's width. */}
           {item.replyTo && (
-            <View style={[styles.replyEcho, isOwnMessage && styles.replyEchoOwn]}>
+            <Pressable
+              style={[styles.replyEcho, isOwnMessage && styles.replyEchoOwn]}
+              onPress={() => onReplyPress(item.replyTo!.id)}
+              accessibilityRole="button"
+              accessibilityLabel="Go to the original message"
+            >
               {!!item.replyTo.mediaUrl && (
                 <Image
                   source={{
@@ -880,8 +990,18 @@ function MessageBubbleComponent({
               <Text style={styles.replyEchoText} numberOfLines={1}>
                 {item.replyTo.preview}
               </Text>
-            </View>
+            </Pressable>
           )}
+        {/* The message itself — its bubble and photos — with the reaction
+            sitting on its bottom corner, as in DMs and Messenger. */}
+        <View
+          style={[
+            styles.messageBody,
+            isOwnMessage && styles.messageBodyOwn,
+            reactionEntries.length > 0 && styles.messageBodyWithReaction,
+          ]}
+        >
+        {bubbleHasContent && (
         <Pressable
           style={bubbleStyle}
           onPress={handleBubbleTap}
@@ -925,16 +1045,72 @@ function MessageBubbleComponent({
           {showName && (
             <Text style={styles.messageAuthor}>
               {item.isAnonymous
-                ? (isOwnMessage && isStaffViewer ? "Anonymous (You)" : "Anonymous")
+                ? anonymousName(item, { isYou: isOwnMessage && isStaffViewer })
                 : item.username || "User"}
             </Text>
           )}
-          {!!item.text && (
+          {item.poll ? (
+            <ChannelPollCard
+              poll={item.poll}
+              voters={item.pollVoters}
+              currentUserId={currentUserId}
+              nowMs={nowMs ?? 0}
+              canVote={canVotePolls && !sending}
+              onVote={(optionId) => onPollVote(item.id, optionId)}
+              onAddOption={(text) => onAddPollOption(item.id, text)}
+              accent={accent}
+            />
+          ) : !!item.text && (
             <ExpandableText
               text={item.text}
               textStyle={[styles.messageText, isOwnMessage && styles.messageTextOwn]}
-              collapsedLines={5}
-              minLengthToToggle={220}
+              renderText={(value) =>
+                splitMessageLinks(value).map((part, index) =>
+                  part.url ? (
+                    <Text
+                      key={`${part.url}:${index}`}
+                      style={[styles.messageLink, isOwnMessage && styles.messageLinkOwn]}
+                      accessibilityRole="link"
+                      onPress={() => onOpenUrl(part.url!, part.text)}
+                      onLongPress={() => onLongPress(item.id)}
+                    >
+                      {part.text}
+                    </Text>
+                  ) : splitTaggedMentions(
+                      part.text,
+                      item.taggedUsers,
+                      item.mentionedUserIds,
+                    ).map((piece, pieceIndex) => {
+                      const navigable = canNavigateToTaggedUser(piece.taggedUser?.id);
+                      return piece.taggedUser ? (
+                        <Text
+                          key={`mention:${index}:${pieceIndex}`}
+                          style={[
+                            styles.messageMention,
+                            isOwnMessage && styles.messageMentionOwn,
+                          ]}
+                          onPress={
+                            navigable
+                              ? () => onProfilePress(piece.taggedUser!.id, false)
+                              : undefined
+                          }
+                          accessibilityRole={navigable ? "link" : undefined}
+                        >
+                          {piece.text}
+                        </Text>
+                      ) : (
+                        <React.Fragment key={`text:${index}:${pieceIndex}`}>
+                          {piece.text}
+                        </React.Fragment>
+                      );
+                    }),
+                )
+              }
+              // Chat reads top to bottom, so messages show in full, as in
+              // Messenger or Discord; only a huge paste is cut, so it can't
+              // take over the channel.
+              collapsedLines={15}
+              collapsible={!showFullText}
               buttonTextStyle={[
                 styles.messageToggleText,
                 isOwnMessage && styles.messageToggleTextOwn,
@@ -962,80 +1138,43 @@ function MessageBubbleComponent({
             </View>
           ) : null}
 
-          {[...gifFiles, ...imageFiles].map((file, index, all) => (
-            <Pressable
+          {docs.map((file) => (
+            <FileAttachmentCard
               key={file.url}
-              onPress={() => onOpenImage(all.map((entry) => entry.url), index)}
-              // Without this the nested pressable swallows the gesture and the
-              // bubble's own long-press never fires, so an image could not be
-              // reacted to. Tap still opens the viewer; hold reacts.
+              file={file}
+              onPress={() => Linking.openURL(file.url).catch(() => null)}
               onLongPress={() => onLongPress(item.id)}
-              delayLongPress={250}
               disabled={sending}
-              style={({ pressed }) => (pressed ? styles.messageImagePressed : undefined)}
-            >
-              <MessageImage
-                uri={feedImage(file.url, FEED_IMAGE_WIDTH) || file.url}
-                width={MESSAGE_MEDIA_WIDTH}
-                sourceWidth={file.width}
-                sourceHeight={file.height}
-                style={styles.messageImageSpacing}
-                recyclingKey={`${item.id}:${file.url}`}
-                placeholderUri={localCopyOf(file.url)}
-              />
-            </Pressable>
+            />
           ))}
-
-          {docs.map((file) => {
-            const details = getFileIconDetails(file.mimeType, file.name);
-            return (
-              <TouchableOpacity
-                key={file.url}
-                style={styles.fileChip}
-                onPress={() => Linking.openURL(file.url).catch(() => null)}
-                // Same capture problem as the image above: without this a
-                // message that is only an attachment cannot be reacted to.
-                onLongPress={() => onLongPress(item.id)}
-                delayLongPress={250}
-                disabled={sending}
-                activeOpacity={0.8}
-              >
-                <Ionicons
-                  name={details.icon}
-                  size={16}
-                  color={isOwnMessage ? theme.surface : details.color}
-                />
-                <Text
-                  style={[styles.fileChipText, isOwnMessage && styles.fileChipTextOwn]}
-                  numberOfLines={1}
-                >
-                  {file.name || "Attachment"}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
 
           {item.link && (
             <TouchableOpacity
               style={styles.linkCard}
-              onPress={() => Linking.openURL(item.link?.url || "").catch(() => null)}
+              onPress={() => onOpenUrl(item.link?.url || "", item.link?.title)}
+              onLongPress={() => onLongPress(item.id)}
+              delayLongPress={250}
+              disabled={sending}
               activeOpacity={0.82}
+              accessibilityRole="link"
+              accessibilityLabel={`${item.link.title || "Link"}. Hold for message actions.`}
             >
               <Ionicons
                 name="link-outline"
                 size={16}
                 color={isOwnMessage ? theme.surface : theme.primary}
               />
-              <View style={{ flex: 1 }}>
-                <Text
-                  style={[styles.linkTitle, isOwnMessage && styles.linkTitleOwn]}
-                  numberOfLines={1}
-                >
-                  {item.link.title || "Link"}
-                </Text>
+              <View style={styles.linkCopy}>
+                {!!item.link.title?.trim() && item.link.title.trim() !== item.link.url && (
+                  <Text
+                    style={[styles.linkTitle, isOwnMessage && styles.linkTitleOwn]}
+                    numberOfLines={1}
+                  >
+                    {item.link.title.trim()}
+                  </Text>
+                )}
                 <Text
                   style={[styles.linkUrl, isOwnMessage && styles.linkUrlOwn]}
-                  numberOfLines={1}
                 >
                   {item.link.url}
                 </Text>
@@ -1043,42 +1182,118 @@ function MessageBubbleComponent({
             </TouchableOpacity>
           )}
 
-          {!!item.taggedUsers?.length && (
-            <View style={styles.tagRow}>
-              <Ionicons
-                name="people-outline"
-                size={13}
-                color={isOwnMessage ? theme.surface : "#a86fff"}
-              />
-              <Text style={[styles.tagText, isOwnMessage && styles.tagTextOwn]}>
-                with {item.taggedUsers.map((tag) => tag.name).join(", ")}
-              </Text>
+          {manualTags.length > 0 && (
+            <View style={styles.tagCard}>
+              <View style={styles.tagRow}>
+                <Ionicons
+                  name="people-outline"
+                  size={13}
+                  color={isOwnMessage ? theme.surface : "#a86fff"}
+                />
+                <Text style={[styles.tagText, isOwnMessage && styles.tagTextOwn]}>with </Text>
+                {visibleManualTags.map((tag, index) => {
+                  const navigable = canNavigateToTaggedUser(tag.id);
+                  return (
+                    <React.Fragment key={tag.id}>
+                      {index > 0 && (
+                        <Text style={[styles.tagText, isOwnMessage && styles.tagTextOwn]}>, </Text>
+                      )}
+                      <TouchableOpacity
+                        onPress={navigable ? () => onProfilePress(tag.id, false) : undefined}
+                        disabled={!navigable}
+                        hitSlop={6}
+                        accessibilityRole={navigable ? "link" : undefined}
+                      >
+                        <Text style={[styles.tagText, isOwnMessage && styles.tagTextOwn]}>
+                          {tag.name}
+                        </Text>
+                      </TouchableOpacity>
+                    </React.Fragment>
+                  );
+                })}
+                {hiddenManualTagCount > 0 && !tagsExpanded && (
+                  <TouchableOpacity onPress={() => setTagsExpanded(true)} hitSlop={8}>
+                    <Text style={[styles.tagMore, isOwnMessage && styles.tagTextOwn]}>
+                      See {hiddenManualTagCount} more
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {tagsExpanded && manualTags.length > 1 && (
+                  <TouchableOpacity onPress={() => setTagsExpanded(false)} hitSlop={8}>
+                    <Text style={[styles.tagMore, isOwnMessage && styles.tagTextOwn]}>See less</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
             </View>
           )}
         </Pressable>
+        )}
 
-        <MessageTimestamp
-          createdAt={item.createdAt}
-          nowMs={nowMs}
-          revealed={revealed}
-          isGroupEnd={isGroupEnd}
-          isOwnMessage={isOwnMessage}
-          sending={sending}
-        />
+        {/* A picture on its own still says who sent it. */}
+        {!bubbleHasContent && showName && photoFiles.length > 0 && (
+          <Text style={[styles.messageAuthor, styles.photoAuthor]}>
+            {item.isAnonymous
+              ? anonymousName(item, { isYou: isOwnMessage && isStaffViewer })
+              : item.username || "User"}
+          </Text>
+        )}
+
+        {photoFiles.length > 0 && (
+          <View style={[styles.photoStack, isOwnMessage && styles.photoStackOwn]}>
+            {photoFiles.map((file, index, all) => (
+              <Pressable
+                key={file.url}
+                onPress={() => onOpenImage(all.map((entry) => entry.url), index)}
+                // Hold to react, tap to open — the picture carries both now
+                // that there may be no bubble around it.
+                onLongPress={() => onLongPress(item.id)}
+                delayLongPress={250}
+                disabled={sending}
+                accessibilityRole="button"
+                accessibilityLabel={`${file.mimeType.includes("gif") ? "GIF" : "Image"}. Hold for message actions.`}
+                style={({ pressed }) => [styles.photoItem, pressed && styles.messageImagePressed]}
+              >
+                <MessageImage
+                  uri={feedImage(file.url, FEED_IMAGE_WIDTH) || file.url}
+                  width={MESSAGE_MEDIA_WIDTH}
+                  sourceWidth={file.width}
+                  sourceHeight={file.height}
+                  recyclingKey={`${item.id}:${file.url}`}
+                  placeholderUri={localCopyOf(file.url)}
+                />
+              </Pressable>
+            ))}
+          </View>
+        )}
 
         {reactionEntries.length > 0 && (
           // One compact pill (Messenger-style): the distinct emojis + a total
           // count. Tapping it removes your reaction if you have one, or adds
           // the default heart if you don't. Pops on a new reaction.
-          <ReactionPill
-            emojis={reactionSummary.join("")}
-            total={reactionTotal}
-            mine={!!myReaction}
-            isOwnMessage={isOwnMessage}
-            messageId={item.id}
-            onPress={() => onSetReaction(item.id, myReaction ?? DEFAULT_REACTION)}
-          />
+          <View
+            style={[
+              styles.reactionCorner,
+              isOwnMessage ? styles.reactionCornerOwn : styles.reactionCornerOther,
+            ]}
+          >
+            <ReactionPill
+              emojis={reactionSummary.join("")}
+              total={reactionTotal}
+              mine={!!myReaction}
+              messageId={item.id}
+              onPress={() => onSetReaction(item.id, myReaction ?? DEFAULT_REACTION)}
+            />
+          </View>
         )}
+        </View>
+
+        <MessageTimestamp
+          createdAt={item.createdAt}
+          nowMs={nowMs}
+          revealed={revealed}
+          isOwnMessage={isOwnMessage}
+          sending={sending}
+        />
 
         {readers.length > 0 && (
           // Feature 5: small stacked avatars for members who've read up to
@@ -1116,6 +1331,7 @@ function MessageBubbleComponent({
       </View>
     </ReanimatedAnimated.View>
     </GestureDetector>
+    </View>
   );
 }
 
@@ -1163,7 +1379,7 @@ function PinnedMessageRowComponent({
   const { styles, theme } = useStyles();
   const avatarUri = liveAvatarUri || resolveAvatarUri(item);
   const senderName = item.isAnonymous
-    ? (isOwn && isStaffViewer ? "Anonymous (You)" : "Anonymous")
+    ? anonymousName(item, { isYou: isOwn && isStaffViewer })
     : item.username || "User";
   const file = (item.files || [])[0];
   const previewText = file
@@ -1178,8 +1394,8 @@ function PinnedMessageRowComponent({
     <View style={styles.pinnedRow}>
       <Pressable
         style={styles.pinnedRowMain}
-        onPress={() => onOpenContent(item.id)}
-        accessibilityLabel="Open pinned content"
+        onPress={() => onJumpToMessage(item.id)}
+        accessibilityLabel="Jump to message in thread"
       >
         <View style={styles.pinnedAvatar}>
           {avatarUri ? (
@@ -1295,7 +1511,7 @@ function SearchResultRowComponent({
 }) {
   const { styles, theme } = useStyles();
   const senderName = item.isAnonymous
-    ? (isOwn && isStaffViewer ? "Anonymous (You)" : "Anonymous")
+    ? anonymousName(item, { isYou: isOwn && isStaffViewer })
     : item.username || "User";
   return (
     <Pressable style={styles.galleryRow} onPress={() => onJump(item.id)}>
@@ -1356,6 +1572,9 @@ export default function ServerChannelScreen() {
   const [channelMuted, setChannelMuted] = useState(false);
   // Task 5: the "channel content" sheet (Media / Files / Links / Search).
   const [contentSheetVisible, setContentSheetVisible] = useState(false);
+  // Stable, so the sheets' drag gesture isn't rebuilt on every render.
+  const closePinnedList = useCallback(() => setPinnedListVisible(false), []);
+  const closeContentSheet = useCallback(() => setContentSheetVisible(false), []);
   const [contentTab, setContentTab] = useState<ContentTab>("media");
   const [galleryVisibleCount, setGalleryVisibleCount] = useState(GALLERY_PAGE_SIZE);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1548,8 +1767,64 @@ export default function ServerChannelScreen() {
     };
   }, [isOffline, user]);
 
+  // Task 3: track this server's owner/creator so pin permission can mirror the
+  // communityServers rule. One tiny doc; a listener keeps it correct across a
+  // rare ownership transfer.
+  useEffect(() => {
+    if (!resolvedServerId) return;
+    const unsubscribe = onSnapshot(
+      doc(db, "communityServers", resolvedServerId),
+      (snapshot) => {
+        const data = snapshot.data();
+        setServerMeta(
+          data ? { createdBy: (data as any).createdBy, ownerId: (data as any).ownerId } : null,
+        );
+        setCurrentServerData(data || null);
+      },
+      (error) => console.error("Error loading server metadata:", error),
+    );
+    return unsubscribe;
+  }, [resolvedServerId]);
+
+  const currentChannel = useMemo(() => {
+    if (!currentServerData?.sections) return null;
+    for (const section of currentServerData.sections) {
+      const found = (section.channels || []).find(
+        (ch: any) => ch.id === resolvedChannelId || ch.label === resolvedChannelLabel,
+      );
+      if (found) return found;
+    }
+    return null;
+  }, [currentServerData?.sections, resolvedChannelId, resolvedChannelLabel]);
+
+  const channelType: ChannelType = useMemo(
+    () =>
+      resolveChannelType(
+        currentChannel ?? { id: resolvedChannelId || "", label: resolvedChannelLabel || "" },
+      ),
+    [currentChannel, resolvedChannelId, resolvedChannelLabel],
+  );
+
+  // Read-only and Rules: staff and the owner post; students read, react, forward.
+  const isStaffOnly = channelType === "rules" || channelType === "announcement";
+  const userIsStaff = ["admin", "moderator", "teacher"].includes(currentUserProfile?.role || "");
+  const userIsOwner =
+    currentServerData?.ownerId === user?.uid || currentServerData?.createdBy === user?.uid;
+  // Staff only: its messages are kept apart from everyone else's, and a
+  // student can't open it, even from an old link or a notification.
+  const staffChannelHere = channelType === "staff";
+  const messageCollection = staffChannelHere ? "communityStaffMessages" : "communityThreadMessages";
+  const staffChannelBlocked = staffChannelHere && !!currentUserProfile && !userIsStaff;
+  const canPostInChannel = staffChannelHere
+    ? userIsStaff
+    : !isStaffOnly || userIsStaff || userIsOwner;
+  const canManageChannel = userIsStaff || userIsOwner;
+
   useEffect(() => {
     if (!resolvedServerId || !resolvedChannelId) return;
+    // Staff only: nothing to load until we know this is staff, and never
+    // for a student (the rules would refuse it anyway).
+    if (staffChannelHere && !userIsStaff) return;
 
     let isMounted = true;
     getCachedChannelMessages<ThreadMessage>(resolvedServerId, resolvedChannelId).then((cached) => {
@@ -1563,7 +1838,7 @@ export default function ServerChannelScreen() {
     // app. Equality-only filters need no composite index, so there is nothing
     // to deploy; the list is sorted by time on the phone below.
     const messagesQuery = query(
-      collection(db, "communityThreadMessages"),
+      collection(db, messageCollection),
       where("serverId", "==", resolvedServerId),
       where("channelId", "==", resolvedChannelId),
     );
@@ -1611,61 +1886,8 @@ export default function ServerChannelScreen() {
       isMounted = false;
       unsubscribe();
     };
-  }, [currentUserProfile?.role, resolvedChannelId, resolvedServerId, user?.uid]);
+  }, [currentUserProfile?.role, messageCollection, resolvedChannelId, resolvedServerId, staffChannelHere, user?.uid, userIsStaff]);
 
-  // Task 3: track this server's owner/creator so pin permission can mirror the
-  // communityServers rule. One tiny doc; a listener keeps it correct across a
-  // rare ownership transfer.
-  useEffect(() => {
-    if (!resolvedServerId) return;
-    const unsubscribe = onSnapshot(
-      doc(db, "communityServers", resolvedServerId),
-      (snapshot) => {
-        const data = snapshot.data();
-        setServerMeta(
-          data ? { createdBy: (data as any).createdBy, ownerId: (data as any).ownerId } : null,
-        );
-        setCurrentServerData(data || null);
-      },
-      (error) => console.error("Error loading server metadata:", error),
-    );
-    return unsubscribe;
-  }, [resolvedServerId]);
-
-  const currentChannel = useMemo(() => {
-    if (!currentServerData?.sections) return null;
-    for (const section of currentServerData.sections) {
-      const found = (section.channels || []).find(
-        (ch: any) => ch.id === resolvedChannelId || ch.label === resolvedChannelLabel,
-      );
-      if (found) return found;
-    }
-    return null;
-  }, [currentServerData?.sections, resolvedChannelId, resolvedChannelLabel]);
-
-  const channelType: ChannelType = useMemo(() => {
-    if (currentChannel?.channelType) return currentChannel.channelType;
-    const lowerLabel = (resolvedChannelLabel || "").toLowerCase();
-    const lowerId = (resolvedChannelId || "").toLowerCase();
-    if (lowerLabel === "rules" || lowerId.endsWith("_rules")) return "rules";
-    if (
-      lowerLabel === "announcement" ||
-      lowerLabel === "announcements" ||
-      lowerId.endsWith("_announcement") ||
-      lowerId.endsWith("_announcements")
-    ) {
-      return "announcement";
-    }
-    if (lowerLabel === "media" || lowerId.endsWith("_media")) return "media";
-    return "text";
-  }, [currentChannel?.channelType, resolvedChannelId, resolvedChannelLabel]);
-
-  const isStaffOnly = channelType === "rules" || channelType === "announcement";
-  const userIsStaff = ["admin", "moderator", "teacher"].includes(currentUserProfile?.role || "");
-  const userIsOwner =
-    currentServerData?.ownerId === user?.uid || currentServerData?.createdBy === user?.uid;
-  const canPostInChannel = !isStaffOnly || userIsStaff || userIsOwner;
-  const canManageChannel = userIsStaff || userIsOwner;
 
   const [editChannelModalVisible, setEditChannelModalVisible] = useState(false);
   const [editChannelName, setEditChannelName] = useState("");
@@ -1697,46 +1919,46 @@ export default function ServerChannelScreen() {
       );
       await updateDoc(doc(db, "communityServers", resolvedServerId), {
         sections: nextSections,
+        // Each channel's type, for the database rules.
+        channelAccess: buildChannelAccess(nextSections),
         updatedAt: serverTimestamp(),
       });
       setEditChannelModalVisible(false);
     } catch (err) {
       console.error("Failed to update channel:", err);
-      Alert.alert("Error", "Failed to update channel.");
+      showInfo("Couldn't save the channel", "Check your connection and try again.");
     }
   }, [currentServerData?.sections, editChannelEmoji, editChannelHint, editChannelName, editChannelType, resolvedChannelId, resolvedServerId]);
 
   const handleDeleteCurrentChannel = useCallback(() => {
     if (!resolvedServerId || !resolvedChannelId) return;
-    Alert.alert(
-      "Delete Channel",
-      `Are you sure you want to delete #${resolvedChannelLabel}? This action cannot be undone.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              const nextSections = deleteChannelFromSections(
-                currentServerData?.sections,
-                resolvedServerId,
-                resolvedChannelId,
-              );
-              await updateDoc(doc(db, "communityServers", resolvedServerId), {
-                sections: nextSections,
-                updatedAt: serverTimestamp(),
-              });
-              setEditChannelModalVisible(false);
-              closeToDrawer();
-            } catch (err) {
-              console.error("Failed to delete channel:", err);
-              Alert.alert("Error", "Failed to delete channel.");
-            }
-          },
-        },
-      ],
-    );
+    showConfirm({
+      title: `Delete #${resolvedChannelLabel}?`,
+      description: "Everything posted in this channel goes with it. This can't be undone.",
+      confirmText: "Delete channel",
+      cancelText: "Cancel",
+      destructive: true,
+      onConfirm: async () => {
+        try {
+          const nextSections = deleteChannelFromSections(
+            currentServerData?.sections,
+            resolvedServerId,
+            resolvedChannelId,
+          );
+          await updateDoc(doc(db, "communityServers", resolvedServerId), {
+            sections: nextSections,
+            channelAccess: buildChannelAccess(nextSections),
+            updatedAt: serverTimestamp(),
+          });
+          setEditChannelModalVisible(false);
+          closeToDrawer();
+          showAppToast({ message: `#${resolvedChannelLabel} deleted` });
+        } catch (err) {
+          console.error("Failed to delete channel:", err);
+          showInfo("Couldn't delete the channel", "Check your connection and try again.");
+        }
+      },
+    });
   }, [closeToDrawer, currentServerData?.sections, resolvedChannelId, resolvedChannelLabel, resolvedServerId]);
 
   // Load servers and user memberships when Forward Modal is visible
@@ -1778,6 +2000,7 @@ export default function ServerChannelScreen() {
       channelName: string;
       channelEmoji?: string;
       isCurrentServer: boolean;
+      staffChannel?: boolean;
     }[] = [];
 
     // First, add all channels from current server
@@ -1794,6 +2017,7 @@ export default function ServerChannelScreen() {
               channelName: ch.label || ch.id,
               channelEmoji: ch.emoji,
               isCurrentServer: true,
+              staffChannel: isStaffChannel(ch),
             });
           }
         }
@@ -1834,6 +2058,7 @@ export default function ServerChannelScreen() {
               channelName: ch.label || ch.id,
               channelEmoji: ch.emoji,
               isCurrentServer: false,
+              staffChannel: isStaffChannel(ch),
             });
           }
         }
@@ -1868,6 +2093,7 @@ export default function ServerChannelScreen() {
       serverName: string;
       channelId: string;
       channelName: string;
+      staffChannel?: boolean;
     }) => {
       if (!user?.uid || !forwardTargetMessage) return;
       if (isOffline) {
@@ -1895,14 +2121,16 @@ export default function ServerChannelScreen() {
           serverId: dest.serverId,
           channelId: dest.channelId,
           createdAt: serverTimestamp(),
-          moderationStatus: "pending",
+          // Only staff can reach a Staff only channel, and staff messages
+          // skip the moderation queue.
+          moderationStatus: dest.staffChannel ? "approved" : "pending",
           moderationReasons: [],
           moderatedAtMs: null,
           forwarded: true,
           isForwarded: true,
           forwardedFrom: {
             senderName: forwardTargetMessage.isAnonymous
-              ? "Anonymous"
+              ? anonymousName(forwardTargetMessage)
               : forwardTargetMessage.username || "User",
             channelId: resolvedChannelId,
             channelName: resolvedChannelLabel,
@@ -1912,16 +2140,18 @@ export default function ServerChannelScreen() {
         };
 
         const docRef = await addDoc(
-          collection(db, "communityThreadMessages"),
+          collection(db, dest.staffChannel ? "communityStaffMessages" : "communityThreadMessages"),
           forwardPayload,
         );
-        requestFirestoreModerationDecision({
-          collectionName: "communityThreadMessages",
-          documentId: docRef.id,
-          scope: "thread",
-        }).catch((err) => {
-          console.warn("[ServerChannel] Moderation trigger on forward failed:", err);
-        });
+        if (!dest.staffChannel) {
+          requestFirestoreModerationDecision({
+            collectionName: "communityThreadMessages",
+            documentId: docRef.id,
+            scope: "thread",
+          }).catch((err) => {
+            console.warn("[ServerChannel] Moderation trigger on forward failed:", err);
+          });
+        }
 
         setForwardStatusMap((prev) => ({ ...prev, [dest.channelId]: "sent" }));
       } catch (error: any) {
@@ -2333,12 +2563,19 @@ export default function ServerChannelScreen() {
     () => messages.find((entry) => entry.id === reactionTargetId),
     [messages, reactionTargetId],
   );
+  const reactionTargetIsOwn =
+    !!reactionTargetMessage &&
+    (reactionTargetMessage.realUserId || reactionTargetMessage.userId) === user?.uid;
+  const canDeleteReactionTarget =
+    !!reactionTargetMessage &&
+    (reactionTargetIsOwn ||
+      (isStaff(currentUserProfile?.role) &&
+        normalizeUserRole(reactionTargetMessage.role) === "student" &&
+        reactionTargetMessage.aiAssistant !== true));
 
-  // Task 4A: edit / delete your own message. Both are surfaced from the same
-  // long-press menu as reactions/pin (no second long-press interaction) and
-  // are author-only. Delete is a hard delete via deleteDoc, matching how
-  // posts/comments/replies/polls are removed elsewhere in this codebase
-  // rather than introducing a soft-delete just for messages.
+  // Authors can edit/delete their own message. Admins, moderators and teachers
+  // can also delete student-authored channel messages (including replies) as
+  // a moderation action. Delete stays a hard delete, matching other content.
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
@@ -2370,7 +2607,7 @@ export default function ServerChannelScreen() {
     }
     setSavingEdit(true);
     try {
-      await updateDoc(doc(db, "communityThreadMessages", id), {
+      await updateDoc(doc(db, messageCollection, id), {
         text: next,
         editedAt: serverTimestamp(),
       });
@@ -2381,26 +2618,33 @@ export default function ServerChannelScreen() {
     } finally {
       setSavingEdit(false);
     }
-  }, [cancelMessageEdit, editingMessageId, editingText, messages]);
+  }, [cancelMessageEdit, editingMessageId, editingText, messageCollection, messages]);
 
-  const confirmDeleteMessage = useCallback((messageId: string) => {
+  const confirmDeleteMessage = useCallback((message: ThreadMessage) => {
+    const isOwn = (message.realUserId || message.userId) === user?.uid;
+    const contentLabel = message.replyTo ? "reply" : "message";
+    const authorName = message.isAnonymous
+      ? anonymousName(message)
+      : message.username || "this student";
     showConfirm({
-      title: "Delete message?",
-      description:
-        "This removes the message for everyone in the channel. This can't be undone.",
+      title: `Delete ${contentLabel}?`,
+      description: isOwn
+        ? `This removes your ${contentLabel} for everyone in the channel. This can't be undone.`
+        : `This removes ${authorName}'s ${contentLabel} for everyone in the channel. This can't be undone.`,
       confirmText: "Delete",
       cancelText: "Cancel",
       destructive: true,
       onConfirm: async () => {
         try {
-          await deleteDoc(doc(db, "communityThreadMessages", messageId));
+          await deleteDoc(doc(db, messageCollection, message.id));
+          setReplyingTo((current) => (current?.id === message.id ? null : current));
         } catch (error) {
           console.error("Failed to delete message:", error);
           showInfo("Couldn't delete", "Something went wrong. Please try again.");
         }
       },
     });
-  }, []);
+  }, [messageCollection, user?.uid]);
 
   // Reporting is a student-only tool: staff never report, and only a
   // student's message or an anonymous one can be reported — the same rule
@@ -2486,7 +2730,7 @@ export default function ServerChannelScreen() {
       if (!uid) return;
       const message = messages.find((entry) => entry.id === messageId);
       const current = getMyReaction(message, uid);
-      const ref = doc(db, "communityThreadMessages", messageId);
+      const ref = doc(db, messageCollection, messageId);
       try {
         if (current === emoji) {
           await updateDoc(ref, new FieldPath("reactions", emoji), arrayRemove(uid));
@@ -2505,8 +2749,20 @@ export default function ServerChannelScreen() {
         console.error("Failed to set reaction:", error);
       }
     },
-    [messages, user?.uid],
+    [messageCollection, messages, user?.uid],
   );
+
+  // A Collaborative channel lets any member pin, so we need to know whether
+  // this person has joined the server. One small doc.
+  const [isJoinedMember, setIsJoinedMember] = useState(false);
+  useEffect(() => {
+    if (!resolvedServerId || !user?.uid) return;
+    return onSnapshot(
+      doc(db, "communityServerMemberships", `${resolvedServerId}_${user.uid}`),
+      (snapshot) => setIsJoinedMember(snapshot.exists() && snapshot.data()?.status === "joined"),
+      () => setIsJoinedMember(false),
+    );
+  }, [resolvedServerId, user?.uid]);
 
   // Task 3: who may pin/unpin in this channel — the server's creator/owner or
   // any app-wide staff member, exactly mirroring the communityServers rule.
@@ -2517,9 +2773,11 @@ export default function ServerChannelScreen() {
     return (
       isStaff(currentUserProfile?.role) ||
       serverMeta?.createdBy === uid ||
-      serverMeta?.ownerId === uid
+      serverMeta?.ownerId === uid ||
+      // A Collaborative channel is a shared board: any member may pin.
+      (channelType === "media" && isJoinedMember)
     );
-  }, [currentUserProfile?.role, serverMeta?.createdBy, serverMeta?.ownerId, user?.uid]);
+  }, [channelType, currentUserProfile?.role, isJoinedMember, serverMeta?.createdBy, serverMeta?.ownerId, user?.uid]);
 
   // Task 3: everything currently pinned here, newest pin first. Derived from
   // the same messages subscription, so the pinned view updates in real time.
@@ -2542,7 +2800,7 @@ export default function ServerChannelScreen() {
       if (!canPinMessages || !user?.uid) return;
       const message = messages.find((entry) => entry.id === messageId);
       if (!message) return;
-      const ref = doc(db, "communityThreadMessages", messageId);
+      const ref = doc(db, messageCollection, messageId);
       try {
         if (message.pinned) {
           await updateDoc(ref, {
@@ -2570,7 +2828,92 @@ export default function ServerChannelScreen() {
         );
       }
     },
-    [canPinMessages, currentUserProfile, messages, user?.uid],
+    [canPinMessages, currentUserProfile, messageCollection, messages, user?.uid],
+  );
+
+  // Polls: members and staff may vote, even where they can't post.
+  const canVotePolls = isJoinedMember || userIsStaff;
+
+  // Your answer after a tap, saved under your own id only; taking every
+  // answer back removes your entry.
+  const handlePollVote = useCallback(
+    async (messageId: string, optionId: string) => {
+      const uid = user?.uid;
+      if (!uid) return;
+      const message = messages.find((entry) => entry.id === messageId);
+      if (!message?.poll || pollIsClosed(message.poll, Date.now())) return;
+      const { mine } = tallyPoll(message.poll, message.pollVoters, uid);
+      const next = nextPollAnswer(message.poll, mine, optionId);
+      try {
+        await updateDoc(
+          doc(db, messageCollection, messageId),
+          new FieldPath("pollVoters", uid),
+          next.length ? next : deleteField(),
+        );
+      } catch (error) {
+        console.warn("[ServerChannel] Vote not saved:", error);
+        showInfo("Vote not saved", "Check your connection and try again.");
+      }
+    },
+    [messageCollection, messages, user?.uid],
+  );
+
+  const handleAddPollOption = useCallback(
+    async (messageId: string, text: string): Promise<string | null> => {
+      const uid = user?.uid;
+      if (!uid) return "Sign in to add an option.";
+      const messageRef = doc(db, messageCollection, messageId);
+      const suffix = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+      try {
+        await runTransaction(db, async (transaction) => {
+          const snapshot = await transaction.get(messageRef);
+          if (!snapshot.exists()) throw new Error("This poll is no longer available.");
+          const poll = snapshot.data()?.poll as ChannelPoll | undefined;
+          if (!poll) throw new Error("This poll is no longer available.");
+          if (pollIsClosed(poll, Date.now())) throw new Error("This poll has ended.");
+          const nextPoll = appendUserPollOption(poll, uid, text, suffix);
+          transaction.update(messageRef, { poll: nextPoll });
+        });
+        return null;
+      } catch (error: any) {
+        const message = String(error?.message || "");
+        const expected = [
+          "not accepting new options",
+          "Write an option first",
+          "Keep the option under",
+          "already has",
+          "already in the poll",
+          "no longer available",
+          "poll has ended",
+        ].find((part) => message.toLowerCase().includes(part.toLowerCase()));
+        if (expected) return message;
+        console.warn("[ServerChannel] Poll option not added:", error);
+        return "Couldn't add the option. Check your connection and try again.";
+      }
+    },
+    [messageCollection, user?.uid],
+  );
+
+  const confirmEndPoll = useCallback(
+    (messageId: string) => {
+      showConfirm({
+        title: "End this poll?",
+        description: "Nobody can vote once it ends. The results stay in the channel.",
+        confirmText: "End poll",
+        cancelText: "Cancel",
+        destructive: false,
+        onConfirm: async () => {
+          try {
+            await updateDoc(doc(db, messageCollection, messageId), "poll.closesAt", serverTimestamp());
+          } catch (error) {
+            console.warn("[ServerChannel] Couldn't end the poll:", error);
+            showInfo("Couldn't end the poll", "Check your connection and try again.");
+          }
+        },
+      });
+    },
+    [messageCollection],
   );
 
   // Task 3: open a pinned item's content straight from the sheet — the actual
@@ -2590,7 +2933,7 @@ export default function ServerChannelScreen() {
         return;
       }
       showInfo(
-        message.isAnonymous ? "Anonymous" : message.username || "Pinned message",
+        message.isAnonymous ? anonymousName(message) : message.username || "Pinned message",
         message.text?.trim() || "This message has no text.",
       );
     },
@@ -2621,10 +2964,13 @@ export default function ServerChannelScreen() {
     [messages],
   );
 
-  // Task 5: open attachments/links straight from the gallery, exactly as the
-  // bubble does (Linking.openURL, swallow failures).
-  const handleOpenUrl = useCallback((url: string) => {
-    if (url) Linking.openURL(url).catch(() => null);
+  const [pendingExternalLink, setPendingExternalLink] = useState<
+    ReturnType<typeof prepareExternalLink>
+  >(null);
+
+  // Typed and attached links use the same domain-first safety screen as DMs.
+  const handleOpenUrl = useCallback((url: string, label?: string) => {
+    if (url) setPendingExternalLink(prepareExternalLink(url, label));
   }, []);
 
   // Task 5: flatten the (already fully loaded) channel history into per-item
@@ -2640,7 +2986,7 @@ export default function ServerChannelScreen() {
       const createdAtMs = message.createdAt?.toMillis?.() ?? 0;
       const isOwnMsg = (message.realUserId || message.userId) === user?.uid;
       const senderName = message.isAnonymous
-        ? (isOwnMsg && isStaffUser ? "Anonymous (You)" : "Anonymous")
+        ? anonymousName(message, { isYou: isOwnMsg && isStaffUser })
         : message.username || "User";
       [...messageGifFiles(message), ...messageImageFiles(message)].forEach(
         (file) => {
@@ -2684,6 +3030,21 @@ export default function ServerChannelScreen() {
           icon: "link-outline",
         });
       }
+      splitMessageLinks(message.text || "")
+        .filter((part) => part.url && part.url !== message.link?.url)
+        .forEach((part, linkIndex) => {
+          links.push({
+            key: `${message.id}:text-link:${linkIndex}`,
+            messageId: message.id,
+            createdAtMs,
+            senderName,
+            url: part.url!,
+            isImage: false,
+            title: part.text,
+            subtitle: part.url!,
+            icon: "link-outline",
+          });
+        });
     }
     return { media, files, links };
   }, [currentUserProfile?.role, messages, user?.uid]);
@@ -2792,7 +3153,7 @@ export default function ServerChannelScreen() {
         id: message.id,
         isOwn: isOwnMsg,
         senderName: message.isAnonymous
-          ? (isOwnMsg && isStaffUser ? "Anonymous (You)" : "Anonymous")
+          ? anonymousName(message, { isYou: isOwnMsg && isStaffUser })
           : message.username || "User",
         preview: replyPreviewText(message).slice(0, 140),
         ...(media ? { mediaUrl: media.url, mediaType: media.type } : {}),
@@ -2858,13 +3219,25 @@ export default function ServerChannelScreen() {
       // Grouping only needs the immediate neighbours: this bubble starts a
       // group if the previous message isn't part of the same run, and ends
       // one if the next message isn't.
-      const groupedWithPrev = isSameSenderRun(displayedMessages[index - 1], item);
-      const groupedWithNext = isSameSenderRun(item, displayedMessages[index + 1]);
+      const older = displayedMessages[index - 1];
+      const newer = displayedMessages[index + 1];
+      const timeLabel = needsTimeLabel(item, older)
+        ? formatChatTimeLabel(messageMillis(item), relativeTimeNow)
+        : null;
+      // A time label always starts a new group, so a name and avatar never
+      // straddle it.
+      const groupedWithPrev = !timeLabel && isSameSenderRun(older, item);
+      const groupedWithNext =
+        !(newer && needsTimeLabel(newer, item)) && isSameSenderRun(item, newer);
       const authorId = item.realUserId || item.userId;
       const isOwn = authorId === user?.uid;
-      const liveAvatar = isOwn
-        ? resolveAvatarUri(currentUserProfile)
-        : (userAvatarMap.get(authorId) || peekUserData(authorId)?.profileImage || null);
+      // Do not even resolve an anonymous writer's cached profile image. The
+      // bubble renders the same generic person icon as comments and replies.
+      const liveAvatar = item.isAnonymous
+        ? null
+        : isOwn
+          ? resolveAvatarUri(currentUserProfile)
+          : (userAvatarMap.get(authorId) || peekUserData(authorId)?.profileImage || null);
       return (
         <MessageBubble
           item={item}
@@ -2880,9 +3253,16 @@ export default function ServerChannelScreen() {
           onLongPress={handleOpenReactionPicker}
           onSetReaction={handleSetReaction}
           onSwipeReply={handleSwipeReply}
+          onReplyPress={handleJumpToMessage}
           onOpenImage={openImageViewer}
+          onOpenUrl={handleOpenUrl}
           readers={readsByMessageId.get(item.id) ?? EMPTY_READERS}
           pinned={item.pinned === true}
+          showFullText={isStaffOnly || item.pinned === true}
+          timeLabel={timeLabel}
+          canVotePolls={canVotePolls}
+          onPollVote={handlePollVote}
+          onAddPollOption={handleAddPollOption}
           liveAvatarUri={liveAvatar}
           isStaffViewer={isStaff(currentUserProfile?.role)}
         />
@@ -2898,7 +3278,13 @@ export default function ServerChannelScreen() {
       handleOpenReactionPicker,
       handleSetReaction,
       handleSwipeReply,
+      handleJumpToMessage,
       openImageViewer,
+      handleOpenUrl,
+      isStaffOnly,
+      canVotePolls,
+      handlePollVote,
+      handleAddPollOption,
       relativeTimeNow,
       resolvedServerAccent,
       revealedMessageId,
@@ -2947,18 +3333,22 @@ export default function ServerChannelScreen() {
         return false;
       }
 
-      const isAnon = messageData.isAnonymous === true;
+      // Nobody is anonymous in a Staff only channel.
+      const isAnon = messageData.isAnonymous === true && !staffChannelHere;
       const isStaffUser = isStaff(currentUserProfile?.role);
       const authorUsername = isAnon
         ? (isStaffUser ? "Anonymous (You)" : "Anonymous")
         : (messageData.username || currentUserProfile?.firstname || "Someone");
 
+      // Anonymous messages carry the writer's permanent anonymous name.
+      const anonymousHandle = isAnon ? await getMyAnonymousHandle() : null;
       const draftPayload = {
         ...messageData,
         userId: user.uid,
         realUserId: user.uid,
         isAnonymous: isAnon,
-        username: isAnon ? "Anonymous" : authorUsername,
+        ...(anonymousHandle ? { anonymousHandle } : {}),
+        username: isAnon ? anonymousHandle || "Anonymous" : authorUsername,
         profilePic:
           isAnon ? null : resolveAvatarUri(messageData) || resolveAvatarUri(currentUserProfile),
         profileImage:
@@ -2973,9 +3363,11 @@ export default function ServerChannelScreen() {
         // rule allows extra fields, so no rules change is needed here.
         ...(replyingTo ? { replyTo: replyingTo } : {}),
       };
-      const shouldTriggerAi = (messageData.taggedUsers || []).some((tag: TaggedUser) =>
-        isAiAssistantId(tag.id),
-      );
+      // B.E.A. writes its replies where everyone's messages live, so it
+      // doesn't answer in a Staff only channel.
+      const shouldTriggerAi =
+        !staffChannelHere &&
+        (messageData.taggedUsers || []).some((tag: TaggedUser) => isAiAssistantId(tag.id));
 
       // Clear the reply bar now; it comes back if the message can't be saved.
       const activeReplyingTo = replyingTo;
@@ -2983,7 +3375,7 @@ export default function ServerChannelScreen() {
 
       // The id is picked up front, so the copy shown while attachments upload
       // and the saved message are the same row.
-      const messageRef = doc(collection(db, "communityThreadMessages"));
+      const messageRef = doc(collection(db, messageCollection));
       const undoSend = () => {
         setSendingMessages((prev) => prev.filter((message) => message.id !== messageRef.id));
         setReplyingTo(activeReplyingTo);
@@ -3030,7 +3422,8 @@ export default function ServerChannelScreen() {
       void (async () => {
         let moderationDecision;
         try {
-          moderationDecision = await moderateNewContent(isStaffUser, {
+          // Staff messages (every one in a Staff only channel) skip the queue.
+          moderationDecision = await moderateNewContent(isStaffUser || staffChannelHere, {
             collectionName: "communityThreadMessages",
             documentId: messageRef.id,
             scope: "thread",
@@ -3191,9 +3584,38 @@ export default function ServerChannelScreen() {
       resolvedChannelId,
       resolvedChannelLabel,
       resolvedServerId,
+      messageCollection,
+      staffChannelHere,
       stopTyping,
       user?.uid,
     ],
+  );
+
+  // A poll is posted like any message — same moderation, same storage for
+  // the channel — with the poll attached and no answers yet.
+  const [pollSheetOpen, setPollSheetOpen] = useState(false);
+  const handleCreatePoll = useCallback(
+    async (draft: PollDraft) => {
+      const poll = buildChannelPoll(draft, Date.now());
+      const name =
+        `${currentUserProfile?.firstname || ""} ${currentUserProfile?.lastname || ""}`.trim() ||
+        String(currentUserProfile?.username || user?.displayName || "").trim() ||
+        "User";
+      const sent = await handleSend(
+        {
+          text: pollMessageText(poll),
+          username: name,
+          role: currentUserProfile?.role || "student",
+          isAnonymous: false,
+          taggedUsers: [],
+          poll,
+          pollVoters: {},
+        },
+        prepareComposerAttachments([], null),
+      );
+      return sent !== false;
+    },
+    [currentUserProfile, handleSend, user?.displayName],
   );
 
   const dragGesture = useMemo(
@@ -3259,20 +3681,12 @@ export default function ServerChannelScreen() {
               <Text style={styles.serverName} numberOfLines={1}>{resolvedServerName}</Text>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                 <Ionicons
-                  name={
-                    channelType === "rules"
-                      ? "shield-checkmark-outline"
-                      : channelType === "announcement"
-                      ? "megaphone-outline"
-                      : channelType === "media"
-                      ? "images-outline"
-                      : "chatbubbles-outline"
-                  }
+                  name={getChannelIcon(channelType) as any}
                   size={15}
                   color={resolvedServerAccent}
                 />
                 <Text style={styles.channelName} numberOfLines={1}>#{resolvedChannelLabel}</Text>
-                {isStaffOnly && (
+                {(isStaffOnly || staffChannelHere) && (
                   <Ionicons name="lock-closed" size={12} color={theme.textMuted} />
                 )}
               </View>
@@ -3350,6 +3764,33 @@ export default function ServerChannelScreen() {
               </Text>
             </View>
           )}
+          {/* Collaborative: what's been shared, one tap from the Files & Media view. */}
+          {channelType === "media" && !staffChannelBlocked && (
+            <TouchableOpacity
+              style={[styles.sharedFilesBar, { borderColor: `${resolvedServerAccent}40` }]}
+              onPress={openContentSheet}
+              activeOpacity={0.82}
+              accessibilityRole="button"
+              accessibilityLabel="Open shared files"
+            >
+              <Ionicons name="folder-open-outline" size={16} color={resolvedServerAccent} />
+              <Text style={styles.sharedFilesText} numberOfLines={1}>
+                {countLabel(galleryEntries.media.length, "photo")} ·{" "}
+                {countLabel(galleryEntries.files.length, "file")} ·{" "}
+                {countLabel(galleryEntries.links.length, "link")}
+              </Text>
+              <Text style={[styles.sharedFilesOpen, { color: resolvedServerAccent }]}>Open</Text>
+            </TouchableOpacity>
+          )}
+          {staffChannelBlocked ? (
+            <View style={styles.noAccess}>
+              <Ionicons name="lock-closed-outline" size={40} color={theme.textMuted} />
+              <Text style={styles.noAccessTitle}>Staff only</Text>
+              <Text style={styles.noAccessText}>
+                This channel is for admins, moderators and teachers.
+              </Text>
+            </View>
+          ) : (
           <FlatList
             ref={listRef}
             data={displayedMessages}
@@ -3427,8 +3868,9 @@ export default function ServerChannelScreen() {
               }, 280);
             }}
           />
+          )}
 
-          {showScrollToBottom && (
+          {showScrollToBottom && !staffChannelBlocked && (
             <TouchableOpacity
               style={[
                 styles.scrollToBottomBtn,
@@ -3455,9 +3897,15 @@ export default function ServerChannelScreen() {
             </View>
           )}
 
-          {currentUserProfile && (
+          {currentUserProfile && !staffChannelBlocked && (
             canPostInChannel ? (
               <ReanimatedAnimated.View style={[styles.composerShell, composerAnimatedStyle]}>
+                {staffChannelHere && (
+                  <View style={styles.staffChannelNote}>
+                    <Ionicons name="lock-closed" size={12} color={theme.textMuted} />
+                    <Text style={styles.staffChannelNoteText}>Only staff can see this channel.</Text>
+                  </View>
+                )}
                 {replyingTo && (
                   // Feature 4: "replying to …" bar. X clears it.
                   <View style={styles.replyBar}>
@@ -3486,6 +3934,19 @@ export default function ServerChannelScreen() {
                   onSend={handleSend}
                   onTypingChange={handleTyping}
                   placeholder={`Message #${resolvedChannelLabel}`}
+                  staffOnly={staffChannelHere}
+                  onCreatePoll={() => setPollSheetOpen(true)}
+                  replyingTo={
+                    replyingTo
+                      ? {
+                          id: replyingTo.id,
+                          name: replyingTo.isOwn ? "yourself" : replyingTo.senderName,
+                          text: replyingTo.preview,
+                        }
+                      : null
+                  }
+                  onCancelReply={clearReply}
+                  showReplyBar={false}
                 />
               </ReanimatedAnimated.View>
             ) : (
@@ -3494,13 +3955,21 @@ export default function ServerChannelScreen() {
                   <Ionicons name="lock-closed" size={16} color={resolvedServerAccent} />
                 </View>
                 <Text style={styles.readOnlyText}>
-                  Only admins, moderators, and teachers can send messages in #{resolvedChannelLabel}
+                  Only staff can post in #{resolvedChannelLabel}. You can react to messages and forward them.
                 </Text>
               </View>
             )
           )}
         </SafeAreaView>
       </ReanimatedAnimated.View>
+
+      <ChannelPollSheet
+        visible={pollSheetOpen}
+        channelLabel={resolvedChannelLabel || "channel"}
+        accent={resolvedServerAccent}
+        onClose={() => setPollSheetOpen(false)}
+        onSubmit={handleCreatePoll}
+      />
 
       <ConfirmDialog
         visible={!!dialog}
@@ -3558,6 +4027,20 @@ export default function ServerChannelScreen() {
               })}
             </View>
 
+            {reactionTargetMessage && (
+              <Pressable
+                style={styles.reactionPickerAction}
+                onPress={() => {
+                  const targetId = reactionTargetMessage.id;
+                  setReactionTargetId(null);
+                  setTimeout(() => handleSwipeReply(targetId), 180);
+                }}
+              >
+                <Ionicons name="arrow-undo-outline" size={17} color={theme.primary} />
+                <Text style={styles.reactionPickerActionText}>Reply</Text>
+              </Pressable>
+            )}
+
             {canPinMessages && reactionTargetId && (
               <Pressable
                 style={styles.reactionPickerAction}
@@ -3577,7 +4060,25 @@ export default function ServerChannelScreen() {
               </Pressable>
             )}
 
-            {reactionTargetMessage && (
+            {reactionTargetMessage?.poll &&
+              !pollIsClosed(reactionTargetMessage.poll, relativeTimeNow) &&
+              ((reactionTargetMessage.realUserId || reactionTargetMessage.userId) === user?.uid ||
+                canManageChannel) && (
+                <Pressable
+                  style={styles.reactionPickerAction}
+                  onPress={() => {
+                    const targetId = reactionTargetMessage.id;
+                    setReactionTargetId(null);
+                    setTimeout(() => confirmEndPoll(targetId), 180);
+                  }}
+                >
+                  <Ionicons name="stop-circle-outline" size={17} color={theme.primary} />
+                  <Text style={styles.reactionPickerActionText}>End poll now</Text>
+                </Pressable>
+              )}
+
+            {/* A forwarded copy would lose the poll, so polls aren't forwarded. */}
+            {reactionTargetMessage && !reactionTargetMessage.poll && (
               <Pressable
                 style={styles.reactionPickerAction}
                 onPress={() => {
@@ -3617,11 +4118,9 @@ export default function ServerChannelScreen() {
               </Pressable>
             )}
 
-            {reactionTargetMessage &&
-              (reactionTargetMessage.realUserId || reactionTargetMessage.userId) ===
-                user?.uid && (
+            {reactionTargetMessage && reactionTargetIsOwn && (
                 <>
-                  {isWithinEditWindow(reactionTargetMessage) && (
+                  {isWithinEditWindow(reactionTargetMessage) && !reactionTargetMessage.poll && (
                     <Pressable
                       style={styles.reactionPickerAction}
                       onPress={() => {
@@ -3639,23 +4138,42 @@ export default function ServerChannelScreen() {
                   <Pressable
                     style={styles.reactionPickerAction}
                     onPress={() => {
-                      const targetId = reactionTargetMessage.id;
+                      const target = reactionTargetMessage;
                       setReactionTargetId(null);
                       // Let this (transparent) modal finish dismissing before
                       // presenting the ConfirmDialog modal — presenting one
                       // while another is mid-dismiss can be dropped on iOS.
-                      setTimeout(() => confirmDeleteMessage(targetId), 180);
+                      setTimeout(() => confirmDeleteMessage(target), 180);
                     }}
                   >
                     <Ionicons name="trash-outline" size={17} color="#a12a1a" />
                     <Text
                       style={[styles.reactionPickerActionText, styles.reactionPickerActionDanger]}
                     >
-                      Delete message
+                      {reactionTargetMessage.replyTo ? "Delete reply" : "Delete message"}
                     </Text>
                   </Pressable>
                 </>
               )}
+
+            {reactionTargetMessage && canDeleteReactionTarget && !reactionTargetIsOwn && (
+              <Pressable
+                style={styles.reactionPickerAction}
+                onPress={() => {
+                  const target = reactionTargetMessage;
+                  setReactionTargetId(null);
+                  // Let this modal dismiss before presenting ConfirmDialog.
+                  setTimeout(() => confirmDeleteMessage(target), 180);
+                }}
+              >
+                <Ionicons name="trash-outline" size={17} color="#a12a1a" />
+                <Text
+                  style={[styles.reactionPickerActionText, styles.reactionPickerActionDanger]}
+                >
+                  {reactionTargetMessage.replyTo ? "Delete reply" : "Delete message"}
+                </Text>
+              </Pressable>
+            )}
           </View>
         </Pressable>
       </Modal>
@@ -3708,237 +4226,226 @@ export default function ServerChannelScreen() {
       {/* Task 3: Pinned messages sheet — everything currently pinned in this
           channel, newest first, with a tap-to-open action and a jump-to-thread
           button. Virtualized since a channel can accumulate many pins. */}
-      <Modal
+      <DragToCloseSheet
         visible={pinnedListVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setPinnedListVisible(false)}
-      >
-        <View style={styles.pinnedSheetOverlay}>
-          <Pressable
-            style={styles.pinnedSheetBackdrop}
-            onPress={() => setPinnedListVisible(false)}
-          />
-          <View
-            style={[
-              styles.pinnedSheet,
-              { paddingBottom: Math.max(insets.bottom, 16) },
-            ]}
-          >
-            <View style={styles.pinnedSheetHandle} />
-            <View style={styles.pinnedSheetHeader}>
-              <Ionicons name="pin" size={16} color={resolvedServerAccent} />
-              <Text style={styles.pinnedSheetTitle} numberOfLines={1}>
-                Pinned in #{resolvedChannelLabel}
-              </Text>
-              <TouchableOpacity
-                onPress={() => setPinnedListVisible(false)}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                accessibilityLabel="Close pinned messages"
-              >
-                <Ionicons name="close" size={20} color={theme.textSecondary} />
-              </TouchableOpacity>
-            </View>
-            <FlatList
-              data={pinnedMessages}
-              keyExtractor={(item) => item.id}
-              renderItem={renderPinnedItem}
-              // Bounded height so the list scrolls inside the auto-height sheet
-              // rather than pushing it past its maxHeight.
-              style={styles.pinnedList}
-              initialNumToRender={12}
-              maxToRenderPerBatch={8}
-              windowSize={9}
-              removeClippedSubviews={Platform.OS === "android"}
-              contentContainerStyle={
-                pinnedMessages.length === 0
-                  ? styles.pinnedEmptyContent
-                  : styles.pinnedListContent
-              }
-              ListEmptyComponent={
-                <View style={styles.pinnedEmptyState}>
-                  <Ionicons name="pin-outline" size={40} color="#c9b0a8" />
-                  <Text style={styles.pinnedEmptyText}>Nothing pinned yet</Text>
-                </View>
-              }
-              showsVerticalScrollIndicator={false}
-            />
+        onClose={closePinnedList}
+        handleColor={theme.textMuted}
+        closeLabel="Close pinned messages"
+        sheetStyle={[
+          styles.pinnedSheet,
+          styles.draggableSheet,
+          { paddingBottom: Math.max(insets.bottom, 16) },
+        ]}
+        header={
+          <View style={styles.pinnedSheetHeader}>
+            <Ionicons name="pin" size={16} color={resolvedServerAccent} />
+            <Text style={styles.pinnedSheetTitle} numberOfLines={1}>
+              Pinned in #{resolvedChannelLabel}
+            </Text>
+            <TouchableOpacity
+              onPress={() => setPinnedListVisible(false)}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              accessibilityLabel="Close pinned messages"
+            >
+              <Ionicons name="close" size={20} color={theme.textSecondary} />
+            </TouchableOpacity>
           </View>
-        </View>
-      </Modal>
+        }
+      >
+        <FlatList
+          data={pinnedMessages}
+          keyExtractor={(item) => item.id}
+          renderItem={renderPinnedItem}
+          // Bounded height so the list scrolls inside the auto-height sheet
+          // rather than pushing it past its maxHeight.
+          style={styles.pinnedList}
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          windowSize={9}
+          removeClippedSubviews={Platform.OS === "android"}
+          contentContainerStyle={
+            pinnedMessages.length === 0
+              ? styles.pinnedEmptyContent
+              : styles.pinnedListContent
+          }
+          ListEmptyComponent={
+            <View style={styles.pinnedEmptyState}>
+              <Ionicons name="pin-outline" size={40} color="#c9b0a8" />
+              <Text style={styles.pinnedEmptyText}>Nothing pinned yet</Text>
+            </View>
+          }
+          showsVerticalScrollIndicator={false}
+        />
+      </DragToCloseSheet>
 
       {/* Task 5: channel content sheet — Media / Files / Links gallery (auto,
           from every message ever shared here) plus a lightweight in-channel
           search over the messages currently loaded. */}
-      <Modal
+      <DragToCloseSheet
         visible={contentSheetVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setContentSheetVisible(false)}
+        onClose={closeContentSheet}
+        handleColor={theme.textMuted}
+        closeLabel="Close channel media"
+        sheetStyle={[
+          styles.pinnedSheet,
+          styles.draggableSheet,
+          { paddingBottom: Math.max(insets.bottom, 16) },
+        ]}
+        header={
+          <View style={styles.pinnedSheetHeader}>
+            <Ionicons name="albums-outline" size={16} color={resolvedServerAccent} />
+            <Text style={styles.pinnedSheetTitle} numberOfLines={1}>
+              #{resolvedChannelLabel}
+            </Text>
+            <TouchableOpacity
+              onPress={() => setContentSheetVisible(false)}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              accessibilityLabel="Close"
+            >
+              <Ionicons name="close" size={20} color={theme.textSecondary} />
+            </TouchableOpacity>
+          </View>
+        }
       >
-        <View style={styles.pinnedSheetOverlay}>
-          <Pressable
-            style={styles.pinnedSheetBackdrop}
-            onPress={() => setContentSheetVisible(false)}
-          />
-          <View
-            style={[styles.pinnedSheet, { paddingBottom: Math.max(insets.bottom, 16) }]}
-          >
-            <View style={styles.pinnedSheetHandle} />
-            <View style={styles.pinnedSheetHeader}>
-              <Ionicons name="albums-outline" size={16} color={resolvedServerAccent} />
-              <Text style={styles.pinnedSheetTitle} numberOfLines={1}>
-                #{resolvedChannelLabel}
-              </Text>
-              <TouchableOpacity
-                onPress={() => setContentSheetVisible(false)}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                accessibilityLabel="Close"
-              >
-                <Ionicons name="close" size={20} color={theme.textSecondary} />
-              </TouchableOpacity>
-            </View>
 
-            <View style={styles.segmentRow}>
-              {(
-                [
-                  ["media", "Media"],
-                  ["files", "Files"],
-                  ["links", "Links"],
-                  ["search", "Search"],
-                ] as [ContentTab, string][]
-              ).map(([tab, label]) => (
+        <View style={styles.segmentRow}>
+          {(
+            [
+              ["media", "Media"],
+              ["files", "Files"],
+              ["links", "Links"],
+              ["search", "Search"],
+            ] as [ContentTab, string][]
+          ).map(([tab, label]) => (
+            <TouchableOpacity
+              key={tab}
+              style={[styles.segment, contentTab === tab && styles.segmentActive]}
+              onPress={() => selectContentTab(tab)}
+              activeOpacity={0.85}
+            >
+              <Text
+                style={[
+                  styles.segmentText,
+                  contentTab === tab && styles.segmentTextActive,
+                ]}
+              >
+                {label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {contentTab === "search" ? (
+          <>
+            <View style={styles.searchInputWrap}>
+              <Ionicons name="search" size={16} color={theme.textMuted} />
+              <TextInput
+                style={styles.searchInput}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder="Search this channel"
+                placeholderTextColor="#b9a49b"
+                autoFocus
+                returnKeyType="search"
+              />
+              {searchQuery.length > 0 && (
                 <TouchableOpacity
-                  key={tab}
-                  style={[styles.segment, contentTab === tab && styles.segmentActive]}
-                  onPress={() => selectContentTab(tab)}
+                  onPress={() => setSearchQuery("")}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="close-circle" size={16} color="#b9a49b" />
+                </TouchableOpacity>
+              )}
+            </View>
+            <Text style={styles.searchScopeNote}>
+              Searching messages loaded in this channel — not the full history.
+            </Text>
+            <FlatList
+              key="search"
+              data={searchResults}
+              keyExtractor={(item) => item.id}
+              renderItem={renderSearchItem}
+              style={styles.galleryList}
+              initialNumToRender={12}
+              maxToRenderPerBatch={10}
+              windowSize={9}
+              removeClippedSubviews={Platform.OS === "android"}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={
+                searchResults.length === 0
+                  ? styles.pinnedEmptyContent
+                  : styles.pinnedListContent
+              }
+              ListEmptyComponent={
+                <View style={styles.contentEmptyState}>
+                  <Ionicons
+                    name="search-outline"
+                    size={56}
+                    color="#c9b0a8"
+                  />
+                  <Text style={styles.contentEmptyText}>
+                    {searchQuery.trim().length < SEARCH_MIN_CHARS
+                      ? "Type at least two characters to search."
+                      : "No matches in the loaded messages."}
+                  </Text>
+                </View>
+              }
+              showsVerticalScrollIndicator={false}
+            />
+          </>
+        ) : (
+          <FlatList
+            key={contentTab}
+            data={activeGalleryEntries.slice(0, galleryVisibleCount)}
+            keyExtractor={(item) => item.key}
+            renderItem={renderGalleryItem}
+            style={styles.galleryList}
+            numColumns={contentTab === "media" ? 3 : 1}
+            initialNumToRender={contentTab === "media" ? 18 : 12}
+            maxToRenderPerBatch={contentTab === "media" ? 18 : 10}
+            windowSize={9}
+            removeClippedSubviews={Platform.OS === "android"}
+            contentContainerStyle={
+              activeGalleryEntries.length === 0
+                ? styles.pinnedEmptyContent
+                : styles.pinnedListContent
+            }
+            ListEmptyComponent={
+              <View style={styles.contentEmptyState}>
+                <Ionicons name="albums-outline" size={40} color="#c9b0a8" />
+                <Text style={styles.contentEmptyText}>
+                  {contentTab === "media"
+                    ? "No photos or GIFs shared here yet."
+                    : contentTab === "files"
+                      ? "No files shared here yet."
+                      : "No links shared here yet."}
+                </Text>
+              </View>
+            }
+            ListFooterComponent={
+              galleryVisibleCount < activeGalleryEntries.length ? (
+                <TouchableOpacity
+                  style={styles.loadMoreButton}
+                  onPress={() =>
+                    setGalleryVisibleCount((count) => count + GALLERY_PAGE_SIZE)
+                  }
                   activeOpacity={0.85}
                 >
-                  <Text
-                    style={[
-                      styles.segmentText,
-                      contentTab === tab && styles.segmentTextActive,
-                    ]}
-                  >
-                    {label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {contentTab === "search" ? (
-              <>
-                <View style={styles.searchInputWrap}>
-                  <Ionicons name="search" size={16} color={theme.textMuted} />
-                  <TextInput
-                    style={styles.searchInput}
-                    value={searchQuery}
-                    onChangeText={setSearchQuery}
-                    placeholder="Search this channel"
-                    placeholderTextColor="#b9a49b"
-                    autoFocus
-                    returnKeyType="search"
+                  <Ionicons
+                    name="chevron-down-circle-outline"
+                    size={17}
+                    color={theme.primary}
                   />
-                  {searchQuery.length > 0 && (
-                    <TouchableOpacity
-                      onPress={() => setSearchQuery("")}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    >
-                      <Ionicons name="close-circle" size={16} color="#b9a49b" />
-                    </TouchableOpacity>
-                  )}
-                </View>
-                <Text style={styles.searchScopeNote}>
-                  Searching messages loaded in this channel — not the full history.
-                </Text>
-                <FlatList
-                  key="search"
-                  data={searchResults}
-                  keyExtractor={(item) => item.id}
-                  renderItem={renderSearchItem}
-                  style={styles.galleryList}
-                  initialNumToRender={12}
-                  maxToRenderPerBatch={10}
-                  windowSize={9}
-                  removeClippedSubviews={Platform.OS === "android"}
-                  keyboardShouldPersistTaps="handled"
-                  contentContainerStyle={
-                    searchResults.length === 0
-                      ? styles.pinnedEmptyContent
-                      : styles.pinnedListContent
-                  }
-                  ListEmptyComponent={
-                    <View style={styles.contentEmptyState}>
-                      <Ionicons
-                        name="search-outline"
-                        size={36}
-                        color="#c9b0a8"
-                      />
-                      <Text style={styles.contentEmptyText}>
-                        {searchQuery.trim().length < SEARCH_MIN_CHARS
-                          ? "Type at least two characters to search."
-                          : "No matches in the loaded messages."}
-                      </Text>
-                    </View>
-                  }
-                  showsVerticalScrollIndicator={false}
-                />
-              </>
-            ) : (
-              <FlatList
-                key={contentTab}
-                data={activeGalleryEntries.slice(0, galleryVisibleCount)}
-                keyExtractor={(item) => item.key}
-                renderItem={renderGalleryItem}
-                style={styles.galleryList}
-                numColumns={contentTab === "media" ? 3 : 1}
-                initialNumToRender={contentTab === "media" ? 18 : 12}
-                maxToRenderPerBatch={contentTab === "media" ? 18 : 10}
-                windowSize={9}
-                removeClippedSubviews={Platform.OS === "android"}
-                contentContainerStyle={
-                  activeGalleryEntries.length === 0
-                    ? styles.pinnedEmptyContent
-                    : styles.pinnedListContent
-                }
-                ListEmptyComponent={
-                  <View style={styles.contentEmptyState}>
-                    <Ionicons name="albums-outline" size={36} color="#c9b0a8" />
-                    <Text style={styles.contentEmptyText}>
-                      {contentTab === "media"
-                        ? "No photos or GIFs shared here yet."
-                        : contentTab === "files"
-                          ? "No files shared here yet."
-                          : "No links shared here yet."}
-                    </Text>
-                  </View>
-                }
-                ListFooterComponent={
-                  galleryVisibleCount < activeGalleryEntries.length ? (
-                    <TouchableOpacity
-                      style={styles.loadMoreButton}
-                      onPress={() =>
-                        setGalleryVisibleCount((count) => count + GALLERY_PAGE_SIZE)
-                      }
-                      activeOpacity={0.85}
-                    >
-                      <Ionicons
-                        name="chevron-down-circle-outline"
-                        size={17}
-                        color={theme.primary}
-                      />
-                      <Text style={styles.loadMoreText}>Load more</Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <View style={{ height: 16 }} />
-                  )
-                }
-                showsVerticalScrollIndicator={false}
-              />
-            )}
-          </View>
-        </View>
-      </Modal>
+                  <Text style={styles.loadMoreText}>Load more</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={{ height: 16 }} />
+              )
+            }
+            showsVerticalScrollIndicator={false}
+          />
+        )}
+      </DragToCloseSheet>
 
       {/* ── Channel Settings / Edit Modal ─────────────────────────────── */}
       <Modal
@@ -3958,20 +4465,18 @@ export default function ServerChannelScreen() {
                 onPress={() => setEditChannelModalVisible(false)}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
-                <Ionicons name="close" size={22} color={theme.textSecondary} />
+                <Ionicons name="close" size={24} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
             <Text style={styles.channelSettingsFieldLabel}>Channel Type</Text>
             <View style={styles.channelSettingsTypeGrid}>
-              {(
-                [
-                  ["text", "Text", "chatbubbles-outline", "💬", "Discussion for all members"],
-                  ["announcement", "Announcement", "megaphone-outline", "📢", "Staff only send; students react & forward"],
-                  ["rules", "Rules", "shield-checkmark-outline", "📜", "Guidelines; staff post, students react"],
-                  ["media", "Media", "images-outline", "📸", "Photos, videos & file sharing for all"],
-                ] as const
-              ).map(([typeKey, title, iconName, defaultEmoji, hint]) => {
+              {CHANNEL_TYPE_OPTIONS.filter((option) =>
+                // A channel can't move into or out of Staff only: its messages
+                // are kept apart, so they'd be left behind, or left where
+                // students could reach them.
+                staffChannelHere ? option.type === "staff" : option.type !== "staff",
+              ).map(({ type: typeKey, title, icon: iconName, emoji: defaultEmoji, hint }) => {
                 const isSelected = editChannelType === typeKey;
                 return (
                   <TouchableOpacity
@@ -4223,6 +4728,10 @@ export default function ServerChannelScreen() {
         onClose={closeImageViewer}
         showActions={false}
       />
+      <ExternalLinkDialog
+        link={pendingExternalLink}
+        onClose={() => setPendingExternalLink(null)}
+      />
     </View>
   );
 }
@@ -4270,7 +4779,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 16,
-    paddingBottom: 14,
+    paddingBottom: 16,
     borderBottomWidth: 1,
   },
   headerCopy: {
@@ -4331,7 +4840,7 @@ const makeStyles = (c: ThemeTokens) =>
   listContent: {
     paddingHorizontal: 16,
     paddingTop: 6,
-    paddingBottom: 20,
+    paddingBottom: 24,
   },
   emptyListContent: {
     flexGrow: 1,
@@ -4365,7 +4874,7 @@ const makeStyles = (c: ThemeTokens) =>
     bottom: 128,
   },
   messageRow: {
-    marginBottom: 14,
+    marginBottom: 16,
     flexDirection: "row",
     alignItems: "flex-end",
   },
@@ -4446,6 +4955,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexShrink: 1,
   },
   messageContentWrap: {
+    width: SCREEN_WIDTH * 0.74,
     maxWidth: SCREEN_WIDTH * 0.74,
     // maxWidth caps the widest this may get; these stop it being crushed to
     // nothing when a sibling in the row measures wider than expected. Without
@@ -4461,6 +4971,7 @@ const makeStyles = (c: ThemeTokens) =>
     // stretch to whatever the widest sibling below it is (e.g. a reaction
     // pill), which made own-message bubbles look "stretched".
     alignSelf: "flex-start",
+    maxWidth: "100%",
     backgroundColor: c.surface,
     borderRadius: 20,
     paddingHorizontal: 14,
@@ -4485,11 +4996,24 @@ const makeStyles = (c: ThemeTokens) =>
   messageText: {
     color: c.textPrimary,
     fontSize: 15,
-    lineHeight: 21,
+    lineHeight: 20,
   },
   messageTextOwn: {
     color: c.onPrimary,
   },
+  messageLink: {
+    color: "#2563eb",
+    fontWeight: "700",
+    textDecorationLine: "underline",
+  },
+  messageLinkOwn: {
+    color: c.onPrimary,
+  },
+  messageMention: {
+    color: c.isDark ? "#93C5FD" : "#2563EB",
+    fontWeight: "700",
+  },
+  messageMentionOwn: { color: "#BFDBFE" },
   // Task 4A: "(edited)" marker under the text of an edited message.
   editedTag: {
     marginTop: 3,
@@ -4557,6 +5081,21 @@ const makeStyles = (c: ThemeTokens) =>
   messageImageSpacing: {
     marginTop: 10,
   },
+  photoStack: {
+    alignSelf: "flex-start",
+    gap: 4,
+    marginTop: 4,
+  },
+  photoStackOwn: {
+    alignSelf: "flex-end",
+  },
+  photoItem: {
+    borderRadius: 16,
+    overflow: "hidden",
+  },
+  photoAuthor: {
+    marginBottom: 2,
+  },
   messageImagePressed: {
     opacity: 0.85,
   },
@@ -4580,6 +5119,8 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.onPrimary,
   },
   linkCard: {
+    width: MESSAGE_DETAIL_CARD_WIDTH,
+    maxWidth: "100%",
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
@@ -4588,6 +5129,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 12,
     backgroundColor: "rgba(255,250,247,0.18)",
   },
+  linkCopy: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
   linkTitle: {
     color: c.primary,
     fontSize: 13,
@@ -4600,25 +5142,43 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontSize: 11.5,
     marginTop: 2,
+    lineHeight: 16,
   },
   linkUrlOwn: {
     color: "rgba(255,250,247,0.82)",
   },
+  tagCard: {
+    width: MESSAGE_DETAIL_CARD_WIDTH,
+    maxWidth: "100%",
+    marginTop: 10,
+  },
   tagRow: {
     flexDirection: "row",
     alignItems: "center",
+    flexWrap: "wrap",
     gap: 6,
-    marginTop: 10,
   },
   tagText: {
     color: c.textSecondary,
     fontSize: 12.5,
     fontWeight: "600",
-    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
   tagTextOwn: {
     color: c.onPrimary,
   },
+  tagMore: { color: c.textMuted, fontSize: 12, fontWeight: "700" },
+  tagExpandedList: {
+    marginTop: 7,
+    marginLeft: 20,
+    paddingTop: 7,
+    gap: 6,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: c.borderStrong,
+  },
+  tagExpandedListOwn: { borderTopColor: "rgba(255,255,255,0.25)" },
+  tagExpandedName: { color: c.textSecondary, fontSize: 12.5, fontWeight: "600" },
   messageMeta: {
     color: c.textMuted,
     fontSize: 11.5,
@@ -4742,24 +5302,53 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "700",
   },
   // One compact pill (not a wrapping row), so it can't stretch the bubble.
+  // The time above a new stretch of messages, as in DMs.
+  timeLabel: {
+    alignSelf: "center",
+    marginTop: 16,
+    marginBottom: 6,
+    fontSize: 11.5,
+    fontWeight: "600",
+    color: c.textMuted,
+  },
+  // The bubble and its photos, as one box the reaction can sit on.
+  messageBody: {
+    alignSelf: "flex-start",
+    maxWidth: "100%",
+  },
+  messageBodyOwn: {
+    alignSelf: "flex-end",
+  },
+  // Room below for the reaction hanging off the corner.
+  messageBodyWithReaction: {
+    marginBottom: 12,
+  },
+  reactionCorner: {
+    position: "absolute",
+    bottom: -12,
+    zIndex: 4,
+  },
+  reactionCornerOwn: {
+    right: 6,
+  },
+  reactionCornerOther: {
+    left: 6,
+  },
   reactionPill: {
     flexDirection: "row",
     alignItems: "center",
-    alignSelf: "flex-start",
     gap: 3,
-    marginTop: 4,
-    marginLeft: 4,
-    backgroundColor: c.surfaceSunken,
+    backgroundColor: c.surfaceRaised,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.12,
+    shadowRadius: 2.5,
+    elevation: 2,
     borderWidth: 1,
     borderColor: c.border,
     borderRadius: 12,
     paddingHorizontal: 7,
     paddingVertical: 2,
-  },
-  reactionPillOwn: {
-    alignSelf: "flex-end",
-    marginLeft: 0,
-    marginRight: 4,
   },
   reactionPillMine: {
     backgroundColor: c.accentSoft,
@@ -4834,10 +5423,10 @@ const makeStyles = (c: ThemeTokens) =>
   },
   emptyState: {
     alignItems: "center",
-    paddingHorizontal: 26,
+    paddingHorizontal: 20,
   },
   emptyTitle: {
-    marginTop: 14,
+    marginTop: 16,
     color: c.textPrimary,
     fontSize: 20,
     fontWeight: "800",
@@ -4857,14 +5446,6 @@ const makeStyles = (c: ThemeTokens) =>
     paddingBottom: Platform.OS === "android" ? 8 : 0,
   },
   // Task 3: Pinned messages sheet.
-  pinnedSheetOverlay: {
-    flex: 1,
-    justifyContent: "flex-end",
-  },
-  pinnedSheetBackdrop: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: "rgba(10,2,2,0.45)",
-  },
   pinnedSheet: {
     backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 22,
@@ -4875,13 +5456,9 @@ const makeStyles = (c: ThemeTokens) =>
   pinnedList: {
     maxHeight: SCREEN_HEIGHT * 0.58,
   },
-  pinnedSheetHandle: {
-    alignSelf: "center",
-    width: 44,
-    height: 5,
-    borderRadius: 999,
-    backgroundColor: c.textMuted,
-    marginBottom: 10,
+  // DragToCloseSheet draws the handle, with its own space above it.
+  draggableSheet: {
+    paddingTop: 0,
   },
   pinnedSheetHeader: {
     flexDirection: "row",
@@ -4906,7 +5483,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   pinnedEmptyState: {
     alignItems: "center",
-    paddingVertical: 48,
+    paddingVertical: 32,
     gap: 10,
   },
   pinnedEmptyText: {
@@ -4964,7 +5541,7 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     color: c.textSecondary,
     fontSize: 13,
-    lineHeight: 18,
+    lineHeight: 16,
   },
   pinnedMeta: {
     marginTop: 4,
@@ -4988,7 +5565,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(10,2,2,0.45)",
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
   },
   editCard: {
     width: "100%",
@@ -5016,14 +5593,14 @@ const makeStyles = (c: ThemeTokens) =>
     paddingBottom: 10,
     color: c.textPrimary,
     fontSize: 15,
-    lineHeight: 21,
+    lineHeight: 20,
     textAlignVertical: "top",
   },
   editActions: {
     flexDirection: "row",
     justifyContent: "flex-end",
     gap: 10,
-    marginTop: 14,
+    marginTop: 16,
   },
   editButtonGhost: {
     paddingVertical: 9,
@@ -5148,11 +5725,11 @@ const makeStyles = (c: ThemeTokens) =>
     marginTop: 2,
     color: c.textSecondary,
     fontSize: 13,
-    lineHeight: 18,
+    lineHeight: 16,
   },
   contentEmptyState: {
     alignItems: "center",
-    paddingVertical: 44,
+    paddingVertical: 32,
     gap: 10,
   },
   contentEmptyText: {
@@ -5160,7 +5737,7 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 13.5,
     fontWeight: "600",
     textAlign: "center",
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
   },
   loadMoreButton: {
     flexDirection: "row",
@@ -5171,7 +5748,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.border,
     borderRadius: 14,
-    paddingVertical: 13,
+    paddingVertical: 16,
     marginTop: 8,
   },
   loadMoreText: {
@@ -5357,7 +5934,7 @@ const makeStyles = (c: ThemeTokens) =>
   forwardEmptyContainer: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 40,
+    paddingVertical: 32,
     gap: 8,
   },
   forwardEmptyText: {
@@ -5365,12 +5942,40 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     textAlign: "center",
   },
+  // Collaborative: counts of what's been shared, opening Files & Media.
+  sharedFilesBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 12,
+    marginTop: 8,
+    marginBottom: 2,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: c.surface,
+  },
+  sharedFilesText: { flex: 1, color: c.textSecondary, fontSize: 12.5, fontWeight: "600" },
+  sharedFilesOpen: { fontSize: 12.5, fontWeight: "800" },
+  // A student who reaches a Staff only channel.
+  noAccess: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32, gap: 8 },
+  noAccessTitle: { color: c.textPrimary, fontSize: 16, fontWeight: "800" },
+  noAccessText: { color: c.textMuted, fontSize: 13.5, textAlign: "center", lineHeight: 20 },
+  staffChannelNote: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingTop: 6,
+  },
+  staffChannelNoteText: { color: c.textMuted, fontSize: 11.5, fontWeight: "600" },
   readOnlyBanner: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: c.surface,
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 16,
     borderTopWidth: 1,
     borderTopColor: c.border,
     gap: 12,
@@ -5387,21 +5992,21 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textSecondary,
     fontSize: 13,
     fontWeight: "600",
-    lineHeight: 18,
+    lineHeight: 16,
   },
   channelSettingsModalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.5)",
     justifyContent: "center",
     alignItems: "center",
-    padding: 20,
+    padding: 24,
   },
   channelSettingsModalCard: {
     width: "100%",
     maxWidth: 440,
     backgroundColor: c.surface,
     borderRadius: 20,
-    padding: 20,
+    padding: 24,
     borderWidth: 1,
     borderColor: c.border,
   },
@@ -5409,10 +6014,10 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 14,
+    marginBottom: 16,
   },
   channelSettingsModalTitle: {
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "800",
     color: c.textPrimary,
   },
@@ -5461,7 +6066,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textPrimary,
   },
   channelSettingsInputMulti: {
-    minHeight: 56,
+    minHeight: 52,
     textAlignVertical: "top",
   },
   channelSettingsDeleteBtn: {
@@ -5485,7 +6090,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     justifyContent: "flex-end",
     gap: 10,
-    marginTop: 14,
+    marginTop: 16,
   },
   channelSettingsCancelBtn: {
     paddingVertical: 9,
@@ -5500,7 +6105,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   channelSettingsSaveBtn: {
     paddingVertical: 9,
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
     borderRadius: 18,
   },
   channelSettingsSaveText: {

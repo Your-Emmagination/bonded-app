@@ -22,16 +22,17 @@ import {
   ActivityIndicator,
   BackHandler,
   FlatList,
-  KeyboardAvoidingView,
   ListRenderItem,
-  Platform,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Image } from "expo-image";
 import DropDownPicker from "react-native-dropdown-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -46,12 +47,6 @@ import { emitHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
 import { getTimeAgo } from "@/utils/relativeTime";
 import { findMostSimilar } from "@/utils/textSimilarity";
 import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
-import {
-  canUsePostFlair,
-  DEFAULT_POST_FLAIR,
-  POST_FLAIRS,
-  type PostFlairId,
-} from "@/utils/postFlairs";
 
 type PollOption = {
   id: string;
@@ -110,8 +105,6 @@ const CreatePollScreen = () => {
   // screen has to keep current.
   const [recentPolls, setRecentPolls] = useState<RecentPoll[]>([]);
   const [similarPollDismissed, setSimilarPollDismissed] = useState(false);
-  const [selectedFlair, setSelectedFlair] =
-    useState<PostFlairId>(DEFAULT_POST_FLAIR);
   const [authorRole, setAuthorRole] = useState<string>("student");
   const [studentAuthorName, setStudentAuthorName] = useState("");
   const [options, setOptions] = useState<PollOption[]>([
@@ -256,7 +249,6 @@ const CreatePollScreen = () => {
               : Date.now();
 
         setQuestion(String(data.question || ""));
-        setSelectedFlair((data.flair || DEFAULT_POST_FLAIR) as PostFlairId);
         setOptions(
           loadedOptions.map((option: any, index: number) => ({
             id: String(index + 1),
@@ -427,14 +419,6 @@ const CreatePollScreen = () => {
       // No local text filtering. The poll is always created as pending and the
       // trusted Worker re-reads this exact text before calling OpenModeration.
 
-      if (!canUsePostFlair(selectedFlair, authorRole)) {
-        showInfo(
-          "Flair Not Allowed",
-          "Announcement is reserved for authorized staff accounts.",
-        );
-        return;
-      }
-
       const normalizedOptions = filledOptions.map((opt) => ({
         text: opt.text.trim(),
         votes: Number(opt.votes || 0),
@@ -445,7 +429,6 @@ const CreatePollScreen = () => {
       if (isEditMode && selectedEditPollId) {
         const updateData: Record<string, unknown> = {
           question: question.trim(),
-          flair: selectedFlair,
           imageUrl: pollImage || null,
           allowUsersToAddOption: allowAdding,
           durationMs,
@@ -508,7 +491,7 @@ const CreatePollScreen = () => {
 
       const pollData = {
         question: question.trim(),
-        flair: selectedFlair,
+        // No flair: polls have their own "Polls" filter on Home.
         options: normalizedOptions,
         imageUrl: pollImage || null,
         allowUsersToAddOption: allowAdding,
@@ -638,7 +621,6 @@ const CreatePollScreen = () => {
 
   const formSections: FormSection[] = useMemo(
     () => [
-      { id: "flair", type: "flair" },
       { id: "question", type: "question" },
       ...(similarPoll ? [{ id: "similarPoll", type: "similarPoll" }] : []),
       { id: "image", type: "image" },
@@ -655,51 +637,6 @@ const CreatePollScreen = () => {
 
   const renderItem: ListRenderItem<FormSection> = ({ item }) => {
     switch (item.type) {
-      case "flair":
-        return (
-          <View style={styles.flairSection}>
-            <View style={styles.flairSectionHeader}>
-              <Text style={styles.flairSectionTitle}>Poll flair</Text>
-              <Text style={styles.flairSectionHint}>Choose a category</Text>
-            </View>
-
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.flairPickerContent}
-            >
-              {POST_FLAIRS.filter(
-                (flair) =>
-                  !flair.staffOnly || canUsePostFlair(flair.id, authorRole),
-              ).map((flair) => {
-                const selected = selectedFlair === flair.id;
-
-                return (
-                  <TouchableOpacity
-                    key={flair.id}
-                    style={[
-                      styles.flairChoice,
-                      selected && styles.flairChoiceSelected,
-                    ]}
-                    activeOpacity={0.82}
-                    onPress={() => setSelectedFlair(flair.id)}
-                  >
-                    <Text style={styles.flairChoiceEmoji}>{flair.emoji}</Text>
-                    <Text
-                      style={[
-                        styles.flairChoiceText,
-                        selected && styles.flairChoiceTextSelected,
-                      ]}
-                    >
-                      {flair.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </View>
-        );
-
       case "question":
         return <QuestionSection question={question} setQuestion={setQuestion} />;
 
@@ -800,6 +737,7 @@ const CreatePollScreen = () => {
             minutesOpen={minutesOpen}
             onUpdateDuration={updateDuration}
             onOpenDropdown={openDropdown}
+            onCloseDropdowns={closeAllDropdowns}
           />
         );
 
@@ -823,8 +761,8 @@ const CreatePollScreen = () => {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.contentShell}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
+      <KeyboardAvoidingView automaticOffset
+        behavior="padding"
         style={{ flex: 1 }}
       >
         <View style={styles.header}>
@@ -1160,6 +1098,7 @@ const DurationSection = ({
   minutesOpen,
   onUpdateDuration,
   onOpenDropdown,
+  onCloseDropdowns,
 }: {
   duration: PollDuration;
   daysOpen: boolean;
@@ -1167,6 +1106,7 @@ const DurationSection = ({
   minutesOpen: boolean;
   onUpdateDuration: (field: "days" | "hours" | "minutes", value: number) => void;
   onOpenDropdown: (dropdown: "days" | "hours" | "minutes") => void;
+  onCloseDropdowns: () => void;
 }) => {
   const { styles } = useStyles();
 
@@ -1180,7 +1120,7 @@ const DurationSection = ({
           onChange={(val) => onUpdateDuration("days", val)}
           max={30}
           open={daysOpen}
-          setOpen={() => onOpenDropdown("days")}
+          setOpen={(next) => (next ? onOpenDropdown("days") : onCloseDropdowns())}
           zIndex={100}
         />
         <DurationDropdown
@@ -1189,7 +1129,7 @@ const DurationSection = ({
           onChange={(val) => onUpdateDuration("hours", val)}
           max={23}
           open={hoursOpen}
-          setOpen={() => onOpenDropdown("hours")}
+          setOpen={(next) => (next ? onOpenDropdown("hours") : onCloseDropdowns())}
           zIndex={99}
         />
         <DurationDropdown
@@ -1198,7 +1138,7 @@ const DurationSection = ({
           onChange={(val) => onUpdateDuration("minutes", val)}
           max={59}
           open={minutesOpen}
-          setOpen={() => onOpenDropdown("minutes")}
+          setOpen={(next) => (next ? onOpenDropdown("minutes") : onCloseDropdowns())}
           zIndex={98}
         />
       </View>
@@ -1247,7 +1187,8 @@ const DurationDropdown = ({
   onChange: (val: number) => void;
   max: number;
   open: boolean;
-  setOpen: () => void;
+  /** Called with whether the list should now be open. */
+  setOpen: (open: boolean) => void;
   zIndex?: number;
 }) => {
   const { styles } = useStyles();
@@ -1266,7 +1207,10 @@ const DurationDropdown = ({
         open={open}
         value={value}
         items={items}
-        setOpen={setOpen}
+        // The picker asks to close when its arrow is tapped or a value is
+        // picked. This used to ignore that and open it again every time, so
+        // the list could never be closed.
+        setOpen={(next) => setOpen(typeof next === "function" ? next(open) : next)}
         setValue={(callback) => {
           const newValue =
             typeof callback === "function" ? callback(value) : callback;
@@ -1330,55 +1274,6 @@ const makeStyles = (c: ThemeTokens) =>
     gap: 10,
   },
   scopeCopy: { flex: 1 },
-  flairSection: {
-    marginBottom: 20,
-  },
-  flairSectionHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 9,
-  },
-  flairSectionTitle: {
-    color: c.textPrimary,
-    fontSize: 14,
-    fontWeight: "800",
-  },
-  flairSectionHint: {
-    color: c.textMuted,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  flairPickerContent: {
-    gap: 8,
-    paddingRight: 16,
-  },
-  flairChoice: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderRadius: 18,
-    backgroundColor: c.surface,
-    borderWidth: 1,
-    borderColor: c.border,
-  },
-  flairChoiceSelected: {
-    backgroundColor: c.primary,
-    borderColor: c.primary,
-  },
-  flairChoiceEmoji: {
-    fontSize: 14,
-  },
-  flairChoiceText: {
-    color: c.textSecondary,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  flairChoiceTextSelected: {
-    color: c.surfaceRaised,
-  },
   scopeLabel: {
     color: c.textMuted,
     fontSize: 12,
@@ -1394,7 +1289,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   listContent: {
     paddingHorizontal: 16,
-    paddingVertical: 20,
+    paddingVertical: 16,
     paddingBottom: 80,
   },
   loadingEditContainer: {
@@ -1414,7 +1309,7 @@ const makeStyles = (c: ThemeTokens) =>
   lockedOptionsText: {
     color: c.textMuted,
     fontSize: 12.5,
-    lineHeight: 18,
+    lineHeight: 16,
     marginTop: -6,
   },
   similarPollCard: {
@@ -1434,7 +1329,7 @@ const makeStyles = (c: ThemeTokens) =>
   similarPollQuestion: {
     color: c.textMuted,
     fontSize: 12,
-    lineHeight: 17,
+    lineHeight: 16,
     marginTop: 3,
     fontStyle: "italic",
   },
@@ -1443,7 +1338,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1.5,
     borderColor: c.borderStrong,
     borderRadius: 12,
-    padding: 14,
+    padding: 16,
     color: c.textPrimary,
     fontSize: 15,
     minHeight: 80,
@@ -1479,7 +1374,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 2,
     borderColor: c.primary,
     borderRadius: 12,
-    paddingVertical: 30,
+    paddingVertical: 24,
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
@@ -1490,14 +1385,14 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "600",
   },
   optionContainer: {
-    marginBottom: 14,
+    marginBottom: 16,
   },
   optionInputWrapper: {
     backgroundColor: c.surface,
     borderWidth: 1,
     borderColor: c.borderStrong,
     borderRadius: 12,
-    padding: 14,
+    padding: 16,
   },
   optionLabel: {
     color: c.primary,
@@ -1549,7 +1444,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     gap: 12,
     backgroundColor: c.surface,
-    padding: 14,
+    padding: 16,
     borderRadius: 12,
     marginBottom: 12,
     borderWidth: 1,
@@ -1615,14 +1510,14 @@ const makeStyles = (c: ThemeTokens) =>
     borderColor: c.borderStrong,
     borderWidth: 1,
     borderRadius: 10,
-    minHeight: 50,
+    minHeight: 52,
   },
   durationDropdown: {
     backgroundColor: c.surfaceRaised,
     borderColor: c.borderStrong,
     borderWidth: 1,
     borderRadius: 10,
-    minHeight: 50,
+    minHeight: 52,
   },
   dropdownContainer: {
     backgroundColor: c.surfaceRaised,
@@ -1661,7 +1556,7 @@ const makeStyles = (c: ThemeTokens) =>
   createBtn: {
     backgroundColor: c.primary,
     borderRadius: 12,
-    paddingVertical: 14,
+    paddingVertical: 16,
     alignItems: "center",
     marginBottom: 20,
     shadowColor: "#6f160f",

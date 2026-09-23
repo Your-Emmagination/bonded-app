@@ -17,7 +17,7 @@ import {
   ActivityIndicator,
   AppState,
   Keyboard,
-  KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -28,6 +28,10 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { auth } from "../../Firebase_configure";
@@ -35,6 +39,7 @@ import BeaOrb from "./components/BeaOrb";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 import { uploadPostImage } from "@/utils/cloudinaryUpload";
 import { isAdmin as isAdminRole } from "@/utils/rbac";
+import { SIGN_IN_TICKET_SOURCE } from "@/utils/signInHelp";
 import { formatChatTimeLabel, formatClockTime, formatDayLabel, sameDay } from "@/utils/chatTime";
 import { timestampMillis } from "@/utils/messengerState";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
@@ -300,10 +305,23 @@ export default function SupportTicketScreen() {
   const statusMeta = ticket ? TICKET_STATUS_META[ticket.status] : null;
   const priorityMeta = ticket ? TICKET_PRIORITY_META[ticket.priority] : null;
 
+  // Sent from the Sign-in Help screen by someone who can't sign in: nobody
+  // could read a reply here, so it's answered by email or phone instead.
+  const isSignInRequest = ticket?.source === SIGN_IN_TICKET_SOURCE;
   const canReply = useMemo(
-    () => ticket && ticket.status !== "closed",
+    () => ticket && ticket.status !== "closed" && ticket.source !== SIGN_IN_TICKET_SOURCE,
     [ticket],
   );
+  const contact = ticket?.contact?.trim() || "";
+  const contactIsEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact);
+  const contactIsPhone = !contactIsEmail && contact.replace(/\D/g, "").length >= 7;
+  const reachOut = () => {
+    if (!contact) return;
+    const url = contactIsEmail
+      ? `mailto:${contact}?subject=${encodeURIComponent(`BondED ${ticket?.ticketNo || "sign-in"} request`)}`
+      : `tel:${contact.replace(/[^\d+]/g, "")}`;
+    Linking.openURL(url).catch(() => undefined);
+  };
 
   if (loading) {
     return (
@@ -330,7 +348,7 @@ export default function SupportTicketScreen() {
   }
 
   return (
-    <KeyboardAvoidingView
+    <KeyboardAvoidingView automaticOffset
       style={{ flex: 1 }}
       behavior="padding"
       enabled={Platform.OS !== "web"}
@@ -418,6 +436,48 @@ export default function SupportTicketScreen() {
                 </Text>
               </View>
             </View>
+
+            {/* A sign-in request: nobody is signed in behind it, so the name and
+                ID are only what was typed. Staff confirm who it is first. */}
+            {staff && isSignInRequest && (
+              <View style={styles.signInBox}>
+                <View style={styles.signInHeader}>
+                  <Ionicons name="shield-half-outline" size={17} color={theme.warning} />
+                  <Text style={styles.signInTitle}>Sign-in request · not verified</Text>
+                </View>
+                <Text style={styles.signInText}>
+                  Sent without signing in, so anyone could have typed this ID. Confirm
+                  it&apos;s really this person before changing their account.
+                </Text>
+                <Text style={styles.signInDetail}>
+                  {ticket.accountFound
+                    ? `ID matches ${ticket.accountName || "an account"}${
+                        ticket.accountRole ? ` (${ticket.accountRole})` : ""
+                      }.`
+                    : ticket.accountFound === false
+                      ? "No account uses this ID."
+                      : ""}
+                </Text>
+                {!!contact && (
+                  <TouchableOpacity
+                    style={styles.signInContact}
+                    onPress={reachOut}
+                    activeOpacity={0.85}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${contactIsEmail ? "Email" : "Call"} ${contact}`}
+                  >
+                    <Ionicons
+                      name={contactIsEmail ? "mail-outline" : contactIsPhone ? "call-outline" : "person-outline"}
+                      size={16}
+                      color={theme.onPrimary}
+                    />
+                    <Text style={styles.signInContactText} numberOfLines={1}>
+                      {contactIsEmail ? "Email" : contactIsPhone ? "Call" : "Contact"} {contact}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
 
             {/* Staff need to know who they are talking to without leaving. */}
             {staff && (
@@ -572,6 +632,16 @@ export default function SupportTicketScreen() {
             </View>
           )}
         </ScrollView>
+
+        {isSignInRequest && ticket.status !== "closed" && (
+          <View style={[styles.offAppNote, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+            <Ionicons name="information-circle-outline" size={16} color={theme.textMuted} />
+            <Text style={styles.offAppNoteText}>
+              Reply by email or phone — this person can&apos;t sign in to read replies here.
+              Mark it resolved once you have.
+            </Text>
+          </View>
+        )}
 
         {canReply && (
           <View
@@ -813,7 +883,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.border,
     borderRadius: 16,
-    padding: 14,
+    padding: 16,
     gap: 9,
   },
   subject: { color: c.textPrimary, fontSize: 16, fontWeight: "900" },
@@ -828,6 +898,42 @@ const makeStyles = (c: ThemeTokens) =>
   },
   reporterName: { color: c.textPrimary, fontSize: 13, fontWeight: "800" },
   reporterMeta: { color: c.textMuted, fontSize: 11.5 },
+  signInBox: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: c.warning,
+    backgroundColor: c.surfaceSunken,
+    gap: 6,
+  },
+  signInHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
+  signInTitle: { color: c.textPrimary, fontSize: 13.5, fontWeight: "800" },
+  signInText: { color: c.textSecondary, fontSize: 12.5, lineHeight: 16 },
+  signInDetail: { color: c.textPrimary, fontSize: 12.5, fontWeight: "700" },
+  signInContact: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 7,
+    marginTop: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 10,
+    backgroundColor: c.primary,
+  },
+  signInContactText: { color: c.onPrimary, fontSize: 13, fontWeight: "800", flexShrink: 1 },
+  offAppNote: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: c.border,
+    backgroundColor: c.surface,
+  },
+  offAppNoteText: { flex: 1, color: c.textMuted, fontSize: 12.5, lineHeight: 16 },
   assignedText: { color: c.accent, fontSize: 12, fontWeight: "800" },
   beaNote: {
     flexDirection: "row",
@@ -871,7 +977,7 @@ const makeStyles = (c: ThemeTokens) =>
     height: 4,
     borderRadius: 999,
     backgroundColor: c.borderStrong,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   sheetTitle: { color: c.textPrimary, fontSize: 17, fontWeight: "900" },
   sheetSubtitle: { color: c.textMuted, fontSize: 12.5, marginTop: 2 },
@@ -881,7 +987,7 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "900",
     textTransform: "uppercase",
     letterSpacing: 0.3,
-    marginTop: 18,
+    marginTop: 20,
     marginBottom: 8,
   },
   sheetRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
@@ -904,15 +1010,15 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.accentSoft,
     borderRadius: 14,
     paddingHorizontal: 14,
-    paddingVertical: 13,
+    paddingVertical: 16,
   },
   sheetAssignText: { color: c.accent, fontSize: 13.5, fontWeight: "800" },
   sheetDone: {
     alignItems: "center",
     backgroundColor: c.primary,
     borderRadius: 15,
-    paddingVertical: 14,
-    marginTop: 22,
+    paddingVertical: 16,
+    marginTop: 20,
   },
   sheetDoneText: { color: c.background, fontSize: 14.5, fontWeight: "900" },
 

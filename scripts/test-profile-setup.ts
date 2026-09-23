@@ -58,6 +58,11 @@ async function main() {
   const swappedAccount = await run("anything", { fetchImpl: async () => ({ ok: true, json: async () => ({ localId: "someone-else" }) }) });
   assert.equal(swappedAccount.status, 400);
   assert.equal(writes.length, 2, "Invalid credentials must not change password state");
+  const isTemporaryPassword = async (_env: unknown, uid: string, password: string) => uid === "member" && password === "Hq7M-t4Rk-9wPe";
+  const issued = await run("Hq7M-t4Rk-9wPe", { isTemporaryPassword });
+  assert.equal(issued.body.mustChangePassword, true, "An admin-issued temporary password must be replaced");
+  const replaced = await run("MyChosenPassword!9", { isTemporaryPassword });
+  assert.equal(replaced.body.mustChangePassword, false, "A password chosen after the temporary one clears the flag");
   const anonymous = await checkAccountPassword({}, new Request("https://worker.example.test"), {}, deps);
   assert.equal(anonymous.status, 401);
   await assert.rejects(run("MyChosenPassword!9", { patchProfile: async () => { throw new Error("Save failed"); } }));

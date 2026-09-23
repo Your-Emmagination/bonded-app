@@ -28,7 +28,6 @@ import { useRouter } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -37,6 +36,10 @@ import {
   TextInput,
   View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { auth } from "../../Firebase_configure";
@@ -198,9 +201,9 @@ export default function GoLiveScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      <KeyboardAvoidingView
+      <KeyboardAvoidingView automaticOffset
         style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        behavior="padding"
         enabled={Platform.OS !== "web"}
       >
         <ScrollView
@@ -330,7 +333,7 @@ const makeStyles = (c: ThemeTokens) =>
       flex: 1,
       textAlign: "center",
       color: c.onChrome,
-      fontSize: 17,
+      fontSize: 16,
       fontWeight: "800",
     },
     headerSpacer: { width: 34 },
@@ -405,7 +408,7 @@ const makeStyles = (c: ThemeTokens) =>
       justifyContent: "center",
       gap: 9,
       marginTop: 8,
-      paddingVertical: 15,
+      paddingVertical: 16,
       borderRadius: 15,
       backgroundColor: c.danger,
     },

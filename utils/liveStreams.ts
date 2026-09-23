@@ -24,6 +24,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -66,7 +67,15 @@ export type LiveStream = {
    */
   replayPostId: string | null;
 
+  /** When the live was created — before any video, while the camera connects. */
   startedAt: any;
+  /**
+   * When the host's camera actually joined the video channel, which is also
+   * when the replay recording starts. The clock counts from here. Null while
+   * connecting; a stream from an older app version, which never set it, uses
+   * startedAt.
+   */
+  broadcastStartedAt: any;
   endedAt: any;
   /**
    * The host's last "still here", refreshed while their live screen is open.
@@ -134,6 +143,7 @@ export type LiveComment = {
   createdAt: any;
   /** Hidden by the host or a moderator; kept rather than deleted. */
   hidden: boolean;
+  kind: "comment" | "join";
 };
 
 const toStream = (id: string, data: any): LiveStream => ({
@@ -150,6 +160,8 @@ const toStream = (id: string, data: any): LiveStream => ({
   replayUrl: data?.replayUrl ?? null,
   replayPostId: typeof data?.replayPostId === "string" ? data.replayPostId : null,
   startedAt: data?.startedAt,
+  broadcastStartedAt:
+    data && "broadcastStartedAt" in data ? data.broadcastStartedAt ?? null : data?.startedAt ?? null,
   endedAt: data?.endedAt,
   // Undefined and null mean different things here; see isLiveStreamFresh.
   hostSeenAt: data?.hostSeenAt,
@@ -179,6 +191,7 @@ const toComment = (id: string, data: any): LiveComment => ({
   text: String(data?.text || ""),
   createdAt: data?.createdAt,
   hidden: data?.hidden === true,
+  kind: data?.kind === "join" ? "join" : "comment",
 });
 
 // ── Starting and ending ───────────────────────────────────────────────────
@@ -214,6 +227,8 @@ export async function startLiveStream(input: StartLiveInput): Promise<string> {
     playbackUrl: input.playbackUrl ?? null,
     replayUrl: null,
     startedAt: serverTimestamp(),
+    // Set by the host's screen once the camera is really broadcasting.
+    broadcastStartedAt: null,
     hostSeenAt: serverTimestamp(),
     endedAt: null,
     endedBy: null,
@@ -227,6 +242,17 @@ export async function startLiveStream(input: StartLiveInput): Promise<string> {
     pinnedComment: null,
   });
   return ref.id;
+}
+
+/**
+ * The host's camera has joined the video channel: the live has really begun.
+ * Everyone's clock counts from this, matching the replay, which starts
+ * recording at the same moment.
+ */
+export async function markBroadcastStarted(streamId: string): Promise<void> {
+  await updateDoc(doc(db, "liveStreams", streamId), {
+    broadcastStartedAt: serverTimestamp(),
+  });
 }
 
 /** The host closing their own stream. */
@@ -456,6 +482,7 @@ export async function postLiveComment(input: {
     authorName: input.authorName,
     authorAvatar: input.authorAvatar ?? null,
     text,
+    kind: "comment",
     createdAt: serverTimestamp(),
     hidden: false,
   });
@@ -510,9 +537,24 @@ export async function sendLiveReaction(
  */
 export function joinAsViewer(
   streamId: string,
-  viewer: { id: string; name: string },
+  viewer: { id: string; name: string; avatar?: string | null },
 ): () => void {
   const ref = doc(db, "liveStreams", streamId, "viewers", viewer.id);
+  const activityRef = doc(db, "liveStreams", streamId, "comments", `joined_${viewer.id}`);
+  // One activity row per viewer per live. Reconnects do not announce twice.
+  void runTransaction(db, async (transaction) => {
+    const existing = await transaction.get(activityRef);
+    if (existing.exists()) return;
+    transaction.set(activityRef, {
+      authorId: viewer.id,
+      authorName: viewer.name,
+      authorAvatar: viewer.avatar ?? null,
+      text: "joined the live",
+      kind: "join",
+      createdAt: serverTimestamp(),
+      hidden: false,
+    });
+  }).catch(() => undefined);
   const touch = () =>
     setDoc(
       ref,
@@ -537,6 +579,10 @@ export function joinAsViewer(
 /**
  * Watches who is present and reports the live count.
  *
+ * The host is never part of it: like TikTok or Facebook, a live starts at 0
+ * and goes to 1 when somebody else is watching. The host's screen doesn't
+ * mark itself present, and an old mark from a build that did is ignored.
+ *
  * Only the host's screen should call this. Every viewer subscribing to every
  * other viewer is a read for each pair, which grows with the square of the
  * audience; instead the host publishes the number onto the stream document,
@@ -544,6 +590,7 @@ export function joinAsViewer(
  */
 export function subscribeToViewerCount(
   streamId: string,
+  hostId: string,
   onCount: (count: number) => void,
 ): () => void {
   return onSnapshot(
@@ -551,6 +598,7 @@ export function subscribeToViewerCount(
     (snapshot) => {
       const cutoff = Date.now() - VIEWER_STALE_MS;
       const active = snapshot.docs.filter((item) => {
+        if (item.id === hostId) return false;
         const seen = timestampMs(item.data()?.lastSeenAt);
         // A document written moments ago has no server timestamp yet; treat
         // that as present rather than blinking the count down.

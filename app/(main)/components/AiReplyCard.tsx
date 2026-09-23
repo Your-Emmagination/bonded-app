@@ -50,7 +50,6 @@ export default function AiReplyCard({
           text={reply.text || ""}
           textStyle={styles.body}
           collapsedLines={compact ? 4 : 5}
-          minLengthToToggle={220}
           buttonTextStyle={styles.toggleText}
         />
       )}
@@ -69,7 +68,7 @@ const makeStyles = (c: ThemeTokens) =>
   StyleSheet.create({
   card: {
     marginTop: 12,
-    padding: 14,
+    padding: 16,
     borderRadius: 18,
     backgroundColor: c.surface,
     borderWidth: 1,

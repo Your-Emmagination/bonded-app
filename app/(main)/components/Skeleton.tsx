@@ -14,6 +14,12 @@
 //   <ProfileHeaderSkeleton /> avatar + name + stat blocks
 //   <DashboardSkeleton />     header + stat grid + action rows
 //   <ChatSkeleton />          alternating chat bubble blocks
+//   <SkeletonCard />          one card drawn in a screen's own card style
+//   <CardListSkeleton />      a list of those, in the screen's own list padding
+//
+// Aligned like Analytics: a screen passes its real card and list styles, so
+// the placeholders sit exactly where the content will, and nothing jumps
+// when it arrives.
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import React, {
@@ -355,6 +361,109 @@ export function DashboardSkeleton() {
   );
 }
 
+/** A text line inside a SkeletonCard. */
+export type SkeletonLineSpec = {
+  width: number | `${number}%`;
+  height?: number;
+  /** Space above the line; the first line has none by default. */
+  gap?: number;
+};
+
+const DEFAULT_CARD_LINES: SkeletonLineSpec[] = [
+  { width: "55%", height: 14 },
+  { width: "85%", height: 11, gap: 9 },
+];
+
+type SkeletonCardProps = {
+  /** The screen's real card style — its padding, corners, border and margins. */
+  style?: StyleProp<ViewStyle>;
+  /** A photo or icon beside the text. Its style should repeat the real one's margins. */
+  avatar?: { size: number; radius?: number; style?: StyleProp<ViewStyle> };
+  lines?: SkeletonLineSpec[];
+  /** Pill badges under the text, by width. */
+  chips?: number[];
+  chipHeight?: number;
+  /** Line the avatar up with the first line, as rows that top-align do. */
+  alignTop?: boolean;
+  /** Anything else inside the card, under the text — a picture, a button row. */
+  children?: React.ReactNode;
+};
+
+/** One card-shaped placeholder, drawn in the card style the screen really uses. */
+export function SkeletonCard({
+  style,
+  avatar,
+  lines = DEFAULT_CARD_LINES,
+  chips,
+  chipHeight = 20,
+  alignTop = false,
+  children,
+}: SkeletonCardProps) {
+  const { styles } = useStyles();
+  return (
+    <View style={style}>
+      <View style={[styles.cardRow, (alignTop || !avatar) && styles.cardRowTop]}>
+        {avatar && (
+          <SkeletonBlock
+            width={avatar.size}
+            height={avatar.size}
+            radius={avatar.radius ?? avatar.size / 2}
+            style={[styles.cardAvatar, avatar.style]}
+          />
+        )}
+        <View style={styles.cardBody}>
+          {lines.map((line, index) => (
+            <SkeletonBlock
+              key={index}
+              width={line.width}
+              height={line.height ?? 12}
+              style={{ marginTop: line.gap ?? (index === 0 ? 0 : 8) }}
+            />
+          ))}
+          {!!chips?.length && (
+            <View style={styles.cardChips}>
+              {chips.map((width, index) => (
+                <SkeletonBlock key={index} width={width} height={chipHeight} radius={chipHeight / 2} />
+              ))}
+            </View>
+          )}
+        </View>
+      </View>
+      {children}
+    </View>
+  );
+}
+
+/**
+ * A list of SkeletonCards inside the screen's own list padding, with an
+ * optional header (a hero card, a search box) drawn above them.
+ */
+export function CardListSkeleton({
+  count = 5,
+  style,
+  header,
+  timeoutMs,
+  cardStyle,
+  ...card
+}: Omit<SkeletonCardProps, "style"> & {
+  count?: number;
+  /** The screen's real list content style (its padding), when not already inside it. */
+  style?: StyleProp<ViewStyle>;
+  /** The screen's real card style. */
+  cardStyle?: StyleProp<ViewStyle>;
+  header?: React.ReactNode;
+  timeoutMs?: number | null;
+}) {
+  return (
+    <SkeletonGroup style={style} timeoutMs={timeoutMs}>
+      {header}
+      {Array.from({ length: count }).map((_, index) => (
+        <SkeletonCard key={index} style={cardStyle} {...card} />
+      ))}
+    </SkeletonGroup>
+  );
+}
+
 export function ChatSkeleton({
   count = 6,
   style,
@@ -403,13 +512,13 @@ const makeStyles = (c: ThemeTokens) =>
     textAlign: "center",
     color: c.textMuted,
     fontSize: 12,
-    marginTop: 18,
-    paddingHorizontal: 24,
+    marginTop: 20,
+    paddingHorizontal: 20,
   },
   // Post-card skeleton — matches PostCard.postCard spacing.
   postCard: {
     backgroundColor: c.surface,
-    paddingVertical: 14,
+    paddingVertical: 16,
     paddingHorizontal: 16,
     borderBottomWidth: 1,
     borderBottomColor: c.borderStrong,
@@ -418,8 +527,8 @@ const makeStyles = (c: ThemeTokens) =>
   postBody: { flex: 1 },
   postActionsRow: {
     flexDirection: "row",
-    gap: 22,
-    marginTop: 14,
+    gap: 16,
+    marginTop: 16,
   },
   // List row skeleton.
   listContent: { paddingVertical: 8 },
@@ -434,12 +543,12 @@ const makeStyles = (c: ThemeTokens) =>
   profileHeader: {
     alignItems: "center",
     paddingVertical: 32,
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
   },
   profileStatsRow: {
     flexDirection: "row",
-    gap: 14,
-    marginTop: 22,
+    gap: 16,
+    marginTop: 20,
   },
   // Dashboard skeleton.
   dashboard: { padding: 20 },
@@ -448,8 +557,22 @@ const makeStyles = (c: ThemeTokens) =>
     flexWrap: "wrap",
     justifyContent: "space-between",
     rowGap: 12,
-    marginTop: 18,
+    marginTop: 20,
   },
+  // Card skeletons: the card itself comes from the screen.
+  // Fills the card whether the card lays its content out in a row or a
+  // column, so the lines' percentage widths have room to mean something.
+  cardRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexGrow: 1,
+    flexShrink: 1,
+    alignSelf: "stretch",
+  },
+  cardRowTop: { alignItems: "flex-start" },
+  cardAvatar: { marginRight: 12 },
+  cardBody: { flex: 1 },
+  cardChips: { flexDirection: "row", gap: 8, marginTop: 10 },
   // Chat skeleton.
   chat: { padding: 16 },
   chatRow: {

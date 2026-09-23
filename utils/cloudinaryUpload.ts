@@ -34,6 +34,9 @@ export const uploadToCloudinary = async ({
   resourceType = "auto",
 }: CloudinaryUploadOptions): Promise<string> => {
   try {
+    const tooLargeMessage = resourceType === "raw"
+      ? "This file is too large to upload. Choose a file smaller than 9 MB."
+      : "This file is too large to upload. Choose a smaller file and try again.";
     // Validate inputs
     if (!uri) {
       throw new Error("File URI is required");
@@ -77,6 +80,9 @@ if (!CLOUDINARY_UPLOAD_PRESET) {
       try {
         data = JSON.parse(uploadResult.body);
       } catch {
+        if (uploadResult.status === 413) {
+          throw new Error(tooLargeMessage);
+        }
         throw new Error(`Upload failed: received invalid response (HTTP ${uploadResult.status})`);
       }
 
@@ -110,7 +116,15 @@ if (!CLOUDINARY_UPLOAD_PRESET) {
         },
       });
 
-      data = await response.json();
+      const responseText = await response.text();
+      try {
+        data = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        if (response.status === 413) {
+          throw new Error(tooLargeMessage);
+        }
+        throw new Error(`Upload failed: received invalid response (HTTP ${response.status})`);
+      }
 
       if (!response.ok || data?.error) {
         const errorMessage = data?.error?.message || response.statusText || "Unknown error";
@@ -433,7 +447,7 @@ export const uploadPostVideo = async (uri: string): Promise<string> => {
 export const uploadVideoWithProgress = async (
   uri: string,
   onProgress?: (fraction: number) => void,
-): Promise<string> => {
+): Promise<{ url: string; durationMs: number | null }> => {
   const endpoint = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/video/upload`;
   const task = FileSystem.createUploadTask(
     endpoint,
@@ -470,7 +484,13 @@ export const uploadVideoWithProgress = async (
   if (typeof data?.secure_url !== "string" || !data.secure_url.startsWith("https://")) {
     throw new Error("Upload failed: no video URL was returned. Please try again.");
   }
-  return data.secure_url;
+  // Cloudinary measures the video it received, which is its true length —
+  // unlike a recorder's last progress report, which can lag behind.
+  const seconds = Number(data?.duration);
+  return {
+    url: data.secure_url,
+    durationMs: Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : null,
+  };
 };
 
 /**
@@ -481,7 +501,7 @@ export const uploadPostFile = async (uri: string): Promise<string> => {
   return uploadToCloudinary({
     uri,
     folder: "post_files",
-    resourceType: "auto", // Auto-detects file type
+    resourceType: "raw",
   });
 };
 

@@ -3,9 +3,8 @@ import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { doc, getDoc } from "firebase/firestore";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   Linking,
   ScrollView,
   StyleSheet,
@@ -16,8 +15,12 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
 import { showAppToast } from "@/utils/toastEvents";
+import { buildUserProfileHref } from "@/utils/profileNavigation";
+import { canNavigateToTaggedUser } from "@/utils/taggedUsers";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import CommentModal from "./components/CommentModal";
 import PostCard from "./components/PostCard";
+import { FeedSkeleton } from "./components/Skeleton";
 
 type TargetParams = {
   notificationId?: string | string[];
@@ -51,6 +54,7 @@ export default function NotificationTargetScreen() {
   const { styles, theme } = useStyles();
   const params = useLocalSearchParams<TargetParams>();
   const router = useRouter();
+  const currentUserRole = useCurrentUserRole();
   const [target, setTarget] = useState<ResolvedTarget | null>(null);
   // The comment/reply modal is rendered inline on this screen rather than as
   // its own route, so closing it must only hide it locally — it must NOT
@@ -63,6 +67,38 @@ export default function NotificationTargetScreen() {
   const entityId = single(params.entityId);
   const parentId = single(params.parentId);
   const fromLiveReplay = single(params.origin) === "live-replay";
+
+  const openProfile = useCallback(
+    (userId?: string) => {
+      if (!userId) return;
+      // PostCard already resolves anonymous/profile-document identities into
+      // a complete profile href. Do not wrap that href as though it were a uid.
+      if (userId === "/UserProfileScreen" || userId.startsWith("/UserProfileScreen?") || userId.startsWith("/(main)/UserProfileScreen?")) {
+        router.push(userId as any);
+        return;
+      }
+      if (userId === "self" || userId === auth.currentUser?.uid) {
+        router.push({
+          pathname: "/(main)/(tabs)/ProfileScreen",
+          params: { returnTo: "/(main)/NotificationTargetScreen" },
+        });
+        return;
+      }
+      router.push(
+        buildUserProfileHref({
+          userId,
+          returnTo: "/(main)/NotificationTargetScreen",
+        }) as any,
+      );
+    },
+    [router],
+  );
+  const openTagProfile = useCallback(
+    (userId: string) => {
+      if (canNavigateToTaggedUser(userId)) openProfile(userId);
+    },
+    [openProfile],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -179,14 +215,16 @@ export default function NotificationTargetScreen() {
       </View>
 
       {!target ? (
-        <View style={styles.center}>
-          <View style={styles.loadingCard}>
-            <ActivityIndicator size="large" color={theme.textSecondary} />
-            <Text style={styles.loadingText}>Opening content…</Text>
-          </View>
-        </View>
+        // The post's own shape, where the post will appear.
+        <FeedSkeleton count={1} />
       ) : (
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+          // The comment sheet opens from inside this post; left at "never",
+          // the first tap on Send only closed the keyboard.
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={styles.contextBanner}>
             <View style={styles.contextIconCircle}>
               <Ionicons
@@ -219,9 +257,10 @@ export default function NotificationTargetScreen() {
             isLiked={target.post.likedBy?.includes(auth.currentUser?.uid || "") || false}
             isHighlighted
             currentUserId={auth.currentUser?.uid}
+            currentUserRole={currentUserRole}
             onLike={() => undefined}
-            onProfileClick={() => undefined}
-            onTagClick={() => undefined}
+            onProfileClick={openProfile}
+            onTagClick={openTagProfile}
             onImagePress={() => undefined}
             onFilePress={(url) => void Linking.openURL(url)}
             getTimeAgo={timeAgo}
@@ -294,7 +333,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.borderStrong,
     paddingVertical: 32,
-    paddingHorizontal: 28,
+    paddingHorizontal: 20,
     width: "100%",
     maxWidth: 320,
   },

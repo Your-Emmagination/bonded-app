@@ -1,0 +1,32 @@
+{
+  "knot": {
+    "heritage": { "name": "Heritage", "note": "Closest to what you have: the greys stay, navy becomes maroon, mint becomes gold.", "ed": "#e0a53d",
+      "colours": { "greyBand": "#a3a6ab", "greyFold": "#393e51", "navyBand": "#8f1d2c", "navyFold": "#4a0606", "mintBand": "#e0a53d", "mintFold": "#9a6a1c" } },
+    "campus": { "name": "Campus", "note": "The app's own colours: two gold ribbons, one maroon, one cream.", "ed": "#e0a53d", "recommended": true,
+      "colours": { "greyBand": "#e0a53d", "greyFold": "#9a6a1c", "navyBand": "#8f1d2c", "navyFold": "#4a0606", "mintBand": "#f3dcae", "mintFold": "#b8894a" } },
+    "warm": { "name": "Warm Stone", "note": "Heritage with warm greys, so it sits comfortably on cream.", "ed": "#e0a53d",
+      "colours": { "greyBand": "#c2b5ad", "greyFold": "#54443e", "navyBand": "#8f1d2c", "navyFold": "#4a0606", "mintBand": "#e0a53d", "mintFold": "#9a6a1c" } },
+    "cream": { "name": "Cream & Gold", "note": "Made for the maroon sign-in screen — light ribbons that glow on it.", "ed": "#e0a53d",
+      "colours": { "greyBand": "#fff1dc", "greyFold": "#cdb49a", "navyBand": "#e0a53d", "navyFold": "#a8741f", "mintBand": "#f6d38a", "mintFold": "#c29a4a" } },
+    "gold": { "name": "All Gold", "note": "One metal in four tones. Feels like a medal; strongest on maroon.", "ed": "#f6d38a",
+      "colours": { "greyBand": "#e9b95a", "greyFold": "#9a6a1c", "navyBand": "#c98a2a", "navyFold": "#7a5212", "mintBand": "#f6d38a", "mintFold": "#c29a4a" } },
+    "maroon": { "name": "All Maroon", "note": "Four shades of the school colour. Elegant on cream, weak on maroon.", "ed": "#b8434a",
+      "colours": { "greyBand": "#b8434a", "greyFold": "#6d1419", "navyBand": "#5f0909", "navyFold": "#2e0303", "mintBand": "#d9868c", "mintFold": "#9c4a50" } },
+    "collegiate": { "name": "Collegiate", "note": "Maroon, navy and gold — a varsity-jacket palette that keeps your navy.", "ed": "#e0a53d",
+      "colours": { "greyBand": "#8f1d2c", "greyFold": "#4a0606", "navyBand": "#1d2a6b", "navyFold": "#0e1435", "mintBand": "#e0a53d", "mintFold": "#9a6a1c" } },
+    "festival": { "name": "Festival", "note": "Gold, crimson and amber. Loud and happy — a Siglakas mood.", "ed": "#f59e0b",
+      "colours": { "greyBand": "#e0a53d", "greyFold": "#a8741f", "navyBand": "#b91c1c", "navyFold": "#6b1010", "mintBand": "#f59e0b", "mintFold": "#b45309" } }
+  },
+  "icon": {
+    "maroon": { "name": "Maroon & Gold", "note": "Maroon background, cream bubble, a gold cap.", "recommended": true,
+      "colours": { "top": "#8f1d2c", "bottom": "#5f0909", "deep": "#3a0404", "bubble": "#fffaf6", "cap": "#e0a53d" } },
+    "sunset": { "name": "Gold to Maroon", "note": "Gold at the top fading into maroon, with a dark cap.",
+      "colours": { "top": "#e0a53d", "bottom": "#8f1d2c", "deep": "#5f0909", "bubble": "#fffaf6", "cap": "#3a0404" } },
+    "gold": { "name": "Gold", "note": "A bright gold icon that stands out on any home screen.",
+      "colours": { "top": "#f3c878", "bottom": "#e0a53d", "deep": "#b8842d", "bubble": "#fffaf6", "cap": "#5f0909" } },
+    "night": { "name": "Deep Maroon", "note": "Dark and quiet, with a gold bubble.",
+      "colours": { "top": "#5f0909", "bottom": "#3d0505", "deep": "#260303", "bubble": "#e0a53d", "cap": "#2e0404" } },
+    "cream": { "name": "Cream", "note": "A light icon with a maroon cap — soft, but pale on light wallpapers.",
+      "colours": { "top": "#f6e2c7", "bottom": "#e8c9a3", "deep": "#c99a66", "bubble": "#ffffff", "cap": "#5f0909" } }
+  }
+}

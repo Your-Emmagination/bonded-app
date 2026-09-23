@@ -790,7 +790,7 @@ const makeStyles = (c: ThemeTokens) =>
   StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: c.chrome },
   topBar: {
-    minHeight: 64,
+    minHeight: 52,
     paddingHorizontal: 16,
     flexDirection: "row",
     alignItems: "center",
@@ -874,7 +874,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.border,
     padding: 16,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   briefingCardAttention: {
     borderColor: c.danger,
@@ -903,7 +903,7 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     color: c.textPrimary,
     fontSize: 13,
-    lineHeight: 18,
+    lineHeight: 16,
     fontWeight: "500",
   },
 
@@ -1002,27 +1002,27 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    padding: 30,
+    padding: 24,
     backgroundColor: c.surfaceSunken,
   },
   deniedTitle: {
     color: c.textPrimary,
     fontSize: 20,
     fontWeight: "900",
-    marginTop: 14,
+    marginTop: 16,
   },
   deniedText: {
     color: c.textMuted,
     fontSize: 13,
     textAlign: "center",
     marginTop: 6,
-    lineHeight: 19,
+    lineHeight: 20,
   },
   deniedButton: {
     marginTop: 20,
     backgroundColor: c.primary,
     borderRadius: 12,
-    paddingHorizontal: 22,
+    paddingHorizontal: 20,
     paddingVertical: 12,
   },
   deniedButtonText: { color: c.background, fontWeight: "800" },

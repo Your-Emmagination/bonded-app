@@ -70,6 +70,21 @@ const PREFERENCE_OPTIONS: { value: VideoQualityPreference; label: string; hint: 
 
 const HITSLOP = { top: 12, bottom: 12, left: 12, right: 12 } as const;
 
+/**
+ * Makes a change to the player unless it is already gone. expo-video
+ * releases its player in its own clean-up, which runs before this
+ * component's, so on unmount any clean-up that touches the player finds it
+ * released — and a released player throws. Deleting a post while its video
+ * was playing crashed the whole screen that way.
+ */
+const ifPlayerAlive = (change: () => void) => {
+  try {
+    change();
+  } catch {
+    // Released: there is nothing left to reset.
+  }
+};
+
 export default function VideoPostMedia({
   uri,
   width,
@@ -157,7 +172,9 @@ export default function VideoPostMedia({
     }
     return () => {
       sub.remove();
-      player.timeUpdateEventInterval = 0;
+      ifPlayerAlive(() => {
+        player.timeUpdateEventInterval = 0;
+      });
       if (wantCaptions) setCaptionLine("");
     };
   }, [captionsOn, captionsReady, captions, feedAutoplay, isPlaying, player]);
@@ -572,7 +589,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    paddingTop: 44,
+    paddingTop: 32,
     paddingBottom: 10,
     paddingHorizontal: 12,
     backgroundColor: "rgba(0,0,0,0.35)",

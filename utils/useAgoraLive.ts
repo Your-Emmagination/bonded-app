@@ -49,6 +49,19 @@ import {
 const HOST_VIDEO_BITRATE_KBPS = 900;
 
 /**
+ * How long to wait for Agora to say the replay file is finished before
+ * closing the engine anyway. Closing it first cut off the end of the file.
+ */
+const RECORDER_STOP_TIMEOUT_MS = 3000;
+
+/**
+ * The engine is one shared instance. A live closing down waits for its
+ * recorder before releasing it, so a new live started meanwhile waits for
+ * that — otherwise the late release would shut the new one down.
+ */
+let pendingEngineShutdown: Promise<void> = Promise.resolve();
+
+/**
  * Turns an Agora error code into something a person can act on.
  *
  * Agora's own message is frequently empty, which leaves only the number — and
@@ -220,6 +233,9 @@ export function useAgoraLive(
     let recordingUri: string | null = null;
     let recordingStartedAt = 0;
     let recordedMs = 0;
+    // Settles when Agora reports the recorder stopped, i.e. the file is done.
+    let recorderStopped: Promise<void> | null = null;
+    let markRecorderStopped: () => void = () => undefined;
 
     const startRecording = (uid: number) => {
       if (!record || !engine || recorder) return;
@@ -231,8 +247,17 @@ export function useAgoraLive(
           uid,
           type: RecorderStreamType.Rtc,
         });
+        recorderStopped = new Promise<void>((resolve) => {
+          markRecorderStopped = resolve;
+        });
         next.setMediaRecorderObserver({
           onRecorderStateChanged: (_channel, _uid, state) => {
+            if (
+              state === RecorderState.RecorderStateStop ||
+              state === RecorderState.RecorderStateError
+            ) {
+              markRecorderStopped();
+            }
             // A stop is always worth hearing, even after shutdown began.
             if (cancelled && state === RecorderState.RecorderStateStart) return;
             setRecording(state === RecorderState.RecorderStateStart);
@@ -261,17 +286,26 @@ export function useAgoraLive(
       }
     };
 
-    const finishRecording = () => {
+    // Stops the recorder and waits for Agora to confirm the file is finished
+    // (or a few seconds, whichever is first) — only then may the engine close
+    // and the file be handed on. Closing straight away cut the replay short.
+    const finishRecording = async () => {
       const current = recorder;
       const fileUri = recordingUri;
+      const stopped = recorderStopped;
       recorder = null;
       recordingUri = null;
+      recorderStopped = null;
       if (!current || !fileUri) return;
       try {
         current.stopRecording();
       } catch {
         // Stopping a recorder that already hit its time limit can throw.
       }
+      await Promise.race([
+        stopped ?? Promise.resolve(),
+        new Promise<void>((resolve) => setTimeout(resolve, RECORDER_STOP_TIMEOUT_MS)),
+      ]);
       try {
         engine?.destroyMediaRecorder(current);
       } catch {
@@ -286,6 +320,9 @@ export function useAgoraLive(
 
     const start = async () => {
       const access = await ensureMediaPermissions(role);
+      if (cancelled) return;
+      // A live that just ended may still be closing the shared engine.
+      await pendingEngineShutdown;
       if (cancelled) return;
       setPermission(access);
       if (access !== "granted") {
@@ -401,20 +438,23 @@ export function useAgoraLive(
 
     return () => {
       cancelled = true;
-      // Before leaving: the recorder needs the engine to close its file.
-      finishRecording();
       const current = engineRef.current;
       engineRef.current = null;
-      if (!current) return;
-      try {
-        if (role === "host") current.stopPreview();
-        current.leaveChannel();
-        current.unregisterEventHandler({});
-        current.release();
-      } catch {
-        // Leaving a channel that never joined throws; there is nothing to do
-        // about it and nothing depends on it having worked.
-      }
+      // The recorder needs the engine until its file is finished, so the
+      // engine closes after it — a moment after the screen has moved on.
+      pendingEngineShutdown = (async () => {
+        await finishRecording();
+        if (!current) return;
+        try {
+          if (role === "host") current.stopPreview();
+          current.leaveChannel();
+          current.unregisterEventHandler({});
+          current.release();
+        } catch {
+          // Leaving a channel that never joined throws; there is nothing to do
+          // about it and nothing depends on it having worked.
+        }
+      })().catch(() => undefined);
     };
   }, [channelName, role, firebaseUid, localUid, appId, attempt, record]);
 

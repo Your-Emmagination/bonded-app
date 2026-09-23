@@ -55,6 +55,24 @@ export function isConversationVisible(conversation: {
     isMessageAfterDeletion(conversation.lastMessage.createdAt, conversation.deletedThrough?.[userId]);
 }
 
+/**
+ * Whether this person pinned the chat to the top of their list. The key being
+ * there is what counts: right after pinning, the server time is still pending
+ * and reads as null, and the chat must not drop out of the pinned spots.
+ */
+export function isConversationPinned(conversation: {
+  pinnedAt?: Record<string, any>;
+}, userId: string): boolean {
+  return !!conversation.pinnedAt && Object.prototype.hasOwnProperty.call(conversation.pinnedAt, userId);
+}
+
+/** When it was pinned, for ordering; a pin still being saved counts as the newest. */
+export function conversationPinnedMillis(conversation: {
+  pinnedAt?: Record<string, any>;
+}, userId: string): number {
+  return timestampMillis(conversation.pinnedAt?.[userId]) || Number.MAX_SAFE_INTEGER;
+}
+
 /** Archiving hides a chat until a genuinely new message arrives, never a read or edit. */
 export function isConversationArchived(conversation: {
   lastMessage?: { createdAt: any };
@@ -72,4 +90,22 @@ export function getDirectNotificationTarget(data: {
     (data.entityType === "comment" && data.message === "sent you a message");
   return direct && typeof data.parentId === "string" && data.parentId && !data.parentId.includes("/")
     ? data.parentId : null;
+}
+
+/**
+ * One reaction per person, as in Messenger. Tapping the reaction you already
+ * have takes it off; tapping another swaps it. Messages from before this
+ * rule can hold several of one person's reactions, so every one of theirs
+ * is cleared, not just the one tapped.
+ */
+export function planOwnReaction(
+  currentReactions: Record<string, string[]> | null | undefined,
+  userId: string,
+  emoji: string,
+): { add: string | null; remove: string[] } {
+  const mine = Object.entries(currentReactions || {})
+    .filter(([, uids]) => Array.isArray(uids) && uids.includes(userId))
+    .map(([key]) => key);
+  if (mine.includes(emoji)) return { add: null, remove: mine };
+  return { add: emoji, remove: mine };
 }

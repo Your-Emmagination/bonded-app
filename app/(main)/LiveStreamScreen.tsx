@@ -21,6 +21,7 @@ import {
   hideLiveComment,
   isLiveStreamFresh,
   joinAsViewer,
+  markBroadcastStarted,
   pinLiveComment,
   postLiveComment,
   publishViewerCount,
@@ -56,7 +57,6 @@ import {
   ActivityIndicator,
   FlatList,
   Image,
-  KeyboardAvoidingView,
   Platform,
   Pressable,
   StyleSheet,
@@ -66,6 +66,10 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import Reanimated, {
   Easing,
   runOnJS,
@@ -151,23 +155,27 @@ export default function LiveStreamScreen() {
   }, [streamId]);
 
   // Presence, so the host's count is real. Leaving removes the mark; a client
-  // that dies leaves a stale one, which the count already ignores.
+  // that dies leaves a stale one, which the count already ignores. The host
+  // isn't a viewer of their own live, so it waits until the stream says who
+  // the host is, and the host never marks themselves.
+  const hostId = stream?.hostId ?? null;
   useEffect(() => {
     if (!streamId || !user?.uid || viewerName === "Someone") return;
-    return joinAsViewer(streamId, { id: user.uid, name: viewerName });
-  }, [streamId, user?.uid, viewerName]);
+    if (!hostId || hostId === user.uid) return;
+    return joinAsViewer(streamId, { id: user.uid, name: viewerName, avatar: viewerAvatar });
+  }, [hostId, streamId, user?.uid, viewerName, viewerAvatar]);
 
   // Only the host tallies the audience, then writes the number onto the
   // stream document so every viewer reads it from a snapshot they already
   // have rather than subscribing to each other.
   const peakRef = useRef(0);
   useEffect(() => {
-    if (!isHost || !streamId) return;
-    return subscribeToViewerCount(streamId, (count) => {
+    if (!isHost || !streamId || !hostId) return;
+    return subscribeToViewerCount(streamId, hostId, (count) => {
       publishViewerCount(streamId, count, peakRef.current);
       if (count > peakRef.current) peakRef.current = count;
     });
-  }, [isHost, streamId]);
+  }, [hostId, isHost, streamId]);
 
   // ── Host still here ─────────────────────────────────────────────────────
   // While the host has this screen open and in front, the stream keeps
@@ -254,6 +262,7 @@ export default function LiveStreamScreen() {
   // only if the host ended the live themselves; one a moderator stopped is
   // thrown away.
   const hostEndedRef = useRef(false);
+  const saveReplayRef = useRef(true);
   const replaySourceRef = useRef<LiveStream | null>(null);
   useEffect(() => {
     replaySourceRef.current = stream;
@@ -261,7 +270,7 @@ export default function LiveStreamScreen() {
   const handleRecordingFinished = useCallback((recording: LiveRecording) => {
     const source = replaySourceRef.current;
     const uid = auth.currentUser?.uid;
-    if (!hostEndedRef.current || !source || !uid || source.hostId !== uid) {
+    if (!hostEndedRef.current || !saveReplayRef.current || !source || !uid || source.hostId !== uid) {
       discardRecording(recording.fileUri);
       return;
     }
@@ -285,6 +294,20 @@ export default function LiveStreamScreen() {
     user?.uid ?? null,
     { record: isHost, onRecordingFinished: handleRecordingFinished },
   );
+
+  // The live really begins when the host's camera joins the video channel —
+  // the moment the replay starts recording — so that's when the clock starts,
+  // for everyone. It used to count from when the live was created, several
+  // seconds earlier, which is why a replay came out shorter than the clock.
+  const broadcastMarkedRef = useRef(false);
+  useEffect(() => {
+    if (!isHost || !agora.joined || !streamId || stream?.status !== "live") return;
+    if (stream.broadcastStartedAt !== null || broadcastMarkedRef.current) return;
+    broadcastMarkedRef.current = true;
+    markBroadcastStarted(streamId).catch((error) =>
+      console.warn("Could not mark the live as broadcasting:", error),
+    );
+  }, [agora.joined, isHost, stream, streamId]);
 
   // The host watches their own camera; everyone else watches the host's.
   const agoraCanvasUid = isHost ? 0 : agora.remoteUid;
@@ -385,12 +408,15 @@ export default function LiveStreamScreen() {
     }).catch(() => undefined);
   }, [draft, streamId, user?.uid, viewerName, viewerAvatar]);
 
-  const confirmEndStream = useCallback(async () => {
+  const confirmEndStream = useCallback(async (saveReplay: boolean) => {
     if (!streamId) return;
     setConfirmEnd(null);
     // Marked before the stream flips to ended, which is what stops the
     // recording; that is where it is decided whether it becomes a replay.
-    if (isHost) hostEndedRef.current = true;
+    if (isHost) {
+      hostEndedRef.current = true;
+      saveReplayRef.current = saveReplay;
+    }
 
     if (confirmEnd === "leave") {
       // Carry on with the exit that was held back, without waiting for the
@@ -476,6 +502,16 @@ export default function LiveStreamScreen() {
 
   const renderComment = useCallback(
     ({ item }: { item: LiveComment }) => {
+      if (item.kind === "join") {
+        return (
+          <View style={styles.joinActivity}>
+            <Ionicons name="person-add-outline" size={13} color={theme.textMuted} />
+            <Text style={styles.joinActivityText} numberOfLines={1}>
+              <Text style={styles.joinActivityName}>{item.authorName}</Text> joined the live
+            </Text>
+          </View>
+        );
+      }
       const avatar = item.authorAvatar ? avatarThumb(item.authorAvatar) : null;
       const hasActions = isHost || canModerate;
       return (
@@ -500,7 +536,7 @@ export default function LiveStreamScreen() {
         </Pressable>
       );
     },
-    [styles, isHost, canModerate],
+    [styles, theme.textMuted, isHost, canModerate],
   );
 
   // ── States ──────────────────────────────────────────────────────────────
@@ -654,9 +690,9 @@ export default function LiveStreamScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
-      <KeyboardAvoidingView
+      <KeyboardAvoidingView automaticOffset
         style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        behavior="padding"
         enabled={Platform.OS !== "web"}
       >
         {/* ── Video ─────────────────────────────────────────────────────── */}
@@ -796,7 +832,7 @@ export default function LiveStreamScreen() {
           </View>
 
           <View style={styles.statusRow}>
-            <LiveTimer startedAt={stream.startedAt} />
+            <LiveTimer startedAt={stream.broadcastStartedAt} createdAt={stream.startedAt} />
             {isHost && agora.recording && (
               // Only the host sees this; it says the replay is being kept.
               <View
@@ -951,6 +987,7 @@ export default function LiveStreamScreen() {
           </Pressable>
           <Pressable style={styles.heartButton} onPress={tapHeart}>
             <Ionicons name="heart" size={22} color={theme.danger} />
+            <Text style={styles.heartCount}>{stream.reactionCount}</Text>
           </Pressable>
         </View>
       </KeyboardAvoidingView>
@@ -974,18 +1011,20 @@ export default function LiveStreamScreen() {
         }
         description={
           confirmEnd === "leave"
-            ? "Leaving this screen ends your live for everyone watching."
+            ? "Leaving ends your live for everyone. Choose whether to publish the recording as a replay."
             : isHost
-              ? "Viewers will be told the stream has finished."
+              ? "Viewers will be told the stream has finished. You can publish or discard the replay."
               : "Everyone watching will be told a moderator ended it. This cannot be undone."
         }
         confirmText={
-          confirmEnd === "leave" ? "End live" : isHost ? "End stream" : "End it"
+          isHost ? "End & save replay" : "End it"
         }
         cancelText={
           confirmEnd === "leave" ? "Stay live" : isHost ? "Keep streaming" : "Keep watching"
         }
-        onConfirm={confirmEndStream}
+        secondaryText={isHost ? "End without replay" : undefined}
+        onSecondary={isHost ? () => void confirmEndStream(false) : undefined}
+        onConfirm={() => void confirmEndStream(true)}
         onCancel={cancelEndStream}
       />
     </SafeAreaView>
@@ -1004,21 +1043,39 @@ const formatElapsed = (totalSeconds: number) => {
 };
 
 /**
+ * If the camera never reports in — it failed, or the moment couldn't be
+ * saved — the pill stops saying "Connecting…" after this long and counts from
+ * when the live was created, as it used to.
+ */
+const CONNECTING_FALLBACK_MS = 30_000;
+
+/**
  * The running clock.
  *
  * Its own component so the once-a-second tick re-renders this pill and
  * nothing else — the video surface and the chat list stay still. Counted from
- * the server's start time, so every viewer sees the same number whenever they
- * joined. It reads 0:00 for the moment before the host's start time has come
- * back from the server.
+ * the server's time for when the camera went live, so every viewer sees the
+ * same number whenever they joined, and it matches the replay. Until then it
+ * says "Connecting…" instead of LIVE.
  */
-function LiveTimer({ startedAt }: { startedAt: any }) {
+function LiveTimer({ startedAt, createdAt }: { startedAt: any; createdAt: any }) {
   const { styles } = useStyles();
   const nowMs = useRelativeTimeNow(1000);
   const startedMs = timestampMs(startedAt);
-  const elapsed = startedMs
-    ? Math.max(0, Math.floor((nowMs - startedMs) / 1000))
-    : 0;
+  const createdMs = timestampMs(createdAt);
+  const clockFromMs =
+    startedMs || (createdMs && nowMs - createdMs >= CONNECTING_FALLBACK_MS ? createdMs : 0);
+
+  if (!clockFromMs) {
+    return (
+      <View style={styles.statusPill} accessible accessibilityLabel="Connecting">
+        <View style={styles.connectingDot} />
+        <Text style={styles.statusPillText}>Connecting…</Text>
+      </View>
+    );
+  }
+
+  const elapsed = Math.max(0, Math.floor((nowMs - clockFromMs) / 1000));
 
   return (
     <View style={[styles.statusPill, styles.livePill]}>
@@ -1110,7 +1167,7 @@ const makeStyles = (c: ThemeTokens) =>
       alignItems: "center",
       justifyContent: "center",
       gap: 10,
-      paddingHorizontal: 28,
+      paddingHorizontal: 20,
     },
     stagePlaceholderText: {
       color: c.onChromeMuted,
@@ -1126,7 +1183,7 @@ const makeStyles = (c: ThemeTokens) =>
       gap: 8,
       marginTop: 6,
       minHeight: 44,
-      paddingHorizontal: 18,
+      paddingHorizontal: 20,
       borderRadius: 22,
       backgroundColor: c.danger,
     },
@@ -1220,6 +1277,14 @@ const makeStyles = (c: ThemeTokens) =>
       borderRadius: 3,
       backgroundColor: c.onPrimary,
     },
+    // Hollow until the camera is really live, when it becomes LIVE's dot.
+    connectingDot: {
+      width: 7,
+      height: 7,
+      borderRadius: 3.5,
+      borderWidth: 1.5,
+      borderColor: c.onChrome,
+    },
     // Tabular figures, so the pill doesn't twitch in width every second.
     timerText: { fontVariant: ["tabular-nums"] },
     recDot: {
@@ -1298,6 +1363,19 @@ const makeStyles = (c: ThemeTokens) =>
     commentInitial: { color: c.textSecondary, fontSize: 12, fontWeight: "800" },
     commentText: { flex: 1, color: c.textPrimary, fontSize: 13.5, lineHeight: 19 },
     commentName: { color: c.textMuted, fontWeight: "800" },
+    joinActivity: {
+      alignSelf: "center",
+      maxWidth: "92%",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      paddingHorizontal: 12,
+      paddingVertical: 5,
+      borderRadius: 14,
+      backgroundColor: c.surfaceSunken,
+    },
+    joinActivityText: { color: c.textMuted, fontSize: 12.5 },
+    joinActivityName: { color: c.textSecondary, fontWeight: "800" },
     commentEmpty: {
       color: c.textMuted,
       fontSize: 13,
@@ -1336,13 +1414,17 @@ const makeStyles = (c: ThemeTokens) =>
     },
     sendButtonIdle: { backgroundColor: c.surfaceSunken },
     heartButton: {
-      width: 42,
+      minWidth: 42,
       height: 42,
       borderRadius: 21,
+      paddingHorizontal: 10,
+      flexDirection: "row",
+      gap: 5,
       alignItems: "center",
       justifyContent: "center",
       backgroundColor: c.dangerSoft,
     },
+    heartCount: { color: c.danger, fontSize: 12, fontWeight: "900" },
 
     endedTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "900" },
     endedText: { color: c.textSecondary, fontSize: 14, textAlign: "center" },
@@ -1351,7 +1433,7 @@ const makeStyles = (c: ThemeTokens) =>
     replayCard: {
       alignSelf: "stretch",
       marginTop: 10,
-      padding: 14,
+      padding: 16,
       gap: 8,
       borderRadius: 16,
       borderWidth: 1,
@@ -1385,7 +1467,7 @@ const makeStyles = (c: ThemeTokens) =>
       alignItems: "center",
       gap: 8,
       marginTop: 10,
-      paddingHorizontal: 18,
+      paddingHorizontal: 20,
       paddingVertical: 11,
       borderRadius: 14,
       borderWidth: 1,
@@ -1395,7 +1477,7 @@ const makeStyles = (c: ThemeTokens) =>
     replayButtonText: { color: c.primary, fontSize: 14, fontWeight: "800" },
     primaryButton: {
       marginTop: 10,
-      paddingHorizontal: 22,
+      paddingHorizontal: 20,
       paddingVertical: 12,
       borderRadius: 14,
       backgroundColor: c.primary,

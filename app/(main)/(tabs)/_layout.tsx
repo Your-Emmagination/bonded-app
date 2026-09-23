@@ -97,7 +97,7 @@ function TabItem({
         }}
       >
         <View style={{ position: "relative" }}>
-          <Ionicons name={iconName} size={24} color={color} />
+          <Ionicons name={iconName} size={22} color={color} />
           {showBadge && (
             <Reanimated.View
               style={[

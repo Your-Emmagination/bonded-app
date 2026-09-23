@@ -19,6 +19,7 @@ export type ComposerFile = {
   url: string;
   mimeType: string;
   name?: string;
+  size?: number;
   /** Pixel size, when the upload reported one, so a bubble is the right shape on first paint. */
   width?: number;
   height?: number;
@@ -35,7 +36,7 @@ export type ComposerAttachments = {
   upload: () => Promise<ComposerFile[]>;
 };
 
-type PickedFile = { uri: string; mimeType: string; name: string };
+type PickedFile = { uri: string; mimeType: string; name: string; size?: number };
 
 /**
  * How many attachments upload at the same time. A phone's connection gains
@@ -85,7 +86,7 @@ export function prepareComposerAttachments(
 ): ComposerAttachments {
   const jobs = [
     ...files.map((file) => ({
-      local: { url: file.uri, mimeType: file.mimeType, name: file.name },
+      local: { url: file.uri, mimeType: file.mimeType, name: file.name, size: file.size },
       send: file.mimeType.startsWith("image/") ? uploadPostImage : uploadPostFile,
     })),
     ...(gifUrl

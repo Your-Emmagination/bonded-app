@@ -23,7 +23,8 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { ListSkeleton } from "./components/Skeleton";
+import { CardListSkeleton } from "./components/Skeleton";
+import { SIGN_IN_TICKET_SOURCE } from "@/utils/signInHelp";
 import { isAdmin as isAdminRole } from "@/utils/rbac";
 import { getTimeAgo } from "@/utils/relativeTime";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
@@ -105,10 +106,41 @@ export default function ManageSupportScreen() {
     });
   }, [filter, search, tickets]);
 
+  // The same bar whether the queue has loaded or not, so it never jumps.
+  const topBar = (
+    <View style={styles.topBar}>
+      <TouchableOpacity
+        onPress={() => router.back()}
+        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+      >
+        <Ionicons name="chevron-back" size={24} color={theme.textPrimary} />
+      </TouchableOpacity>
+      <Text style={styles.topBarTitle}>Support requests</Text>
+      <View style={{ width: 24 }} />
+    </View>
+  );
+  // Ticket cards drawn in the real card style, so they land where the
+  // tickets will.
+  const ticketSkeleton = (
+    <CardListSkeleton
+      count={5}
+      style={styles.skeletonList}
+      cardStyle={styles.card}
+      lines={[
+        { width: 84, height: 12 },
+        { width: "70%", height: 15, gap: 10 },
+        { width: "95%", height: 12, gap: 8 },
+        { width: "58%", height: 12, gap: 6 },
+        { width: "40%", height: 10, gap: 10 },
+      ]}
+    />
+  );
+
   if (role === undefined) {
     return (
       <SafeAreaView style={styles.screen}>
-        <ListSkeleton count={5} rowStyle={styles.skeletonCard} />
+        {topBar}
+        <View style={styles.listContent}>{ticketSkeleton}</View>
       </SafeAreaView>
     );
   }
@@ -130,17 +162,7 @@ export default function ManageSupportScreen() {
 
   return (
     <SafeAreaView style={styles.screen}>
-      <View style={styles.topBar}>
-        <TouchableOpacity
-          onPress={() => router.back()}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="chevron-back" size={24} color={theme.textPrimary} />
-        </TouchableOpacity>
-        <Text style={styles.topBarTitle}>Support requests</Text>
-        <View style={{ width: 24 }} />
-      </View>
-
+      {topBar}
       <FlatList
         data={visible}
         keyExtractor={(ticket) => ticket.id}
@@ -207,7 +229,7 @@ export default function ManageSupportScreen() {
         }
         ListEmptyComponent={
           loading ? (
-            <ListSkeleton count={5} rowStyle={styles.skeletonCard} />
+            ticketSkeleton
           ) : (
             <View style={styles.emptyCard}>
               <Ionicons name="checkmark-done-outline" size={28} color={theme.success} />
@@ -239,6 +261,11 @@ export default function ManageSupportScreen() {
               <View style={styles.cardTop}>
                 <Text style={styles.ticketNo}>{item.ticketNo}</Text>
                 <View style={styles.cardTopRight}>
+                  {item.source === SIGN_IN_TICKET_SOURCE && (
+                    <View style={[styles.chip, { backgroundColor: theme.accentSoft }]}>
+                      <Text style={[styles.chipText, { color: theme.accent }]}>Sign-in request</Text>
+                    </View>
+                  )}
                   {item.priority !== "normal" && (
                     <View style={[styles.chip, { backgroundColor: priority.bg }]}>
                       <Text style={[styles.chipText, { color: priority.color }]}>
@@ -306,7 +333,8 @@ const makeStyles = (c: ThemeTokens) =>
   deniedText: { color: c.textMuted, fontSize: 13, textAlign: "center", lineHeight: 19 },
 
   listContent: { padding: 16, gap: 10 },
-  skeletonCard: { height: 104, borderRadius: 16, marginBottom: 10 },
+  // Same spacing between cards as the real list.
+  skeletonList: { gap: 10 },
 
   searchShell: {
     flexDirection: "row",
@@ -387,7 +415,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.border,
     borderRadius: 18,
-    paddingVertical: 34,
+    paddingVertical: 32,
     paddingHorizontal: 20,
   },
   emptyTitle: { color: c.textPrimary, fontSize: 14.5, fontWeight: "900" },

@@ -92,8 +92,8 @@ const makeStyles = (c: ThemeTokens) =>
     elevation: 8,
   },
   header: {
-    minHeight: 54,
-    paddingHorizontal: 18,
+    minHeight: 52,
+    paddingHorizontal: 20,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -103,7 +103,7 @@ const makeStyles = (c: ThemeTokens) =>
   divider: { height: 1, backgroundColor: c.border },
   itemDivider: { height: 1, backgroundColor: c.border, marginLeft: 58 },
   actionItem: {
-    minHeight: 54,
+    minHeight: 52,
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 16,

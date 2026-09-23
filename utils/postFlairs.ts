@@ -1,12 +1,12 @@
+// Academic, Study and Sports were retired. Posts that still carry one read as
+// Discussion through normalizePostFlair, and the database rules still accept
+// them so those older posts stay editable.
 export const POST_FLAIRS = [
   { id: "discussion", label: "Discussion", emoji: "💬", staffOnly: false },
   { id: "question", label: "Question", emoji: "❓", staffOnly: false },
-  { id: "academic", label: "Academic", emoji: "🎓", staffOnly: false },
-  { id: "study", label: "Study", emoji: "📚", staffOnly: false },
   { id: "help", label: "Help / Advice", emoji: "🆘", staffOnly: false },
   { id: "achievement", label: "Achievement", emoji: "🏆", staffOnly: false },
   { id: "lost_found", label: "Lost & Found", emoji: "🔎", staffOnly: false },
-  { id: "sports", label: "Sports", emoji: "🏀", staffOnly: false },
   { id: "announcement", label: "Announcement", emoji: "📢", staffOnly: true },
 ] as const;
 export type PostFlairId = (typeof POST_FLAIRS)[number]["id"];

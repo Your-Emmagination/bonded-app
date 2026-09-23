@@ -1,6 +1,6 @@
 // Updated CommentModal.tsx 
+import { anonymousName } from "@/utils/anonymousHandle";
 import { AVATAR_SIZE_SMALL, FEED_IMAGE_WIDTH, avatarThumb, feedImage } from "@/utils/cloudinaryImages";
-import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
@@ -14,7 +14,6 @@ import {
     Dimensions,
     FlatList,
     Keyboard,
-    KeyboardEvent,
     Linking,
     Modal,
     Platform,
@@ -33,6 +32,7 @@ import ReanimatedAnimated, {
     withSpring,
     withTiming,
 } from "react-native-reanimated";
+import { useReanimatedKeyboardAnimation } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { hasAiAssistantMention, isAiAssistantId } from "@/utils/aiAssistant";
@@ -107,11 +107,14 @@ import ReplyThread from "./ReplyThread";
 import { buildAiConversationContext, summarizeAiVisibleContent } from "@/utils/aiContext";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { canNavigateToTaggedUser, manualTaggedUsers, splitTaggedMentions } from "@/utils/taggedUsers";
 import AiReplyCard from "./AiReplyCard";
 import CommentComposer from "./CommentComposer";
 import ConfirmDialog from "./ConfirmDialog";
 import ContentActionMenu from "./ContentActionMenu";
+import FileAttachmentCard from "./FileAttachmentCard";
 import ExpandableText from "./ExpandableText";
+import ExternalLinkDialog, { prepareExternalLink } from "./ExternalLinkDialog";
 import ImageZoomViewer from "./ImageZoomViewer";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
@@ -154,14 +157,15 @@ type Comment = {
   profilePic?: string;
   isAnonymous?: boolean;
   replyCount?: number;
-  files?: { url: string; mimeType: string; name?: string }[];
+  files?: { url: string; mimeType: string; name?: string; size?: number }[];
   link?: { url: string; title: string };
   taggedUsers?: { id: string; name: string; studentID: string }[];
+  mentionedUserIds?: string[];
   aiReply?: { text: string; model?: string | null; generatedAtMs?: number };
   moderationStatus?: string;
   moderationReasons?: string[];
   onImagePress?: (images: string[], index: number) => void;
-  onLinkPress?: (url: string) => void;
+  onLinkPress?: (url: string, label?: string) => void;
   onTagClick?: (userId: string) => void;
   onFilePress?: (url: string, name: string) => void;
 };
@@ -190,7 +194,7 @@ type CommentItemProps = {
   getTimeAgo: (timestamp: any) => string;
   isHighlighted?: boolean;
   onImagePress: (images: string[], startIndex: number) => void;
-  onLinkPress: (url: string) => void;
+  onLinkPress: (url: string, label?: string) => void;
   onTagClick: (taggedUserId: string) => void;
   onFilePress: (url: string, filename: string) => void;
 };
@@ -271,7 +275,7 @@ function CommentItemComponent({
 
   const displayName = isIdentityVisible
     ? authorFullName || item.username?.trim() || "User"
-    : (item.isAnonymous && isCurrentUser && isStaffViewer ? "Anonymous (You)" : "Anonymous");
+    : anonymousName(item, { isYou: !!item.isAnonymous && isCurrentUser && isStaffViewer });
 
   const canClickProfile =
     isIdentityVisible && !!authorData?.userId && authorData.userId !== "anonymous";
@@ -292,6 +296,11 @@ function CommentItemComponent({
   // uploaded one loads.
   const gifLocalCopy = localCopyOf(gifFiles[0]?.url);
   const imageLocalCopy = localCopyOf(imageFiles[0]?.url);
+  const visibleTaggedUsers = manualTaggedUsers(
+    item.text,
+    item.taggedUsers,
+    item.mentionedUserIds,
+  );
   const [imageHeight, setImageHeight] = useState(200);
 
   useEffect(() => {
@@ -377,8 +386,24 @@ function CommentItemComponent({
         <ExpandableText
           text={item.text}
           textStyle={styles.commentText}
+          renderText={(text) =>
+            splitTaggedMentions(text, item.taggedUsers, item.mentionedUserIds).map((part, index) => {
+              const navigable = canNavigateToTaggedUser(part.taggedUser?.id);
+              return part.taggedUser ? (
+                <Text
+                  key={`${part.taggedUser.id}-${index}`}
+                  style={styles.inlineMention}
+                  onPress={navigable ? () => onTagClick?.(part.taggedUser!.id) : undefined}
+                  accessibilityRole={navigable ? "link" : undefined}
+                >
+                  {part.text}
+                </Text>
+              ) : (
+                <React.Fragment key={`text-${index}`}>{part.text}</React.Fragment>
+              );
+            })
+          }
           collapsedLines={5}
-          minLengthToToggle={220}
           buttonStyle={styles.seeMoreButton}
           buttonTextStyle={styles.seeMoreText}
         />
@@ -421,42 +446,30 @@ function CommentItemComponent({
 
       {docFiles.length > 0 && (
         <View style={styles.commentDocsContainer}>
-          {docFiles.map((file, idx) => {
-            const displayName = getFileDisplayName(file);
-            const details = getFileIconDetails(file.mimeType, displayName);
-            return (
-              <TouchableOpacity
-                key={idx}
-                style={styles.commentDocItem}
-                onPress={() => onFilePress?.(file.url, displayName)}
-                disabled={sending}
-              >
-                <Ionicons
-                  name={details.icon}
-                  size={16}
-                  color={details.color}
-                />
-                <Text style={styles.commentDocText} numberOfLines={1}>
-                  {displayName}
-                </Text>
-                <Ionicons name="download-outline" size={14} color={theme.textMuted} />
-              </TouchableOpacity>
-            );
-          })}
+          {docFiles.map((file, idx) => (
+            <FileAttachmentCard
+              key={`${file.url}-${idx}`}
+              file={{ ...file, name: getFileDisplayName(file) }}
+              onPress={() => onFilePress?.(file.url, getFileDisplayName(file))}
+              disabled={sending}
+            />
+          ))}
         </View>
       )}
 
 {item.link && (
   <TouchableOpacity
     style={styles.commentLinkPreview}
-    onPress={() => onLinkPress?.(item.link?.url ?? '')}
+    onPress={() => onLinkPress?.(item.link?.url ?? '', item.link?.title)}
   >
     <Ionicons name="link" size={16} color="#4f9cff" />
-    <View style={{ flex: 1, marginLeft: 8 }}>
-      <Text style={styles.commentLinkTitle} numberOfLines={1}>
-        {item.link?.title ?? 'Link'}
-      </Text>
-      <Text style={styles.commentLinkUrl} numberOfLines={1}>
+    <View style={styles.commentLinkCopy}>
+      {!!item.link.title?.trim() && item.link.title.trim() !== item.link.url && (
+        <Text style={styles.commentLinkTitle} numberOfLines={1}>
+          {item.link.title.trim()}
+        </Text>
+      )}
+      <Text style={styles.commentLinkUrl}>
         {item.link?.url ?? ''}
       </Text>
     </View>
@@ -464,8 +477,8 @@ function CommentItemComponent({
   </TouchableOpacity>
 )}
 
-      {item.taggedUsers && item.taggedUsers.length > 0 && (
-        <TaggedUsersDisplay taggedUsers={item.taggedUsers} onTagClick={onTagClick} />
+      {visibleTaggedUsers.length > 0 && (
+        <TaggedUsersDisplay taggedUsers={visibleTaggedUsers} onTagClick={onTagClick} />
       )}
 
       <AiReplyCard reply={item.aiReply} compact />
@@ -509,36 +522,33 @@ const TaggedUsersDisplay = ({
   const [expanded, setExpanded] = useState(false);
 
   const MAX_VISIBLE = 1;
-  const visible = expanded ? taggedUsers : taggedUsers.slice(0, MAX_VISIBLE);
+  const visibleTags = expanded ? taggedUsers : taggedUsers.slice(0, MAX_VISIBLE);
   const remaining = taggedUsers.length - MAX_VISIBLE;
-  const hasMore = remaining > 0 && !expanded;
 
   return (
     <View style={styles.taggedBox}>
       <View style={styles.taggedContent}>
         <Ionicons name="people-outline" size={14} color={theme.accent} />
         <Text style={styles.taggedLabel}>with </Text>
-
-        {visible.map((tag, idx) => (
+        {visibleTags.map((tag, index) => (
           <React.Fragment key={tag.id}>
-            <TouchableOpacity onPress={() => onTagClick?.(tag.id)}>
+            <TouchableOpacity
+              onPress={() => onTagClick?.(tag.id)}
+              disabled={!canNavigateToTaggedUser(tag.id)}
+            >
               <Text style={styles.taggedName}>{tag.name}</Text>
             </TouchableOpacity>
-            {(idx < visible.length - 1 || (hasMore && idx === visible.length - 1)) && (
-              <Text style={styles.taggedSeparator}>, </Text>
-            )}
+            {index < visibleTags.length - 1 && <Text style={styles.taggedSeparator}>, </Text>}
           </React.Fragment>
         ))}
-
-        {hasMore && (
+        {remaining > 0 && !expanded && (
           <TouchableOpacity onPress={() => setExpanded(true)} activeOpacity={0.7}>
-            <Text style={styles.moreCount}>+{remaining} more</Text>
+            <Text style={styles.moreCount}>See {remaining} more</Text>
           </TouchableOpacity>
         )}
-
         {expanded && taggedUsers.length > MAX_VISIBLE && (
-          <TouchableOpacity onPress={() => setExpanded(false)} style={{ marginLeft: 4 }}>
-            <Text style={styles.showLessText}>Show less</Text>
+          <TouchableOpacity onPress={() => setExpanded(false)}>
+            <Text style={styles.showLessText}>See less</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -574,7 +584,6 @@ const CommentModal: React.FC<CommentModalProps> = ({
   const [selectedImages, setSelectedImages] = useState<string[]>([]);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [isNavigating, setIsNavigating] = useState(false); 
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [editingComment, setEditingComment] = useState<Comment | null>(null);
   const [editingText, setEditingText] = useState("");
   const [savingCommentEdit, setSavingCommentEdit] = useState(false);
@@ -600,18 +609,27 @@ const CommentModal: React.FC<CommentModalProps> = ({
   // Self-harm gets its own dialog instead of the generic confirm one — see
   // components/SafetyDialog.
   const [safetyVisible, setSafetyVisible] = useState(false);
+  const [pendingLink, setPendingLink] =
+    useState<ReturnType<typeof prepareExternalLink>>(null);
   const relativeTimeNow = useRelativeTimeNow();
-  // Reanimated keeps the keyboard lift on the UI thread.
-  const composerBottom = useSharedValue(0);
-  const composerAnimatedStyle = useAnimatedStyle(() => ({
-    marginBottom: composerBottom.value,
-  }));
+  // The keyboard's position on every frame: height runs from 0 down to
+  // minus the keyboard's height, progress from 0 to 1.
+  const { height: keyboardOffset, progress: keyboardProgress } =
+    useReanimatedKeyboardAnimation();
 
   const flatListRef = useRef<FlatList>(null);
   const initialReplyKeyRef = useRef<string | null>(null);
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const hiddenComposerPadding = Math.max(insets.bottom, Platform.OS === "android" ? 16 : 12);
+  // The typing bar rides on the keyboard as it moves. It used to wait for
+  // Android to say the keyboard had finished opening and only then slide up,
+  // so the keyboard covered it for a moment first.
+  const composerAnimatedStyle = useAnimatedStyle(() => ({
+    marginBottom: -keyboardOffset.value + keyboardProgress.value * KEYBOARD_COMPOSER_LIFT,
+    paddingBottom:
+      hiddenComposerPadding + (8 - hiddenComposerPadding) * keyboardProgress.value,
+  }));
 
   const translateY = useSharedValue(SCREEN_HEIGHT);
   const backdropOpacity = useSharedValue(0);
@@ -623,36 +641,16 @@ const CommentModal: React.FC<CommentModalProps> = ({
       });
     };
 
+    // Once the keyboard is up, the newest comments move into view above it.
     const showSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
-      (e: KeyboardEvent) => {
-        const nextHeight = Math.max(0, e.endCoordinates.height);
-        setKeyboardHeight(nextHeight);
-        composerBottom.value = withTiming(
-          nextHeight + KEYBOARD_COMPOSER_LIFT,
-          { duration: Platform.OS === "ios" ? e.duration || 250 : 220 },
-          (finished) => {
-            if (finished) runOnJS(scrollCommentsToEnd)();
-          },
-        );
-      }
-    );
-
-    const hideSub = Keyboard.addListener(
-      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
-      (e: KeyboardEvent) => {
-        setKeyboardHeight(0);
-        composerBottom.value = withTiming(0, {
-          duration: Platform.OS === "ios" ? e.duration || 250 : 180,
-        });
-      }
+      scrollCommentsToEnd,
     );
 
     return () => {
       showSub.remove();
-      hideSub.remove();
     };
-  }, [composerBottom]);
+  }, []);
 
   useEffect(() => {
     setInternalVisible(visible);
@@ -1456,6 +1454,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
   }, [closeAndNavigate, user, router, setIsNavigating]);
 
   const handleTagClick = useCallback((taggedUserId: string) => {
+    if (!canNavigateToTaggedUser(taggedUserId)) return;
     try {
       setIsNavigating(true);
       closeAndNavigate(() => {
@@ -1479,27 +1478,10 @@ const CommentModal: React.FC<CommentModalProps> = ({
     }
   }, [closeAndNavigate, user, router, setIsNavigating]);
 
-  const handleLinkPress = useCallback((url: string) => {
-    Linking.canOpenURL(url)
-      .then((supported) => {
-        if (supported) Linking.openURL(url);
-        else setConfirmDialog({
-          title: "Invalid Link",
-          description: "Cannot open this URL",
-          confirmText: "OK",
-          singleAction: true,
-          destructive: true,
-          onConfirm: () => setConfirmDialog(null),
-        });
-      })
-      .catch(() => setConfirmDialog({
-        title: "Error",
-        description: "Failed to open link",
-        confirmText: "OK",
-        singleAction: true,
-        destructive: true,
-        onConfirm: () => setConfirmDialog(null),
-      }));
+  const handleLinkPress = useCallback((url: string, label?: string) => {
+    if (url) {
+      setPendingLink(prepareExternalLink(url, label));
+    }
   }, []);
 
   const handleFilePress = useCallback(async (url: string, filename: string) => {
@@ -1797,14 +1779,7 @@ const CommentModal: React.FC<CommentModalProps> = ({
 
       {user && (
         <ReanimatedAnimated.View
-          style={[
-            styles.composerWrapper,
-            {
-              paddingBottom:
-                keyboardHeight > 0 ? 8 : hiddenComposerPadding,
-            },
-            composerAnimatedStyle,
-          ]}
+          style={[styles.composerWrapper, composerAnimatedStyle]}
         >
           <CommentComposer
             currentUser={user}
@@ -1830,9 +1805,12 @@ const CommentModal: React.FC<CommentModalProps> = ({
     commentId={selectedComment.id}
     commentAuthor={
       selectedComment.isAnonymous
-        ? (!!user?.uid && (selectedComment.realUserId || selectedComment.userId) === user.uid && isStaff(parseUserRole(user?.role))
-            ? "Anonymous (You)"
-            : "Anonymous")
+        ? anonymousName(selectedComment, {
+            isYou:
+              !!user?.uid &&
+              (selectedComment.realUserId || selectedComment.userId) === user.uid &&
+              isStaff(parseUserRole(user?.role)),
+          })
         : selectedComment.username || "User"
     }
     currentUser={user}
@@ -1869,6 +1847,8 @@ const CommentModal: React.FC<CommentModalProps> = ({
   onConfirm={() => confirmDialog?.onConfirm()}
   onCancel={() => setConfirmDialog(null)}
 />
+
+<ExternalLinkDialog link={pendingLink} onClose={() => setPendingLink(null)} />
 
 <SafetyDialog
   visible={safetyVisible}
@@ -2109,7 +2089,7 @@ modalContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 80,
+    paddingVertical: 32,
   },
   emptyText: { color: c.textPrimary, fontSize: 17, fontWeight: "700", marginTop: 16 },
   emptySubText: { color: c.textMuted, fontSize: 14, marginTop: 6 },
@@ -2128,7 +2108,7 @@ modalContainer: {
     backgroundColor: c.surface,
     marginHorizontal: 16,
     marginTop: 12,
-    padding: 14,
+    padding: 16,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: c.border,
@@ -2167,6 +2147,10 @@ modalContainer: {
 
   commentContentContainer: { marginTop: 4, marginBottom: 8 },
   commentText: { color: c.textPrimary, fontSize: 15, lineHeight: 21 },
+  inlineMention: {
+    color: c.isDark ? "#93C5FD" : "#2563EB",
+    fontWeight: "600",
+  },
   seeMoreButton: { alignSelf: "flex-start", marginTop: 4 },
   seeMoreText: { color: c.accent, fontSize: 14, fontWeight: "600" },
 
@@ -2213,7 +2197,8 @@ modalContainer: {
     borderColor: c.border,
   },
   commentLinkTitle: { color: c.textPrimary, fontSize: 14, fontWeight: "600", marginBottom: 2 },
-  commentLinkUrl: { color: c.textMuted, fontSize: 12 },
+  commentLinkCopy: { flex: 1, minWidth: 0, marginLeft: 8 },
+  commentLinkUrl: { color: c.textMuted, fontSize: 12, lineHeight: 16 },
 
   taggedBox: {
     backgroundColor: c.surface,
@@ -2230,6 +2215,15 @@ modalContainer: {
   taggedSeparator: { color: c.textMuted, fontSize: 13 },
   moreCount: { color: c.textMuted, fontWeight: "600", fontSize: 13.5 },
   showLessText: { color: c.textMuted, fontSize: 13, fontStyle: "italic" },
+  taggedExpandedList: {
+    marginTop: 8,
+    marginLeft: 20,
+    paddingTop: 7,
+    gap: 7,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: c.border,
+  },
+  taggedExpandedPerson: { flexDirection: "row", alignItems: "center", gap: 6 },
 
   actionRow: {
     flexDirection: "row",

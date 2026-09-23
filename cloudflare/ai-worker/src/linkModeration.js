@@ -28,6 +28,8 @@ const ADULT_HOSTS = new Set([
   "porntrex.com", "eporner.com", "tnaflix.com", "motherless.com",
   "thisav.com", "iwara.tv", "fapello.com", "erome.com", "xhamster18.com",
   "hentaihaven.xxx", "pornhd.com", "youjizz.com", "tube8.com", "beeg.com",
+  // Filipino viral scandal / leak domains
+  "sulasok.mom",
 ]);
 
 // Hidden destinations. Never conclusive on their own — a club really might

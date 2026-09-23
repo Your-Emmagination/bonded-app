@@ -34,7 +34,6 @@ import {
     ActivityIndicator,
     Animated,
     FlatList,
-    KeyboardAvoidingView,
     Modal,
     Platform,
     Pressable,
@@ -44,10 +43,14 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
 import ConfirmDialog from "./components/ConfirmDialog";
-import { ListSkeleton } from "./components/Skeleton";
+import { CardListSkeleton, SkeletonCard } from "./components/Skeleton";
 
 const normalizeQuestion = (value: string) =>
   value.trim().toLowerCase().replace(/\s+/g, " ");
@@ -484,13 +487,46 @@ export default function ManageCampusFaqScreen() {
 
   // --- gates ---------------------------------------------------------
   if (loading) {
+    // Drawn as the screen will be — its bar, its opening card, then cards in
+    // the real card style — so nothing moves when the data arrives.
     return (
-      <SafeAreaView style={styles.safeArea}>
-        <ListSkeleton
-          count={6}
-          showAvatar={false}
-          contentStyle={styles.skeletonContent}
-          rowStyle={styles.skeletonCard}
+      <SafeAreaView style={styles.safeArea} edges={["top"]}>
+        <View style={styles.topBar}>
+          <TouchableOpacity
+            style={styles.iconBtnDark}
+            onPress={() => router.back()}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+          >
+            <Ionicons name="arrow-back" size={21} color={theme.onPrimary} />
+          </TouchableOpacity>
+          <View style={styles.topBarCopy}>
+            <Text style={styles.topBarEyebrow}>ADMIN WORKSPACE</Text>
+            <Text style={styles.topBarTitle}>Manage Campus FAQ</Text>
+          </View>
+          <View style={[styles.iconBtnGold, styles.iconBtnGoldOff]} />
+        </View>
+        <CardListSkeleton
+          count={5}
+          style={[styles.list, styles.listContent]}
+          header={
+            <SkeletonCard
+              style={styles.heroCard}
+              avatar={{ size: 48, radius: 16, style: { marginRight: 16 } }}
+              lines={[
+                { width: "55%", height: 15 },
+                { width: "90%", height: 11, gap: 9 },
+                { width: "70%", height: 11, gap: 6 },
+              ]}
+            />
+          }
+          cardStyle={styles.card}
+          lines={[
+            { width: "72%", height: 14 },
+            { width: "95%", height: 11, gap: 10 },
+            { width: "80%", height: 11, gap: 6 },
+            { width: 90, height: 10, gap: 10 },
+          ]}
         />
       </SafeAreaView>
     );
@@ -747,8 +783,8 @@ export default function ManageCampusFaqScreen() {
         transparent
         onRequestClose={closeEditor}
       >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        <KeyboardAvoidingView automaticOffset
+          behavior="padding"
           style={styles.editorOverlay}
         >
           <Pressable style={styles.editorBackdrop} onPress={closeEditor} />
@@ -943,7 +979,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   topBarTitle: {
     color: c.background,
-    fontSize: 21,
+    fontSize: 20,
     fontWeight: "900",
     marginTop: 2,
   },
@@ -981,19 +1017,19 @@ const makeStyles = (c: ThemeTokens) =>
   list: { flex: 1, backgroundColor: c.surfaceSunken },
   listContent: {
     padding: 16,
-    paddingBottom: 140,
+    paddingBottom: 32,
     flexGrow: 1,
   },
 
   heroCard: {
     flexDirection: "row",
-    gap: 14,
+    gap: 16,
     padding: 16,
     borderRadius: 20,
     backgroundColor: c.background,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   heroIcon: {
     width: 48,
@@ -1008,7 +1044,7 @@ const makeStyles = (c: ThemeTokens) =>
   heroText: {
     color: c.textMuted,
     fontSize: 12.5,
-    lineHeight: 19,
+    lineHeight: 20,
     marginTop: 5,
   },
 
@@ -1032,7 +1068,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 14,
     paddingHorizontal: 13,
     paddingVertical: Platform.OS === "ios" ? 12 : 4,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   searchInput: {
     flex: 1,
@@ -1050,7 +1086,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderColor: c.accent,
     borderRadius: 16,
     padding: 13,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   importIcon: {
     width: 40,
@@ -1109,7 +1145,7 @@ const makeStyles = (c: ThemeTokens) =>
   cardAnswer: {
     color: c.textSecondary,
     fontSize: 12.5,
-    lineHeight: 17,
+    lineHeight: 16,
     marginTop: 3,
   },
   cardMeta: {
@@ -1134,8 +1170,8 @@ const makeStyles = (c: ThemeTokens) =>
 
   emptyState: {
     alignItems: "center",
-    paddingTop: 48,
-    paddingHorizontal: 24,
+    paddingTop: 32,
+    paddingHorizontal: 20,
     gap: 8,
   },
   emptyTitle: {
@@ -1147,7 +1183,7 @@ const makeStyles = (c: ThemeTokens) =>
   emptyText: {
     color: c.textMuted,
     fontSize: 13,
-    lineHeight: 19,
+    lineHeight: 20,
     textAlign: "center",
   },
   emptyCta: {
@@ -1191,9 +1227,9 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
     paddingTop: 8,
-    paddingBottom: 26,
+    paddingBottom: 24,
   },
   editorHandle: {
     alignSelf: "center",
@@ -1207,7 +1243,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 14,
+    marginBottom: 16,
   },
   editorTitle: { color: c.textPrimary, fontSize: 18, fontWeight: "900" },
   field: { marginBottom: 14 },
@@ -1260,7 +1296,7 @@ const makeStyles = (c: ThemeTokens) =>
   editorCancel: {
     flex: 1,
     borderRadius: 13,
-    paddingVertical: 13,
+    paddingVertical: 16,
     alignItems: "center",
     backgroundColor: c.surfaceSunken,
   },
@@ -1268,7 +1304,7 @@ const makeStyles = (c: ThemeTokens) =>
   editorSave: {
     flex: 1.4,
     borderRadius: 13,
-    paddingVertical: 13,
+    paddingVertical: 16,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: c.primary,

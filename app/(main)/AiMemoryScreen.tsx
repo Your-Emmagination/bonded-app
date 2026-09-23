@@ -33,7 +33,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
 import ConfirmDialog from "./components/ConfirmDialog";
-import { ListSkeleton } from "./components/Skeleton";
+import { CardListSkeleton } from "./components/Skeleton";
 
 type DraftState = {
   id?: string | null;
@@ -272,15 +272,10 @@ export default function AiMemoryScreen() {
     });
   };
 
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <ListSkeleton showAvatar={false} count={6} />
-      </SafeAreaView>
-    );
-  }
-
-  if (!allowed) {
+  // While it loads, the real screen shows — header, counts, search, the
+  // help card — and only the list is drawn as placeholder cards in the real
+  // card style, so nothing moves when the entries arrive.
+  if (!loading && !allowed) {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.centerState}>
@@ -391,7 +386,19 @@ export default function AiMemoryScreen() {
           </Text>
         </View>
 
-        {entries.length === 0 ? (
+        {loading ? (
+          <CardListSkeleton
+            count={4}
+            cardStyle={styles.memoryCard}
+            lines={[
+              { width: 90, height: 20 },
+              { width: "70%", height: 14, gap: 12 },
+              { width: "95%", height: 11, gap: 9 },
+              { width: "82%", height: 11, gap: 6 },
+            ]}
+            chips={[64, 52]}
+          />
+        ) : entries.length === 0 ? (
           <View style={styles.emptyCard}>
             <Ionicons name="library-outline" size={42} color={theme.textMuted} />
             <Text style={styles.emptyTitle}>No memory yet</Text>
@@ -602,7 +609,7 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: 28,
+    paddingHorizontal: 20,
   },
   header: {
     flexDirection: "row",
@@ -622,11 +629,11 @@ const makeStyles = (c: ThemeTokens) =>
   },
   headerTitle: {
     color: c.surface,
-    fontSize: 21,
+    fontSize: 20,
     fontWeight: "800",
   },
   headerSubtitle: {
-    color: c.borderStrong,
+    color: c.onChromeMuted,
     marginTop: 2,
     fontSize: 12.5,
   },
@@ -663,7 +670,7 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "800",
   },
   statValueActive: {
-    color: c.surface,
+    color: c.onPrimary,
   },
   statLabel: {
     color: c.textMuted,
@@ -671,7 +678,7 @@ const makeStyles = (c: ThemeTokens) =>
     marginTop: 2,
   },
   statLabelActive: {
-    color: c.borderStrong,
+    color: c.onPrimary,
   },
   searchBox: {
     flexDirection: "row",
@@ -694,15 +701,15 @@ const makeStyles = (c: ThemeTokens) =>
   },
   scrollContent: {
     padding: 16,
-    paddingBottom: 36,
+    paddingBottom: 32,
   },
   helperCard: {
     backgroundColor: c.surfaceRaised,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    padding: 14,
-    marginBottom: 14,
+    padding: 16,
+    marginBottom: 16,
   },
   helperTitle: {
     color: c.primary,
@@ -719,7 +726,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 18,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    padding: 28,
+    padding: 24,
     alignItems: "center",
   },
   emptyTitle: {
@@ -739,7 +746,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 16,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    padding: 14,
+    padding: 16,
     marginBottom: 12,
   },
   memoryHeader: {
@@ -779,7 +786,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textSecondary,
     fontSize: 14,
     marginTop: 8,
-    lineHeight: 21,
+    lineHeight: 20,
   },
   tagsText: {
     color: c.accent,
@@ -789,8 +796,8 @@ const makeStyles = (c: ThemeTokens) =>
   },
   cardActions: {
     flexDirection: "row",
-    gap: 18,
-    marginTop: 14,
+    gap: 16,
+    marginTop: 16,
   },
   cardAction: {
     flexDirection: "row",
@@ -809,7 +816,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
     paddingVertical: 16,
     borderBottomWidth: 1,
     borderBottomColor: c.borderStrong,
@@ -821,7 +828,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   modalContent: {
     padding: 16,
-    paddingBottom: 40,
+    paddingBottom: 32,
   },
   fieldLabel: {
     color: c.primary,
@@ -836,7 +843,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 12,
     paddingVertical: 12,
     color: c.textPrimary,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   textArea: {
     minHeight: 180,
@@ -844,7 +851,7 @@ const makeStyles = (c: ThemeTokens) =>
   scopeSwitchRow: {
     flexDirection: "row",
     gap: 10,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   scopeSwitch: {
     flex: 1,
@@ -871,12 +878,12 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 22,
+    marginBottom: 20,
   },
   saveButton: {
     backgroundColor: c.primary,
     borderRadius: 14,
-    paddingVertical: 14,
+    paddingVertical: 16,
     alignItems: "center",
   },
   saveButtonText: {

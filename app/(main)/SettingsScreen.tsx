@@ -5,7 +5,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ActivityIndicator,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Switch,
@@ -13,23 +12,12 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import Reanimated, {
-  useAnimatedStyle,
-  useSharedValue,
-  withSequence,
-  withTiming,
-} from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { ListSkeleton } from "./components/Skeleton";
+import { SkeletonCard, SkeletonGroup } from "./components/Skeleton";
 import { auth } from "../../Firebase_configure";
 import { subscribeToMyTicketBadge } from "@/utils/supportTickets";
 import { useTheme } from "@/contexts/ThemeContext";
-import {
-  THEME_OPTIONS,
-  type ThemeId,
-  type ThemeOption,
-  type ThemeTokens,
-} from "@/utils/theme";
+import { THEME_OPTIONS, type ThemeTokens } from "@/utils/theme";
 import {
   fetchNotificationSoundId,
   setNotificationSoundId,
@@ -42,94 +30,6 @@ import {
   isPushNotificationsSupported,
   registerDeviceForPushNotifications,
 } from "../../utils/pushNotifications";
-
-const THEME_GROUPS: { key: ThemeOption["group"]; label: string }[] = [
-  { key: "brightness", label: "LIGHT & DARK" },
-  { key: "campus", label: "CAMPUS COLOURS" },
-];
-
-/**
- * One theme in the Appearance grid: three dots of its own colours, its name,
- * and a check once chosen. Picking one recolours the whole screen at once,
- * so the card itself gives a small settle and the check fades in — enough to
- * show which tap took, without animating the app.
- */
-const ThemeChoiceCard = React.memo(function ThemeChoiceCard({
-  option,
-  selected,
-  onSelect,
-  styles,
-  theme,
-}: {
-  option: ThemeOption;
-  selected: boolean;
-  onSelect: (id: ThemeId) => void;
-  styles: ReturnType<typeof makeStyles>;
-  theme: ThemeTokens;
-}) {
-  const settle = useSharedValue(1);
-  const check = useSharedValue(selected ? 1 : 0);
-  const firstRunRef = useRef(true);
-  useEffect(() => {
-    check.value = withTiming(selected ? 1 : 0, { duration: 180 });
-    // Not on first show: only a card that has just been picked settles.
-    if (selected && !firstRunRef.current) {
-      settle.value = withSequence(
-        withTiming(0.98, { duration: 70 }),
-        withTiming(1, { duration: 150 }),
-      );
-    }
-    firstRunRef.current = false;
-  }, [check, selected, settle]);
-
-  const cardStyle = useAnimatedStyle(() => ({ transform: [{ scale: settle.value }] }));
-  const checkStyle = useAnimatedStyle(() => ({
-    opacity: check.value,
-    transform: [{ scale: 0.6 + 0.4 * check.value }],
-  }));
-
-  return (
-    <Reanimated.View style={[styles.themeCardWrap, cardStyle]}>
-      <Pressable
-        onPress={() => onSelect(option.id)}
-        style={({ pressed }) => [
-          styles.themeCard,
-          selected && styles.themeCardSelected,
-          pressed && styles.themeCardPressed,
-        ]}
-        accessibilityRole="radio"
-        accessibilityState={{ selected }}
-        accessibilityLabel={`${option.label}. ${option.description}`}
-      >
-        <View style={styles.themeCardTop}>
-          {/* The palette's own colours: a name alone doesn't say what
-              "Dim" or "Campus Teal" looks like. */}
-          <View style={styles.themeDots}>
-            {option.swatch.map((shade, index) => (
-              <View
-                key={`${option.id}-${index}`}
-                style={[
-                  styles.themeDot,
-                  index > 0 && styles.themeDotOverlap,
-                  { backgroundColor: shade },
-                ]}
-              />
-            ))}
-          </View>
-          <Reanimated.View style={checkStyle}>
-            <Ionicons name="checkmark-circle" size={20} color={theme.primary} />
-          </Reanimated.View>
-        </View>
-        <Text style={styles.themeCardLabel} numberOfLines={1}>
-          {option.label}
-        </Text>
-        <Text style={styles.themeCardDesc} numberOfLines={2}>
-          {option.description}
-        </Text>
-      </Pressable>
-    </Reanimated.View>
-  );
-});
 
 const SettingsScreen = () => {
   const router = useRouter();
@@ -144,9 +44,10 @@ const SettingsScreen = () => {
   const {
     choice: themeChoice,
     resolved: resolvedTheme,
-    setChoice: setThemeChoice,
     colors: theme,
   } = useTheme();
+  const themeOption =
+    THEME_OPTIONS.find((option) => option.id === themeChoice) ?? THEME_OPTIONS[0];
   const styles = useMemo(() => makeStyles(theme), [theme]);
 
   useEffect(() => {
@@ -236,50 +137,49 @@ const SettingsScreen = () => {
       </View>
 
       <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
-      {/* First section on purpose: it is the setting people come looking for,
-          and every choice below is previewed live as you tap it. */}
+
+      {/* First on purpose: it is the setting people come looking for. One
+          row here; every theme is on its own screen, previewed as it's picked. */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>APPEARANCE</Text>
-        <Text style={styles.sectionHint}>
-          {themeChoice === "system"
-            ? `Following your phone — currently ${resolvedTheme === "light" ? "light" : "dark"}`
-            : "Applies to this device only"}
-        </Text>
-
-        {THEME_GROUPS.map((group) => (
-          <View key={group.key} accessibilityRole="radiogroup">
-            <Text style={styles.themeGroupLabel}>{group.label}</Text>
-            <View style={styles.themeGrid}>
-              {THEME_OPTIONS.filter((option) => option.group === group.key).map((option) => (
-                <ThemeChoiceCard
-                  key={option.id}
-                  option={option}
-                  selected={themeChoice === option.id}
-                  onSelect={setThemeChoice}
-                  styles={styles}
-                  theme={theme}
+        <View style={styles.goldCard}>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel={`Theme: ${themeOption.label}`}
+            style={styles.soundRow}
+            onPress={() => router.push("/(main)/ThemeScreen" as any)}
+          >
+            <View style={styles.iconBox}>
+              <Ionicons name="color-palette-outline" size={18} color={theme.primary} />
+            </View>
+            <View style={{ marginLeft: 12, flex: 1 }}>
+              <Text style={styles.rowLabel}>Theme</Text>
+              <Text style={styles.rowSubtext}>
+                {themeChoice === "system"
+                  ? `Use system — currently ${resolvedTheme === "light" ? "light" : "dark"}`
+                  : themeOption.label}
+              </Text>
+            </View>
+            <View style={styles.themeDots}>
+              {themeOption.swatch.map((shade, index) => (
+                <View
+                  key={`${themeOption.id}-${index}`}
+                  style={[styles.themeDot, index > 0 && styles.themeDotOverlap, { backgroundColor: shade }]}
                 />
               ))}
             </View>
-          </View>
-        ))}
+            <Ionicons name="chevron-forward" size={20} color={theme.textMuted} />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>ACCOUNT</Text>
         <View style={styles.goldCard}>
-          {/* Both rows open the same screen; Change Password just lands on
-              its tab. It used to bounce through the Profile tab, which left
-              "back" on Profile instead of here. */}
+          {/* Password is a tab inside Edit Profile, so it has no row of its own. */}
           <TouchableOpacity accessibilityRole="button" style={styles.soundRow} onPress={() => router.push("/(main)/EditProfileScreen" as any)}>
             <View style={styles.iconBox}><Ionicons name="person-circle-outline" size={18} color={theme.primary} /></View>
-            <View style={{ marginLeft: 12, flex: 1 }}><Text style={styles.rowLabel}>Edit Profile</Text><Text style={styles.rowSubtext}>Personal email and profile photo</Text></View>
-            <Ionicons name="chevron-forward" size={20} color={theme.textMuted} />
-          </TouchableOpacity>
-          <View style={styles.rowDivider} />
-          <TouchableOpacity accessibilityRole="button" style={styles.soundRow} onPress={() => router.push({ pathname: "/(main)/EditProfileScreen", params: { tab: "password" } } as any)}>
-            <View style={styles.iconBox}><Ionicons name="lock-closed-outline" size={18} color={theme.primary} /></View>
-            <View style={{ marginLeft: 12, flex: 1 }}><Text style={styles.rowLabel}>Change Password</Text><Text style={styles.rowSubtext}>Update your password whenever you need to</Text></View>
+            <View style={{ marginLeft: 12, flex: 1 }}><Text style={styles.rowLabel}>Edit Profile</Text><Text style={styles.rowSubtext}>Personal email, password and profile photo</Text></View>
             <Ionicons name="chevron-forward" size={20} color={theme.textMuted} />
           </TouchableOpacity>
         </View>
@@ -343,7 +243,24 @@ const SettingsScreen = () => {
         </Text>
 
         {loading ? (
-          <ListSkeleton count={4} lines={1} contentStyle={styles.skeletonCard} />
+          // One placeholder row per sound, in the real card and row style.
+          <SkeletonGroup style={styles.goldCard}>
+            {NOTIFICATION_SOUND_OPTIONS.map((option, index) => (
+              <View key={option.id}>
+                <SkeletonCard
+                  style={styles.soundRow}
+                  avatar={{ size: 36, radius: 10 }}
+                  lines={[
+                    { width: "42%", height: 13 },
+                    { width: "66%", height: 10, gap: 6 },
+                  ]}
+                />
+                {index < NOTIFICATION_SOUND_OPTIONS.length - 1 && (
+                  <View style={styles.rowDivider} />
+                )}
+              </View>
+            ))}
+          </SkeletonGroup>
         ) : (
           <View style={styles.goldCard}>
             {NOTIFICATION_SOUND_OPTIONS.map((option, index) => {
@@ -383,7 +300,7 @@ const SettingsScreen = () => {
                     ) : isSelected ? (
                       <Ionicons
                         name="checkmark-circle"
-                        size={22}
+                        size={24}
                         color={theme.accent}
                       />
                     ) : (
@@ -420,7 +337,7 @@ const makeStyles = (c: ThemeTokens) =>
     justifyContent: "space-between",
     backgroundColor: c.chrome,
     paddingHorizontal: 12,
-    paddingVertical: 14,
+    paddingVertical: 16,
   },
   backBtn: { width: 32, alignItems: "flex-start" },
   header: { color: c.onChrome, fontSize: 18, fontWeight: "700" },
@@ -461,7 +378,7 @@ const makeStyles = (c: ThemeTokens) =>
   toggleRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 14,
+    paddingVertical: 16,
   },
   soundRow: {
     flexDirection: "row",
@@ -469,45 +386,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingVertical: 12,
   },
   rowDivider: { height: 1, backgroundColor: c.border },
-  themeGroupLabel: {
-    color: c.textMuted,
-    fontSize: 11,
-    fontWeight: "800",
-    letterSpacing: 0.6,
-    marginTop: 6,
-    marginBottom: 8,
-  },
-  themeGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    rowGap: 10,
-    marginBottom: 8,
-  },
-  themeCardWrap: { width: "48.5%" },
-  themeCard: {
-    minHeight: 96,
-    padding: 12,
-    borderRadius: 16,
-    borderWidth: 1.5,
-    borderColor: c.border,
-    backgroundColor: c.surface,
-  },
-  // Chosen: a heavier border in the identity colour and a faint tint, as well
-  // as the check, so it doesn't rest on colour alone.
-  themeCardSelected: {
-    borderWidth: 2,
-    borderColor: c.primary,
-    backgroundColor: c.accentSoft,
-  },
-  themeCardPressed: { opacity: 0.85 },
-  themeCardTop: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 10,
-  },
-  themeDots: { flexDirection: "row", alignItems: "center" },
+  themeDots: { flexDirection: "row", alignItems: "center", marginRight: 6 },
   themeDot: {
     width: 20,
     height: 20,
@@ -516,8 +395,6 @@ const makeStyles = (c: ThemeTokens) =>
     borderColor: c.surface,
   },
   themeDotOverlap: { marginLeft: -6 },
-  themeCardLabel: { color: c.textPrimary, fontSize: 13.5, fontWeight: "700" },
-  themeCardDesc: { color: c.textMuted, fontSize: 11, lineHeight: 15, marginTop: 2 },
   iconBox: {
     width: 36,
     height: 36,

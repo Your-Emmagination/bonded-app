@@ -6,7 +6,9 @@ import {
     DirectConversation,
     deleteDirectConversationForMe,
     getDirectChatParams,
+    MAX_PINNED_CHATS,
     setDirectConversationArchived,
+    setDirectConversationPinned,
     subscribeToUserConversations
 } from "@/utils/directMessages";
 import { getRoleColor, getRoleDisplayName, parseUserRole, peekUserData } from "@/utils/rbac";
@@ -19,12 +21,19 @@ import {
     getCachedConversations,
     saveCachedConversations,
 } from "@/utils/offlineStorage";
-import { getPresenceState, isConversationArchived, isConversationVisible, type PresenceData } from "@/utils/messengerState";
+import {
+    conversationPinnedMillis,
+    getPresenceState,
+    isConversationArchived,
+    isConversationPinned,
+    isConversationVisible,
+    type PresenceData,
+} from "@/utils/messengerState";
 import { useUserPresence } from "@/utils/presence";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useFocusEffect, useRouter } from "expo-router";
-import { collection, onSnapshot } from "firebase/firestore";
+import { collection, getDocs } from "firebase/firestore";
 import ReanimatedSwipeable, {
     type SwipeableMethods,
 } from "react-native-gesture-handler/ReanimatedSwipeable";
@@ -45,6 +54,9 @@ import {
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import ConfirmDialog from "./components/ConfirmDialog";
+import { SkeletonCard, SkeletonGroup } from "./components/Skeleton";
+import { isStaff } from "@/utils/rbac";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 
 type SearchableUser = PresenceData & {
   id: string;
@@ -145,6 +157,7 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
   }, [lastMessage, isOwnLastMessage]);
 
   const archived = isConversationArchived(conversation, currentUserId);
+  const pinned = !archived && isConversationPinned(conversation, currentUserId);
 
   // Swiping left uncovers one button: Archive in Chats, Unarchive in
   // Archived. It still needs a tap, so a stray swipe while scrolling never
@@ -197,7 +210,7 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
       onLongPress={() => onActions(conversation, displayName)}
       disabled={deleting}
       accessibilityRole="button"
-      accessibilityLabel={`Chat with ${displayName}`}
+      accessibilityLabel={`Chat with ${displayName}${pinned ? ", pinned" : ""}`}
       accessibilityHint="Swipe left to archive, or long-press for more options."
       accessibilityActions={[
         { name: "options", label: "Conversation options" },
@@ -245,6 +258,9 @@ const ConversationRowComponent: React.FC<ConversationRowProps> = ({
             </View>
           )}
 
+          {pinned && (
+            <Ionicons name="pin" size={12} color={theme.textMuted} style={styles.pinnedIcon} />
+          )}
           <Text style={[styles.timeText, isUnread && styles.timeTextUnread]}>{timeLabel}</Text>
         </View>
 
@@ -302,6 +318,9 @@ const ConversationRow = React.memo(ConversationRowComponent);
 
 /* ==================== MAIN MESSAGES SCREEN ==================== */
 export default function MessagesScreen() {
+  // Staff can still find someone by their ID; students can't, so nobody can
+  // look up who a given ID belongs to.
+  const canSearchById = isStaff(useCurrentUserRole());
   const theme = useThemeColors();
   const styles = useMemo(() => makeStyles(theme), [theme]);
 
@@ -338,6 +357,7 @@ export default function MessagesScreen() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const deletionInFlight = useRef(false);
+  const [pinBusy, setPinBusy] = useState(false);
 
   const actionConversation = conversations.find((conversation) => conversation.id === actionTarget?.id);
   const targetIsArchived = !!actionConversation && isConversationArchived(actionConversation, currentUserId);
@@ -354,15 +374,19 @@ export default function MessagesScreen() {
   // The Undo button calls back into it through a ref, since a callback cannot
   // list itself as a dependency.
   const toggleArchiveRef = useRef<
-    (id: string, name: string, archive: boolean, offerUndo: boolean) => Promise<string | null>
+    (id: string, name: string, archive: boolean, offerUndo: boolean, unpinFirst?: boolean) => Promise<string | null>
   >(async () => null);
   const toggleArchive = useCallback(
-    async (id: string, name: string, archive: boolean, offerUndo: boolean) => {
+    async (id: string, name: string, archive: boolean, offerUndo: boolean, unpinFirst = false) => {
       if (archiveInFlight.current) return null;
       if (isOffline) return "Reconnect to move this conversation.";
       archiveInFlight.current = true;
       setArchiveBusyId(id);
       try {
+        // An archived chat gives its pinned spot back rather than holding it.
+        if (archive && unpinFirst) {
+          await setDirectConversationPinned(id, currentUserId, false);
+        }
         await setDirectConversationArchived(id, currentUserId, archive);
         showAppToast({
           message: archive ? `Chat with ${name} archived` : `Chat with ${name} moved to Chats`,
@@ -395,20 +419,23 @@ export default function MessagesScreen() {
   // in, so a failure is reported the same way success is.
   const quickToggleArchive = useCallback(
     (conversation: DirectConversation, name: string, archive: boolean) => {
-      void toggleArchive(conversation.id, name, archive, true).then((failure) => {
+      const unpinFirst = archive && isConversationPinned(conversation, currentUserId);
+      void toggleArchive(conversation.id, name, archive, true, unpinFirst).then((failure) => {
         if (failure) showAppToast({ message: failure });
       });
     },
-    [toggleArchive],
+    [currentUserId, toggleArchive],
   );
 
   const changeArchive = useCallback(async () => {
     if (!actionTarget) return;
     setArchiveError("");
-    const failure = await toggleArchive(actionTarget.id, actionTarget.name, !targetIsArchived, true);
+    const unpinFirst = !targetIsArchived && !!actionConversation &&
+      isConversationPinned(actionConversation, currentUserId);
+    const failure = await toggleArchive(actionTarget.id, actionTarget.name, !targetIsArchived, true, unpinFirst);
     if (failure) setArchiveError(failure);
     else setActionTarget(null);
-  }, [actionTarget, targetIsArchived, toggleArchive]);
+  }, [actionConversation, actionTarget, currentUserId, targetIsArchived, toggleArchive]);
   const archiveBusy = archiveBusyId !== null;
 
   const handleDeleteConversation = useCallback((conversation: DirectConversation, name: string) => {
@@ -473,11 +500,43 @@ export default function MessagesScreen() {
     isConversationVisible(conversation, currentUserId)), [conversations, currentUserId]);
   const archivedCount = useMemo(() => visibleConversations.filter((conversation) =>
     isConversationArchived(conversation, currentUserId)).length, [visibleConversations, currentUserId]);
+  const pinnedCount = useMemo(() => visibleConversations.filter((conversation) =>
+    !isConversationArchived(conversation, currentUserId) && isConversationPinned(conversation, currentUserId)).length,
+  [visibleConversations, currentUserId]);
+
+  const targetIsPinned = !!actionConversation && !targetIsArchived &&
+    isConversationPinned(actionConversation, currentUserId);
+  const changePin = useCallback(async () => {
+    if (!actionTarget || pinBusy) return;
+    const pin = !targetIsPinned;
+    if (isOffline) {
+      setArchiveError("Reconnect to pin or unpin this chat.");
+      return;
+    }
+    if (pin && pinnedCount >= MAX_PINNED_CHATS) {
+      setArchiveError(`You can pin up to ${MAX_PINNED_CHATS} chats. Unpin one first.`);
+      return;
+    }
+    setArchiveError("");
+    setPinBusy(true);
+    try {
+      await setDirectConversationPinned(actionTarget.id, currentUserId, pin);
+      setActionTarget(null);
+      showAppToast({
+        message: pin ? `Chat with ${actionTarget.name} pinned to top` : `Chat with ${actionTarget.name} unpinned`,
+      });
+    } catch (error) {
+      console.warn("[MessagesScreen] Pin conversation failed:", error);
+      setArchiveError("Could not update this chat. Please try again.");
+    } finally {
+      setPinBusy(false);
+    }
+  }, [actionTarget, currentUserId, isOffline, pinBusy, pinnedCount, targetIsPinned]);
 
   // Main search includes archived chats; opening a result never unarchives it.
   const filteredConversations = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return visibleConversations.filter((conv) => {
+    const matches = visibleConversations.filter((conv) => {
       const archived = isConversationArchived(conv, currentUserId);
       if (folder === "archived" && !archived) return false;
       if (folder === "chats" && !q && archived) return false;
@@ -489,6 +548,14 @@ export default function MessagesScreen() {
       const lastMsg = (conv.lastMessage?.text || "").toLowerCase();
       return name.includes(q) || lastMsg.includes(q);
     });
+    if (folder !== "chats" || q) return matches;
+    // Pinned chats sit on top, the most recently pinned first; the rest keep
+    // their newest-message order below them.
+    const pinned = matches
+      .filter((conv) => isConversationPinned(conv, currentUserId))
+      .sort((a, b) => conversationPinnedMillis(b, currentUserId) - conversationPinnedMillis(a, currentUserId));
+    if (pinned.length === 0) return matches;
+    return [...pinned, ...matches.filter((conv) => !isConversationPinned(conv, currentUserId))];
   }, [visibleConversations, searchQuery, currentUserId, folder]);
 
   // Open conversation handler
@@ -510,10 +577,15 @@ export default function MessagesScreen() {
     [router],
   );
 
-  // Load directory users when opening "New Chat" modal
+  // Load directory users when opening "New Chat" modal. Read once, not
+  // listened to: every open app updates its profile every 30 seconds to say
+  // it's online, and a live list re-downloaded someone for each of those
+  // while the picker was open.
   useEffect(() => {
     if (!newChatModalVisible) return;
-    return onSnapshot(collection(db, "students"), (snap) => {
+    let cancelled = false;
+    getDocs(collection(db, "students")).then((snap) => {
+      if (cancelled) return;
       const list: SearchableUser[] = [];
       snap.forEach((docSnap) => {
         const data = docSnap.data();
@@ -546,10 +618,13 @@ export default function MessagesScreen() {
       list.sort((a, b) => a.fullName.localeCompare(b.fullName));
       setDirectoryUsers(list);
       setDirectoryLoading(false);
-    }, (e) => {
+    }).catch((e) => {
       console.warn("[MessagesScreen] Failed to load directory users:", e);
-      setDirectoryLoading(false);
+      if (!cancelled) setDirectoryLoading(false);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [currentUserId, newChatModalVisible]);
 
   const handleOpenNewChatModal = useCallback(() => {
@@ -566,12 +641,12 @@ export default function MessagesScreen() {
     return directoryUsers.filter((u) => {
       return (
         u.fullName.toLowerCase().includes(q) ||
-        (u.studentID && u.studentID.toLowerCase().includes(q)) ||
+        (canSearchById && u.studentID && u.studentID.toLowerCase().includes(q)) ||
         (u.course && u.course.toLowerCase().includes(q)) ||
         (u.role && u.role.toLowerCase().includes(q))
       );
     });
-  }, [directoryUsers, peopleSearchQuery]);
+  }, [canSearchById, directoryUsers, peopleSearchQuery]);
 
   // Start chat with selected user from directory
   const handleStartChatWithUser = useCallback(
@@ -680,10 +755,21 @@ export default function MessagesScreen() {
 
       {/* Conversations List (Virtualized 60-120 FPS) */}
       {loading && !isOffline ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={theme.primary} />
-          <Text style={styles.loadingText}>Loading conversations...</Text>
-        </View>
+        // Conversation rows in the real row and photo style, so each chat
+        // appears exactly where its placeholder was.
+        <SkeletonGroup style={styles.listContent}>
+          {Array.from({ length: 8 }).map((_, index) => (
+            <SkeletonCard
+              key={index}
+              style={styles.conversationItem}
+              avatar={{ size: 52, style: { marginRight: 16 } }}
+              lines={[
+                { width: index % 2 ? "46%" : "58%", height: 15 },
+                { width: index % 3 ? "78%" : "64%", height: 12, gap: 8 },
+              ]}
+            />
+          ))}
+        </SkeletonGroup>
       ) : (
         <FlatList
           data={filteredConversations}
@@ -766,7 +852,7 @@ export default function MessagesScreen() {
             <Ionicons name="search" size={18} color={theme.textMuted} style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
-              placeholder="Search people by name, ID, or course..."
+              placeholder={canSearchById ? "Search by name, ID or course" : "Search by name or course"}
               placeholderTextColor="#af928b"
               value={peopleSearchQuery}
               onChangeText={setPeopleSearchQuery}
@@ -838,7 +924,7 @@ export default function MessagesScreen() {
                         )}
                       </View>
                       <Text style={styles.personSubtext} numberOfLines={1}>
-                        {[item.studentID, item.course].filter(Boolean).join(" • ") || "BondED Member"}
+                        {item.course || "BondED Member"}
                       </Text>
                       <Text style={styles.personSubtext}>{getPresenceState(item, nowMs).label}</Text>
                     </View>
@@ -868,6 +954,14 @@ export default function MessagesScreen() {
             <Text style={styles.actionsTitle} numberOfLines={2}>{actionTarget?.name}</Text>
             <Text style={styles.actionsDescription}>Manage this conversation for your account.</Text>
             {!!archiveError && <Text style={styles.archiveError} accessibilityLiveRegion="polite">{archiveError}</Text>}
+            {!targetIsArchived && (
+              <Pressable style={styles.conversationAction} onPress={() => void changePin()} disabled={archiveBusy || pinBusy || !actionConversation}
+                accessibilityRole="button" accessibilityLabel={targetIsPinned ? "Unpin conversation" : "Pin conversation to top"}>
+                {pinBusy ? <ActivityIndicator color={theme.primary} /> : <Ionicons name={targetIsPinned ? "pin" : "pin-outline"} size={23} color={theme.primary} />}
+                <View style={{ flex: 1 }}><Text style={styles.conversationActionText}>{targetIsPinned ? "Unpin" : "Pin to top"}</Text>
+                  <Text style={styles.actionsDescription}>{targetIsPinned ? "Let it move with your other chats" : `Keep it above your other chats · up to ${MAX_PINNED_CHATS}`}</Text></View>
+              </Pressable>
+            )}
             <Pressable style={styles.conversationAction} onPress={() => void changeArchive()} disabled={archiveBusy || !actionConversation}
               accessibilityRole="button" accessibilityLabel={targetIsArchived ? "Unarchive conversation" : "Archive conversation"}>
               {archiveBusy ? <ActivityIndicator color={theme.primary} /> : <Ionicons name={targetIsArchived ? "arrow-undo-outline" : "archive-outline"} size={23} color={theme.primary} />}
@@ -923,6 +1017,7 @@ const makeStyles = (c: ThemeTokens) =>
   swipeActionText: { color: c.onPrimary, fontSize: 12, fontWeight: "800" },
   unarchiveChip: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 14, borderWidth: 1, borderColor: c.borderStrong, backgroundColor: c.surface },
   unarchiveChipText: { color: c.primary, fontSize: 12, fontWeight: "700" },
+  pinnedIcon: { marginRight: 4, transform: [{ rotate: "35deg" }] },
   actionsOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center", padding: 24 },
   actionsCard: { width: "100%", maxWidth: 360, borderRadius: 22, padding: 20, backgroundColor: c.surface },
   actionsTitle: { color: c.textPrimary, fontSize: 19, fontWeight: "700", marginBottom: 6 },
@@ -1010,7 +1105,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   avatarWrapper: {
     position: "relative",
-    marginRight: 14,
+    marginRight: 16,
   },
   avatar: {
     width: 52,
@@ -1126,8 +1221,8 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: 36,
-    marginTop: 60,
+    paddingHorizontal: 32,
+    marginTop: 24,
   },
   emptyIconCircle: {
     width: 80,
@@ -1139,7 +1234,7 @@ const makeStyles = (c: ThemeTokens) =>
     marginBottom: 16,
   },
   emptyTitle: {
-    fontSize: 19,
+    fontSize: 18,
     fontWeight: "800",
     color: c.textPrimary,
     marginBottom: 8,
@@ -1177,7 +1272,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 16,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: c.border,
   },
@@ -1245,7 +1340,7 @@ const makeStyles = (c: ThemeTokens) =>
   modalEmpty: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 48,
+    paddingVertical: 32,
     gap: 10,
   },
   modalEmptyText: {

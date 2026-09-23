@@ -1,5 +1,7 @@
 // PollCard.tsx 
 
+import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { anonymousName } from "@/utils/anonymousHandle";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
@@ -53,6 +55,8 @@ import {
 
   canViewAnonymousIdentity,
 
+  isStaff,
+
   getRoleColor,
 
   getRoleDisplayName,
@@ -69,7 +73,6 @@ import { resolveAvatarUri } from "@/utils/avatar";
 
 import CommentModal from "./CommentModal";
 
-import { getPostFlair } from "@/utils/postFlairs";
 
 
 
@@ -122,6 +125,10 @@ type Poll = {
   userRole?: UserRole;
 
   isAnonymous?: boolean;
+  /** Pinned to the top of the feed by staff, until pinExpiresAt if set. */
+  pinnedAt?: any;
+  pinnedBy?: string | null;
+  pinExpiresAt?: any;
 
   allowMultiple: boolean;
 
@@ -176,6 +183,8 @@ interface PollCardProps {
   onDelete?: (pollId: string) => void | Promise<void>;
 
   onEdit?: (pollId: string) => void;
+  /** Staff only: pin the poll to the top of the feed, or unpin it. */
+  onTogglePin?: (pollId: string, shouldPin: boolean) => void;
 
 }
 
@@ -238,6 +247,7 @@ const PollCard = React.memo<PollCardProps>(({
   onDelete,
 
   onEdit,
+  onTogglePin,
 
 }: PollCardProps) => {
   const { styles, theme } = useStyles();
@@ -448,10 +458,6 @@ const PollCard = React.memo<PollCardProps>(({
 
   const roleDisplayName = getRoleDisplayName(authorRole || "student");
 
-  const pollFlair = getPostFlair(poll.flair);
-
-
-
   const canSeeIdentity = canViewAnonymousIdentity(
 
     parseUserRole(currentUserRole),
@@ -498,7 +504,19 @@ const PollCard = React.memo<PollCardProps>(({
 
     ) && !isOwnPoll;
 
-  const canOpenOptions = canEdit || (canDelete && !!onDelete) || canReport;
+  // Pinning works exactly as it does for posts: staff only.
+  const pinClockMs = useRelativeTimeNow(60_000);
+  const canPin = isStaff(normalizedCurrentUserRole) && !!onTogglePin;
+  const pinExpiresMs = typeof poll.pinExpiresAt?.toMillis === "function"
+    ? poll.pinExpiresAt.toMillis()
+    : typeof poll.pinExpiresAt?.seconds === "number"
+      ? poll.pinExpiresAt.seconds * 1000
+      : 0;
+  // A ticking clock rather than Date.now() here, so a pin with an end date
+  // lapses on screen without anyone reloading the feed.
+  const isPinned = !!poll.pinnedAt && (!pinExpiresMs || pinExpiresMs > pinClockMs);
+
+  const canOpenOptions = canEdit || (canDelete && !!onDelete) || canReport || canPin;
 
 
 
@@ -520,7 +538,7 @@ const PollCard = React.memo<PollCardProps>(({
 
         : poll.username || "Anonymous"
 
-    : "Anonymous";
+    : anonymousName(poll);
 
 
 
@@ -713,6 +731,11 @@ const handleAddOption = async () => {
 };
 
 
+
+  const handleTogglePin = () => {
+    setShowPollActions(false);
+    onTogglePin?.(poll.id, !isPinned);
+  };
 
   const handleEditPoll = () => {
 
@@ -998,6 +1021,13 @@ const handleAddOption = async () => {
 
               <View style={styles.headerRight}>
 
+                {isPinned && (
+                  <View style={styles.pinnedBadge}>
+                    <Ionicons name="pin" size={11} color={theme.onPrimary} />
+                    <Text style={styles.pinnedBadgeText}>Pinned</Text>
+                  </View>
+                )}
+
                 {canOpenOptions && (
 
                   <TouchableOpacity
@@ -1029,16 +1059,6 @@ const handleAddOption = async () => {
             </View>
 
             <Text style={styles.timestamp}>{getTimeAgo(poll.createdAt)}</Text>
-
-          </View>
-
-
-
-          <View style={styles.flairBadge}>
-
-            <Text style={styles.flairBadgeEmoji}>{pollFlair.emoji}</Text>
-
-            <Text style={styles.flairBadgeText}>{pollFlair.label}</Text>
 
           </View>
 
@@ -1576,6 +1596,12 @@ const handleAddOption = async () => {
 
         actions={[
 
+          ...(canPin
+
+            ? [{ label: isPinned ? "Unpin Poll" : "Pin Poll", icon: "pin-outline" as const, onPress: handleTogglePin }]
+
+            : []),
+
           ...(canEdit
 
             ? [{ label: "Edit Poll", icon: "create-outline" as const, onPress: handleEditPoll }]
@@ -1832,7 +1858,7 @@ const makeStyles = (c: ThemeTokens) =>
 
     backgroundColor: c.surface,
 
-    paddingVertical: 14,
+    paddingVertical: 16,
 
     paddingHorizontal: FEED_HORIZONTAL_PADDING,
 
@@ -1902,7 +1928,7 @@ const makeStyles = (c: ThemeTokens) =>
 
   avatarText: {
 
-    fontSize: 17,
+    fontSize: 16,
 
     fontWeight: "700",
 
@@ -1994,6 +2020,20 @@ const makeStyles = (c: ThemeTokens) =>
 
   },
 
+  pinnedBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: c.primary,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  pinnedBadgeText: {
+    color: c.onPrimary,
+    fontSize: 10.5,
+    fontWeight: "700",
+  },
   moreButton: {
 
     paddingHorizontal: 2,
@@ -2015,50 +2055,6 @@ const makeStyles = (c: ThemeTokens) =>
     marginBottom: 4,
 
     letterSpacing: -0.1,
-
-  },
-
-  flairBadge: {
-
-    alignSelf: "flex-start",
-
-    flexDirection: "row",
-
-    alignItems: "center",
-
-    gap: 5,
-
-    marginTop: 5,
-
-    marginBottom: 5,
-
-    paddingHorizontal: 9,
-
-    paddingVertical: 5,
-
-    borderRadius: 12,
-
-    backgroundColor: c.surfaceSunken,
-
-    borderWidth: 1,
-
-    borderColor: c.border,
-
-  },
-
-  flairBadgeEmoji: {
-
-    fontSize: 12,
-
-  },
-
-  flairBadgeText: {
-
-    color: c.textSecondary,
-
-    fontSize: 11.5,
-
-    fontWeight: "800",
 
   },
 
@@ -2496,7 +2492,7 @@ const makeStyles = (c: ThemeTokens) =>
 
     flexWrap: "wrap",
 
-    gap: 14,
+    gap: 16,
 
   },
 
@@ -2534,7 +2530,7 @@ const makeStyles = (c: ThemeTokens) =>
 
     flexDirection: "row",
 
-    gap: 28,
+    gap: 24,
 
     marginTop: 12,
 
@@ -2818,7 +2814,7 @@ reportModalHeader: {
 
   minHeight: 68,
 
-  paddingHorizontal: 18,
+  paddingHorizontal: 20,
 
   paddingVertical: 12,
 
@@ -2834,7 +2830,7 @@ reportModalTitle: {
 
   color: c.textPrimary,
 
-  fontSize: 17,
+  fontSize: 16,
 
   fontWeight: "700",
 
@@ -2856,9 +2852,9 @@ reportReasonButton: {
 
   alignItems: "center",
 
-  paddingHorizontal: 18,
+  paddingHorizontal: 20,
 
-  paddingVertical: 13,
+  paddingVertical: 16,
 
   borderTopWidth: 1,
 

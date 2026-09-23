@@ -575,7 +575,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-around",
     alignItems: "center",
     width: "100%",
-    paddingHorizontal: 40,
+    paddingHorizontal: 32,
   },
   actionBtn: {
     flexDirection: "row",

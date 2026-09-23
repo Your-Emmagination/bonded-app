@@ -1,5 +1,6 @@
 // components/PostCard.tsx
 
+import { anonymousName } from "@/utils/anonymousHandle";
 import { auth, db } from "@/Firebase_configure";
 import { resolveAvatarUri } from "@/utils/avatar";
 import {
@@ -30,6 +31,7 @@ import {
     UserRole,
 } from "@/utils/rbac";
 import { showAppToast } from "@/utils/toastEvents";
+import { canNavigateToTaggedUser, manualTaggedUsers, splitTaggedMentions } from "@/utils/taggedUsers";
 import {
     normalizeCaptions,
     type CaptionSegment,
@@ -104,6 +106,8 @@ type Post = {
   realUserId?: string;
   isAnonymous?: boolean;
   taggedUsers?: TaggedUser[];
+  /** IDs represented inline with @; other taggedUsers are deliberate tags. */
+  mentionedUserIds?: string[];
   createdAt?: any;
   likeCount?: number;
   commentCount?: number;
@@ -487,6 +491,11 @@ const PostCard = React.memo<PostCardProps>(({
   };
 
   const taggedUsers = post.taggedUsers ?? [];
+  const visibleTaggedUsers = manualTaggedUsers(
+    post.content || "",
+    taggedUsers,
+    post.mentionedUserIds || [],
+  );
   const postFlair = getPostFlair(post.flair);
 
   // ── Lost & Found status ──────────────────────────────────────────────────
@@ -641,19 +650,40 @@ const PostCard = React.memo<PostCardProps>(({
               <ExpandableText
                 text={post.content}
                 textStyle={styles.postContent}
+                renderText={(text) =>
+                  splitTaggedMentions(text, taggedUsers, post.mentionedUserIds || []).map(
+                    (part, index) =>
+                      part.taggedUser ? (
+                        <Text
+                          key={`${part.taggedUser.id}-${index}`}
+                          style={styles.inlineMention}
+                          onPress={
+                            canNavigateToTaggedUser(part.taggedUser.id)
+                              ? () => onTagClick(part.taggedUser!.id)
+                              : undefined
+                          }
+                          accessibilityRole={canNavigateToTaggedUser(part.taggedUser.id) ? "link" : undefined}
+                        >
+                          {part.text}
+                        </Text>
+                      ) : (
+                        <React.Fragment key={`text-${index}`}>{part.text}</React.Fragment>
+                      ),
+                  )
+                }
                 collapsedLines={compact ? 3 : 5}
                 // In the trending scroller the card can't grow, so never offer
                 // an inline "show more" — the tap target is the card itself.
-                minLengthToToggle={compact ? Number.MAX_SAFE_INTEGER : 180}
+                showToggle={!compact}
                 buttonStyle={styles.toggleContainer}
                 buttonTextStyle={styles.toggleText}
               />
             </View>
           )}
 
-          {taggedUsers.length > 0 && (
+          {visibleTaggedUsers.length > 0 && (
             <TaggedUsersDisplay
-              taggedUsers={taggedUsers}
+              taggedUsers={visibleTaggedUsers}
               onTagClick={onTagClick}
             />
           )}
@@ -936,7 +966,10 @@ const TaggedUsersDisplay = ({
 
         {visibleUsers.map((tag, index) => (
           <React.Fragment key={tag.id}>
-            <TouchableOpacity onPress={() => onTagClick(tag.id)}>
+            <TouchableOpacity
+              onPress={() => onTagClick(tag.id)}
+              disabled={!canNavigateToTaggedUser(tag.id)}
+            >
               <Text style={styles.taggedName}>{tag.name}</Text>
             </TouchableOpacity>
             {(index < visibleUsers.length - 1 ||
@@ -951,7 +984,7 @@ const TaggedUsersDisplay = ({
             onPress={() => setExpanded(true)}
             activeOpacity={0.7}
           >
-            <Text style={styles.moreCount}>+{remainingCount} more</Text>
+            <Text style={styles.moreCount}>See {remainingCount} more</Text>
           </TouchableOpacity>
         )}
 
@@ -1096,10 +1129,7 @@ const PostHeader: React.FC<{
 
   const getAuthorDisplayName = () => {
     if (!isIdentityVisible) {
-      if (post.isAnonymous && isOwnPost && isStaffViewer) {
-        return "Anonymous (You)";
-      }
-      return "Anonymous";
+      return anonymousName(post, { isYou: !!post.isAnonymous && isOwnPost && isStaffViewer });
     }
 
     const firstName = authorData?.firstname?.trim() || "";
@@ -1111,7 +1141,7 @@ const PostHeader: React.FC<{
 
     const fallback = post.authorName?.trim() || post.username?.trim() || "User";
     if (post.isAnonymous && /^Anonymous\d*$/i.test(fallback)) {
-      return isOwnPost && isStaffViewer ? "Anonymous (You)" : "Anonymous";
+      return anonymousName(post, { isYou: isOwnPost && isStaffViewer });
     }
 
     return fallback;
@@ -1637,7 +1667,7 @@ const makeStyles = (c: ThemeTokens) =>
   StyleSheet.create({
   postCard: {
     backgroundColor: c.surface,
-    paddingVertical: 14,
+    paddingVertical: 16,
     paddingHorizontal: FEED_HORIZONTAL_PADDING,
     borderBottomWidth: 1,
     borderBottomColor: c.border,
@@ -1672,6 +1702,10 @@ const makeStyles = (c: ThemeTokens) =>
   liveReplayText: { color: c.danger },
   postContentContainer: { marginTop: 4, marginBottom: 8 },
   postContent: { color: c.textPrimary, fontSize: 15, lineHeight: 21 },
+  inlineMention: {
+    color: c.isDark ? "#93C5FD" : "#2563EB",
+    fontWeight: "600",
+  },
   toggleContainer: { alignSelf: "flex-start", marginTop: 4 },
   toggleText: { color: c.danger, fontSize: 14, fontWeight: "600" },
 
@@ -1716,7 +1750,7 @@ const makeStyles = (c: ThemeTokens) =>
 
   actions: {
     flexDirection: "row",
-    gap: 28,
+    gap: 24,
     marginTop: 12,
     marginBottom: 6,
   },
@@ -1740,8 +1774,8 @@ const makeStyles = (c: ThemeTokens) =>
   reportReasonButton: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 18,
-    paddingVertical: 13,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
     borderTopWidth: 1,
     borderTopColor: c.border,
     gap: 12,
@@ -1775,7 +1809,7 @@ const makeStyles = (c: ThemeTokens) =>
   statsRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 14,
+    gap: 16,
     marginTop: 4,
   },
   statText: { color: c.textMuted, fontSize: 13, fontWeight: "500" },
@@ -1801,8 +1835,8 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: 18,
-    paddingVertical: 14,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
     borderBottomWidth: 1,
     borderBottomColor: c.border,
   },
@@ -1831,7 +1865,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontSize: 15,
     textAlign: "center",
-    paddingVertical: 40,
+    paddingVertical: 32,
   },
   avatar: {
     width: 40,
@@ -1846,7 +1880,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   avatarImage: { width: "100%", height: "100%" },
   avatarText: {
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "700",
   },
 
@@ -1901,7 +1935,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: "rgba(35, 18, 14, 0.42)",
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
   },
   actionMenuContainer: {
     width: "100%",
@@ -1918,15 +1952,15 @@ const makeStyles = (c: ThemeTokens) =>
     elevation: 8,
   },
   actionMenuHeader: {
-    minHeight: 56,
+    minHeight: 52,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
   },
   actionMenuTitle: {
     color: c.textPrimary,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "700",
   },
   actionMenuCloseButton: {
@@ -1976,7 +2010,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    backgroundColor: c.textSecondary,
+    backgroundColor: c.primary,
     borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 5,

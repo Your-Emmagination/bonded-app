@@ -1,6 +1,6 @@
 // Dependencies are supplied by the Worker so this authentication boundary can
 // be tested without contacting production Firebase or receiving real passwords.
-export async function checkAccountPassword(env, request, body, { lookupUser, readProfile, patchProfile, fetchImpl = fetch }) {
+export async function checkAccountPassword(env, request, body, { lookupUser, readProfile, patchProfile, isTemporaryPassword = async () => false, fetchImpl = fetch }) {
   const token = (request.headers.get("Authorization") || "").replace(/^Bearer /, "");
   if (!token) return { status: 401, body: { error: "Sign in to continue." } };
   const account = await lookupUser(env, token);
@@ -22,7 +22,10 @@ export async function checkAccountPassword(env, request, body, { lookupUser, rea
     return { status: response.status === 429 ? 429 : 400, body: { error: "Could not verify your password. Check it and try again, or try again later if you have made too many attempts." } };
   }
   // Both existing account creators use the exact, case-sensitive last name.
-  const mustChangePassword = !!profile.lastname && password === `${String(profile.lastname).trim()}12345`;
+  // An admin's account-recovery reset issues a random one instead, which has
+  // to be replaced just the same.
+  const mustChangePassword = (!!profile.lastname && password === `${String(profile.lastname).trim()}12345`)
+    || await isTemporaryPassword(env, account.localId, password);
   await patchProfile(env, studentID, { mustChangePassword, passwordCheckedAt: new Date().toISOString() });
   return { status: 200, body: { mustChangePassword } };
 }

@@ -8,6 +8,10 @@ import {
     type CommunityServer,
     getChannelDefaultEmoji,
     isStaffOnlyChannel,
+    CHANNEL_TYPE_OPTIONS,
+    isStaffChannel,
+    isStaffRole,
+    resolveChannelType,
     type ServerJoinRequestRecord,
 } from "@/utils/communityServers";
 import { Ionicons } from "@expo/vector-icons";
@@ -20,7 +24,6 @@ import {
     Animated,
     Dimensions,
     FlatList,
-    KeyboardAvoidingView,
     Modal,
     Platform,
     Pressable,
@@ -32,6 +35,10 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -147,6 +154,10 @@ type ServerDrawerProps = {
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const DRAWER_WIDTH = SCREEN_WIDTH;
 const RAIL_WIDTH = 82;
+/** Join requests shown above the channels; the rest are behind "View all". */
+const JOIN_REQUEST_PREVIEW_COUNT = 2;
+const joinRequestKey = (request: ServerJoinRequestRecord) =>
+  `${request.serverId}_${request.userId}`;
 
 const PRESET_ACCENTS = [
   "#8f3a2b",
@@ -341,6 +352,78 @@ const ServerHeroTitle = React.memo(function ServerHeroTitle({
   );
 });
 
+type JoinRequestCardProps = {
+  request: ServerJoinRequestRecord;
+  onOpenUserProfile?: (userId?: string, profileDocId?: string) => void;
+  onApproveJoinRequest?: (serverId: string, userId: string) => void | Promise<void>;
+  onRejectJoinRequest?: (serverId: string, userId: string) => void | Promise<void>;
+  selectionMode?: boolean;
+  selected?: boolean;
+  onToggleSelected?: (request: ServerJoinRequestRecord) => void;
+};
+
+/** One pending request with Accept and Reject, in the drawer and in the full list. */
+const JoinRequestCard = React.memo(function JoinRequestCard({
+  request,
+  onOpenUserProfile,
+  onApproveJoinRequest,
+  onRejectJoinRequest,
+  selectionMode = false,
+  selected = false,
+  onToggleSelected,
+}: JoinRequestCardProps) {
+  const { styles, theme } = useStyles();
+  return (
+    <View style={styles.requestCard}>
+      {selectionMode && (
+        <TouchableOpacity
+          style={[styles.requestCheckbox, selected && styles.requestCheckboxSelected]}
+          onPress={() => onToggleSelected?.(request)}
+          activeOpacity={0.8}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: selected }}
+          accessibilityLabel={`Select ${request.requesterName || request.userId}`}
+        >
+          {selected && <Ionicons name="checkmark" size={15} color="#fffaf7" />}
+        </TouchableOpacity>
+      )}
+      <View style={{ flex: 1 }}>
+        <Text style={styles.requestName}>
+          {request.requesterName || request.userId}
+        </Text>
+        <Text style={styles.requestMeta}>
+          {[request.course, request.yearLevel].filter(Boolean).join(" · ") || "Course not provided"}
+        </Text>
+        <TouchableOpacity
+          onPress={() => onOpenUserProfile?.(request.userId)}
+          activeOpacity={0.78}
+          style={styles.requestProfileLink}
+        >
+          <Text style={styles.requestProfileLinkText}>Open profile</Text>
+        </TouchableOpacity>
+      </View>
+      {!selectionMode && <View style={styles.requestActionColumn}>
+        <TouchableOpacity
+          style={styles.requestApprove}
+          onPress={() => onApproveJoinRequest?.(request.serverId, request.userId)}
+          activeOpacity={0.82}
+        >
+          <Ionicons name="checkmark" size={16} color="#fffaf7" />
+          <Text style={styles.requestApproveText}>Accept</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.requestReject}
+          onPress={() => onRejectJoinRequest?.(request.serverId, request.userId)}
+          activeOpacity={0.82}
+        >
+          <Ionicons name="close" size={16} color={theme.danger} />
+          <Text style={styles.requestRejectText}>Reject</Text>
+        </TouchableOpacity>
+      </View>}
+    </View>
+  );
+});
+
 type DrawerHeaderProps = {
   selectedServer: CommunityServer;
   membershipState: string;
@@ -354,6 +437,8 @@ type DrawerHeaderProps = {
   onRejectJoinRequest?: (serverId: string, userId: string) => void;
   onLeaveServer?: (serverId: string) => void;
   onOpenThreadCreate: () => void;
+  /** Opens every pending request, when there are more than the preview shows. */
+  onViewAllJoinRequests: () => void;
 };
 
 const DrawerHeader = React.memo(function DrawerHeader({
@@ -369,6 +454,7 @@ const DrawerHeader = React.memo(function DrawerHeader({
   onRejectJoinRequest,
   onLeaveServer,
   onOpenThreadCreate,
+  onViewAllJoinRequests,
 }: DrawerHeaderProps) {
   const { styles, theme } = useStyles();
   return (
@@ -460,47 +546,29 @@ const DrawerHeader = React.memo(function DrawerHeader({
               {pendingJoinRequests.length}
             </Text>
           </View>
-          {pendingJoinRequests.map((request) => (
-            <View key={`${request.serverId}_${request.userId}`} style={styles.requestCard}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.requestName}>
-                  {request.requesterName || request.userId}
-                </Text>
-                <Text style={styles.requestMeta}>
-                  {request.course || "Course not provided"}
-                </Text>
-                <TouchableOpacity
-                  onPress={() => onOpenUserProfile?.(request.userId)}
-                  activeOpacity={0.78}
-                  style={styles.requestProfileLink}
-                >
-                  <Text style={styles.requestProfileLinkText}>Open profile</Text>
-                </TouchableOpacity>
-              </View>
-              <View style={styles.requestActionColumn}>
-                <TouchableOpacity
-                  style={styles.requestApprove}
-                  onPress={() =>
-                    onApproveJoinRequest?.(request.serverId, request.userId)
-                  }
-                  activeOpacity={0.82}
-                >
-                  <Ionicons name="checkmark" size={16} color="#fffaf7" />
-                  <Text style={styles.requestApproveText}>Accept</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.requestReject}
-                  onPress={() =>
-                    onRejectJoinRequest?.(request.serverId, request.userId)
-                  }
-                  activeOpacity={0.82}
-                >
-                  <Ionicons name="close" size={16} color={theme.danger} />
-                  <Text style={styles.requestRejectText}>Reject</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
+          {/* A few here; a long queue would push the channels out of reach. */}
+          {pendingJoinRequests.slice(0, JOIN_REQUEST_PREVIEW_COUNT).map((request) => (
+            <JoinRequestCard
+              key={joinRequestKey(request)}
+              request={request}
+              onOpenUserProfile={onOpenUserProfile}
+              onApproveJoinRequest={onApproveJoinRequest}
+              onRejectJoinRequest={onRejectJoinRequest}
+            />
           ))}
+          {pendingJoinRequests.length > JOIN_REQUEST_PREVIEW_COUNT && (
+            <TouchableOpacity
+              style={styles.viewAllRequestsButton}
+              onPress={onViewAllJoinRequests}
+              activeOpacity={0.82}
+              accessibilityRole="button"
+            >
+              <Text style={styles.viewAllRequestsText}>
+                View all requests
+              </Text>
+              <Ionicons name="chevron-forward" size={16} color={theme.primary} />
+            </TouchableOpacity>
+          )}
         </View>
       )}
 
@@ -755,6 +823,16 @@ function ServerDrawerComponent({
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   const [createVisible, setCreateVisible] = useState(false);
+  // The server whose full join-request list is showing in place of its
+  // channels. Tied to a server so switching servers goes back to channels,
+  // and cleared when the drawer closes so it reopens on the channels.
+  const [requestsServerId, setRequestsServerId] = useState<string | null>(null);
+  const [requestQuery, setRequestQuery] = useState("");
+  const [selectedRequestKeys, setSelectedRequestKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [bulkReviewing, setBulkReviewing] = useState(false);
+  if (!visible && requestsServerId !== null) setRequestsServerId(null);
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string;
     description?: string;
@@ -1072,15 +1150,7 @@ function ServerDrawerComponent({
   const openEditChannel = useCallback((channel: CommunityChannel) => {
     setEditingChannel(channel);
     setEditChannelName(channel.label);
-    const resolvedType: ChannelType =
-      channel.channelType ||
-      (channel.label.toLowerCase() === "rules"
-        ? "rules"
-        : channel.label.toLowerCase().includes("announcement")
-        ? "announcement"
-        : channel.label.toLowerCase() === "media"
-        ? "media"
-        : "text");
+    const resolvedType: ChannelType = resolveChannelType(channel);
     setEditChannelType(resolvedType);
     setEditChannelEmoji(channel.emoji || getChannelDefaultEmoji(resolvedType));
     setEditChannelHint(channel.hint || "");
@@ -1202,6 +1272,106 @@ function ServerDrawerComponent({
     setMembersVisible(true);
   }, []);
 
+  const showingJoinRequests =
+    !!selectedServer?.canManage && requestsServerId === membersServerId;
+  const openJoinRequests = useCallback(() => {
+    setRequestQuery("");
+    setSelectedRequestKeys(new Set());
+    setRequestsServerId(membersServerId);
+  }, [membersServerId]);
+  const closeJoinRequests = useCallback(() => {
+    setRequestQuery("");
+    setSelectedRequestKeys(new Set());
+    setRequestsServerId(null);
+  }, []);
+  const filteredJoinRequests = useMemo(() => {
+    const query = requestQuery.trim().toLowerCase();
+    if (!query) return pendingJoinRequests;
+    return pendingJoinRequests.filter((request) =>
+      [request.requesterName, request.course, request.userId]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query)),
+    );
+  }, [pendingJoinRequests, requestQuery]);
+  const toggleJoinRequestSelection = useCallback((request: ServerJoinRequestRecord) => {
+    const key = joinRequestKey(request);
+    setSelectedRequestKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const selectedJoinRequests = useMemo(
+    () => pendingJoinRequests.filter((request) => selectedRequestKeys.has(joinRequestKey(request))),
+    [pendingJoinRequests, selectedRequestKeys],
+  );
+  const allFilteredRequestsSelected =
+    filteredJoinRequests.length > 0 &&
+    filteredJoinRequests.every((request) => selectedRequestKeys.has(joinRequestKey(request)));
+  const toggleAllFilteredRequests = useCallback(() => {
+    setSelectedRequestKeys((current) => {
+      const next = new Set(current);
+      if (allFilteredRequestsSelected) {
+        filteredJoinRequests.forEach((request) => next.delete(joinRequestKey(request)));
+      } else {
+        filteredJoinRequests.forEach((request) => next.add(joinRequestKey(request)));
+      }
+      return next;
+    });
+  }, [allFilteredRequestsSelected, filteredJoinRequests]);
+
+  const reviewSelectedRequests = useCallback(
+    (decision: "accept" | "reject") => {
+      if (selectedJoinRequests.length === 0 || bulkReviewing) return;
+      const isReject = decision === "reject";
+      setConfirmDialog({
+        title: `${isReject ? "Reject" : "Accept"} ${selectedJoinRequests.length} request${selectedJoinRequests.length === 1 ? "" : "s"}?`,
+        description: isReject
+          ? "The selected people will not be added to this server."
+          : "The selected people will be added to this server.",
+        confirmText: isReject ? "Reject selected" : "Accept selected",
+        cancelText: "Cancel",
+        destructive: isReject,
+        onConfirm: () => {
+          setConfirmDialog(null);
+          setBulkReviewing(true);
+          const handler = isReject ? onRejectJoinRequest : onApproveJoinRequest;
+          void Promise.allSettled(
+            selectedJoinRequests.map((request) =>
+              Promise.resolve(handler?.(request.serverId, request.userId)),
+            ),
+          ).finally(() => {
+            setBulkReviewing(false);
+            setSelectedRequestKeys(new Set());
+          });
+        },
+      });
+    },
+    [bulkReviewing, onApproveJoinRequest, onRejectJoinRequest, selectedJoinRequests],
+  );
+  const renderJoinRequestItem = useCallback(
+    ({ item }: { item: ServerJoinRequestRecord }) => (
+      <JoinRequestCard
+        request={item}
+        onOpenUserProfile={onOpenUserProfile}
+        onApproveJoinRequest={onApproveJoinRequest}
+        onRejectJoinRequest={onRejectJoinRequest}
+        selectionMode
+        selected={selectedRequestKeys.has(joinRequestKey(item))}
+        onToggleSelected={toggleJoinRequestSelection}
+      />
+    ),
+    [
+      onApproveJoinRequest,
+      onOpenUserProfile,
+      onRejectJoinRequest,
+      selectedRequestKeys,
+      toggleJoinRequestSelection,
+    ],
+  );
+
   const closeMembers = useCallback(() => {
     setMembersVisible(false);
     setMembersMode("list");
@@ -1317,12 +1487,14 @@ function ServerDrawerComponent({
         onRejectJoinRequest={onRejectJoinRequest}
         onLeaveServer={onLeaveServer}
         onOpenThreadCreate={() => setThreadVisible(true)}
+        onViewAllJoinRequests={openJoinRequests}
       />
     );
   }, [
     canEnterThreads,
     canLeaveServer,
     membershipState,
+    openJoinRequests,
     onApproveJoinRequest,
     onLeaveServer,
     onOpenUserProfile,
@@ -1335,7 +1507,12 @@ function ServerDrawerComponent({
 
   return (
     <>
-      <Modal visible={visible} transparent animationType="none" onRequestClose={onClose}>
+      <Modal
+        visible={visible}
+        transparent
+        animationType="none"
+        onRequestClose={showingJoinRequests ? closeJoinRequests : onClose}
+      >
         <GestureHandlerRootView style={styles.overlay}>
           <Animated.View style={[styles.backdrop, { opacity: fadeAnim }]}>
             <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
@@ -1384,7 +1561,119 @@ function ServerDrawerComponent({
             </View>
 
             <View style={styles.panel}>
-              {selectedServer ? (
+              {selectedServer && showingJoinRequests ? (
+                <>
+                  <View style={[styles.panelTopBar, { paddingTop: insets.top + 10 }]}>
+                    <TouchableOpacity
+                      style={styles.topBarButton}
+                      onPress={closeJoinRequests}
+                      activeOpacity={0.82}
+                      accessibilityRole="button"
+                      accessibilityLabel="Back to channels"
+                    >
+                      <Ionicons name="arrow-back" size={18} color={theme.primary} />
+                      <Text style={styles.topBarButtonText}>Back</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.requestsTopBarTitle} numberOfLines={1}>
+                      Join Requests · {pendingJoinRequests.length}
+                    </Text>
+                  </View>
+
+                  <FlatList
+                    style={styles.panelScroll}
+                    contentContainerStyle={[
+                      styles.requestsListContent,
+                      { paddingBottom: insets.bottom + 28 },
+                    ]}
+                    showsVerticalScrollIndicator={false}
+                    data={filteredJoinRequests}
+                    keyExtractor={joinRequestKey}
+                    renderItem={renderJoinRequestItem}
+                    initialNumToRender={10}
+                    ListHeaderComponent={
+                      <View>
+                        <Text style={styles.requestsListHint}>
+                          Review each profile before granting access to {selectedServer.name}.
+                        </Text>
+                        <View style={styles.requestSearchBox}>
+                          <Ionicons name="search-outline" size={17} color={theme.textMuted} />
+                          <TextInput
+                            value={requestQuery}
+                            onChangeText={setRequestQuery}
+                            placeholder="Search name, course or ID"
+                            placeholderTextColor={theme.textMuted}
+                            style={styles.requestSearchInput}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                          />
+                          {!!requestQuery && (
+                            <TouchableOpacity onPress={() => setRequestQuery("")} hitSlop={8}>
+                              <Ionicons name="close-circle" size={18} color={theme.textMuted} />
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                        <Text style={styles.requestResultCount}>
+                          {filteredJoinRequests.length} of {pendingJoinRequests.length} waiting
+                        </Text>
+                        <View style={styles.requestSelectionBar}>
+                          <TouchableOpacity
+                            style={styles.requestSelectAllButton}
+                            onPress={toggleAllFilteredRequests}
+                            disabled={filteredJoinRequests.length === 0 || bulkReviewing}
+                            activeOpacity={0.8}
+                          >
+                            <Ionicons
+                              name={allFilteredRequestsSelected ? "checkbox" : "square-outline"}
+                              size={18}
+                              color={theme.primary}
+                            />
+                            <Text style={styles.requestSelectAllText}>
+                              {allFilteredRequestsSelected ? "Clear visible" : "Select all visible"}
+                            </Text>
+                          </TouchableOpacity>
+                          <Text style={styles.requestSelectedCount}>
+                            {selectedJoinRequests.length} selected
+                          </Text>
+                        </View>
+                        {selectedJoinRequests.length > 0 && (
+                          <View style={styles.requestBulkActions}>
+                            <TouchableOpacity
+                              style={styles.requestBulkAccept}
+                              onPress={() => reviewSelectedRequests("accept")}
+                              disabled={bulkReviewing}
+                              activeOpacity={0.82}
+                            >
+                              {bulkReviewing ? (
+                                <ActivityIndicator size="small" color="#fffaf7" />
+                              ) : (
+                                <Ionicons name="checkmark-done" size={17} color="#fffaf7" />
+                              )}
+                              <Text style={styles.requestBulkAcceptText}>Accept</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={styles.requestBulkReject}
+                              onPress={() => reviewSelectedRequests("reject")}
+                              disabled={bulkReviewing}
+                              activeOpacity={0.82}
+                            >
+                              <Ionicons name="close" size={17} color={theme.danger} />
+                              <Text style={styles.requestBulkRejectText}>Reject</Text>
+                            </TouchableOpacity>
+                          </View>
+                        )}
+                      </View>
+                    }
+                    ListEmptyComponent={
+                      <View style={styles.requestsEmpty}>
+                        <Ionicons name="checkmark-done-outline" size={40} color={theme.textMuted} />
+                        <Text style={styles.emptyStateText}>
+                          {requestQuery ? "No requests match your search" : "No requests waiting"}
+                        </Text>
+                      </View>
+                    }
+                  />
+                </>
+              ) : selectedServer ? (
                 <>
                   <View style={[styles.panelTopBar, { paddingTop: insets.top + 10 }]}>
                     <TouchableOpacity
@@ -1436,9 +1725,9 @@ function ServerDrawerComponent({
       </Modal>
 
       <Modal visible={createVisible} transparent animationType="fade" onRequestClose={() => setCreateVisible(false)}>
-        <KeyboardAvoidingView
+        <KeyboardAvoidingView automaticOffset
           style={styles.modalOverlay}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          behavior="padding"
           keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
         >
           <ScrollView
@@ -1676,9 +1965,9 @@ function ServerDrawerComponent({
       </Modal>
 
       <Modal visible={editVisible} transparent animationType="fade" onRequestClose={() => setEditVisible(false)}>
-        <KeyboardAvoidingView
+        <KeyboardAvoidingView automaticOffset
           style={styles.modalOverlay}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          behavior="padding"
           keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
         >
           <ScrollView
@@ -1956,14 +2245,10 @@ function ServerDrawerComponent({
 
             <Text style={styles.fieldLabel}>Channel Type</Text>
             <View style={styles.channelTypeGrid}>
-              {(
-                [
-                  ["text", "Text", "chatbubbles-outline", "💬", "Discussion for all members"],
-                  ["announcement", "Announcement", "megaphone-outline", "📢", "Staff only send; students react & forward"],
-                  ["rules", "Rules", "shield-checkmark-outline", "📜", "Guidelines; staff post, students react"],
-                  ["media", "Media", "images-outline", "📸", "Photos, videos & file sharing for all"],
-                ] as const
-              ).map(([typeKey, title, iconName, defaultEmoji, hint]) => {
+              {CHANNEL_TYPE_OPTIONS.filter(
+                // Only staff can use a Staff only channel, so only staff can make one.
+                (option) => option.type !== "staff" || isStaffRole(currentUserRole),
+              ).map(({ type: typeKey, title, icon: iconName, emoji: defaultEmoji, hint }) => {
                 const isSelected = threadType === typeKey;
                 return (
                   <TouchableOpacity
@@ -2067,14 +2352,14 @@ function ServerDrawerComponent({
 
             <Text style={styles.fieldLabel}>Channel Type</Text>
             <View style={styles.channelTypeGrid}>
-              {(
-                [
-                  ["text", "Text", "chatbubbles-outline", "💬", "Discussion for all members"],
-                  ["announcement", "Announcement", "megaphone-outline", "📢", "Staff only send; students react & forward"],
-                  ["rules", "Rules", "shield-checkmark-outline", "📜", "Guidelines; staff post, students react"],
-                  ["media", "Media", "images-outline", "📸", "Photos, videos & file sharing for all"],
-                ] as const
-              ).map(([typeKey, title, iconName, defaultEmoji, hint]) => {
+              {CHANNEL_TYPE_OPTIONS.filter((option) =>
+                // A channel can't move into or out of Staff only: its messages
+                // are kept apart from everyone else's, so they would be left
+                // behind, or left where students could reach them.
+                editingChannel && isStaffChannel(editingChannel)
+                  ? option.type === "staff"
+                  : option.type !== "staff",
+              ).map(({ type: typeKey, title, icon: iconName, emoji: defaultEmoji, hint }) => {
                 const isSelected = editChannelType === typeKey;
                 return (
                   <TouchableOpacity
@@ -2175,9 +2460,9 @@ function ServerDrawerComponent({
         animationType="fade"
         onRequestClose={() => (membersMode === "add" ? setMembersMode("list") : closeMembers())}
       >
-        <KeyboardAvoidingView
+        <KeyboardAvoidingView automaticOffset
           style={styles.modalOverlay}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          behavior="padding"
         >
           <View style={styles.modalCard}>
             {membersMode === "list" ? (
@@ -2365,7 +2650,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   communityRailLabel: {
     width: 68,
-    minHeight: 54,
+    minHeight: 52,
     borderRadius: 14,
     backgroundColor: c.chromeBorder,
     borderWidth: 1,
@@ -2516,11 +2801,11 @@ const makeStyles = (c: ThemeTokens) =>
   titleSizeRow: {
     flexDirection: "row",
     gap: 8,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   titleSizeButton: {
     width: 58,
-    minHeight: 54,
+    minHeight: 52,
     borderRadius: 12,
     borderWidth: 1.5,
     borderColor: c.borderStrong,
@@ -2541,7 +2826,7 @@ const makeStyles = (c: ThemeTokens) =>
   optionRow: {
     flexDirection: "row",
     gap: 8,
-    marginBottom: 14,
+    marginBottom: 16,
     flexWrap: "wrap",
   },
   optionButton: {
@@ -2580,7 +2865,7 @@ const makeStyles = (c: ThemeTokens) =>
     gap: 10,
   },
   mediaChoiceEmoji: {
-    fontSize: 26,
+    fontSize: 24,
     width: 34,
     textAlign: "center",
   },
@@ -2661,7 +2946,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: "rgba(255,250,247,0.18)",
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 14,
+    marginBottom: 16,
     overflow: "hidden",
   },
   heroBadgeImage: {
@@ -2669,7 +2954,7 @@ const makeStyles = (c: ThemeTokens) =>
     height: "100%",
   },
   heroBadgeEmoji: {
-    fontSize: 28,
+    fontSize: 24,
   },
  heroTitle: {
   color: c.surface,
@@ -2692,14 +2977,14 @@ const makeStyles = (c: ThemeTokens) =>
   heroSubtitle: {
     color: "rgba(255,250,247,0.86)",
     fontSize: 13,
-    lineHeight: 19,
+    lineHeight: 20,
     marginTop: 6,
   },
   heroMetaRow: {
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 8,
-    marginTop: 14,
+    marginTop: 16,
   },
   metaPill: {
     flexDirection: "row",
@@ -2730,11 +3015,11 @@ const makeStyles = (c: ThemeTokens) =>
   },
   accessText: {
     color: c.textMuted,
-    lineHeight: 19,
+    lineHeight: 20,
     marginTop: 6,
   },
   joinButton: {
-    marginTop: 14,
+    marginTop: 16,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -2765,7 +3050,119 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "700",
   },
   requestSection: {
-    marginBottom: 18,
+    marginBottom: 20,
+  },
+  viewAllRequestsButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 11,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: c.borderStrong,
+    backgroundColor: c.surface,
+  },
+  viewAllRequestsText: {
+    color: c.primary,
+    fontSize: 13.5,
+    fontWeight: "800",
+  },
+  requestsTopBarTitle: {
+    flexShrink: 1,
+    color: c.primary,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  requestsListContent: {
+    paddingTop: 12,
+  },
+  requestsListHint: {
+    color: c.textMuted,
+    fontSize: 12.5,
+    marginBottom: 10,
+  },
+  requestSearchBox: {
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: c.borderStrong,
+    backgroundColor: c.surface,
+  },
+  requestSearchInput: {
+    flex: 1,
+    color: c.textPrimary,
+    fontSize: 13.5,
+    paddingVertical: 9,
+  },
+  requestResultCount: {
+    color: c.textMuted,
+    fontSize: 11.5,
+    fontWeight: "600",
+    marginTop: 8,
+    marginBottom: 10,
+  },
+  requestSelectionBar: {
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    marginBottom: 10,
+  },
+  requestSelectAllButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    paddingVertical: 7,
+  },
+  requestSelectAllText: {
+    color: c.primary,
+    fontSize: 12.5,
+    fontWeight: "800",
+  },
+  requestSelectedCount: {
+    color: c.textMuted,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  requestBulkActions: {
+    flexDirection: "row",
+    gap: 9,
+    marginBottom: 12,
+  },
+  requestBulkAccept: {
+    flex: 1,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: c.success,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+  },
+  requestBulkReject: {
+    flex: 1,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.dangerSoft,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+  },
+  requestBulkAcceptText: { color: "#fffaf7", fontSize: 12.5, fontWeight: "800" },
+  requestBulkRejectText: { color: c.danger, fontSize: 12.5, fontWeight: "800" },
+  requestsEmpty: {
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 32,
   },
   sectionHeaderRow: {
     flexDirection: "row",
@@ -2800,6 +3197,20 @@ const makeStyles = (c: ThemeTokens) =>
     borderColor: c.borderStrong,
     padding: 12,
     marginBottom: 8,
+  },
+  requestCheckbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 7,
+    borderWidth: 1.5,
+    borderColor: c.borderStrong,
+    backgroundColor: c.surface,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  requestCheckboxSelected: {
+    backgroundColor: c.primary,
+    borderColor: c.primary,
   },
   requestName: {
     color: c.textPrimary,
@@ -2858,7 +3269,7 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "700",
   },
   leaveButton: {
-    marginTop: 14,
+    marginTop: 16,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -2972,12 +3383,12 @@ const makeStyles = (c: ThemeTokens) =>
   modalKeyboardContent: {
     flexGrow: 1,
     justifyContent: "center",
-    paddingVertical: 20,
+    paddingVertical: 16,
   },
   modalCard: {
     backgroundColor: c.surface,
     borderRadius: 22,
-    padding: 20,
+    padding: 24,
     borderWidth: 1,
     borderColor: c.borderStrong,
   },
@@ -2985,7 +3396,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 18,
+    marginBottom: 20,
   },
   modalTitle: {
     color: c.textPrimary,
@@ -3010,7 +3421,7 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 14,
     paddingHorizontal: 14,
     paddingVertical: 11,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   inputMulti: {
     minHeight: 92,
@@ -3072,7 +3483,7 @@ const makeStyles = (c: ThemeTokens) =>
   memberEmptyState: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 28,
+    paddingVertical: 24,
     gap: 10,
   },
   memberEmptyText: {
@@ -3115,7 +3526,7 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     color: c.textSecondary,
     fontSize: 12.5,
-    lineHeight: 17,
+    lineHeight: 16,
   },
   memberRemoveButton: {
     width: 36,
@@ -3129,7 +3540,7 @@ const makeStyles = (c: ThemeTokens) =>
     opacity: 0.7,
   },
   addMembersSubmit: {
-    marginTop: 14,
+    marginTop: 16,
     minHeight: 48,
     borderRadius: 14,
     alignItems: "center",
@@ -3172,7 +3583,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.borderStrong,
     padding: 12,
-    marginBottom: 18,
+    marginBottom: 20,
   },
   switchTitle: {
     color: c.textPrimary,
@@ -3237,7 +3648,7 @@ const makeStyles = (c: ThemeTokens) =>
   requestDeleteHint: {
     color: c.textMuted,
     fontSize: 12,
-    lineHeight: 17,
+    lineHeight: 16,
     marginBottom: 10,
   },
   requestDeleteButton: {
@@ -3258,7 +3669,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   channelTypeGrid: {
     gap: 8,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   channelTypeCard: {
     flexDirection: "row",

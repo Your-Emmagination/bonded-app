@@ -2,6 +2,7 @@
 import { useThemeColors } from "@/contexts/ThemeContext";
 import { onSurface, type ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
+import * as Clipboard from "expo-clipboard";
 import { useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
 import {
@@ -21,7 +22,6 @@ import {
   ActivityIndicator,
   FlatList,
   Keyboard,
-  KeyboardAvoidingView,
   Modal,
   Platform,
   ScrollView,
@@ -31,12 +31,30 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import {
+  KeyboardAvoidingView,
+  KeyboardAwareScrollView,
+} from "react-native-keyboard-controller";
 import { Image } from "expo-image";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import AlumniBadge from "./components/AlumniBadge";
 import ConfirmDialog from "./components/ConfirmDialog";
-import { ListSkeleton } from "./components/Skeleton";
+import { CardListSkeleton, SkeletonBlock } from "./components/Skeleton";
 import { auth, db } from "../../Firebase_configure";
+import {
+  ACCOUNT_RECOVERY_LABELS,
+  fetchAccountRecoveryLog,
+  movePersonalEmailsToPrivate,
+  runAccountRecovery,
+  type AccountRecoveryAction,
+  type AccountRecoveryLogEntry,
+} from "@/utils/accountRecovery";
+import { formatChatTimeLabel } from "@/utils/chatTime";
+import { validPersonalEmail } from "@/utils/profileSetup";
+import { showAppToast } from "@/utils/toastEvents";
 import { avatarThumb } from "@/utils/cloudinaryImages";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import {
@@ -85,6 +103,23 @@ type ManagedUserRecord = {
    * YearPromotionScreen and runYearLevelPromotions in functions/index.js.
    */
   promotionHold?: boolean;
+  /** Where password reset codes go. Shown so an admin can check it's theirs. */
+  recoveryEmail?: string;
+  recoveryEmailVerified?: boolean;
+  /** Set by Account recovery → Lock: nobody can sign in until unlocked. */
+  accountLocked?: boolean;
+  /**
+   * The public profile, which everyone signed in can read, still carries a
+   * personal email or recovery details from before private records.
+   */
+  publicPersonalData?: boolean;
+};
+
+/** A person's private record: personal email and recovery details. */
+type PrivateProfileRecord = {
+  email?: string;
+  recoveryEmail?: string;
+  recoveryEmailVerified?: boolean;
 };
 
 // Mirrors the `programs` collection shape used by the registration program
@@ -179,6 +214,11 @@ type UserRowProps = {
   onChangeYear: (user: ManagedUserRecord, year: string) => void;
   onChangeRole: (user: ManagedUserRecord, role: UserRole) => void;
   onTogglePromotionHold: (user: ManagedUserRecord) => void;
+  /** The recovery action running on this row, if any. */
+  recoveryBusy: AccountRecoveryAction | null;
+  /** Changes after each recovery action, so the history reloads. */
+  historyKey: number;
+  onRecoveryAction: (user: ManagedUserRecord, action: AccountRecoveryAction) => void;
 };
 
 function UserRowComponent({
@@ -193,9 +233,54 @@ function UserRowComponent({
   onChangeYear,
   onChangeRole,
   onTogglePromotionHold,
+  recoveryBusy,
+  historyKey,
+  onRecoveryAction,
 }: UserRowProps) {
   const { styles, theme } = useStyles();
   const normalizedRole = parseUserRole(user.role) || "student";
+  const recoveryButtons: {
+    action: AccountRecoveryAction;
+    label: string;
+    help: string;
+    icon: keyof typeof Ionicons.glyphMap;
+    danger?: boolean;
+    unavailable?: boolean;
+  }[] = [
+    {
+      action: "reset-password",
+      icon: "key-outline",
+      label: "Reset to temporary password",
+      help: "Shown to you once. They choose their own when they sign in.",
+    },
+    {
+      action: "remove-recovery-email",
+      icon: "mail-unread-outline",
+      label: "Remove recovery email",
+      help: "Stops reset codes going to it, and signs them out everywhere.",
+      unavailable: !user.recoveryEmail,
+    },
+    {
+      action: "sign-out-all",
+      icon: "log-out-outline",
+      label: "Sign out all devices",
+      help: "Ends every session. Their password stays the same.",
+    },
+    user.accountLocked
+      ? {
+          action: "unlock",
+          icon: "lock-open-outline",
+          label: "Unlock account",
+          help: "Lets them sign in again.",
+        }
+      : {
+          action: "lock",
+          icon: "lock-closed-outline",
+          label: "Lock account",
+          help: "Blocks every sign-in until you unlock it.",
+          danger: true,
+        },
+  ];
 
   return (
     <View
@@ -265,6 +350,12 @@ function UserRowComponent({
                 </Text>
               </View>
               <AlumniBadge yearlvl={user.yearlvl} />
+              {user.accountLocked && (
+                <View style={styles.lockedBadge}>
+                  <Ionicons name="lock-closed" size={10} color={theme.danger} />
+                  <Text style={styles.lockedBadgeText}>Locked</Text>
+                </View>
+              )}
               <Text style={styles.statusText}>
                 {user.isOnline ? "Online now" : "Offline"}
               </Text>
@@ -442,12 +533,179 @@ function UserRowComponent({
               everywhere.
             </Text>
           )}
+
+          <View style={styles.divider} />
+
+          <Text style={styles.controlTitle}>Account recovery</Text>
+          <Text style={styles.controlHelp}>
+            For someone locked out of their account, or whose email someone
+            else has. Confirm who they are first — in person or from school
+            records.
+          </Text>
+          <View style={styles.recoveryStatusRow}>
+            <Ionicons
+              name={user.recoveryEmail ? "mail-outline" : "mail-unread-outline"}
+              size={15}
+              color={theme.textSecondary}
+            />
+            <Text style={styles.recoveryStatusText} numberOfLines={2}>
+              {user.recoveryEmail
+                ? `Recovery email: ${user.recoveryEmail}${
+                    user.recoveryEmailVerified ? "" : " (not verified)"
+                  }`
+                : "No recovery email"}
+            </Text>
+          </View>
+          {user.accountLocked && (
+            <View style={styles.lockedNotice}>
+              <Ionicons name="lock-closed" size={15} color={theme.danger} />
+              <Text style={styles.lockedNoticeText}>
+                Locked — nobody can sign in to this account until it&apos;s unlocked.
+              </Text>
+            </View>
+          )}
+          {isSelf ? (
+            <Text style={styles.hintText}>
+              These can&apos;t be used on your own account. Another admin can
+              do it for you.
+            </Text>
+          ) : (
+            <>
+              <View style={styles.recoveryActions}>
+                {recoveryButtons.map((item) => {
+                  const running = recoveryBusy === item.action;
+                  return (
+                    <TouchableOpacity
+                      key={item.action}
+                      style={[
+                        styles.recoveryAction,
+                        item.danger && styles.recoveryActionDanger,
+                        item.unavailable && styles.recoveryActionUnavailable,
+                      ]}
+                      onPress={() => onRecoveryAction(user, item.action)}
+                      disabled={!!recoveryBusy || item.unavailable}
+                      activeOpacity={0.84}
+                      accessibilityRole="button"
+                      accessibilityLabel={item.label}
+                      accessibilityState={{
+                        disabled: !!recoveryBusy || !!item.unavailable,
+                        busy: running,
+                      }}
+                    >
+                      <View
+                        style={[
+                          styles.recoveryIcon,
+                          item.danger && styles.recoveryIconDanger,
+                        ]}
+                      >
+                        <Ionicons
+                          name={item.icon}
+                          size={16}
+                          color={item.danger ? theme.danger : theme.primary}
+                        />
+                      </View>
+                      <View style={styles.recoveryCopy}>
+                        <Text
+                          style={[
+                            styles.recoveryLabel,
+                            item.danger && styles.recoveryLabelDanger,
+                          ]}
+                        >
+                          {item.label}
+                        </Text>
+                        <Text style={styles.recoveryHelp}>{item.help}</Text>
+                      </View>
+                      {running ? (
+                        <ActivityIndicator size="small" color={theme.textSecondary} />
+                      ) : (
+                        <Ionicons name="chevron-forward" size={15} color={theme.textMuted} />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <RecoveryHistory studentID={user.id} refreshKey={historyKey} />
+            </>
+          )}
         </View>
       )}
     </View>
   );
 }
 const UserRow = React.memo(UserRowComponent);
+
+/**
+ * The latest account recovery actions on one account: what was done, by
+ * which admin, and when. Loaded when the card opens and again after each
+ * action (refreshKey).
+ */
+function RecoveryHistory({
+  studentID,
+  refreshKey,
+}: {
+  studentID: string;
+  refreshKey: number;
+}) {
+  const { styles } = useStyles();
+  const requestKey = `${studentID}:${refreshKey}`;
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    entries: (AccountRecoveryLogEntry & { when: string })[];
+    failed: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAccountRecoveryLog(studentID)
+      .then((entries) => {
+        if (cancelled) return;
+        const nowMs = Date.now();
+        setLoaded({
+          key: requestKey,
+          entries: entries.map((entry) => ({
+            ...entry,
+            when: entry.atMs ? formatChatTimeLabel(entry.atMs, nowMs) : "",
+          })),
+          failed: false,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setLoaded({ key: requestKey, entries: [], failed: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [requestKey, studentID]);
+
+  const current = loaded?.key === requestKey ? loaded : null;
+
+  return (
+    <View style={styles.recoveryHistory}>
+      <Text style={styles.recoveryHistoryTitle}>Recovery history</Text>
+      {!current ? (
+        <SkeletonBlock width="72%" height={11} />
+      ) : current.failed ? (
+        <Text style={styles.recoveryHistoryEmpty}>
+          History isn&apos;t available right now.
+        </Text>
+      ) : current.entries.length === 0 ? (
+        <Text style={styles.recoveryHistoryEmpty}>No recovery actions yet.</Text>
+      ) : (
+        current.entries.map((entry) => (
+          <View key={entry.id} style={styles.recoveryHistoryRow}>
+            <View style={styles.recoveryHistoryDot} />
+            <Text style={styles.recoveryHistoryText}>
+              <Text style={styles.recoveryHistoryStrong}>
+                {ACCOUNT_RECOVERY_LABELS[entry.action]}
+              </Text>
+              {` by ${entry.byName}${entry.when ? ` · ${entry.when}` : ""}`}
+            </Text>
+          </View>
+        ))
+      )}
+    </View>
+  );
+}
 
 export default function ManageUsersScreen() {
   const { styles, theme } = useStyles();
@@ -458,13 +716,44 @@ export default function ManageUsersScreen() {
   // Live, so an account that loses user-management access is turned out of
   // this screen rather than keeping it open.
   const role = useCurrentUserRole();
-  const [users, setUsers] = useState<ManagedUserRecord[]>([]);
+  const [rawUsers, setRawUsers] = useState<ManagedUserRecord[]>([]);
+  // Personal emails live in private records only admins (and their owners)
+  // can read; merged over the public profiles below.
+  const [privateById, setPrivateById] = useState<Record<string, PrivateProfileRecord>>({});
+  const [movingEmails, setMovingEmails] = useState(false);
+  const users = useMemo(
+    () =>
+      rawUsers.map((user) => {
+        const secret = privateById[user.id];
+        if (!secret) return user;
+        return {
+          ...user,
+          email: secret.email || user.email,
+          recoveryEmail: secret.recoveryEmail ?? user.recoveryEmail,
+          recoveryEmailVerified: secret.recoveryEmailVerified ?? user.recoveryEmailVerified,
+        };
+      }),
+    [privateById, rawUsers],
+  );
   const [usersLoading, setUsersLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ManagedUserFilter>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [recentlyUpdatedId, setRecentlyUpdatedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Account recovery: the action running, the history reload counter, and a
+  // temporary password waiting to be read out (shown once, never stored).
+  const [recoveryBusy, setRecoveryBusy] = useState<{
+    id: string;
+    action: AccountRecoveryAction;
+  } | null>(null);
+  const [recoveryHistoryKey, setRecoveryHistoryKey] = useState(0);
+  const [issuedPassword, setIssuedPassword] = useState<{
+    name: string;
+    studentID: string;
+    password: string;
+  } | null>(null);
+  const [issuedCopied, setIssuedCopied] = useState(false);
   // Fix 2: bounded page that "Load more" grows.
   const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
   const [hasMore, setHasMore] = useState(true);
@@ -580,7 +869,7 @@ export default function ManageUsersScreen() {
 
   useEffect(() => {
     if (!canManage || !auth.currentUser) {
-      setUsers([]);
+      setRawUsers([]);
       setUsersLoading(false);
       return;
     }
@@ -593,7 +882,7 @@ export default function ManageUsersScreen() {
     return onSnapshot(
       query(collection(db, "students"), limit(pageLimit)),
       (snapshot) => {
-        setUsers(
+        setRawUsers(
           snapshot.docs.map((item) => {
             const data = item.data() as ManagedUserRecord;
             return {
@@ -609,6 +898,13 @@ export default function ManageUsersScreen() {
               isOnline: data.isOnline === true,
               profileImage: data.profileImage || null,
               promotionHold: data.promotionHold === true,
+              recoveryEmail: data.recoveryEmail || "",
+              recoveryEmailVerified: data.recoveryEmailVerified === true,
+              accountLocked: data.accountLocked === true,
+              publicPersonalData:
+                data.recoveryEmail !== undefined ||
+                data.recoveryEmailVerified !== undefined ||
+                validPersonalEmail(data.email),
             };
           }),
         );
@@ -624,6 +920,59 @@ export default function ManageUsersScreen() {
       },
     );
   }, [canManage, pageLimit]);
+
+  // Everyone's private record. Admin only; if the rules don't allow it yet,
+  // the public profiles are all there is.
+  useEffect(() => {
+    if (!canManage || !auth.currentUser) return;
+    return onSnapshot(
+      collection(db, "studentPrivate"),
+      (snapshot) => {
+        const next: Record<string, PrivateProfileRecord> = {};
+        snapshot.docs.forEach((item) => {
+          const data = item.data();
+          next[item.id] = {
+            email: typeof data.email === "string" ? data.email : undefined,
+            recoveryEmail: typeof data.recoveryEmail === "string" ? data.recoveryEmail : undefined,
+            recoveryEmailVerified:
+              typeof data.recoveryEmailVerified === "boolean" ? data.recoveryEmailVerified : undefined,
+          };
+        });
+        setPrivateById(next);
+      },
+      (error) => console.warn("[privacy] Private records unavailable:", error?.message || error),
+    );
+  }, [canManage]);
+
+  // Profiles saved before private records still show a personal email to
+  // everyone signed in. One tap moves them all.
+  const publicEmailCount = useMemo(
+    () => rawUsers.filter((user) => user.publicPersonalData).length,
+    [rawUsers],
+  );
+  const handleMoveEmails = () => {
+    showConfirm({
+      title: "Make personal emails private?",
+      description:
+        "Personal emails move from public profiles, which any signed-in user can read, to private records only the owner and admins can see. Do this after everyone has the latest app version: an older version will ask people to verify their email again.",
+      confirmText: "Make private",
+      onConfirm: () => {
+        setMovingEmails(true);
+        movePersonalEmailsToPrivate()
+          .then((moved) =>
+            showAppToast({
+              message: moved
+                ? `${moved} ${moved === 1 ? "email is" : "emails are"} now private`
+                : "Every email is already private",
+            }),
+          )
+          .catch((error) =>
+            showInfo("Couldn't move the emails", error?.message || "Please try again."),
+          )
+          .finally(() => setMovingEmails(false));
+      },
+    });
+  };
 
   // Live program catalog for the profile editor's program picker/validation.
   useEffect(() => {
@@ -929,6 +1278,112 @@ export default function ManageUsersScreen() {
     [canManage, currentStudentDocId],
   );
 
+  // Account recovery. Each one is confirmed first, then run by the Worker,
+  // which checks this is an admin and logs who did it and when.
+  const recoverAccount = useCallback(
+    (managedUser: ManagedUserRecord, action: AccountRecoveryAction) => {
+      if (!canManage) return;
+      const name = getName(managedUser);
+      const first = managedUser.firstname?.trim() || name;
+      const steps: Record<
+        AccountRecoveryAction,
+        {
+          title: string;
+          description: string;
+          confirmText: string;
+          destructive: boolean;
+          doneTitle?: string;
+          done?: string;
+        }
+      > = {
+        "reset-password": {
+          title: "Reset to a temporary password?",
+          description: `${name}'s current password stops working and they're signed out everywhere. You'll see a temporary password once — give it to them yourself, in person or by phone. They'll choose their own when they sign in.`,
+          confirmText: "Reset password",
+          destructive: true,
+        },
+        "remove-recovery-email": {
+          title: "Remove the recovery email?",
+          description: `${managedUser.recoveryEmail || "The email"} will stop receiving password reset codes for ${name}, and they're signed out everywhere so nobody signed in can add it back. They'll add and verify a new email the next time they sign in.`,
+          confirmText: "Remove email",
+          destructive: true,
+          doneTitle: "Recovery email removed",
+          done: `${first} is signed out everywhere and will add a new one the next time they sign in.`,
+        },
+        "sign-out-all": {
+          title: "Sign out of all devices?",
+          description: `${name} is signed out on every phone and browser, including any someone else is using. Their password stays the same.`,
+          confirmText: "Sign out all",
+          destructive: true,
+          doneTitle: "Signed out everywhere",
+          done: `${first} will need to sign in again on every device.`,
+        },
+        lock: {
+          title: "Lock this account?",
+          description: `Nobody can sign in to ${name}'s account until you unlock it, and anyone signed in now is signed out. Use this while you confirm who owns it.`,
+          confirmText: "Lock account",
+          destructive: true,
+          doneTitle: "Account locked",
+          done: `Unlock it once ${first}'s password and email are safe again.`,
+        },
+        unlock: {
+          title: "Unlock this account?",
+          description: `${name} can sign in again. If someone else may know their password or email, reset those first.`,
+          confirmText: "Unlock",
+          destructive: false,
+          doneTitle: "Account unlocked",
+          done: `${first} can sign in again.`,
+        },
+      };
+      const step = steps[action];
+
+      showConfirm({
+        title: step.title,
+        description: step.description,
+        confirmText: step.confirmText,
+        cancelText: "Cancel",
+        destructive: step.destructive,
+        onConfirm: async () => {
+          setRecoveryBusy({ id: managedUser.id, action });
+          try {
+            const result = await runAccountRecovery(managedUser.id, action);
+            setRecentlyUpdatedId(managedUser.id);
+            setExpandedId(managedUser.id);
+            setRecoveryHistoryKey((key) => key + 1);
+            if (result.temporaryPassword) {
+              setIssuedCopied(false);
+              setIssuedPassword({
+                name,
+                studentID: managedUser.studentID || managedUser.id,
+                password: result.temporaryPassword,
+              });
+            } else if (step.doneTitle) {
+              showInfo(step.doneTitle, step.done);
+            }
+          } catch (error) {
+            showInfo(
+              "Couldn't update the account",
+              error instanceof Error ? error.message : "Please try again.",
+            );
+          } finally {
+            setRecoveryBusy(null);
+          }
+        },
+      });
+    },
+    [canManage],
+  );
+
+  const copyIssuedPassword = useCallback(async () => {
+    if (!issuedPassword) return;
+    try {
+      await Clipboard.setStringAsync(issuedPassword.password);
+      setIssuedCopied(true);
+    } catch {
+      // It's still on screen to read out.
+    }
+  }, [issuedPassword]);
+
   // Open the name / email / program editor for a user.
   //
   // Student ID is intentionally NOT editable here. It is the Firestore
@@ -1096,6 +1551,9 @@ export default function ManageUsersScreen() {
           onChangeYear={changeYearLevel}
           onChangeRole={changeRole}
           onTogglePromotionHold={togglePromotionHold}
+          recoveryBusy={recoveryBusy?.id === item.id ? recoveryBusy.action : null}
+          historyKey={expandedId === item.id ? recoveryHistoryKey : 0}
+          onRecoveryAction={recoverAccount}
         />
       );
     },
@@ -1107,21 +1565,19 @@ export default function ManageUsersScreen() {
       expandedId,
       openEditProfile,
       openProfile,
+      recoverAccount,
+      recoveryBusy,
+      recoveryHistoryKey,
       togglePromotionHold,
       recentlyUpdatedId,
       toggleExpand,
     ],
   );
 
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.safeArea}>
-        <ListSkeleton count={6} contentStyle={styles.skeletonContent} rowStyle={styles.skeletonCard} />
-      </SafeAreaView>
-    );
-  }
-
-  if (!canManage) return null;
+  // While sign-in resolves, the screen is drawn as it will be — header,
+  // workspace cards, user rows — with placeholders only where data goes, so
+  // nothing moves when it arrives.
+  if (!loading && !canManage) return null;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -1177,11 +1633,26 @@ export default function ManageUsersScreen() {
             onRegister={() => router.push("/AdminRegisterUserScreen")}
             onOpenPromotion={() => router.push("/YearPromotionScreen")}
             canPromote={role === "admin"}
+            privacyNotice={
+              publicEmailCount > 0
+                ? { count: publicEmailCount, busy: movingEmails, onPress: handleMoveEmails }
+                : null
+            }
+            loading={loading || usersLoading}
           />
         }
         ListEmptyComponent={
-          usersLoading ? (
-            <ListSkeleton count={5} rowStyle={styles.skeletonCard} />
+          loading || usersLoading ? (
+            <CardListSkeleton
+              count={5}
+              cardStyle={styles.userCard}
+              avatar={{ size: 52, radius: 17 }}
+              lines={[
+                { width: "52%", height: 14 },
+                { width: "80%", height: 11, gap: 8 },
+              ]}
+              chips={[64, 86]}
+            />
           ) : (
             <View style={styles.emptyCard}>
               <View style={styles.emptyIcon}>
@@ -1227,8 +1698,8 @@ export default function ManageUsersScreen() {
         animationType="slide"
         onRequestClose={closeEditProfile}
       >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        <KeyboardAvoidingView automaticOffset
+          behavior="padding"
           keyboardVerticalOffset={Platform.OS === "ios" ? 10 : 0}
           style={styles.editModalOverlay}
         >
@@ -1256,6 +1727,9 @@ export default function ManageUsersScreen() {
             </View>
 
             <View style={styles.editModalHeader}>
+              <View style={styles.editModalIcon}>
+                <Ionicons name="person-outline" size={20} color={theme.accent} />
+              </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.editModalTitle}>Edit profile details</Text>
                 <Text style={styles.editModalSubtitle} numberOfLines={1}>
@@ -1273,12 +1747,25 @@ export default function ManageUsersScreen() {
               </TouchableOpacity>
             </View>
 
-            <ScrollView
+            <KeyboardAwareScrollView
+              bottomOffset={24}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="on-drag"
               showsVerticalScrollIndicator={false}
               contentContainerStyle={styles.editModalScrollContent}
             >
+              <View style={styles.editGuidanceCard}>
+                <Ionicons name="information-circle-outline" size={18} color={theme.accent} />
+                <Text style={styles.editGuidanceText}>
+                  Update the user&apos;s public profile details. Their ID and sign-in
+                  credentials stay unchanged.
+                </Text>
+              </View>
+
+              <View style={styles.editSectionHeading}>
+                <Ionicons name="person-circle-outline" size={16} color={theme.textSecondary} />
+                <Text style={styles.editSectionTitle}>Personal information</Text>
+              </View>
               <View style={styles.editFieldRow}>
                 <View style={styles.editFieldHalf}>
                   <Text style={styles.editLabel}>First name</Text>
@@ -1291,6 +1778,8 @@ export default function ManageUsersScreen() {
                     placeholder="Juan"
                     placeholderTextColor={theme.textMuted}
                     style={styles.editInput}
+                    autoCapitalize="words"
+                    textContentType="givenName"
                   />
                 </View>
                 <View style={styles.editFieldHalf}>
@@ -1304,6 +1793,8 @@ export default function ManageUsersScreen() {
                     placeholder="Dela Cruz"
                     placeholderTextColor={theme.textMuted}
                     style={styles.editInput}
+                    autoCapitalize="words"
+                    textContentType="familyName"
                   />
                 </View>
               </View>
@@ -1322,13 +1813,19 @@ export default function ManageUsersScreen() {
                 style={styles.editInput}
                 autoCapitalize="none"
                 keyboardType="email-address"
+                returnKeyType="done"
+                onSubmitEditing={Keyboard.dismiss}
               />
               <Text style={styles.editHelp}>
                 Optional contact email shown in the app. It does not change
                 the account&apos;s login credential.
               </Text>
 
-              <Text style={styles.editLabel}>Program</Text>
+              <View style={styles.editSectionHeading}>
+                <Ionicons name="school-outline" size={16} color={theme.textSecondary} />
+                <Text style={styles.editSectionTitle}>Academic information</Text>
+              </View>
+              <Text style={[styles.editLabel, styles.editFirstLabel]}>Program</Text>
               <TouchableOpacity
                 style={styles.editSearchShell}
                 onPress={() => setEditProgramPickerOpen((open) => !open)}
@@ -1477,9 +1974,62 @@ export default function ManageUsersScreen() {
                   )}
                 </TouchableOpacity>
               </View>
-            </ScrollView>
+            </KeyboardAwareScrollView>
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* A temporary password from Account recovery. Shown this once: the
+          Worker keeps only a hash, so closing it means resetting again. */}
+      <Modal
+        visible={!!issuedPassword}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIssuedPassword(null)}
+      >
+        <View style={styles.issuedOverlay}>
+          <View style={styles.issuedCard}>
+            <View style={styles.issuedIcon}>
+              <Ionicons name="key" size={24} color={theme.primary} />
+            </View>
+            <Text style={styles.issuedTitle}>Temporary password</Text>
+            <Text style={styles.issuedSubtitle} numberOfLines={1}>
+              {issuedPassword ? `${issuedPassword.name} • ${issuedPassword.studentID}` : ""}
+            </Text>
+            <View style={styles.issuedPasswordBox}>
+              <Text selectable style={styles.issuedPassword}>
+                {issuedPassword?.password ?? ""}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.issuedCopy}
+              onPress={copyIssuedPassword}
+              activeOpacity={0.84}
+              accessibilityRole="button"
+              accessibilityLabel="Copy the temporary password"
+            >
+              <Ionicons
+                name={issuedCopied ? "checkmark" : "copy-outline"}
+                size={15}
+                color={theme.accent}
+              />
+              <Text style={styles.issuedCopyText}>{issuedCopied ? "Copied" : "Copy"}</Text>
+            </TouchableOpacity>
+            <Text style={styles.issuedNote}>
+              This is the only time it&apos;s shown. Give it to them in person or
+              by phone — capital letters matter. They&apos;ll choose their own
+              password as soon as they sign in.
+            </Text>
+            <TouchableOpacity
+              style={styles.issuedDone}
+              onPress={() => setIssuedPassword(null)}
+              activeOpacity={0.86}
+              accessibilityRole="button"
+            >
+              <Text style={styles.issuedDoneText}>Done</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </Modal>
 
       <ConfirmDialog
@@ -1503,9 +2053,12 @@ function MetricCard({
   icon,
   color,
   sublabel,
+  loading = false,
 }: {
   label: string;
   value: number;
+  /** Shimmer where the number goes, so the card keeps its size. */
+  loading?: boolean;
   icon: keyof typeof Ionicons.glyphMap;
   color: string;
   /** Secondary count shown under the label, e.g. "+ 87 alumni". */
@@ -1517,7 +2070,11 @@ function MetricCard({
       <View style={[styles.metricIcon, { backgroundColor: color + "12" }]}>
         <Ionicons name={icon} size={18} color={color} />
       </View>
-      <Text style={styles.metricValue}>{value}</Text>
+      {loading ? (
+        <SkeletonBlock width={38} height={22} style={{ marginVertical: 3 }} />
+      ) : (
+        <Text style={styles.metricValue}>{value}</Text>
+      )}
       <Text style={styles.metricLabel}>{label}</Text>
       {!!sublabel && <Text style={styles.metricSublabel}>{sublabel}</Text>}
     </View>
@@ -1539,6 +2096,10 @@ type ManageUsersListHeaderProps = {
   onRegister: () => void;
   onOpenPromotion: () => void;
   canPromote: boolean;
+  /** Profiles whose personal email is still public, and the fix for it. */
+  privacyNotice?: { count: number; busy: boolean; onPress: () => void } | null;
+  /** Counts still loading: the numbers shimmer in place. */
+  loading?: boolean;
 };
 
 function ManageUsersListHeader({
@@ -1552,6 +2113,8 @@ function ManageUsersListHeader({
   onRegister,
   onOpenPromotion,
   canPromote,
+  privacyNotice,
+  loading = false,
 }: ManageUsersListHeaderProps) {
   const { styles, theme } = useStyles();
   return (
@@ -1570,17 +2133,19 @@ function ManageUsersListHeader({
       </View>
 
       <View style={styles.metricGrid}>
-        <MetricCard label="Total" value={counts.all} icon="people" color={theme.primary} />
-        <MetricCard label="Online" value={counts.online} icon="ellipse" color={theme.success} />
+        <MetricCard label="Total" value={counts.all} loading={loading} icon="people" color={theme.primary} />
+        <MetricCard label="Online" value={counts.online} loading={loading} icon="ellipse" color={theme.success} />
         <MetricCard
           label="Staff"
           value={counts.admin + counts.teacher + counts.moderator}
+          loading={loading}
           icon="shield-checkmark"
           color={theme.accent}
         />
         <MetricCard
           label="Students"
           value={counts.student}
+          loading={loading}
           icon="school"
           color="#6e4aa3"
           sublabel={counts.alumni ? `+ ${counts.alumni} alumni` : undefined}
@@ -1620,6 +2185,32 @@ function ManageUsersListHeader({
             </Text>
           </View>
           <Ionicons name="chevron-forward" size={19} color={theme.textSecondary} />
+        </TouchableOpacity>
+      )}
+
+      {privacyNotice && (
+        <TouchableOpacity
+          style={styles.registerCard}
+          onPress={privacyNotice.onPress}
+          disabled={privacyNotice.busy}
+          activeOpacity={0.84}
+          accessibilityRole="button"
+        >
+          <View style={styles.registerIcon}>
+            <Ionicons name="shield-half-outline" size={19} color={theme.accent} />
+          </View>
+          <View style={styles.registerCopy}>
+            <Text style={styles.registerTitle}>Make personal emails private</Text>
+            <Text style={styles.registerText}>
+              {privacyNotice.count} {privacyNotice.count === 1 ? "profile still shows" : "profiles still show"}{" "}
+              a personal email to anyone signed in.
+            </Text>
+          </View>
+          {privacyNotice.busy ? (
+            <ActivityIndicator color={theme.accent} />
+          ) : (
+            <Ionicons name="chevron-forward" size={19} color={theme.textSecondary} />
+          )}
         </TouchableOpacity>
       )}
 
@@ -1733,7 +2324,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   topBarTitle: {
     color: c.background,
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: "900",
     marginTop: 2,
   },
@@ -1749,13 +2340,13 @@ const makeStyles = (c: ThemeTokens) =>
   content: { padding: 16, paddingBottom: 80 },
   heroCard: {
     flexDirection: "row",
-    gap: 14,
-    padding: 18,
+    gap: 16,
+    padding: 16,
     borderRadius: 22,
     backgroundColor: c.background,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   heroIcon: {
     width: 52,
@@ -1777,7 +2368,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 10,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   metricCard: {
     width: "48%",
@@ -1786,7 +2377,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 17,
     borderWidth: 1,
     borderColor: c.border,
-    padding: 14,
+    padding: 16,
   },
   metricIcon: {
     width: 34,
@@ -1817,8 +2408,8 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 17,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    padding: 14,
-    marginBottom: 14,
+    padding: 16,
+    marginBottom: 16,
   },
   registerIcon: {
     width: 40,
@@ -1837,7 +2428,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.border,
     padding: 13,
-    marginBottom: 18,
+    marginBottom: 20,
   },
   searchShell: {
     minHeight: 46,
@@ -1897,7 +2488,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 19,
     borderWidth: 1,
     borderColor: c.border,
-    padding: 14,
+    padding: 16,
     marginBottom: 11,
   },
   skeletonContent: { flex: 1, backgroundColor: c.surfaceSunken, padding: 16 },
@@ -1973,8 +2564,8 @@ const makeStyles = (c: ThemeTokens) =>
   },
   openProfileText: { color: c.accent, fontSize: 11.5, fontWeight: "800" },
   expandedPanel: {
-    marginTop: 14,
-    paddingTop: 14,
+    marginTop: 16,
+    paddingTop: 16,
     borderTopWidth: 1,
     borderTopColor: c.border,
   },
@@ -2032,6 +2623,157 @@ const makeStyles = (c: ThemeTokens) =>
   busyRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12 },
   busyText: { color: c.textSecondary, fontSize: 11.5, fontWeight: "800" },
   hintText: { color: c.textMuted, fontSize: 10.75, lineHeight: 16, marginTop: 12 },
+
+  // Account recovery (expanded card) and the one-time password sheet.
+  lockedBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    backgroundColor: c.dangerSoft,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  lockedBadgeText: { color: c.danger, fontSize: 10.5, fontWeight: "900" },
+  recoveryStatusRow: { flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 10 },
+  recoveryStatusText: { flex: 1, color: c.textSecondary, fontSize: 11.5, fontWeight: "700" },
+  lockedNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: c.dangerSoft,
+    borderWidth: 1,
+    borderColor: c.danger,
+    borderRadius: 12,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    marginBottom: 10,
+  },
+  lockedNoticeText: { flex: 1, color: c.danger, fontSize: 11.5, lineHeight: 16, fontWeight: "800" },
+  recoveryActions: { gap: 8 },
+  recoveryAction: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 11,
+    backgroundColor: c.surfaceSunken,
+    borderWidth: 1,
+    borderColor: c.border,
+    borderRadius: 13,
+    paddingHorizontal: 11,
+    paddingVertical: 10,
+  },
+  recoveryActionDanger: { borderColor: c.danger },
+  recoveryActionUnavailable: { opacity: 0.5 },
+  recoveryIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.background,
+  },
+  recoveryIconDanger: { backgroundColor: c.dangerSoft },
+  recoveryCopy: { flex: 1 },
+  recoveryLabel: { color: c.primary, fontSize: 12.5, fontWeight: "900" },
+  recoveryLabelDanger: { color: c.danger },
+  recoveryHelp: { color: c.textMuted, fontSize: 11, lineHeight: 15, marginTop: 2 },
+  recoveryHistory: {
+    marginTop: 12,
+    paddingTop: 11,
+    borderTopWidth: 1,
+    borderTopColor: c.border,
+    gap: 6,
+  },
+  recoveryHistoryTitle: {
+    color: c.textSecondary,
+    fontSize: 10.5,
+    fontWeight: "900",
+    letterSpacing: 0.4,
+    textTransform: "uppercase",
+  },
+  recoveryHistoryRow: { flexDirection: "row", alignItems: "flex-start", gap: 7 },
+  recoveryHistoryDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: c.borderStrong,
+    marginTop: 5,
+  },
+  recoveryHistoryText: { flex: 1, color: c.textSecondary, fontSize: 11.5, lineHeight: 16 },
+  recoveryHistoryStrong: { color: c.textPrimary, fontWeight: "800" },
+  recoveryHistoryEmpty: { color: c.textMuted, fontSize: 11.5 },
+  issuedOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.58)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  issuedCard: {
+    width: "100%",
+    maxWidth: 380,
+    alignItems: "center",
+    backgroundColor: c.background,
+    borderRadius: 22,
+    padding: 24,
+  },
+  issuedIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.accentSoft,
+  },
+  issuedTitle: { color: c.primary, fontSize: 16, fontWeight: "900", marginTop: 12 },
+  issuedSubtitle: { color: c.textSecondary, fontSize: 12, fontWeight: "700", marginTop: 3 },
+  issuedPasswordBox: {
+    alignSelf: "stretch",
+    alignItems: "center",
+    marginTop: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 16,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: c.borderStrong,
+    backgroundColor: c.surfaceSunken,
+  },
+  issuedPassword: {
+    color: c.textPrimary,
+    fontSize: 24,
+    fontWeight: "800",
+    letterSpacing: 1.5,
+    fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }),
+  },
+  issuedCopy: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: c.accent,
+    backgroundColor: c.accentSoft,
+  },
+  issuedCopyText: { color: c.accent, fontSize: 12.5, fontWeight: "800" },
+  issuedNote: {
+    color: c.textMuted,
+    fontSize: 11.5,
+    lineHeight: 19,
+    textAlign: "center",
+    marginTop: 16,
+  },
+  issuedDone: {
+    alignSelf: "stretch",
+    alignItems: "center",
+    marginTop: 16,
+    paddingVertical: 16,
+    borderRadius: 13,
+    backgroundColor: c.primary,
+  },
+  issuedDoneText: { color: c.onPrimary, fontSize: 14, fontWeight: "900" },
   loadMoreButton: {
     flexDirection: "row",
     alignItems: "center",
@@ -2041,13 +2783,13 @@ const makeStyles = (c: ThemeTokens) =>
     borderWidth: 1,
     borderColor: c.borderStrong,
     borderRadius: 14,
-    paddingVertical: 13,
+    paddingVertical: 16,
     marginTop: 12,
   },
   loadMoreButtonText: { color: c.primary, fontSize: 13, fontWeight: "800" },
   emptyCard: {
     alignItems: "center",
-    padding: 28,
+    padding: 24,
     borderRadius: 19,
     backgroundColor: c.background,
     borderWidth: 1,
@@ -2153,12 +2895,52 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    marginBottom: 14,
+    marginBottom: 16,
+  },
+  editModalIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 13,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.accentSoft,
   },
   editModalTitle: { color: c.textPrimary, fontSize: 19, fontWeight: "900" },
   editModalSubtitle: { color: c.textMuted, fontSize: 12, marginTop: 3 },
-  editFieldRow: { flexDirection: "row", gap: 12 },
-  editFieldHalf: { flex: 1 },
+  editGuidanceCard: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: c.accent,
+    backgroundColor: c.accentSoft,
+  },
+  editGuidanceText: {
+    flex: 1,
+    color: c.textSecondary,
+    fontSize: 11.5,
+    lineHeight: 19,
+    fontWeight: "600",
+  },
+  editSectionHeading: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    marginTop: 20,
+    marginBottom: 2,
+  },
+  editSectionTitle: {
+    color: c.textSecondary,
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+  },
+  editFieldRow: { gap: 2 },
+  editFieldHalf: { width: "100%" },
   editLabel: {
     color: c.textSecondary,
     fontSize: 12.5,
@@ -2166,6 +2948,7 @@ const makeStyles = (c: ThemeTokens) =>
     marginBottom: 6,
     marginTop: 12,
   },
+  editFirstLabel: { marginTop: 8 },
   editLabelOptional: {
     color: c.textMuted,
     fontSize: 11.5,
@@ -2264,7 +3047,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.danger,
     fontSize: 12,
     fontWeight: "700",
-    marginTop: 14,
+    marginTop: 16,
   },
   editButtonRow: { flexDirection: "row", gap: 10, marginTop: 18 },
   editButton: {

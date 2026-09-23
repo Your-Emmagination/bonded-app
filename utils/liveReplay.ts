@@ -81,7 +81,10 @@ export type LiveReplayInput = {
 const jobs = new Map<string, ReplayJob>();
 const inputs = new Map<string, LiveReplayInput>();
 /** Videos already uploaded, so a retry after a later failure doesn't upload twice. */
-const uploaded = new Map<string, string>();
+const uploaded = new Map<string, UploadedReplay>();
+
+/** The uploaded video, and its length as Cloudinary measured it when known. */
+type UploadedReplay = { url: string; durationMs: number | null };
 const running = new Set<string>();
 const listeners = new Map<string, Set<() => void>>();
 
@@ -187,13 +190,13 @@ async function waitForFinishedFile(uri: string): Promise<number> {
  * the feed, search, moderation and captions all treat it like any other. It
  * starts pending; the Worker decides, as for every post.
  */
-async function createReplayPost(input: LiveReplayInput, videoUrl: string): Promise<string> {
+async function createReplayPost(input: LiveReplayInput, video: UploadedReplay): Promise<string> {
   const content = `Live replay: ${input.title}`;
   const ref = await addDoc(collection(db, "posts"), {
     content,
     searchTerms: buildPostSearchTerms(content, ["live", "replay"]),
     flair: DEFAULT_POST_FLAIR,
-    files: [{ url: videoUrl, mimeType: "video/mp4", name: "live-replay.mp4" }],
+    files: [{ url: video.url, mimeType: "video/mp4", name: "live-replay.mp4" }],
     captionStatus: "pending",
     userId: input.author.uid,
     realUserId: input.author.uid,
@@ -212,7 +215,8 @@ async function createReplayPost(input: LiveReplayInput, videoUrl: string): Promi
     // What PostCard shows in the "Live replay" badge.
     liveReplay: {
       streamId: input.streamId,
-      durationMs: Math.round(input.recording.durationMs),
+      // The video's real length; the recorder's own count is only a backup.
+      durationMs: Math.round(video.durationMs ?? input.recording.durationMs),
       peakViewers: input.stats.peakViewers,
       commentCount: input.stats.commentCount,
       reactionCount: input.stats.reactionCount,
@@ -240,8 +244,8 @@ async function runReplayJob(input: LiveReplayInput): Promise<void> {
   setJob(streamId, { phase: "saving", progress: 0, message: null });
 
   try {
-    let videoUrl = uploaded.get(streamId);
-    if (!videoUrl) {
+    let video = uploaded.get(streamId);
+    if (!video) {
       const size = await waitForFinishedFile(recording.fileUri);
       if (size < REPLAY_MIN_BYTES || recording.durationMs < REPLAY_MIN_DURATION_MS) {
         finish(input, {
@@ -266,18 +270,18 @@ async function runReplayJob(input: LiveReplayInput): Promise<void> {
       }
       setJob(streamId, { phase: "uploading", progress: 0 });
       let reported = 0;
-      videoUrl = await uploadVideoWithProgress(recording.fileUri, (fraction) => {
+      video = await uploadVideoWithProgress(recording.fileUri, (fraction) => {
         const next = Math.min(1, Math.max(0, fraction));
         if (next - reported >= PROGRESS_STEP || next === 1) {
           reported = next;
           setJob(streamId, { progress: next });
         }
       });
-      uploaded.set(streamId, videoUrl);
+      uploaded.set(streamId, video);
     }
 
     setJob(streamId, { phase: "posting", progress: 1 });
-    const postId = await createReplayPost(input, videoUrl);
+    const postId = await createReplayPost(input, video);
 
     let approved = false;
     try {
@@ -290,7 +294,7 @@ async function runReplayJob(input: LiveReplayInput): Promise<void> {
     if (approved) {
       // Linked from the stream only now, so an unreviewed video can never be
       // reached through the ended live.
-      await setLiveReplay(streamId, { replayUrl: videoUrl, replayPostId: postId }).catch(
+      await setLiveReplay(streamId, { replayUrl: video.url, replayPostId: postId }).catch(
         (error) => console.warn("[LiveReplay] Could not link the replay to the live:", error),
       );
       void requestVideoTranscription(postId);

@@ -7,7 +7,7 @@ import {
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
-import { pickUploadDocuments } from "@/utils/uploadAttachments";
+import { isAttachmentTooLargeError, pickUploadDocuments } from "@/utils/uploadAttachments";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { router, useLocalSearchParams } from "expo-router";
@@ -32,7 +32,6 @@ import {
     Animated,
     BackHandler,
     FlatList,
-    KeyboardAvoidingView,
     LayoutAnimation,
     Modal,
     Platform,
@@ -44,6 +43,13 @@ import {
     UIManager,
     View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import {
+    KeyboardAvoidingView,
+    KeyboardAwareScrollView,
+} from "react-native-keyboard-controller";
 import {
     SafeAreaView,
     useSafeAreaInsets,
@@ -100,7 +106,10 @@ import {
 import { getTimeAgo } from "@/utils/relativeTime";
 import { findMostSimilar } from "@/utils/textSimilarity";
 import { buildPostSearchTerms } from "@/utils/postSearchTerms";
-import { getUserDataByAuthUser, resolveUserRoleForAuthUser } from "@/utils/rbac";
+import { getUserDataByAuthUser } from "@/utils/rbac";
+import { getMyAnonymousHandle } from "@/utils/anonymousHandle";
+import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
+import { manualTaggedUsers } from "@/utils/taggedUsers";
 
 const MAX_FILES = 10;
 
@@ -565,16 +574,20 @@ const AddToPostToolbar = memo(function AddToPostToolbar({
   onPickPhotos,
   onPickDocuments,
   onPickVideos,
+  onOpenTags,
   onOpenLink,
   onOpenGif,
+  taggedCount,
 }: {
   filesCount: number;
   onTakePhoto: () => void;
   onPickPhotos: () => void;
   onPickDocuments: () => void;
   onPickVideos: () => void;
+  onOpenTags: () => void;
   onOpenLink: () => void;
   onOpenGif: () => void;
+  taggedCount: number;
 }) {
   const { styles, theme } = useStyles();
   const filesFull = filesCount >= MAX_FILES;
@@ -617,6 +630,20 @@ const AddToPostToolbar = memo(function AddToPostToolbar({
         >
           <Ionicons name="videocam" size={24} color={filesFull ? theme.textMuted : theme.primary} />
         </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={0.7}
+          style={styles.iconButton}
+          onPress={onOpenTags}
+          accessibilityRole="button"
+          accessibilityLabel="Tag people"
+        >
+          <Ionicons name="people-outline" size={23} color={theme.primary} />
+          {taggedCount > 0 && (
+            <View style={styles.tagBadge}>
+              <Text style={styles.tagBadgeText}>{taggedCount}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
         <TouchableOpacity activeOpacity={0.7} style={styles.iconButton} onPress={onOpenLink}>
           <Ionicons name="link" size={24} color="#4f9cff" />
         </TouchableOpacity>
@@ -635,13 +662,16 @@ const CreatePostScreen = () => {
   // Which side of a Lost & Found post this is. Only asked when writing a new
   // one; afterwards the status moves from the post itself.
   const [lostFoundKind, setLostFoundKind] = useState<"lost" | "found">("lost");
-  const [authorRole, setAuthorRole] = useState<string>("student");
+  // Live, so an admin demoting this account takes "Pin to Top of Feed" and
+  // the staff flairs away even from a form that is already open.
+  const liveRole = useCurrentUserRole();
+  const authorRole = String(liveRole || "student").toLowerCase();
   const [authorProfileName, setAuthorProfileName] = useState("");
   const [files, setFiles] = useState<
-    { uri: string; mimeType: string; name: string }[]
+    { uri: string; mimeType: string; name: string; size?: number }[]
   >([]);
   const [existingFiles, setExistingFiles] = useState<
-    { url: string; mimeType: string; name?: string }[]
+    { url: string; mimeType: string; name?: string; size?: number }[]
   >([]);
   const [uploading, setUploading] = useState(false);
   const [blockedDialog, setBlockedDialog] = useState<{
@@ -685,6 +715,8 @@ const CreatePostScreen = () => {
   };
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [taggedUsers, setTaggedUsers] = useState<Student[]>([]);
+  const [mentionedUsers, setMentionedUsers] = useState<Student[]>([]);
+  const [draftTaggedUsers, setDraftTaggedUsers] = useState<Student[]>([]);
   const [showTagModal, setShowTagModal] = useState(false);
   const [students, setStudents] = useState<Student[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -720,7 +752,8 @@ const CreatePostScreen = () => {
     url: string;
     title: string;
   } | null>(null);
-  const contentScrollRef = useRef<ScrollView>(null);
+  const contentScrollRef = useRef<any>(null);
+  const contentInputRef = useRef<TextInput>(null);
   // Horizontal flair picker: its ref plus enough layout bookkeeping to scroll
   // a specific chip into view (used by the suggestion banners' "Switch flair").
   const flairPickerRef = useRef<ScrollView>(null);
@@ -755,12 +788,8 @@ const CreatePostScreen = () => {
   useEffect(() => {
     let active = true;
     const loadAuthorRole = async () => {
-      const [resolvedRole, profile] = await Promise.all([
-        resolveUserRoleForAuthUser(auth.currentUser),
-        getUserDataByAuthUser(auth.currentUser),
-      ]);
+      const profile = await getUserDataByAuthUser(auth.currentUser);
       if (active) {
-        setAuthorRole(String(resolvedRole || "student").toLowerCase());
         setAuthorProfileName(
           `${profile?.firstname || ""} ${profile?.lastname || ""}`.trim(),
         );
@@ -786,17 +815,34 @@ const CreatePostScreen = () => {
           return;
         }
         setContent(data.content || "");
-        setSelectedFlair((data.flair || DEFAULT_POST_FLAIR) as PostFlairId);
+        // A retired flair (Academic, Study, Sports) opens as Discussion.
+        setSelectedFlair(normalizePostFlair(data.flair));
         setIsAnonymous(!!data.isAnonymous);
         setAttachedLink(data.link || null);
         setExistingFiles(Array.isArray(data.files) ? data.files : []);
-        setTaggedUsers(Array.isArray(data.taggedUsers) ? data.taggedUsers.map((tag: any) => ({
+        const loadedTaggedUsers: Student[] = Array.isArray(data.taggedUsers) ? data.taggedUsers.map((tag: any) => ({
           id: tag.id,
           firstname: tag.name || "User",
           lastname: "",
           email: "",
           studentID: tag.studentID || "",
-        })) : []);
+        })) : [];
+        const loadedMentionIds = Array.isArray(data.mentionedUserIds)
+          ? data.mentionedUserIds.filter((id: unknown): id is string => typeof id === "string")
+          : [];
+        const loadedManualIds = new Set(
+          manualTaggedUsers(
+            data.content || "",
+            loadedTaggedUsers.map((tag) => ({
+              id: tag.id,
+              name: tag.firstname,
+              studentID: tag.studentID,
+            })),
+            loadedMentionIds,
+          ).map((tag) => tag.id),
+        );
+        setTaggedUsers(loadedTaggedUsers.filter((tag) => loadedManualIds.has(tag.id)));
+        setMentionedUsers(loadedTaggedUsers.filter((tag) => !loadedManualIds.has(tag.id)));
         if (data.pinnedAt) {
           setShouldPin(true);
           const rawDate = data.pinExpiresAt || data.targetDate;
@@ -959,6 +1005,7 @@ const CreatePostScreen = () => {
           uri: picked.uri || "",
           mimeType: picked.mimeType ?? "image/jpeg",
           name: picked.name ?? `photo_${Date.now()}.jpg`,
+          size: picked.size,
         }));
 
         easeLayout();
@@ -1000,6 +1047,7 @@ const CreatePostScreen = () => {
           uri: picked.uri || "",
           mimeType: picked.mimeType ?? "application/octet-stream",
           name: picked.name ?? `file_${Date.now()}`,
+          size: picked.size,
         }));
 
         easeLayout();
@@ -1007,7 +1055,10 @@ const CreatePostScreen = () => {
       }
     } catch (error) {
       console.error("Error picking documents:", error);
-      showInfo("Error", "Failed to pick documents");
+      showInfo(
+        isAttachmentTooLargeError(error) ? "File too large" : "Error",
+        error instanceof Error ? error.message : "Failed to pick documents",
+      );
     }
   };
 
@@ -1097,7 +1148,7 @@ try {
               uploadedUrl = await uploadPostFile(file.uri);
             }
 
-            return { url: uploadedUrl, mimeType: file.mimeType };
+            return { url: uploadedUrl, mimeType: file.mimeType, name: file.name, size: file.size };
           }),
         ),
         selectedGif ? uploadPostGif(selectedGif) : Promise.resolve(null),
@@ -1105,7 +1156,7 @@ try {
       const uploadedUrls = [...uploadedFiles];
 
       if (uploadedGifUrl) {
-        uploadedUrls.push({ url: uploadedGifUrl, mimeType: "image/gif" });
+        uploadedUrls.push({ url: uploadedGifUrl, mimeType: "image/gif", name: "animated.gif", size: undefined });
       }
 
       // Auto-captioning: a video post starts life as caption "pending"; the
@@ -1118,18 +1169,21 @@ try {
 
       const user = auth.currentUser;
 
-      const nextTaggedUsers = hasAiAssistantMention(content)
-        ? taggedUsers.some((taggedUser) => isAiAssistantId(taggedUser.id))
-          ? taggedUsers
-          : [...taggedUsers, AI_ASSISTANT_STUDENT]
-        : taggedUsers;
-      const normalizedTaggedUsers = hasEveryoneMention(content)
-        ? nextTaggedUsers.some((taggedUser) => isEveryoneMentionId(taggedUser.id))
-          ? nextTaggedUsers
-          : [...nextTaggedUsers, EVERYONE_MENTION_STUDENT]
-        : nextTaggedUsers.filter((taggedUser) => !isEveryoneMentionId(taggedUser.id));
-
-      const uniqueTaggedUsers = normalizedTaggedUsers.filter(
+      const nextMentionedUsers = hasAiAssistantMention(content)
+        ? mentionedUsers.some((taggedUser) => isAiAssistantId(taggedUser.id))
+          ? mentionedUsers
+          : [...mentionedUsers, AI_ASSISTANT_STUDENT]
+        : mentionedUsers.filter((taggedUser) => !isAiAssistantId(taggedUser.id));
+      const normalizedMentionedUsers = hasEveryoneMention(content)
+        ? nextMentionedUsers.some((taggedUser) => isEveryoneMentionId(taggedUser.id))
+          ? nextMentionedUsers
+          : [...nextMentionedUsers, EVERYONE_MENTION_STUDENT]
+        : nextMentionedUsers.filter((taggedUser) => !isEveryoneMentionId(taggedUser.id));
+      const uniqueMentionedUsers = normalizedMentionedUsers.filter(
+        (user, index, self) =>
+          index === self.findIndex((u) => u.id === user.id),
+      );
+      const uniqueTaggedUsers = [...uniqueMentionedUsers, ...taggedUsers].filter(
         (user, index, self) =>
           index === self.findIndex((u) => u.id === user.id),
       );
@@ -1144,8 +1198,11 @@ try {
         }
       }
 
+      // An anonymous post carries the writer's permanent anonymous name, so
+      // readers can tell anonymous people apart without learning who they are.
+      const anonymousHandle = isAnonymous ? await getMyAnonymousHandle() : null;
       const displayName = isAnonymous
-        ? "Anonymous"
+        ? anonymousHandle || "Anonymous"
         : resolvedProfileName || user?.displayName?.trim() || user?.email?.split("@")[0] || "User";
       const aiPrompt = summarizeAiVisibleContent({
         text: content,
@@ -1188,6 +1245,7 @@ try {
   // public display is anonymous. Firestore rules depend on this invariant.
   userId: user?.uid,
   realUserId: user?.uid,
+  ...(anonymousHandle ? { anonymousHandle } : {}),
 
   username: displayName,
   authorName: displayName,
@@ -1208,6 +1266,7 @@ try {
         : `${u.firstname} ${u.lastname}`,
     studentID: u.studentID,
   })),
+  mentionedUserIds: uniqueMentionedUsers.map((user) => user.id),
 
   createdAt: serverTimestamp(),
 
@@ -1248,7 +1307,9 @@ try {
             name: isAiAssistantId(u.id) ? AI_ASSISTANT_NAME : isEveryoneMentionId(u.id) ? EVERYONE_MENTION_TAG.name : `${u.firstname} ${u.lastname}`.trim(),
             studentID: u.studentID,
           })),
+          mentionedUserIds: uniqueMentionedUsers.map((user) => user.id),
           isAnonymous,
+          ...(anonymousHandle ? { anonymousHandle } : {}),
           aiPrompt,
           link: attachedLink || deleteField(),
           moderationStatus: "pending",
@@ -1388,6 +1449,7 @@ try {
           setTargetDateLabel(null);
           setFiles([]);
           setTaggedUsers([]);
+          setMentionedUsers([]);
           setIsAnonymous(false);
           setAttachedLink(null);
           setSelectedGif(null);
@@ -1406,12 +1468,30 @@ try {
     }
   };
 
+  const openTagModal = () => {
+    setDraftTaggedUsers(taggedUsers);
+    setSearchQuery("");
+    setShowTagModal(true);
+  };
+
+  const cancelTagSelection = () => {
+    setDraftTaggedUsers(taggedUsers);
+    setSearchQuery("");
+    setShowTagModal(false);
+  };
+
+  const confirmTagSelection = () => {
+    setTaggedUsers(draftTaggedUsers);
+    setSearchQuery("");
+    setShowTagModal(false);
+  };
+
   const handleTagUser = (student: Student) => {
-    if (taggedUsers.find((u) => u.id === student.id)) {
-      setTaggedUsers(taggedUsers.filter((u) => u.id !== student.id));
-    } else {
-      setTaggedUsers([...taggedUsers, student]);
-    }
+    setDraftTaggedUsers((current) =>
+      current.some((u) => u.id === student.id)
+        ? current.filter((u) => u.id !== student.id)
+        : [...current, student],
+    );
   };
 
   // Rebuilt when the student list loads, not on every key press.
@@ -1464,8 +1544,8 @@ try {
     [activeMentionIndex, activeMentionQuery, allMentionables],
   );
 
-  const syncTaggedUsersFromText = (nextText: string) => {
-    setTaggedUsers((current) => {
+  const syncMentionedUsersFromText = (nextText: string) => {
+    setMentionedUsers((current) => {
       if (current.length === 0) return current;
       const next = current.filter((taggedUser) => {
         const token = isAiAssistantId(taggedUser.id)
@@ -1516,7 +1596,7 @@ try {
 
   const handleContentChange = (nextText: string) => {
     setContent(nextText);
-    syncTaggedUsersFromText(nextText);
+    syncMentionedUsersFromText(nextText);
     // Re-arm both flair suggestions the moment the box is fully cleared, so
     // deleting everything and retyping matching text can surface a banner
     // again this session. A partial edit leaves a dismissed banner dismissed.
@@ -1534,12 +1614,18 @@ try {
     const insertion = `${person.mentionToken} `;
     const nextText = `${before}${insertion}${after}`;
     setContent(nextText);
-    setTaggedUsers((current) => {
+    setMentionedUsers((current) => {
       if (current.some((entry) => entry.id === person.id)) return current;
       return [...current, person];
     });
     const nextCursor = before.length + insertion.length;
     setContentSelection({ start: nextCursor, end: nextCursor });
+    requestAnimationFrame(() => {
+      contentInputRef.current?.focus();
+      contentInputRef.current?.setNativeProps?.({
+        selection: { start: nextCursor, end: nextCursor },
+      });
+    });
   };
 
   const handleAddLink = () => {
@@ -1640,16 +1726,7 @@ try {
     setGifResults([]);
   };
 
-  const autoTaggedUsers = hasAiAssistantMention(content)
-    ? taggedUsers.some((entry) => isAiAssistantId(entry.id))
-      ? taggedUsers
-      : [...taggedUsers, AI_ASSISTANT_STUDENT]
-    : taggedUsers;
-  const effectiveTaggedUsers = hasEveryoneMention(content)
-    ? autoTaggedUsers.some((entry) => isEveryoneMentionId(entry.id))
-      ? autoTaggedUsers
-      : [...autoTaggedUsers, EVERYONE_MENTION_STUDENT]
-    : autoTaggedUsers.filter((entry) => !isEveryoneMentionId(entry.id));
+  const effectiveTaggedUsers = taggedUsers;
   // Filtering every student is only needed while the tag picker is open, not
   // on every key press in the post box.
   const filteredTagOptions = useMemo<Student[]>(() => {
@@ -1666,15 +1743,9 @@ try {
         studentID.includes(search)
       );
     });
-    const everyoneMatchesSearch =
-      !searchQuery.trim() ||
-      EVERYONE_MENTION_NAME.toLowerCase().includes(search) ||
-      EVERYONE_MENTION_TOKEN.slice(1).includes(search) ||
-      "all".includes(search);
-    return [
-      ...(everyoneMatchesSearch ? [EVERYONE_MENTION_STUDENT] : []),
-      ...filteredStudents.filter((student) => !isEveryoneMentionId(student.id)),
-    ];
+    return filteredStudents.filter(
+      (student) => !isAiAssistantId(student.id) && !isEveryoneMentionId(student.id),
+    );
   }, [searchQuery, showTagModal, students]);
 
   // Recent questions, read once when the composer opens. Bounded by a date
@@ -1851,9 +1922,9 @@ try {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.contentShell}>
-      <KeyboardAvoidingView
+      <KeyboardAvoidingView automaticOffset
         style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        behavior="padding"
       >
         <View style={styles.header}>
           <Text style={styles.headerTitle}>{isEditMode ? "Edit Post" : "Create Post"}</Text>
@@ -1885,10 +1956,11 @@ try {
           </View>
         </View>
 
-        <ScrollView
+        <KeyboardAwareScrollView
           ref={contentScrollRef}
           style={styles.scroll}
           contentContainerStyle={styles.scrollContent}
+          bottomOffset={32}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="always"
           keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
@@ -2116,6 +2188,7 @@ try {
             ]}
           >
             <TextInput
+              ref={contentInputRef}
               style={styles.input}
               placeholder="Share something with BondED..."
               placeholderTextColor={theme.textMuted}
@@ -2147,7 +2220,7 @@ try {
               }}
             >
               <Text style={styles.mentionLabel}>Mention someone</Text>
-              {mentionSuggestions.slice(0, 5).map((person) => (
+              {mentionSuggestions.slice(0, 4).map((person) => (
                 <TouchableOpacity
                   key={person.id}
                   style={styles.mentionRow}
@@ -2203,10 +2276,12 @@ try {
             onPickPhotos={handlePickPhotos}
             onPickDocuments={handlePickDocuments}
             onPickVideos={handlePickVideos}
+            onOpenTags={openTagModal}
             onOpenLink={handleOpenLinkModal}
             onOpenGif={handleOpenGifModal}
+            taggedCount={taggedUsers.length}
           />
-        </ScrollView>
+        </KeyboardAwareScrollView>
 
         <View
           style={[
@@ -2259,7 +2334,7 @@ try {
           visible={showTagModal}
           animationType="slide"
           transparent
-          onRequestClose={() => setShowTagModal(false)}
+          onRequestClose={cancelTagSelection}
         >
           <View style={styles.modalOverlay}>
             <View style={styles.modalContainer}>
@@ -2267,11 +2342,23 @@ try {
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>
                   Tag People{" "}
-                  {effectiveTaggedUsers.length > 0 && `(${effectiveTaggedUsers.length})`}
+                  {draftTaggedUsers.length > 0 && `(${draftTaggedUsers.length})`}
                 </Text>
-                <TouchableOpacity onPress={() => setShowTagModal(false)}>
-                  <Ionicons name="close" size={28} color={theme.textSecondary} />
-                </TouchableOpacity>
+                <View style={styles.tagModalActions}>
+                  <TouchableOpacity
+                    style={styles.tagConfirmButton}
+                    onPress={confirmTagSelection}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Confirm ${draftTaggedUsers.length} selected tags`}
+                  >
+                    <Text style={styles.tagConfirmText}>
+                      Confirm{draftTaggedUsers.length > 0 ? ` (${draftTaggedUsers.length})` : ""}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={cancelTagSelection} accessibilityRole="button" accessibilityLabel="Cancel tag selection">
+                    <Ionicons name="close" size={24} color={theme.textSecondary} />
+                  </TouchableOpacity>
+                </View>
               </View>
 
               {students.length > 0 && (
@@ -2280,13 +2367,13 @@ try {
                   onPress={() => {
                     // Tag all students (except already tagged)
                     const allTagged = students.filter(
-                      (s) => !taggedUsers.find((u) => u.id === s.id),
+                      (s) => !draftTaggedUsers.find((u) => u.id === s.id),
                     );
                     if (allTagged.length === 0) {
                       showInfo("Info", "Everyone is already tagged!");
                       return;
                     }
-                    setTaggedUsers([...taggedUsers, ...allTagged]);
+                    setDraftTaggedUsers([...draftTaggedUsers, ...allTagged]);
                   }}
                 >
                   <Ionicons name="people-circle" size={20} color={theme.onAccent} />
@@ -2309,7 +2396,7 @@ try {
                 data={filteredTagOptions}
                 keyExtractor={(item) => item.id}
                 renderItem={({ item }) => {
-                  const tagged = taggedUsers.find((u) => u.id === item.id);
+                  const tagged = draftTaggedUsers.find((u) => u.id === item.id);
                   const firstname = item.firstname || "?";
                   const lastname = item.lastname || "?";
                   return (
@@ -2365,8 +2452,8 @@ try {
           transparent
           onRequestClose={handleCloseLinkModal}
         >
-          <KeyboardAvoidingView
-            behavior={Platform.OS === "ios" ? "padding" : "height"}
+          <KeyboardAvoidingView automaticOffset
+            behavior="padding"
             style={styles.linkModalOverlay}
           >
             <View style={styles.linkModalContent}>
@@ -2379,7 +2466,7 @@ try {
                   accessibilityRole="button"
                   accessibilityLabel="Close Add Link"
                 >
-                  <Ionicons name="close" size={22} color={theme.textSecondary} />
+                  <Ionicons name="close" size={24} color={theme.textSecondary} />
                 </TouchableOpacity>
               </View>
 
@@ -2439,7 +2526,7 @@ try {
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Choose a GIF</Text>
                 <TouchableOpacity onPress={() => setShowGifModal(false)}>
-                  <Ionicons name="close" size={28} color={theme.textSecondary} />
+                  <Ionicons name="close" size={40} color={theme.textSecondary} />
                 </TouchableOpacity>
               </View>
 
@@ -2566,7 +2653,7 @@ const makeStyles = (c: ThemeTokens) =>
     justifyContent: "space-between",
     paddingHorizontal: 16,
     paddingVertical: 10,
-    minHeight: 60,
+    minHeight: 52,
     borderBottomWidth: 1,
     borderBottomColor: c.border,
     backgroundColor: c.surface,
@@ -2625,7 +2712,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 14,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    padding: 14,
+    padding: 16,
     marginBottom: 16,
     shadowColor: c.textPrimary,
     shadowOpacity: 0.04,
@@ -2743,7 +2830,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderColor: c.accent,
     borderRadius: 12,
     padding: 12,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   dateSuggestionHeader: {
     flexDirection: "row",
@@ -2759,7 +2846,7 @@ const makeStyles = (c: ThemeTokens) =>
   dateSuggestionText: {
     color: c.textPrimary,
     fontSize: 13,
-    lineHeight: 18,
+    lineHeight: 16,
     marginBottom: 10,
   },
   dateSuggestionBold: {
@@ -2830,7 +2917,7 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     justifyContent: "space-between",
     backgroundColor: c.surface,
-    padding: 14,
+    padding: 16,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: c.borderStrong,
@@ -2845,8 +2932,8 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontSize: 13,
     marginTop: 6,
-    marginBottom: 14,
-    lineHeight: 18,
+    marginBottom: 16,
+    lineHeight: 16,
   },
   toggle: {
     width: 48,
@@ -2872,7 +2959,7 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 16,
     minHeight: 132,
     textAlignVertical: "top",
-    lineHeight: 23,
+    lineHeight: 20,
   },
   composerCard: {
     backgroundColor: c.surface,
@@ -2881,7 +2968,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderColor: c.borderStrong,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    marginBottom: 14,
+    marginBottom: 16,
     shadowColor: c.textPrimary,
     shadowOpacity: 0.04,
     shadowRadius: 8,
@@ -2889,7 +2976,8 @@ const makeStyles = (c: ThemeTokens) =>
     elevation: 1,
   },
   mentionSheet: {
-    marginBottom: 14,
+    marginBottom: 16,
+    maxHeight: 232,
     backgroundColor: c.surface,
     borderRadius: 16,
     borderWidth: 1,
@@ -2973,7 +3061,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
 
   gifPreview: {
-    marginBottom: 14,
+    marginBottom: 16,
     position: "relative",
     padding: 6,
     borderRadius: 16,
@@ -2996,7 +3084,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingVertical: 12,
     paddingRight: 8,
     borderRadius: 14,
-    marginBottom: 14,
+    marginBottom: 16,
     borderWidth: 1,
     borderColor: c.borderStrong,
   },
@@ -3043,7 +3131,7 @@ const makeStyles = (c: ThemeTokens) =>
   imagePreview: { width: "100%", height: 250, borderRadius: 11 },
   documentPreview: {
     backgroundColor: c.border,
-    padding: 20,
+    padding: 24,
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
@@ -3067,7 +3155,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   addToPostContainer: {
     backgroundColor: c.surface,
-    padding: 14,
+    padding: 16,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: c.borderStrong,
@@ -3082,7 +3170,7 @@ const makeStyles = (c: ThemeTokens) =>
     gap: 6,
   },
   iconButton: {
-    width: 44,
+    width: 42,
     height: 44,
     borderRadius: 14,
     alignItems: "center",
@@ -3119,9 +3207,9 @@ const makeStyles = (c: ThemeTokens) =>
   },
   postButton: {
     backgroundColor: c.accent,
-    minHeight: 50,
+    minHeight: 52,
     borderRadius: 15,
-    paddingVertical: 13,
+    paddingVertical: 16,
     alignItems: "center",
     justifyContent: "center",
     shadowColor: c.textSecondary,
@@ -3138,14 +3226,34 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surfaceSunken,
     borderTopLeftRadius: 18,
     borderTopRightRadius: 18,
-    paddingBottom: 20,
+    paddingBottom: 24,
   },
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
+    alignItems: "center",
     padding: 16,
   },
-  modalTitle: { color: c.textSecondary, fontSize: 18, fontWeight: "bold" },
+  modalTitle: { flex: 1, color: c.textSecondary, fontSize: 18, fontWeight: "bold" },
+  tagModalActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  tagConfirmButton: {
+    minWidth: 88,
+    height: 36,
+    paddingHorizontal: 14,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.primary,
+  },
+  tagConfirmText: {
+    color: c.onPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
   searchInput: {
     backgroundColor: c.surface,
     color: c.textPrimary,
@@ -3157,7 +3265,7 @@ const makeStyles = (c: ThemeTokens) =>
   studentItem: {
     flexDirection: "row",
     alignItems: "center",
-    padding: 14,
+    padding: 16,
     borderBottomColor: c.border,
     borderBottomWidth: 1,
   },
@@ -3194,7 +3302,7 @@ const makeStyles = (c: ThemeTokens) =>
   duplicateQuestionText: {
     color: c.textMuted,
     fontSize: 12,
-    lineHeight: 17,
+    lineHeight: 16,
     marginTop: 3,
     fontStyle: "italic",
   },
@@ -3225,7 +3333,7 @@ const makeStyles = (c: ThemeTokens) =>
     width: "85%",
     backgroundColor: c.surface,
     borderRadius: 16,
-    padding: 20,
+    padding: 24,
   },
   linkModalHeader: {
     minHeight: 40,
@@ -3320,13 +3428,13 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 60,
+    paddingVertical: 32,
   },
   gifErrorContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 60,
+    paddingVertical: 32,
   },
   errorText: {
     color: c.textMuted,
@@ -3338,7 +3446,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   retryButton: {
     backgroundColor: c.accent,
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 8,
     marginTop: 16,

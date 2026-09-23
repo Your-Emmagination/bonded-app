@@ -2,12 +2,10 @@ import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -15,6 +13,10 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+// The keyboard library's own view. It follows the keyboard frame by frame;
+// React Native's built-in one stopped lifting anything on Android once
+// KeyboardProvider (app/_layout.tsx) took over the keyboard.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
   addDoc,
@@ -30,7 +32,7 @@ import {
 import { auth, db } from "../../Firebase_configure";
 import { getUserData, parseUserRole } from "@/utils/rbac";
 import ConfirmDialog from "./components/ConfirmDialog";
-import { ListSkeleton } from "./components/Skeleton";
+import { CardListSkeleton, SkeletonBlock, SkeletonCard } from "./components/Skeleton";
 
 type Program = {
   id: string;
@@ -51,6 +53,9 @@ export default function AdminManageProgramsScreen() {
   const [editorVisible, setEditorVisible] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
+  // The keyboard's Next key moves through the form.
+  const codeInputRef = useRef<TextInput>(null);
+  const descriptionInputRef = useRef<TextInput>(null);
   const [code, setCode] = useState("");
   const [description, setDescription] = useState("");
 
@@ -212,9 +217,42 @@ export default function AdminManageProgramsScreen() {
   };
 
   if (authorized === null || loading) {
+    // Drawn as the screen will be — its bar, its opening card, then cards in
+    // the real card style — so nothing moves when the data arrives.
     return (
       <SafeAreaView style={styles.container}>
-        <ListSkeleton count={6} showAvatar={false} rowStyle={styles.skeletonCard} />
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={24} color={theme.textSecondary} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Manage Programs</Text>
+          <View style={styles.headerAdd} />
+        </View>
+        <CardListSkeleton
+          count={5}
+          style={styles.content}
+          header={
+            <>
+              <SkeletonCard
+                style={styles.hero}
+                avatar={{ size: 46, radius: 15, style: { marginRight: 13 } }}
+                lines={[
+                  { width: "60%", height: 15 },
+                  { width: "90%", height: 11, gap: 8 },
+                ]}
+              />
+              <SkeletonBlock width="100%" height={46} radius={13} style={{ marginBottom: 12 }} />
+              <SkeletonBlock width="100%" height={46} radius={13} style={{ marginBottom: 13 }} />
+            </>
+          }
+          cardStyle={styles.programCard}
+          avatar={{ size: 48, radius: 14, style: { marginRight: 11 } }}
+          lines={[
+            { width: "62%", height: 14 },
+            { width: 70, height: 11, gap: 6 },
+            { width: "85%", height: 10, gap: 6 },
+          ]}
+        />
       </SafeAreaView>
     );
   }
@@ -236,7 +274,7 @@ export default function AdminManageProgramsScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <KeyboardAvoidingView automaticOffset style={{ flex: 1 }} behavior="padding">
         <View style={styles.header}>
           <TouchableOpacity onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color={theme.textSecondary} />
@@ -314,7 +352,11 @@ export default function AdminManageProgramsScreen() {
       </KeyboardAvoidingView>
 
       <Modal visible={editorVisible} transparent animationType="slide" onRequestClose={() => !saving && setEditorVisible(false)}>
-        <View style={styles.modalBackdrop}>
+        {/* A pop-up is its own window: the screen's keyboard handling above
+            doesn't reach it, and the keyboard library turns off Android's own
+            resizing inside pop-ups. So the sheet rides up with the keyboard
+            here, and scrolls if the keyboard leaves too little room. */}
+        <KeyboardAvoidingView automaticOffset behavior="padding" style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <View>
@@ -326,20 +368,54 @@ export default function AdminManageProgramsScreen() {
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.label}>Program Name *</Text>
-            <TextInput value={name} onChangeText={setName} placeholder="Bachelor of Science in Information Systems" placeholderTextColor={theme.textMuted} style={styles.input} />
+            <ScrollView
+              style={styles.modalScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <Text style={styles.label}>Program Name *</Text>
+              <TextInput
+                value={name}
+                onChangeText={setName}
+                placeholder="Bachelor of Science in Information Systems"
+                placeholderTextColor={theme.textMuted}
+                style={styles.input}
+                returnKeyType="next"
+                submitBehavior="submit"
+                onSubmitEditing={() => codeInputRef.current?.focus()}
+              />
 
-            <Text style={styles.label}>Program Code *</Text>
-            <TextInput value={code} onChangeText={setCode} autoCapitalize="characters" placeholder="BSIS" placeholderTextColor={theme.textMuted} style={styles.input} />
+              <Text style={styles.label}>Program Code *</Text>
+              <TextInput
+                ref={codeInputRef}
+                value={code}
+                onChangeText={setCode}
+                autoCapitalize="characters"
+                placeholder="BSIS"
+                placeholderTextColor={theme.textMuted}
+                style={styles.input}
+                returnKeyType="next"
+                submitBehavior="submit"
+                onSubmitEditing={() => descriptionInputRef.current?.focus()}
+              />
 
-            <Text style={styles.label}>Description (optional)</Text>
-            <TextInput value={description} onChangeText={setDescription} placeholder="Short description" placeholderTextColor={theme.textMuted} style={[styles.input, styles.textArea]} multiline />
+              <Text style={styles.label}>Description (optional)</Text>
+              <TextInput
+                ref={descriptionInputRef}
+                value={description}
+                onChangeText={setDescription}
+                placeholder="Short description"
+                placeholderTextColor={theme.textMuted}
+                style={[styles.input, styles.textArea]}
+                multiline
+              />
 
-            <TouchableOpacity style={[styles.primaryButton, saving && { opacity: 0.6 }]} onPress={saveProgram} disabled={saving}>
-              {saving ? <ActivityIndicator color={theme.onPrimary} /> : <><Ionicons name="save-outline" size={18} color={theme.onPrimary} /><Text style={styles.primaryButtonText}>{editingId ? "Save Changes" : "Add Program"}</Text></>}
-            </TouchableOpacity>
+              <TouchableOpacity style={[styles.primaryButton, saving && { opacity: 0.6 }]} onPress={saveProgram} disabled={saving}>
+                {saving ? <ActivityIndicator color={theme.onPrimary} /> : <><Ionicons name="save-outline" size={18} color={theme.onPrimary} /><Text style={styles.primaryButtonText}>{editingId ? "Save Changes" : "Add Program"}</Text></>}
+              </TouchableOpacity>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <ConfirmDialog
@@ -391,7 +467,8 @@ const makeStyles = (c: ThemeTokens) =>
   primaryButton: { minHeight: 48, borderRadius: 13, backgroundColor: c.danger, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8, paddingHorizontal: 18, marginTop: 14 },
   primaryButtonText: { color: c.surface, fontWeight: "800", fontSize: 14 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end" },
-  modalCard: { backgroundColor: c.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 28 },
+  modalCard: { backgroundColor: c.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 24, maxHeight: "92%" },
+  modalScroll: { flexGrow: 0 },
   modalHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 15 },
   modalTitle: { color: c.textPrimary, fontSize: 20, fontWeight: "900" },
   modalSubtitle: { color: c.textMuted, fontSize: 12, marginTop: 3, maxWidth: 280 },

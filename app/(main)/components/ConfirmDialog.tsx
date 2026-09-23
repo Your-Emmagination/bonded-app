@@ -25,6 +25,8 @@ export type ConfirmDialogProps = {
   description?: string;
   confirmText?: string;
   cancelText?: string;
+  secondaryText?: string;
+  onSecondary?: () => void;
   /** Styles the confirm button as a destructive (red) action. Defaults to true for backwards compatibility. */
   destructive?: boolean;
   /** Optional semantic visual style. Takes precedence over `destructive` when provided. */
@@ -49,6 +51,8 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   description,
   confirmText = "Confirm",
   cancelText = "Cancel",
+  secondaryText,
+  onSecondary,
   destructive = true,
   variant,
   loading = false,
@@ -114,13 +118,31 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             />
           </View>
 
-          <Text style={styles.title}>{title}</Text>
+          <Text
+            style={[
+              styles.title,
+              resolvedVariant === "success" && { color: theme.accent },
+            ]}
+          >
+            {title}
+          </Text>
           {!!description && <Text style={styles.description}>{description}</Text>}
 
-          <View style={styles.buttonRow}>
+          <View style={[styles.buttonRow, !!secondaryText && styles.buttonColumn]}>
+            {!!secondaryText && !!onSecondary && (
+              <TouchableOpacity
+                style={[styles.button, styles.buttonFull, styles.secondaryButton]}
+                onPress={onSecondary}
+                disabled={loading}
+                activeOpacity={0.75}
+              >
+                <Ionicons name="trash-outline" size={17} color={palette.danger} />
+                <Text style={styles.secondaryButtonText}>{secondaryText}</Text>
+              </TouchableOpacity>
+            )}
             {!singleAction && (
               <TouchableOpacity
-                style={[styles.button, styles.cancelButton]}
+                style={[styles.button, !!secondaryText && styles.buttonFull, styles.cancelButton]}
                 onPress={onCancel}
                 disabled={loading}
                 activeOpacity={0.75}
@@ -132,6 +154,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             <TouchableOpacity
               style={[
                 styles.button,
+                !!secondaryText && styles.buttonFull,
                 { backgroundColor: theme.accent },
                 loading && styles.buttonDisabled,
               ]}
@@ -166,7 +189,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.scrim,
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: 28,
+    paddingHorizontal: 20,
   },
   card: {
     width: "100%",
@@ -190,7 +213,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   title: {
     color: c.textPrimary,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "700",
     textAlign: "center",
   },
@@ -214,6 +237,16 @@ const makeStyles = (c: ThemeTokens) =>
     justifyContent: "center",
     alignItems: "center",
   },
+  buttonColumn: { flexDirection: "column" },
+  buttonFull: { flex: 0, width: "100%" },
+  secondaryButton: {
+    flexDirection: "row",
+    gap: 7,
+    backgroundColor: c.dangerSoft,
+    borderWidth: 1,
+    borderColor: c.danger,
+  },
+  secondaryButtonText: { color: c.danger, fontSize: 14.5, fontWeight: "700" },
   cancelButton: {
     backgroundColor: c.surfaceSunken,
     borderWidth: 1,

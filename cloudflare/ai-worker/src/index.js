@@ -6,6 +6,11 @@ import { checkKeywordFlags } from "./keywordModeration.js";
 import { checkLinkFlags } from "./linkModeration.js";
 import { checkAccountPassword } from "./accountSetup.js";
 import { issueAgoraToken } from "./agoraToken.js";
+import {
+  PRIVATE_PROFILE_FIELDS,
+  isPersonalEmail,
+  planPrivateProfileMove,
+} from "./privateProfile.js";
 
 const OPENMODERATION_API_URL = "https://api.openmoderation.com/v1/moderation";
 const DEFAULT_OPENMODERATION_PROVIDER = "openai";
@@ -935,6 +940,7 @@ const fsDoc = (d) =>
 
 const toFs = (v) => {
   if (v === null || v === undefined) return { nullValue: null };
+  if (v instanceof Date) return { timestampValue: v.toISOString() };
   if (typeof v === "string") return { stringValue: v };
   if (typeof v === "boolean") return { booleanValue: v };
   if (typeof v === "number") {
@@ -970,9 +976,11 @@ async function firestore(env, path, options = {}) {
   return payload;
 }
 
-async function patchFirestore(env, collectionName, id, fields) {
+// `removeFields` are deleted: in the update mask but not in the body.
+async function patchFirestore(env, collectionName, id, fields, removeFields = []) {
   const params = new URLSearchParams();
   Object.keys(fields).forEach((k) => params.append("updateMask.fieldPaths", k));
+  removeFields.forEach((k) => params.append("updateMask.fieldPaths", k));
   return firestore(env, `/${collectionName}/${encodeURIComponent(id)}?${params}`, {
     method: "PATCH",
     body: JSON.stringify({
@@ -1241,7 +1249,10 @@ async function runApprovedPostSideEffects(env, postId, post) {
   const tagged = Array.isArray(post.taggedUsers) ? post.taggedUsers : [];
   const actorId = String(post.realUserId || "");
   const actorName = post.isAnonymous
-    ? "Anonymous"
+    ? String(post.anonymousHandle || post.username || "Anonymous").replace(
+        /^Anonymous\s+([1-9][0-9]{3,4})$/,
+        "Anonymous$1",
+      )
     : String(post.authorName || post.username || "Someone");
   const recipients = new Set(
     tagged
@@ -1282,6 +1293,8 @@ async function runApprovedPostSideEffects(env, postId, post) {
       });
     }
   }
+
+  recipients.delete(actorId);
 
   const preview = String(post.content || "")
     .replace(/\s+/g, " ")
@@ -2117,11 +2130,16 @@ async function resolveStudentByIdentifier(env, identifier) {
   for (const id of new Set([raw, raw.toLowerCase()])) {
     const doc = await readFirestoreDocSafe(env, `/students/${encodeURIComponent(id)}`);
     if (doc && (doc.userId || doc.uid)) {
+      // The private record wins; a profile not moved yet still has these
+      // on the public one.
+      const secret = await readFirestoreDocSafe(env, `/studentPrivate/${encodeURIComponent(id)}`);
+      const pick = (key) => (secret && secret[key] !== undefined ? secret[key] : doc[key]);
       return {
         studentID: id,
         uid: String(doc.userId || doc.uid),
-        recoveryEmail: doc.recoveryEmail ? String(doc.recoveryEmail) : "",
-        recoveryEmailVerified: doc.recoveryEmailVerified === true,
+        recoveryEmail: pick("recoveryEmail") ? String(pick("recoveryEmail")) : "",
+        recoveryEmailVerified: pick("recoveryEmailVerified") === true,
+        accountLocked: doc.accountLocked === true,
       };
     }
   }
@@ -2210,6 +2228,28 @@ async function writeAuthCode(env, codeId, fields) {
       fields: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, toFs(v)])),
     }),
   });
+}
+
+// Saves someone's personal email and recovery details to their private
+// record, and takes any copy off their public profile (students/{id}),
+// which every signed-in user can read. The private record is written first,
+// so nothing is lost if the second write fails. `publicUpdates` are other
+// changes to the public profile, made in the same write.
+async function savePrivateProfile(env, studentID, uid, fields, publicProfile, publicUpdates = {}) {
+  await patchFirestore(env, "studentPrivate", studentID, {
+    ...fields,
+    userId: uid,
+    updatedAt: new Date(),
+  });
+  const remove = PRIVATE_PROFILE_FIELDS.filter(
+    (key) =>
+      publicProfile?.[key] !== undefined &&
+      !(key in publicUpdates) &&
+      (key !== "email" || isPersonalEmail(publicProfile.email)),
+  );
+  if (remove.length || Object.keys(publicUpdates).length) {
+    await patchFirestore(env, "students", studentID, publicUpdates, remove);
+  }
 }
 
 // -- recovery-email-start : signed in, send a code to a new recovery email ----
@@ -2302,11 +2342,19 @@ async function handleRecoveryEmailConfirm(env, request, body) {
     return json({ error: "Incorrect code." }, { status: 400 });
   }
 
-  await patchFirestore(env, "students", studentID, {
-    email: String(record.email || ""),
-    recoveryEmail: String(record.email || ""),
-    recoveryEmailVerified: true,
-  });
+  const verifiedEmail = String(record.email || "");
+  await savePrivateProfile(
+    env,
+    studentID,
+    uid,
+    {
+      email: verifiedEmail,
+      recoveryEmail: verifiedEmail,
+      recoveryEmailVerified: true,
+      recoveryEmailVerifiedAt: new Date(),
+    },
+    student,
+  );
   await deleteFirestoreDoc(env, "authCodes", codeId);
 
   return json({ ok: true, recoveryEmail: String(record.email || "") });
@@ -2320,7 +2368,14 @@ async function handlePasswordResetStart(env, request, body) {
   if (!identifier) return json({ error: "Enter your ID." }, { status: 400 });
 
   const student = await resolveStudentByIdentifier(env, identifier);
-  if (student && student.recoveryEmailVerified && EMAIL_RE.test(student.recoveryEmail)) {
+  // A locked account gets no code: it was locked because someone else may
+  // have its email.
+  if (
+    student &&
+    !student.accountLocked &&
+    student.recoveryEmailVerified &&
+    EMAIL_RE.test(student.recoveryEmail)
+  ) {
     const codeId = `${student.uid}__pwreset`;
     const existing = await readFirestoreDocSafe(env, `/authCodes/${encodeURIComponent(codeId)}`);
     const onCooldown =
@@ -2353,6 +2408,165 @@ async function handlePasswordResetStart(env, request, body) {
   }
 
   return json({ ok: true });
+}
+
+// -- signin-help-request : NOT signed in, ask the school for help ------------
+// Someone who can't sign in sends the school a request from the Sign-in Help
+// screen. The Worker files it in the admins' support queue — the database
+// itself stays closed to signed-out users — and limits how often it can be
+// sent, per ID and per connection, so the queue can't be flooded. Admins
+// reply by the email or phone left here, after confirming who it really is.
+// The answer never says whether the ID exists.
+const SIGNIN_HELP_PROBLEMS = {
+  forgot_password: "Forgot password",
+  no_recovery_email: "No recovery email",
+  id_not_recognised: "ID not recognised",
+  other: "Something else",
+};
+const SIGNIN_HELP_WINDOW_MS = 24 * 60 * 60 * 1000;
+const SIGNIN_HELP_MAX_PER_ID = 3;
+const SIGNIN_HELP_MAX_PER_CONNECTION = 10;
+
+/** Counts one request against `key`; false once it has used up the day. */
+async function takeSignInHelpSlot(env, key, max) {
+  const id = key.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 140);
+  const existing = await readFirestoreDocSafe(env, `/signInHelpLimits/${encodeURIComponent(id)}`);
+  const now = Date.now();
+  const windowStartMs = Number(existing?.windowStartMs || 0);
+  const fresh = !existing || now - windowStartMs >= SIGNIN_HELP_WINDOW_MS;
+  const count = fresh ? 0 : Number(existing.count || 0);
+  if (count >= max) return false;
+  await createFirestore(env, "signInHelpLimits", id, {
+    windowStartMs: fresh ? now : windowStartMs,
+    count: count + 1,
+  });
+  return true;
+}
+
+/**
+ * The next "SR-00125" number, from the same counter the app uses, raised in
+ * one atomic write. Falls back to a dated number, like the app does, so a
+ * counter problem never stops a request being filed.
+ */
+async function nextSupportTicketNumber(env) {
+  try {
+    const token = await firebaseAccessToken(env);
+    const base = `projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents`;
+    const response = await fetch(`https://firestore.googleapis.com/v1/${base}:commit`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        writes: [
+          {
+            transform: {
+              document: `${base}/counters/supportTickets`,
+              fieldTransforms: [{ fieldPath: "value", increment: { integerValue: "1" } }],
+            },
+          },
+        ],
+      }),
+    });
+    const payload = await response.json().catch(() => null);
+    const result = payload?.writeResults?.[0]?.transformResults?.[0];
+    const value = Number(result?.integerValue ?? result?.doubleValue);
+    if (!response.ok || !Number.isFinite(value) || value <= 0) throw new Error("counter");
+    return `SR-${String(Math.round(value)).padStart(5, "0")}`;
+  } catch {
+    const now = new Date();
+    const stamp =
+      `${String(now.getFullYear()).slice(2)}` +
+      `${String(now.getMonth() + 1).padStart(2, "0")}` +
+      `${String(now.getDate()).padStart(2, "0")}`;
+    return `SR-${stamp}-${String(now.getTime() % 10000).padStart(4, "0")}`;
+  }
+}
+
+async function handleSignInHelpRequest(env, request, body) {
+  const studentID = String(body?.studentID || "").trim().slice(0, 40);
+  const fullName = String(body?.fullName || "").trim().replace(/\s+/g, " ").slice(0, 80);
+  const contact = String(body?.contact || "").trim().slice(0, 120);
+  const problem = Object.prototype.hasOwnProperty.call(SIGNIN_HELP_PROBLEMS, body?.problem)
+    ? body.problem
+    : "other";
+  const message = String(body?.message || "").trim().slice(0, 600);
+
+  if (studentID.length < 3) return json({ error: "Enter your ID." }, { status: 400 });
+  if (fullName.length < 2) return json({ error: "Enter your full name." }, { status: 400 });
+  const reachable =
+    EMAIL_RE.test(contact) ||
+    (/^[+\d][\d\s-]*$/.test(contact) && contact.replace(/\D/g, "").length >= 7);
+  if (!reachable) {
+    return json(
+      { error: "Enter an email or phone number the school can reach you on." },
+      { status: 400 },
+    );
+  }
+
+  // One connection asking about many IDs is the flood to stop; one ID asked
+  // about again and again is the other.
+  const connection = request.headers.get("CF-Connecting-IP") || "unknown";
+  const allowed =
+    (await takeSignInHelpSlot(env, `ip_${connection}`, SIGNIN_HELP_MAX_PER_CONNECTION)) &&
+    (await takeSignInHelpSlot(env, `id_${studentID.toLowerCase()}`, SIGNIN_HELP_MAX_PER_ID));
+  if (!allowed) {
+    return json(
+      {
+        error:
+          "You've already sent several requests today. The school will contact you — or email or call them directly.",
+      },
+      { status: 429 },
+    );
+  }
+
+  // For the admin only: whether the ID matches a real account, and whose.
+  // Never sent back, so the form can't be used to find out which IDs exist.
+  const account = await resolveStudentByIdentifier(env, studentID).catch(() => null);
+  const profile = account
+    ? await readFirestoreDocSafe(env, `/students/${encodeURIComponent(account.studentID)}`)
+    : null;
+  const accountName = profile
+    ? `${profile.firstname || ""} ${profile.lastname || ""}`.trim() || null
+    : null;
+
+  const label = SIGNIN_HELP_PROBLEMS[problem];
+  const ticketNo = await nextSupportTicketNumber(env);
+  const now = new Date();
+  await createFirestore(env, "supportTickets", null, {
+    ticketNo,
+    // No account is signed in; the app treats an empty userId with this
+    // source as a sign-in request that can only be answered off the app.
+    userId: "",
+    userName: fullName,
+    userRole: "signed out",
+    userCourse: null,
+    userYearLevel: null,
+    userStudentId: studentID,
+    category: "account",
+    subject: `Sign-in help: ${label}`,
+    description: message || label,
+    source: "signin-help",
+    contact,
+    verified: false,
+    accountFound: Boolean(account),
+    accountName,
+    accountRole: profile?.role ? String(profile.role) : null,
+    status: "open",
+    priority: "normal",
+    assignedTo: null,
+    assignedToName: null,
+    createdAt: now,
+    updatedAt: now,
+    lastMessageAt: now,
+    lastMessagePreview: (message || label).slice(0, 120),
+    unreadForUser: false,
+    unreadForStaff: true,
+    appVersion: typeof body?.appVersion === "string" ? body.appVersion.slice(0, 20) : null,
+    platform: typeof body?.platform === "string" ? body.platform.slice(0, 20) : null,
+    imageUrl: null,
+    sourceQuestion: null,
+  });
+
+  return json({ ok: true, ticketNo });
 }
 
 // -- password-reset-confirm : NOT signed in, verify code, set new password ----
@@ -2415,6 +2629,376 @@ async function handlePasswordResetConfirm(env, request, body) {
   return json({ ok: true });
 }
 
+// -- admin-account-recovery : signed-in ADMIN, rescue someone's account -------
+// For when someone has lost both their password and their recovery email —
+// or someone else has taken the email. An admin, after confirming who the
+// person is, can:
+//   reset-password         set a random temporary password, shown to the
+//                          admin once; it must be replaced on next sign-in
+//   remove-recovery-email  drop the recovery email so no reset code can go
+//                          to it; they add a new one on next sign-in
+//   sign-out-all           end every session on every device
+//   lock / unlock          block (or allow again) signing in at all
+// Only the Worker can do these: they change the sign-in account itself,
+// which the app can't touch. Every action is logged in accountRecoveryLog
+// with who did it and when.
+const ACCOUNT_RECOVERY_ACTIONS = new Set([
+  "reset-password",
+  "remove-recovery-email",
+  "sign-out-all",
+  "lock",
+  "unlock",
+]);
+
+// No 0/O, 1/l/I: the admin may read it out over the phone.
+const TEMPORARY_PASSWORD_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+
+/** Three groups of four, e.g. "Hq7M-t4Rk-9wPe". About 69 bits of randomness. */
+function temporaryPassword() {
+  const alphabet = TEMPORARY_PASSWORD_ALPHABET;
+  // Bytes at or above this would favour the first few characters.
+  const unbiased = 256 - (256 % alphabet.length);
+  for (;;) {
+    const chars = [];
+    while (chars.length < 12) {
+      for (const byte of crypto.getRandomValues(new Uint8Array(24))) {
+        if (byte < unbiased && chars.length < 12) chars.push(alphabet[byte % alphabet.length]);
+      }
+    }
+    const password = [chars.slice(0, 4), chars.slice(4, 8), chars.slice(8)]
+      .map((group) => group.join(""))
+      .join("-");
+    if (/[A-Z]/.test(password) && /[a-z]/.test(password) && /[0-9]/.test(password)) {
+      return password;
+    }
+  }
+}
+
+/** The stored hash of the temporary password an admin last issued. */
+const temporaryPasswordCodeId = (uid) => `${uid}__temppw`;
+
+/**
+ * Whether `password` is still the temporary one an admin issued. Called only
+ * after Firebase has accepted the password, so any other password means the
+ * temporary one has been replaced and its record can go.
+ */
+async function isTemporaryPassword(env, uid, password) {
+  const codeId = temporaryPasswordCodeId(uid);
+  const record = await readFirestoreDocSafe(env, `/authCodes/${encodeURIComponent(codeId)}`);
+  if (!record?.codeHash) return false;
+  const same = timingSafeEqualHex(String(record.codeHash), await hashAuthCode(env, uid, password));
+  if (!same) await deleteFirestoreDoc(env, "authCodes", codeId);
+  return same;
+}
+
+/** Changes the sign-in account itself: password, disabled, sessions. */
+async function adminUpdateAccount(env, uid, changes) {
+  const token = await firebaseAccessToken(env);
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+      env.FIREBASE_PROJECT_ID,
+    )}/accounts:update`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ localId: uid, ...changes }),
+    },
+  );
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.localId) {
+    throw new Error(payload?.error?.message || `Account update failed (${response.status}).`);
+  }
+  return payload;
+}
+
+/** The profile of whoever is signed in behind an ID token's account. */
+async function findProfileByAccount(env, account) {
+  const uid = String(account?.localId || "");
+  if (!uid) return null;
+  for (const field of ["userId", "uid"]) {
+    const found = await queryFirestore(env, "students", field, uid).catch(() => []);
+    if (found[0]) return found[0];
+  }
+  const docId = String(account?.email || "").split("@")[0];
+  const byEmail = docId
+    ? await readFirestoreDocSafe(env, `/students/${encodeURIComponent(docId)}`)
+    : null;
+  return byEmail && String(byEmail.userId || byEmail.uid || "") === uid ? byEmail : null;
+}
+
+/**
+ * Detaches every phone from the account's notifications. A phone that was
+ * signed out — perhaps someone else's — must stop showing this person's
+ * messages on its lock screen. Their own phones sign up again at sign-in.
+ */
+async function clearPushTokens(env, uid) {
+  await patchFirestore(env, "userPushTokens", uid, {
+    expoPushTokens: [],
+    pushNotificationsUpdatedAt: new Date(),
+  }).catch((error) => {
+    console.warn("[recovery] could not clear push tokens:", error?.message || error);
+  });
+}
+
+async function handleAdminAccountRecovery(env, request, body) {
+  const authHeader = request.headers.get("Authorization") || "";
+  const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  if (!idToken) return json({ error: "Sign in to continue." }, { status: 401 });
+
+  const caller = await lookupFirebaseUser(env, idToken);
+  const callerProfile = await findProfileByAccount(env, caller);
+  if (!callerProfile || normalizeAppRole(callerProfile.role) !== "admin") {
+    return json({ error: "Only administrators can do this." }, { status: 403 });
+  }
+
+  const action = String(body?.action || "");
+  if (!ACCOUNT_RECOVERY_ACTIONS.has(action)) {
+    return json({ error: "Unknown account recovery action." }, { status: 400 });
+  }
+  const studentID = String(body?.studentID || "").trim();
+  if (!studentID) return json({ error: "Choose an account." }, { status: 400 });
+
+  const target = await readFirestoreDocSafe(env, `/students/${encodeURIComponent(studentID)}`);
+  const uid = String(target?.userId || target?.uid || "");
+  if (!target || !uid) {
+    return json({ error: "This account has no sign-in linked to it." }, { status: 404 });
+  }
+  // An admin locking or resetting themselves could lock the school out.
+  if (uid === caller.localId) {
+    return json(
+      { error: "Use Settings for your own account. Another admin can do this for you." },
+      { status: 400 },
+    );
+  }
+
+  const now = new Date();
+  const nowSeconds = String(Math.floor(now.getTime() / 1000));
+  let temporary = null;
+
+  try {
+    if (action === "reset-password") {
+      temporary = temporaryPassword();
+      // Remembered (as a hash, never the password) before it's set, so the
+      // sign-in check can never mistake it for one they chose.
+      await writeAuthCode(env, temporaryPasswordCodeId(uid), {
+        purpose: "temporary-password",
+        uid,
+        studentID,
+        codeHash: await hashAuthCode(env, uid, temporary),
+        createdAtMs: now.getTime(),
+      });
+      // A new password also ends every session, so whoever else was signed
+      // in is out as well.
+      await adminUpdateAccount(env, uid, { password: temporary, validSince: nowSeconds });
+      await patchFirestore(env, "students", studentID, {
+        mustChangePassword: true,
+        passwordCheckedAt: now.toISOString(),
+        sessionsRevokedAt: now,
+      });
+      await clearPushTokens(env, uid);
+    } else if (action === "remove-recovery-email") {
+      // The profile email goes back to the school sign-in address. The
+      // person is asked to add and verify a new one when they next sign in.
+      // Everyone is signed out first: whoever took the email may be signed
+      // in, and would otherwise be asked to add an email right away — and
+      // could simply add theirs again.
+      await adminUpdateAccount(env, uid, { validSince: nowSeconds });
+      let signInEmail = "";
+      try {
+        const token = await firebaseAccessToken(env);
+        const response = await fetch(
+          `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(
+            env.FIREBASE_PROJECT_ID,
+          )}/accounts:lookup`,
+          {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ localId: [uid] }),
+          },
+        );
+        const payload = await response.json().catch(() => null);
+        signInEmail = String(payload?.users?.[0]?.email || "");
+      } catch {
+        signInEmail = "";
+      }
+      // The school sign-in address may go back on the public profile; an
+      // account that signs in with a personal address keeps it private.
+      await savePrivateProfile(
+        env,
+        studentID,
+        uid,
+        { email: "", recoveryEmail: "", recoveryEmailVerified: false, recoveryEmailVerifiedAt: null },
+        target,
+        {
+          sessionsRevokedAt: now,
+          ...(signInEmail && !isPersonalEmail(signInEmail) ? { email: signInEmail } : {}),
+        },
+      );
+      await clearPushTokens(env, uid);
+    } else if (action === "sign-out-all") {
+      await adminUpdateAccount(env, uid, { validSince: nowSeconds });
+      await patchFirestore(env, "students", studentID, { sessionsRevokedAt: now });
+      await clearPushTokens(env, uid);
+    } else if (action === "lock") {
+      await adminUpdateAccount(env, uid, { disableUser: true, validSince: nowSeconds });
+      await patchFirestore(env, "students", studentID, {
+        accountLocked: true,
+        accountLockedAt: now,
+        sessionsRevokedAt: now,
+      });
+      await clearPushTokens(env, uid);
+    } else if (action === "unlock") {
+      await adminUpdateAccount(env, uid, { disableUser: false });
+      await patchFirestore(env, "students", studentID, {
+        accountLocked: false,
+        accountLockedAt: null,
+      });
+    }
+  } catch (error) {
+    console.error(`[recovery] ${action} failed:`, error?.message || error);
+    return json({ error: "Couldn't update the account. Please try again." }, { status: 502 });
+  }
+
+  // Any reset or verification code already sent — possibly to an email
+  // someone else controls — stops working. Unlocking leaves them alone.
+  if (action !== "unlock" && action !== "sign-out-all") {
+    await deleteFirestoreDoc(env, "authCodes", `${uid}__pwreset`);
+    await deleteFirestoreDoc(env, "authCodes", `${uid}__recovery`);
+  }
+
+  const name = (profile) =>
+    `${profile?.firstname || ""} ${profile?.lastname || ""}`.trim() || null;
+  await createFirestore(env, "accountRecoveryLog", null, {
+    studentID,
+    targetUid: uid,
+    targetName: name(target),
+    action,
+    byUid: caller.localId,
+    byStudentID: callerProfile.studentID ? String(callerProfile.studentID) : null,
+    byName: name(callerProfile),
+    at: now,
+  }).catch((error) => {
+    console.error("[recovery] could not write the log:", error?.message || error);
+  });
+
+  return json({ ok: true, action, ...(temporary ? { temporaryPassword: temporary } : {}) });
+}
+
+// -- migrate-private-profile : admin, move personal emails off public profiles
+// Profiles saved before private records existed still carry the personal
+// email on the public profile. This moves them, a few pages per call; the
+// app calls again with `next` until `done`. Safe to run any number of times:
+// a profile with nothing private left is skipped.
+const PRIVATE_MIGRATION_PAGE = 200;
+const PRIVATE_MIGRATION_MAX_PAGES = 8;
+
+async function handleMigratePrivateProfile(env, request, body) {
+  const authHeader = request.headers.get("Authorization") || "";
+  const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  if (!idToken) return json({ error: "Sign in to continue." }, { status: 401 });
+
+  const caller = await lookupFirebaseUser(env, idToken);
+  const callerProfile = await findProfileByAccount(env, caller);
+  if (!callerProfile || normalizeAppRole(callerProfile.role) !== "admin") {
+    return json({ error: "Only administrators can do this." }, { status: 403 });
+  }
+
+  const token = await firebaseAccessToken(env);
+  const base = `projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents`;
+  const api = (path, payload) =>
+    fetch(`https://firestore.googleapis.com/v1/${base}${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(async (response) => {
+      const result = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(
+          (Array.isArray(result) ? result[0]?.error?.message : result?.error?.message) ||
+            `Firestore request failed (${response.status}).`,
+        );
+      }
+      return result;
+    });
+
+  let after =
+    typeof body?.after === "string" && body.after.startsWith(`${base}/students/`)
+      ? body.after
+      : null;
+  let scanned = 0;
+  let moved = 0;
+  let done = false;
+
+  try {
+    for (let page = 0; page < PRIVATE_MIGRATION_MAX_PAGES; page += 1) {
+      const rows = await api(":runQuery", {
+        structuredQuery: {
+          from: [{ collectionId: "students" }],
+          select: {
+            fields: [...PRIVATE_PROFILE_FIELDS, "userId", "uid"].map((fieldPath) => ({ fieldPath })),
+          },
+          orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }],
+          ...(after ? { startAt: { values: [{ referenceValue: after }], before: false } } : {}),
+          limit: PRIVATE_MIGRATION_PAGE,
+        },
+      });
+      const docs = (Array.isArray(rows) ? rows : []).filter((row) => row.document).map((row) => row.document);
+      scanned += docs.length;
+
+      const candidates = docs.filter((document) =>
+        PRIVATE_PROFILE_FIELDS.some((key) => document.fields?.[key] !== undefined),
+      );
+      if (candidates.length) {
+        const privateName = (document) => `${base}/studentPrivate/${document.name.split("/").pop()}`;
+        const existing = new Map();
+        const found = await api(":batchGet", { documents: candidates.map(privateName) });
+        for (const entry of Array.isArray(found) ? found : []) {
+          if (entry.found) existing.set(entry.found.name, entry.found.fields || {});
+        }
+
+        const writes = [];
+        for (const document of candidates) {
+          const plan = planPrivateProfileMove(
+            document.fields || {},
+            existing.get(privateName(document)) || {},
+          );
+          if (!plan) continue;
+          const uid = document.fields?.userId?.stringValue || document.fields?.uid?.stringValue || "";
+          const privateFields = {
+            ...plan.privateFields,
+            ...(uid ? { userId: { stringValue: uid } } : {}),
+            updatedAt: { timestampValue: new Date().toISOString() },
+          };
+          writes.push({
+            update: { name: privateName(document), fields: privateFields },
+            updateMask: { fieldPaths: Object.keys(privateFields) },
+          });
+          writes.push({
+            update: { name: document.name, fields: {} },
+            updateMask: { fieldPaths: plan.publicRemove },
+            currentDocument: { exists: true },
+          });
+          moved += 1;
+        }
+        // Private record and public removal together, or neither.
+        if (writes.length) await api(":commit", { writes });
+      }
+
+      if (docs.length < PRIVATE_MIGRATION_PAGE) {
+        done = true;
+        after = null;
+        break;
+      }
+      after = docs[docs.length - 1].name;
+    }
+  } catch (error) {
+    console.error("[privacy] moving personal emails failed:", error?.message || error);
+    return json({ error: "Couldn't move the emails. Please try again." }, { status: 502 });
+  }
+
+  return json({ ok: true, scanned, moved, done, next: done ? null : after });
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
@@ -2463,6 +3047,7 @@ export default {
           lookupUser: lookupFirebaseUser,
           readProfile: (environment, id) => readFirestoreDocSafe(environment, `/students/${encodeURIComponent(id)}`),
           patchProfile: (environment, id, fields) => patchFirestore(environment, "students", id, fields),
+          isTemporaryPassword,
         });
         return json(result.body, { status: result.status, headers: { "Access-Control-Allow-Origin": allowedOrigin } });
       }
@@ -2482,6 +3067,15 @@ export default {
       }
       if (body?.mode === "password-reset-start") {
         return await handlePasswordResetStart(env, request, body);
+      }
+      if (body?.mode === "signin-help-request") {
+        return await handleSignInHelpRequest(env, request, body);
+      }
+      if (body?.mode === "admin-account-recovery") {
+        return await handleAdminAccountRecovery(env, request, body);
+      }
+      if (body?.mode === "migrate-private-profile") {
+        return await handleMigratePrivateProfile(env, request, body);
       }
       if (body?.mode === "password-reset-confirm") {
         return await handlePasswordResetConfirm(env, request, body);

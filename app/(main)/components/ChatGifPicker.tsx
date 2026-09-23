@@ -1,16 +1,18 @@
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, FlatList, Keyboard, Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { ActivityIndicator, FlatList, Keyboard, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Image } from "expo-image";
 import { Ionicons } from "@expo/vector-icons";
 import { ChatGif, fetchChatGifs } from "@/utils/giphy";
+import DragToCloseSheet from "./DragToCloseSheet";
 
 export default function ChatGifPicker({ onClose, onSelect, color }: {
   onClose: () => void; onSelect: (gif: ChatGif) => void; color: string;
 }) {
   const { styles, theme } = useStyles();
+  const insets = useSafeAreaInsets();
   const [search, setSearch] = useState("");
   const [gifs, setGifs] = useState<ChatGif[]>([]);
   const [loading, setLoading] = useState(true);
@@ -51,12 +53,19 @@ export default function ChatGifPicker({ onClose, onSelect, color }: {
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Couldn't load GIFs."); }
     finally { if (!controller.signal.aborted) { inFlight.current = false; setLoading(false); } }
   };
-  return <Modal visible animationType="slide" onRequestClose={onClose} presentationStyle="fullScreen">
-    <SafeAreaView style={styles.screen}>
-      <View style={styles.header}>
+  const header = <View style={styles.header}>
         <Text style={styles.title}>{selected ? "Preview GIF" : "GIFs"}</Text>
         <Pressable onPress={onClose} style={styles.button} accessibilityLabel="Close GIF picker" accessibilityRole="button"><Ionicons name="close" size={25} color={color} /></Pressable>
-      </View>
+      </View>;
+  return <DragToCloseSheet
+    visible
+    onClose={onClose}
+    header={header}
+    handleColor={theme.borderStrong}
+    closeLabel="Close GIF picker"
+    sheetStyle={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 10) }]}
+  >
+    <View style={styles.screen}>
       {selected ? <View style={styles.preview}>
         <Image source={{ uri: selected.url }} style={styles.largeImage} contentFit="contain" accessibilityLabel={selected.title} />
         <Pressable style={[styles.select, { backgroundColor: color }]} onPress={() => onSelect(selected)}><Text style={styles.selectText}>Add to message</Text></Pressable>
@@ -75,18 +84,19 @@ export default function ChatGifPicker({ onClose, onSelect, color }: {
       </>}
       <View style={styles.attribution}><Image source={require("@/assets/images/giphy-attribution.png")}
         style={{ width: 180, height: 40 }} contentFit="contain" accessibilityLabel="Powered by GIPHY" /></View>
-    </SafeAreaView>
-  </Modal>;
+    </View>
+  </DragToCloseSheet>;
 }
 const makeStyles = (c: ThemeTokens) =>
   StyleSheet.create({
+  sheet: { height: "84%", maxHeight: 720, backgroundColor: c.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: "hidden" },
   screen: { flex: 1, backgroundColor: c.surface },
-  header: { paddingLeft: 18, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  title: { color: c.textPrimary, fontSize: 22, fontWeight: "700" },
-  button: { padding: 14, minHeight: 44, alignItems: "center" },
-  search: { marginHorizontal: 16, marginTop: 8, borderRadius: 22, backgroundColor: c.surfaceSunken, padding: 13, color: c.textPrimary, fontSize: 16 },
-  caption: { padding: 16, color: c.textMuted },
-  grid: { paddingHorizontal: 8 },
+  header: { minHeight: 48, paddingLeft: 18, paddingRight: 6, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
+  title: { color: c.textPrimary, fontSize: 19, fontWeight: "800" },
+  button: { padding: 10, minHeight: 44, alignItems: "center", justifyContent: "center" },
+  search: { marginHorizontal: 16, marginTop: 12, borderRadius: 18, backgroundColor: c.surfaceSunken, paddingHorizontal: 14, paddingVertical: 11, color: c.textPrimary, fontSize: 15 },
+  caption: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, color: c.textMuted, fontSize: 12, fontWeight: "700" },
+  grid: { paddingHorizontal: 10, paddingBottom: 12 },
   tile: { width: "50%", padding: 4 },
   image: { width: "100%", height: 145, backgroundColor: c.surfaceSunken, borderRadius: 12 },
   preview: { flex: 1, justifyContent: "center", padding: 20, gap: 16 },
@@ -94,7 +104,7 @@ const makeStyles = (c: ThemeTokens) =>
   select: { alignItems: "center", padding: 15, borderRadius: 24 },
   selectText: { color: c.onPrimary, fontWeight: "700", fontSize: 16 },
   error: { color: c.primary, textAlign: "center" },
-  attribution: { alignSelf: "center", margin: 10, paddingHorizontal: 8, borderRadius: 8, backgroundColor: "#181818" },
+  attribution: { alignSelf: "center", marginTop: 6, paddingHorizontal: 8, borderRadius: 8, backgroundColor: "#181818" },
 });
 
 /** Themed stylesheet for this file. */

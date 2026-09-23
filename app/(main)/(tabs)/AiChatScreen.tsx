@@ -1625,7 +1625,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   headerTitle: {
     color: c.onChrome,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "800",
   },
   headerSubtitle: {
@@ -1684,7 +1684,7 @@ const makeStyles = (c: ThemeTokens) =>
     width: 38,
     height: 38,
     borderRadius: 19,
-    backgroundColor: c.textSecondary,
+    backgroundColor: c.primary,
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#000",
@@ -1696,7 +1696,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   emptyState: {
     alignItems: "center",
-    gap: 14,
+    gap: 16,
     paddingTop: 12,
   },
   emptyGreeting: {
@@ -1704,7 +1704,7 @@ const makeStyles = (c: ThemeTokens) =>
     maxWidth: 420,
   },
   messageRow: {
-    marginBottom: 14,
+    marginBottom: 16,
     flexDirection: "row",
     alignItems: "flex-end",
   },
@@ -1730,7 +1730,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surface,
     borderRadius: 20,
     paddingHorizontal: 15,
-    paddingVertical: 13,
+    paddingVertical: 16,
     borderWidth: 1,
     borderColor: c.borderStrong,
   },
@@ -1748,7 +1748,7 @@ const makeStyles = (c: ThemeTokens) =>
   messageText: {
     color: c.textPrimary,
     fontSize: 15,
-    lineHeight: 22.5,
+    lineHeight: 20,
   },
   messageTextOwn: {
     color: c.onPrimary,
@@ -1845,7 +1845,7 @@ const makeStyles = (c: ThemeTokens) =>
     gap: 8,
     paddingHorizontal: 12,
     paddingTop: 10,
-    paddingBottom: 96,
+    paddingBottom: COMPOSER_RESTING_BOTTOM_PADDING,
     backgroundColor: c.surfaceSunken,
     borderTopWidth: 1,
     borderTopColor: c.borderStrong,
@@ -1902,7 +1902,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
     paddingTop: 16,
-    paddingBottom: 28,
+    paddingBottom: 24,
     maxHeight: "82%",
   },
   historyHeader: {

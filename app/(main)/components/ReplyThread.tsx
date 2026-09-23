@@ -1,4 +1,5 @@
 import { hasAiAssistantMention, isAiAssistantId } from "@/utils/aiAssistant";
+import { anonymousName } from "@/utils/anonymousHandle";
 import { getAiErrorMessage } from "@/utils/aiConfig";
 import {
     buildAiConversationContext,
@@ -25,7 +26,6 @@ import {
 } from "@/utils/contentModeration";
 import { localCopyOf, type ComposerAttachments } from "@/utils/composerUploads";
 import SafetyDialog from "./SafetyDialog";
-import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { flagPotentialResolution } from "@/utils/lostAndFoundResolution";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import {
@@ -53,6 +53,7 @@ import {
     subscribeToUserDataUpdates,
 } from "@/utils/rbac";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
+import { canNavigateToTaggedUser, manualTaggedUsers, splitTaggedMentions } from "@/utils/taggedUsers";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
@@ -88,7 +89,6 @@ import {
     BackHandler,
     FlatList,
     Keyboard,
-    KeyboardEvent,
     Linking,
     Modal,
     PanResponder,
@@ -100,18 +100,18 @@ import {
     View,
 } from "react-native";
 import ReanimatedAnimated, {
-    runOnJS,
     useAnimatedStyle,
-    useSharedValue,
-    withTiming,
 } from "react-native-reanimated";
+import { useReanimatedKeyboardAnimation } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { db } from "../../../Firebase_configure";
 import AiReplyCard from "./AiReplyCard";
 import ReplyComposer from "./ReplyComposer";
 import ConfirmDialog from "./ConfirmDialog";
 import ExpandableText from "./ExpandableText";
+import ExternalLinkDialog, { prepareExternalLink } from "./ExternalLinkDialog";
 import ImageZoomViewer from "./ImageZoomViewer";
+import FileAttachmentCard from "./FileAttachmentCard";
 
 const REPLY_RETURN_ROUTE = "/(main)/(tabs)/HomeScreen";
 
@@ -133,6 +133,7 @@ type Reply = {
     url: string;
     mimeType: string;
     name?: string;
+    size?: number;
   }[];
   link?: {
     url: string;
@@ -143,6 +144,7 @@ type Reply = {
     name: string;
     studentID: string;
   }[];
+  mentionedUserIds?: string[];
   likeCount?: number;
   likedBy?: string[];
   seenBy?: string[];
@@ -195,7 +197,7 @@ const ReplyBubbleComponent: React.FC<{
   onOptionsPress: (item: Reply, authorRole?: UserRole) => void;
   onProfileClick: (item: Reply, profileDocId?: string | null) => void;
   onTagClick: (userId: string) => void;
-  onLinkPress: (url: string) => void;
+  onLinkPress: (url: string, label?: string) => void;
   onFilePress: (url: string) => void;
   onImagePress: (images: string[], index: number) => void;
   getTimeAgo: (ts: any) => string;
@@ -227,6 +229,7 @@ const ReplyBubbleComponent: React.FC<{
   const { styles, theme } = useStyles();
   const [authorData, setAuthorData] = useState<any>(null);
   const [revealed, setRevealed] = useState(false);
+  const [tagsExpanded, setTagsExpanded] = useState(false);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
@@ -305,7 +308,7 @@ const ReplyBubbleComponent: React.FC<{
         item.username ||
         "User"
       : item.username || "User"
-    : (isAnon && isSelf && isStaffViewer ? "Anonymous (You)" : "Anonymous");
+    : anonymousName(item, { isYou: isAnon && isSelf && isStaffViewer });
 
   const initial = isIdentityVisible
     ? (
@@ -338,7 +341,13 @@ const ReplyBubbleComponent: React.FC<{
   const gifLocalCopy = localCopyOf(gifFiles[0]?.url);
   const imageLocalCopy = localCopyOf(imageFiles[0]?.url);
 
-  const taggedUsers = item.taggedUsers ?? [];
+  const taggedUsers = manualTaggedUsers(
+    item.text,
+    item.taggedUsers,
+    item.mentionedUserIds,
+  );
+  const visibleTaggedUsers = tagsExpanded ? taggedUsers : taggedUsers.slice(0, 1);
+  const hiddenTaggedCount = Math.max(0, taggedUsers.length - 1);
 
   const liveAvatar = isSelf
     ? resolveAvatarUri(currentUser)
@@ -501,32 +510,20 @@ const ReplyBubbleComponent: React.FC<{
             onPress={() =>
               onReplyReferencePress(item.replyingTo?.id)
             }
-            style={[
-              styles.replyPreview,
-              isCurrentUser && styles.replyPreviewRight,
-            ]}
+            // The same card on both sides. Yours used the theme's secondary
+            // text colour as a background with white text — dark brown in the
+            // light themes, but pale pink in the dark ones, so it vanished.
+            style={styles.replyPreview}
           >
             <View style={styles.replyPreviewBar} />
 
             <View style={{ flex: 1 }}>
-              <Text
-                style={[
-                  styles.replyPreviewAuthor,
-                  isCurrentUser && {
-                    color: theme.onPrimary,
-                  },
-                ]}
-              >
+              <Text style={styles.replyPreviewAuthor}>
                 {item.replyingTo.name}
               </Text>
 
               <Text
-                style={[
-                  styles.replyPreviewText,
-                  isCurrentUser && {
-                    color: "#ffffff99",
-                  },
-                ]}
+                style={styles.replyPreviewText}
                 numberOfLines={2}
               >
                 {item.replyingTo.text || "Message"}
@@ -554,8 +551,27 @@ const ReplyBubbleComponent: React.FC<{
                 styles.bubbleText,
                 isCurrentUser && styles.bubbleTextRight,
               ]}
+              renderText={(text) =>
+                splitTaggedMentions(text, item.taggedUsers, item.mentionedUserIds).map((part, index) => {
+                  const navigable = canNavigateToTaggedUser(part.taggedUser?.id);
+                  return part.taggedUser ? (
+                    <Text
+                      key={`${part.taggedUser.id}-${index}`}
+                      style={[
+                        styles.inlineMention,
+                        isCurrentUser && styles.inlineMentionRight,
+                      ]}
+                      onPress={navigable ? () => onTagClick(part.taggedUser!.id) : undefined}
+                      accessibilityRole={navigable ? "link" : undefined}
+                    >
+                      {part.text}
+                    </Text>
+                  ) : (
+                    <React.Fragment key={`text-${index}`}>{part.text}</React.Fragment>
+                  );
+                })
+              }
               collapsedLines={5}
-              minLengthToToggle={220}
               buttonTextStyle={[
                 styles.replyToggleText,
                 isCurrentUser &&
@@ -618,56 +634,14 @@ const ReplyBubbleComponent: React.FC<{
 
           {docFiles.length > 0 && (
             <View style={styles.docsContainer}>
-              {docFiles.map((file, idx) => {
-                const displayName = getFileDisplayName(file);
-                const details = getFileIconDetails(file.mimeType, displayName);
-                return (
-                  <TouchableOpacity
-                    key={`${file.url}-${idx}`}
-                    style={[
-                      styles.docItem,
-                      isCurrentUser &&
-                        styles.docItemRight,
-                    ]}
-                    onPress={() =>
-                      onFilePress(file.url)
-                    }
-                    disabled={sending}
-                  >
-                    <Ionicons
-                      name={details.icon}
-                      size={14}
-                      color={
-                        isCurrentUser
-                          ? "#fff"
-                          : details.color
-                      }
-                    />
-
-                    <Text
-                      style={[
-                        styles.docText,
-                        isCurrentUser && {
-                          color: "#fff",
-                        },
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {displayName}
-                    </Text>
-
-                    <Ionicons
-                      name="download-outline"
-                      size={12}
-                      color={
-                        isCurrentUser
-                          ? "#ffffff99"
-                          : theme.textMuted
-                      }
-                    />
-                  </TouchableOpacity>
-                );
-              })}
+              {docFiles.map((file, idx) => (
+                <FileAttachmentCard
+                  key={`${file.url}-${idx}`}
+                  file={{ ...file, name: getFileDisplayName(file) }}
+                  onPress={() => onFilePress(file.url)}
+                  disabled={sending}
+                />
+              ))}
             </View>
           )}
 
@@ -679,7 +653,7 @@ const ReplyBubbleComponent: React.FC<{
                   styles.linkPreviewRight,
               ]}
               onPress={() =>
-                onLinkPress(item.link?.url ?? "")
+                onLinkPress(item.link?.url ?? "", item.link?.title)
               }
             >
               <Ionicons
@@ -693,22 +667,19 @@ const ReplyBubbleComponent: React.FC<{
               />
 
               <View
-                style={{
-                  flex: 1,
-                  marginLeft: 6,
-                }}
+                style={styles.linkCopy}
               >
-                <Text
-                  style={[
-                    styles.linkTitle,
-                    isCurrentUser && {
-                      color: "#fff",
-                    },
-                  ]}
-                  numberOfLines={1}
-                >
-                  {item.link?.title ?? "Link"}
-                </Text>
+                {!!item.link.title?.trim() && item.link.title.trim() !== item.link.url && (
+                  <Text
+                    style={[
+                      styles.linkTitle,
+                      isCurrentUser && { color: "#fff" },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {item.link.title.trim()}
+                  </Text>
+                )}
 
                 <Text
                   style={[
@@ -717,7 +688,6 @@ const ReplyBubbleComponent: React.FC<{
                       color: "#ffffff99",
                     },
                   ]}
-                  numberOfLines={1}
                 >
                   {item.link?.url ?? ""}
                 </Text>
@@ -735,7 +705,7 @@ const ReplyBubbleComponent: React.FC<{
             </TouchableOpacity>
           )}
 
-          {taggedUsers.length > 0 && (
+          {visibleTaggedUsers.length > 0 && (
             <View
               style={[
                 styles.taggedRow,
@@ -765,40 +735,33 @@ const ReplyBubbleComponent: React.FC<{
               </Text>
 
               <View style={styles.taggedNames}>
-                {taggedUsers.map((tag, idx) => (
+                {visibleTaggedUsers.map((tag, index) => (
                   <React.Fragment key={tag.id}>
                     <TouchableOpacity
-                      onPress={() =>
-                        onTagClick(tag.id)
-                      }
+                      onPress={() => onTagClick(tag.id)}
+                      disabled={!canNavigateToTaggedUser(tag.id)}
                     >
-                      <Text
-                        style={[
-                          styles.taggedName,
-                          isCurrentUser && {
-                            color: "#fff",
-                          },
-                        ]}
-                      >
+                      <Text style={[styles.taggedName, isCurrentUser && { color: "#fff" }]}>
                         {tag.name}
                       </Text>
                     </TouchableOpacity>
-
-                    {idx <
-                      taggedUsers.length - 1 && (
-                      <Text
-                        style={[
-                          styles.taggedWith,
-                          isCurrentUser && {
-                            color: theme.onPrimary,
-                          },
-                        ]}
-                      >
-                        ,{" "}
-                      </Text>
+                    {index < visibleTaggedUsers.length - 1 && (
+                      <Text style={[styles.taggedWith, isCurrentUser && { color: theme.onPrimary }]}>, </Text>
                     )}
                   </React.Fragment>
                 ))}
+                {hiddenTaggedCount > 0 && !tagsExpanded && (
+                  <TouchableOpacity onPress={() => setTagsExpanded(true)}>
+                    <Text style={[styles.taggedMore, isCurrentUser && { color: theme.onPrimary }]}>
+                      {`See ${hiddenTaggedCount} more`}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {tagsExpanded && hiddenTaggedCount > 0 && (
+                  <TouchableOpacity onPress={() => setTagsExpanded(false)}>
+                    <Text style={[styles.taggedMore, isCurrentUser && { color: theme.onPrimary }]}>See less</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             </View>
           )}
@@ -937,6 +900,8 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   // Self-harm gets its own dialog instead of the generic confirm one — see
   // components/SafetyDialog.
   const [safetyVisible, setSafetyVisible] = useState(false);
+  const [pendingLink, setPendingLink] =
+    useState<ReturnType<typeof prepareExternalLink>>(null);
 
   const [loading, setLoading] =
     useState(true);
@@ -984,9 +949,6 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       text: string;
     } | null>(null);
 
-  const [keyboardHeight, setKeyboardHeight] =
-    useState(0);
-
   const [highlightedReplyId, setHighlightedReplyId] =
     useState<string | null>(
       initialReplyId || null,
@@ -1007,13 +969,12 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
       typeof setTimeout
     > | null>(null);
 
-  // Reanimated keeps the keyboard lift on the UI thread.
-  const composerBottom = useSharedValue(0);
-  const composerAnimatedStyle =
-    useAnimatedStyle(() => ({
-      marginBottom:
-        composerBottom.value,
-    }));
+  // The keyboard's position on every frame: height runs from 0 down to
+  // minus the keyboard's height, progress from 0 to 1.
+  const {
+    height: keyboardOffset,
+    progress: keyboardProgress,
+  } = useReanimatedKeyboardAnimation();
 
   const replyActionsTranslateY =
     useRef(new Animated.Value(0)).current;
@@ -1027,6 +988,21 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         ? 16
         : 12,
     );
+
+  // The typing bar rides on the keyboard as it moves. It used to wait for
+  // Android to say the keyboard had finished opening and only then slide
+  // up, so the keyboard covered it for a moment first.
+  const composerAnimatedStyle =
+    useAnimatedStyle(() => ({
+      marginBottom:
+        -keyboardOffset.value +
+        keyboardProgress.value *
+          KEYBOARD_COMPOSER_LIFT,
+      paddingBottom:
+        hiddenComposerPadding +
+        (8 - hiddenComposerPadding) *
+          keyboardProgress.value,
+    }));
 
   const scrollToBottom =
     useCallback(() => {
@@ -1115,69 +1091,23 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   }, [visible, onClose]);
 
   useEffect(() => {
+    // Once the keyboard is up, the newest replies move into view above it.
     const showSub =
       Keyboard.addListener(
         Platform.OS === "ios"
           ? "keyboardWillShow"
           : "keyboardDidShow",
-        (e: KeyboardEvent) => {
-          const nextHeight =
-            Math.max(
-              0,
-              e.endCoordinates.height,
-            );
-
-          setKeyboardHeight(
-            nextHeight,
+        () => {
+          requestAnimationFrame(
+            scrollToBottom,
           );
-
-          composerBottom.value =
-            withTiming(
-              nextHeight +
-                KEYBOARD_COMPOSER_LIFT,
-              {
-                duration:
-                  Platform.OS === "ios"
-                    ? e.duration || 250
-                    : 220,
-              },
-              (finished) => {
-                if (finished) {
-                  runOnJS(
-                    scrollToBottom,
-                  )();
-                }
-              },
-            );
-        },
-      );
-
-    const hideSub =
-      Keyboard.addListener(
-        Platform.OS === "ios"
-          ? "keyboardWillHide"
-          : "keyboardDidHide",
-        (e: KeyboardEvent) => {
-          setKeyboardHeight(0);
-
-          composerBottom.value =
-            withTiming(0, {
-              duration:
-                Platform.OS === "ios"
-                  ? e.duration || 250
-                  : 180,
-            });
         },
       );
 
     return () => {
       showSub.remove();
-      hideSub.remove();
     };
-  }, [
-    composerBottom,
-    scrollToBottom,
-  ]);
+  }, [scrollToBottom]);
 
   useEffect(() => {
     if (!commentId) return;
@@ -1695,6 +1625,12 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
           });
         }
 
+        const replyPostSnapshot = replyPostId
+          ? await getDoc(doc(db, "posts", replyPostId))
+          : null;
+        const mentionServerId = replyPostSnapshot?.exists()
+          ? String(replyPostSnapshot.data()?.serverId || "") || null
+          : null;
         await createMentionNotifications({
           recipientIds:
             await resolveMentionRecipientIds(
@@ -1717,9 +1653,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                   ),
                 actorId:
                   currentUser.uid,
-                serverId:
-                  commentData?.postId ||
-                  null,
+                serverId: mentionServerId,
               },
             ),
           actor,
@@ -2450,6 +2384,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
   const handleTagClick =
     useCallback(
       (taggedUserId: string) => {
+        if (!canNavigateToTaggedUser(taggedUserId)) return;
         try {
           if (
             currentUser &&
@@ -2482,7 +2417,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
     );
 
   const handleLinkPress = useCallback(
-    (url: string) => {
+    (url: string, label?: string) => {
       if (!url.trim()) {
         setConfirmDialog({
           title:
@@ -2504,51 +2439,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         return;
       }
 
-      Linking.canOpenURL(url)
-        .then((ok) => {
-          if (ok) {
-            return Linking.openURL(
-              url,
-            );
-          }
-
-          setConfirmDialog({
-            title:
-              "Invalid Link",
-            description:
-              "Cannot open this URL",
-            confirmText:
-              "OK",
-            singleAction:
-              true,
-            destructive:
-              true,
-            onConfirm: () =>
-              setConfirmDialog(
-                null,
-              ),
-          });
-
-          return undefined;
-        })
-        .catch(() =>
-          setConfirmDialog({
-            title:
-              "Error",
-            description:
-              "Failed to open link",
-            confirmText:
-              "OK",
-            singleAction:
-              true,
-            destructive:
-              true,
-            onConfirm: () =>
-              setConfirmDialog(
-                null,
-              ),
-          }),
-        );
+      setPendingLink(prepareExternalLink(url, label));
     },
     [],
   );
@@ -2953,8 +2844,8 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             >
               <Ionicons
                 name="chatbubbles-outline"
-                size={52}
-                color="#f0e7e2"
+                size={40}
+                color={theme.textMuted}
               />
 
               <Text
@@ -3042,13 +2933,6 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
             <ReanimatedAnimated.View
               style={[
                 styles.composerWrapper,
-                {
-                  paddingBottom:
-                    keyboardHeight >
-                    0
-                      ? 8
-                      : hiddenComposerPadding,
-                },
                 composerAnimatedStyle,
               ]}
             >
@@ -3147,7 +3031,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                         "anonymous"
                         ? reply.username ||
                           "User"
-                        : "Anonymous";
+                        : anonymousName(reply);
 
                     setReplyingTo({
                       id: reply.id,
@@ -3427,7 +3311,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               >
                 <Ionicons
                   name="close"
-                  size={22}
+                  size={24}
                   color={theme.textMuted}
                 />
               </TouchableOpacity>
@@ -3560,7 +3444,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               >
                 <Ionicons
                   name="close"
-                  size={22}
+                  size={24}
                   color={theme.textMuted}
                 />
               </TouchableOpacity>
@@ -3575,8 +3459,8 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
               >
                 <Ionicons
                   name="eye-off-outline"
-                  size={42}
-                  color="#f0e7e2"
+                  size={40}
+                  color={theme.textMuted}
                 />
 
                 <Text
@@ -3595,42 +3479,7 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
                 keyExtractor={(id) =>
                   id
                 }
-                renderItem={({
-                  item: uid,
-                }) => (
-                  <View
-                    style={
-                      styles.seenRow
-                    }
-                  >
-                    <View
-                      style={
-                        styles.seenAvatar
-                      }
-                    >
-                      <Text
-                        style={
-                          styles.seenAvatarText
-                        }
-                      >
-                        {uid[0]?.toUpperCase()}
-                      </Text>
-                    </View>
-
-                    <Text
-                      style={
-                        styles.seenName
-                      }
-                    >
-                      User{" "}
-                      {uid.slice(
-                        0,
-                        8,
-                      )}
-                      …
-                    </Text>
-                  </View>
-                )}
+                renderItem={({ item: uid }) => <SeenByRow uid={uid} />}
               />
             )}
           </View>
@@ -3689,6 +3538,11 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
         }
       />
 
+      <ExternalLinkDialog
+        link={pendingLink}
+        onClose={() => setPendingLink(null)}
+      />
+
       <SafetyDialog
         visible={safetyVisible}
         onClose={() =>
@@ -3707,6 +3561,51 @@ const ReplyThread: React.FC<ReplyThreadProps> = ({
  * and each must read the palette itself — handing them a styles object as a
  * prop would change its identity every render and defeat the memo.
  */
+/**
+ * One person in "Seen by": their photo and full name, looked up from their
+ * account. It used to print "User" and the first 8 characters of their ID.
+ */
+const SeenByRow = React.memo(function SeenByRow({ uid }: { uid: string }) {
+  const { styles } = useStyles();
+  const [person, setPerson] = useState<{ name: string; photo: string | null } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getUserData(uid)
+      .then((data) => {
+        if (cancelled) return;
+        const name = data ? `${data.firstname || ""} ${data.lastname || ""}`.trim() : "";
+        setPerson({ name: name || "BondED member", photo: (data && resolveAvatarUri(data)) || null });
+      })
+      .catch(() => {
+        if (!cancelled) setPerson({ name: "BondED member", photo: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [uid]);
+
+  const name = person?.name || "";
+  return (
+    <View style={styles.seenRow}>
+      <View style={styles.seenAvatar}>
+        {person?.photo ? (
+          <Image
+            source={{ uri: person.photo }}
+            style={styles.seenAvatarImage}
+            contentFit="cover"
+          />
+        ) : (
+          <Text style={styles.seenAvatarText}>{(name[0] || "·").toUpperCase()}</Text>
+        )}
+      </View>
+      <Text style={styles.seenName} numberOfLines={1}>
+        {person ? name : "Loading…"}
+      </Text>
+    </View>
+  );
+});
+
 const useStyles = () => {
   const theme = useThemeColors();
   const styles = useMemo(() => makeStyles(theme), [theme]);
@@ -3742,12 +3641,12 @@ const makeStyles = (c: ThemeTokens) =>
 
   headerTitle: {
     color: c.onChrome,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "700",
   },
 
   headerSub: {
-    color: c.borderStrong,
+    color: c.onChromeMuted,
     fontSize: 12.5,
     marginTop: 2,
   },
@@ -3893,10 +3792,6 @@ const makeStyles = (c: ThemeTokens) =>
     borderColor: c.borderStrong,
   },
 
-  replyPreviewRight: {
-    backgroundColor: c.textSecondary,
-  },
-
   replyPreviewBar: {
     width: 3,
     backgroundColor: c.accent,
@@ -3939,7 +3834,7 @@ const makeStyles = (c: ThemeTokens) =>
   bubbleText: {
     color: c.textPrimary,
     fontSize: 15,
-    lineHeight: 21,
+    lineHeight: 20,
   },
 
   bubbleTextRight: {
@@ -4026,6 +3921,8 @@ const makeStyles = (c: ThemeTokens) =>
   linkPreview: {
     flexDirection: "row",
     alignItems: "center",
+    minWidth: 210,
+    maxWidth: 270,
     backgroundColor: c.border,
     padding: 9,
     borderRadius: 10,
@@ -4050,7 +3947,11 @@ const makeStyles = (c: ThemeTokens) =>
   linkUrl: {
     color: c.textMuted,
     fontSize: 11,
+    lineHeight: 15,
   },
+  inlineMention: { color: c.isDark ? "#93C5FD" : "#2563EB", fontWeight: "700" },
+  inlineMentionRight: { color: "#BFDBFE" },
+  linkCopy: { flexShrink: 1, minWidth: 0, marginLeft: 2 },
 
   taggedRow: {
     flexDirection: "row",
@@ -4085,6 +3986,17 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "600",
     fontSize: 11.5,
   },
+  taggedMore: { color: c.textMuted, fontSize: 11, fontWeight: "700", marginLeft: 6 },
+  taggedExpandedList: {
+    width: "100%",
+    marginTop: 6,
+    paddingTop: 6,
+    gap: 6,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: c.borderStrong,
+  },
+  taggedExpandedListRight: { borderTopColor: "rgba(255,255,255,0.24)" },
+  taggedExpandedPerson: { flexDirection: "row", alignItems: "center", gap: 5 },
 
   bubbleFooter: {
     flexDirection: "row",
@@ -4152,7 +4064,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderTopRightRadius: 24,
     paddingHorizontal: 14,
     paddingTop: 10,
-    paddingBottom: 18,
+    paddingBottom: 16,
     borderWidth: 1,
     borderColor: c.border,
   },
@@ -4175,7 +4087,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
 
   actionMenuItem: {
-    minHeight: 50,
+    minHeight: 52,
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 12,
@@ -4221,7 +4133,7 @@ const makeStyles = (c: ThemeTokens) =>
       "rgba(0,0,0,0.6)",
     justifyContent: "center",
     alignItems: "center",
-    padding: 20,
+    padding: 24,
   },
 
   editSheet: {
@@ -4243,7 +4155,7 @@ const makeStyles = (c: ThemeTokens) =>
 
   editTitle: {
     color: c.textPrimary,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "700",
   },
 
@@ -4256,7 +4168,7 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.surface,
     color: c.textPrimary,
     fontSize: 15,
-    lineHeight: 21,
+    lineHeight: 20,
     paddingHorizontal: 13,
     paddingVertical: 12,
   },
@@ -4289,7 +4201,7 @@ const makeStyles = (c: ThemeTokens) =>
     minWidth: 90,
     height: 44,
     borderRadius: 12,
-    backgroundColor: c.textSecondary,
+    backgroundColor: c.primary,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 16,
@@ -4300,7 +4212,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
 
   editSaveText: {
-    color: "#fff",
+    color: c.onPrimary,
     fontSize: 14,
     fontWeight: "700",
   },
@@ -4358,9 +4270,14 @@ const makeStyles = (c: ThemeTokens) =>
   },
 
   seenAvatarText: {
-    color: "#ff8ab2",
+    color: c.primary,
     fontWeight: "700",
     fontSize: 14,
+  },
+  seenAvatarImage: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
   },
 
   seenName: {
@@ -4373,14 +4290,14 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    padding: 40,
+    padding: 32,
   },
 
   emptyTitle: {
     color: c.textPrimary,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "700",
-    marginTop: 14,
+    marginTop: 16,
   },
 
   emptySub: {

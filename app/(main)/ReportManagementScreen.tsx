@@ -29,7 +29,7 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "../../Firebase_configure";
 import ConfirmDialog from "./components/ConfirmDialog";
-import { ListSkeleton } from "./components/Skeleton";
+import { CardListSkeleton, SkeletonCard } from "./components/Skeleton";
 import {
   getUserData,
   isStaff,
@@ -680,13 +680,42 @@ export default function ReportManagementScreen() {
   };
 
   if (authLoading || loading) {
+    // Drawn as the screen will be — its bar, its opening card, then cards in
+    // the real card style — so nothing moves when the data arrives.
     return (
       <View style={styles.container}>
-        <ListSkeleton
-          count={5}
-          showAvatar={false}
-          contentStyle={styles.skeletonContent}
-          rowStyle={styles.skeletonCard}
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.backButton} onPress={() => router.back()} activeOpacity={0.8}>
+            <Ionicons name="arrow-back" size={24} color={theme.onPrimary} />
+          </TouchableOpacity>
+          <View style={styles.headerTextWrap}>
+            <Text style={styles.headerTitle}>Reports Management</Text>
+            <Text style={styles.headerSubtitle}>
+              Review and handle reports submitted by the community
+            </Text>
+          </View>
+        </View>
+        <CardListSkeleton
+          count={4}
+          style={[styles.content, styles.contentContainer]}
+          header={
+            <SkeletonCard
+              style={styles.summaryCard}
+              avatar={{ size: 48, radius: 16 }}
+              lines={[
+                { width: "55%", height: 15 },
+                { width: "80%", height: 11, gap: 8 },
+              ]}
+            />
+          }
+          cardStyle={styles.reportCard}
+          lines={[
+            { width: 110, height: 22 },
+            { width: "90%", height: 12, gap: 12 },
+            { width: "70%", height: 12, gap: 8 },
+          ]}
+          chips={[82, 64, 96]}
+          chipHeight={24}
         />
       </View>
     );
@@ -938,7 +967,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   summaryIcon: {
     width: 48,
@@ -975,7 +1004,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   searchInput: { flex: 1, color: c.textPrimary, fontSize: 14, paddingVertical: 8 },
   reportCard: {
@@ -983,7 +1012,7 @@ const makeStyles = (c: ThemeTokens) =>
     borderRadius: 18,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    padding: 15,
+    padding: 16,
     marginBottom: 12,
   },
   skeletonContent: { padding: 16 },

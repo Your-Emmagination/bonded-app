@@ -3,6 +3,9 @@ import { File, Paths } from "expo-file-system";
 import { Platform } from "react-native";
 
 const ATTACHMENT_UNAVAILABLE = "ATTACHMENT_UNAVAILABLE";
+const ATTACHMENT_TOO_LARGE = "ATTACHMENT_TOO_LARGE";
+/** Keep raw uploads below Cloudinary's unsigned-plan limit, including multipart overhead. */
+export const MAX_DOCUMENT_ATTACHMENT_BYTES = 9 * 1024 * 1024;
 const attachmentUnavailable = () => Object.assign(
   new Error("The selected attachment cannot be read. Remove it and select it again."),
   { code: ATTACHMENT_UNAVAILABLE },
@@ -13,6 +16,21 @@ export function isAttachmentUnavailableError(error: unknown): boolean {
   return details?.code === ATTACHMENT_UNAVAILABLE ||
     /isn't readable|not readable|cannot be read|no such file|does not exist/i.test(details?.message || "");
 }
+
+export function isAttachmentTooLargeError(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === ATTACHMENT_TOO_LARGE;
+}
+
+const assertDocumentSize = (asset: DocumentPicker.DocumentPickerAsset) => {
+  const mimeType = asset.mimeType || "application/octet-stream";
+  if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) return;
+  if (typeof asset.size === "number" && asset.size > MAX_DOCUMENT_ATTACHMENT_BYTES) {
+    throw Object.assign(
+      new Error("This file is larger than 9 MB. Choose a smaller document and try again."),
+      { code: ATTACHMENT_TOO_LARGE },
+    );
+  }
+};
 
 /** Fail before starting a network upload if a cached attachment is gone or inaccessible. */
 export function assertReadableUpload(uri: string): void {
@@ -39,7 +57,9 @@ export async function pickUploadDocuments(
     ...options,
     copyToCacheDirectory: Platform.OS !== "android",
   });
-  if (result.canceled || Platform.OS !== "android") return result;
+  if (result.canceled) return result;
+  result.assets.forEach(assertDocumentSize);
+  if (Platform.OS !== "android") return result;
 
   const copies: File[] = [];
   try {
@@ -54,7 +74,7 @@ export async function pickUploadDocuments(
       assets.push({ ...asset, uri: copy.uri });
     }
     return { ...result, assets };
-  } catch {
+  } catch (error) {
     // A failed selection must not leave partially copied attachments behind.
     for (const copy of copies) {
       try {
@@ -63,6 +83,7 @@ export async function pickUploadDocuments(
         // Best effort; only these newly created cache files are eligible.
       }
     }
+    if (isAttachmentTooLargeError(error)) throw error;
     throw attachmentUnavailable();
   }
 }
