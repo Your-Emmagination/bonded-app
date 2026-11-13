@@ -2,7 +2,7 @@
   "expo": {
     "name": "BondEd",
     "slug": "bonded-app",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "bondedapp",
@@ -18,6 +18,7 @@
       }
     },
     "android": {
+      "versionCode": 2,
       "softwareKeyboardLayoutMode": "resize",
       "package": "com.encabo.bondedapp",
       "googleServicesFile": "./google-services.json",

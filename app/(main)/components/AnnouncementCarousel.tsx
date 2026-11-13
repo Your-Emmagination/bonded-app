@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
+import HorizontalSwipeRegion from "./HorizontalSwipeRegion";
 import {
     Dimensions,
     FlatList,
@@ -134,6 +135,8 @@ export default function AnnouncementCarousel({
         <Text style={styles.swipeHint}>Swipe to browse</Text>
       </View>
 
+      {/* Swipes through the cards; on Home it never opens Community. */}
+      <HorizontalSwipeRegion>
       <FlatList
         initialNumToRender={3}
         maxToRenderPerBatch={3}
@@ -190,6 +193,7 @@ export default function AnnouncementCarousel({
           );
         }}
       />
+      </HorizontalSwipeRegion>
     </View>
   );
 }

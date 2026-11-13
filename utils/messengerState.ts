@@ -1,5 +1,12 @@
 // Pure state helpers shared by presence, receipts, and regression tests.
-export const PRESENCE_TIMEOUT_MS = 90_000;
+/**
+ * How long after its last heartbeat a phone still counts as online. The
+ * heartbeat is once a minute (utils/presence.ts), so this allows one late
+ * beat on weak Wi-Fi without flickering to offline. Opening, backgrounding
+ * and closing the app update presence at once; this only matters when a
+ * phone dies or drops off the network with the app open.
+ */
+export const PRESENCE_TIMEOUT_MS = 150_000;
 
 export function timestampMillis(value: any): number {
   const result = typeof value?.toMillis === "function" ? value.toMillis()

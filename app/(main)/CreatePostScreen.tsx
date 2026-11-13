@@ -57,6 +57,7 @@ import {
 import { auth, db } from "../../Firebase_configure";
 import AlumniBadge from "./components/AlumniBadge";
 import ConfirmDialog, { type ConfirmDialogVariant } from "./components/ConfirmDialog";
+import DragToCloseSheet from "./components/DragToCloseSheet";
 
 import { notifyAnnouncement } from "@/services/notificationService";
 import {
@@ -124,6 +125,29 @@ if (
 // appear and disappear. Purely visual — no behaviour or copy changes.
 const easeLayout = () =>
   LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+
+function cleanFirestoreData<T>(obj: T): T {
+  if (Array.isArray(obj)) {
+    return obj.map((item) => cleanFirestoreData(item)) as unknown as T;
+  }
+  if (
+    obj !== null &&
+    typeof obj === "object" &&
+    !(obj instanceof Date) &&
+    !("_methodName" in (obj as any)) &&
+    !("nanoseconds" in (obj as any)) &&
+    !("_lat" in (obj as any))
+  ) {
+    const cleaned: Record<string, any> = {};
+    for (const [key, val] of Object.entries(obj)) {
+      if (val !== undefined) {
+        cleaned[key] = cleanFirestoreData(val);
+      }
+    }
+    return cleaned as T;
+  }
+  return obj;
+}
 
 // Shared banner for the flair suggestions (Lost & Found, Help / Advice). Both
 // suggestions render this so the card / "Switch flair" / "Not now" styling
@@ -343,6 +367,14 @@ const FlairPicker = memo(function FlairPicker({
   );
 });
 
+/** Where a new pin's end starts: three days from now, at 11:59 PM. */
+const defaultPinEnd = () => {
+  const end = new Date();
+  end.setDate(end.getDate() + 3);
+  end.setHours(23, 59, 0, 0);
+  return end;
+};
+
 const PinSection = memo(function PinSection({
   selectedFlair,
   shouldPin,
@@ -361,31 +393,38 @@ const PinSection = memo(function PinSection({
   onPinIndefinitely: () => void;
 }) {
   const { styles, theme } = useStyles();
+  // An announcement is always pinned: the switch stays on until the flair changes.
+  const locked = selectedFlair === "announcement" && shouldPin;
   return (
     <View style={styles.pinSection}>
       <View style={styles.pinRow}>
         <View style={styles.pinLabelContainer}>
           <Ionicons name="pin" size={18} color={theme.primary} style={{ marginRight: 8 }} />
           <View style={{ flex: 1 }}>
-            <Text style={styles.pinTitle}>Pin to Top of Feed</Text>
+            <Text style={styles.pinTitle}>Pin to Important Announcements</Text>
             <Text style={styles.pinSubtitle}>
-              {selectedFlair === "announcement"
-                ? "Feature in active announcements carousel at top of feed"
-                : "Keep at the top of the campus feed"}
+              Shows in Pinned at the top of Home. Set an end below, or it stays until unpinned.
             </Text>
           </View>
         </View>
         <TouchableOpacity
           activeOpacity={0.8}
           onPress={onTogglePin}
+          disabled={locked}
           accessibilityRole="switch"
-          accessibilityState={{ checked: shouldPin }}
+          accessibilityState={{ checked: shouldPin, disabled: locked }}
+          style={locked && { opacity: 0.6 }}
         >
           <View style={[styles.miniToggle, shouldPin && styles.miniToggleActive]}>
             <View style={[styles.miniToggleThumb, shouldPin && styles.miniToggleThumbActive]} />
           </View>
         </TouchableOpacity>
       </View>
+      {locked && (
+        <Text style={styles.pinSubtitle}>
+          Announcements are always pinned. Change the flair to unpin.
+        </Text>
+      )}
 
       {shouldPin && (
         <View style={styles.pinDetailsCard}>
@@ -860,6 +899,23 @@ const CreatePostScreen = () => {
             setTargetDateLabel(data.targetDateLabel);
           }
         }
+        // An announcement is always pinned. One whose pin has ended, or that
+        // was never pinned, gets a fresh end three days out — never an end
+        // already in the past, which would unpin it the moment it's saved.
+        if (normalizePostFlair(data.flair) === "announcement") {
+          const rawEnd = data.pinExpiresAt || data.targetDate;
+          const endMs = rawEnd?.toDate
+            ? rawEnd.toDate().getTime()
+            : rawEnd?.seconds
+              ? rawEnd.seconds * 1000
+              : 0;
+          if (!data.pinnedAt || (endMs > 0 && endMs <= Date.now())) {
+            const end = defaultPinEnd();
+            setShouldPin(true);
+            setTargetDate(end);
+            setTargetDateLabel(formatTargetDateLabel(end));
+          }
+        }
       } catch (error) {
         console.error("Error loading post for edit:", error);
         showInfo("Error", "Failed to load the post.", () => router.back());
@@ -1005,7 +1061,7 @@ const CreatePostScreen = () => {
           uri: picked.uri || "",
           mimeType: picked.mimeType ?? "image/jpeg",
           name: picked.name ?? `photo_${Date.now()}.jpg`,
-          size: picked.size,
+          size: picked.size ?? 0,
         }));
 
         easeLayout();
@@ -1047,7 +1103,7 @@ const CreatePostScreen = () => {
           uri: picked.uri || "",
           mimeType: picked.mimeType ?? "application/octet-stream",
           name: picked.name ?? `file_${Date.now()}`,
-          size: picked.size,
+          size: picked.size ?? 0,
         }));
 
         easeLayout();
@@ -1096,6 +1152,7 @@ const CreatePostScreen = () => {
             ? picked.mimeType
             : "video/mp4",
           name: picked.name ?? `video_${Date.now()}.mp4`,
+          size: picked.size ?? 0,
         }));
 
         easeLayout();
@@ -1103,6 +1160,10 @@ const CreatePostScreen = () => {
       }
     } catch (error) {
       console.error("Error picking videos:", error);
+      if (isAttachmentTooLargeError(error)) {
+        showInfo("Video too large", error instanceof Error ? error.message : "Videos can be up to 100 MB.");
+        return;
+      }
       showInfo("Error", "Failed to pick video(s)");
     }
   };
@@ -1141,14 +1202,14 @@ try {
             let uploadedUrl: string;
 
             if (file.mimeType.startsWith("image/")) {
-              uploadedUrl = await uploadPostImage(file.uri);
+              uploadedUrl = await uploadPostImage(file.uri, file.mimeType);
             } else if (file.mimeType.startsWith("video/")) {
               uploadedUrl = await uploadPostVideo(file.uri);
             } else {
               uploadedUrl = await uploadPostFile(file.uri);
             }
 
-            return { url: uploadedUrl, mimeType: file.mimeType, name: file.name, size: file.size };
+            return { url: uploadedUrl, mimeType: file.mimeType, name: file.name, size: file.size ?? 0 };
           }),
         ),
         selectedGif ? uploadPostGif(selectedGif) : Promise.resolve(null),
@@ -1156,7 +1217,7 @@ try {
       const uploadedUrls = [...uploadedFiles];
 
       if (uploadedGifUrl) {
-        uploadedUrls.push({ url: uploadedGifUrl, mimeType: "image/gif", name: "animated.gif", size: undefined });
+        uploadedUrls.push({ url: uploadedGifUrl, mimeType: "image/gif", name: "animated.gif", size: 0 });
       }
 
       // Auto-captioning: a video post starts life as caption "pending"; the
@@ -1340,7 +1401,7 @@ try {
           }
         }
 
-        await updateDoc(doc(db, "posts", selectedEditPostId), editPayload);
+        await updateDoc(doc(db, "posts", selectedEditPostId), cleanFirestoreData(editPayload));
 
         let serverDecision: any = { status: "pending", selfHarm: false };
         try {
@@ -1382,7 +1443,7 @@ try {
         return;
       }
 
-      postRef = await addDoc(collection(db, "posts"), postData);
+      postRef = await addDoc(collection(db, "posts"), cleanFirestoreData(postData));
 
       // Firebase Spark has no deployable Cloud Functions. The post is always
       // created as PENDING, then the trusted Cloudflare Worker re-reads the
@@ -1868,10 +1929,25 @@ try {
     easeLayout();
     setIsAnonymous((current) => !current);
   }, []);
-  const handleSelectFlair = useCallback((flairId: PostFlairId) => {
-    easeLayout();
-    setSelectedFlair(flairId);
-  }, []);
+  const handleSelectFlair = useCallback(
+    (flairId: PostFlairId) => {
+      easeLayout();
+      setSelectedFlair(flairId);
+      // An announcement is always pinned, from the moment it's chosen;
+      // choosing another flair takes the pin off again.
+      if (flairId === "announcement") {
+        setShouldPin(true);
+        if (!targetDate) {
+          const end = defaultPinEnd();
+          setTargetDate(end);
+          setTargetDateLabel(formatTargetDateLabel(end));
+        }
+      } else if (selectedFlair === "announcement") {
+        setShouldPin(false);
+      }
+    },
+    [selectedFlair, targetDate],
+  );
   const handleFlairPickerLayout = useCallback((width: number) => {
     flairPickerWidthRef.current = width;
   }, []);
@@ -1882,17 +1958,17 @@ try {
     flairChipLayoutsRef.current[flairId] = { x, width };
   }, []);
   const handleTogglePin = useCallback(() => {
+    // Locked on for announcements (the switch is disabled too).
+    if (selectedFlair === "announcement" && shouldPin) return;
     easeLayout();
     const next = !shouldPin;
     setShouldPin(next);
     if (next && !targetDate) {
-      const d = new Date();
-      d.setDate(d.getDate() + 3);
-      d.setHours(23, 59, 0, 0);
-      setTargetDate(d);
-      setTargetDateLabel(formatTargetDateLabel(d));
+      const end = defaultPinEnd();
+      setTargetDate(end);
+      setTargetDateLabel(formatTargetDateLabel(end));
     }
-  }, [shouldPin, targetDate]);
+  }, [selectedFlair, shouldPin, targetDate]);
   const handleOpenDatePicker = useCallback(() => setShowDatePicker(true), []);
   const handleOpenTimePicker = useCallback(() => setShowTimePicker(true), []);
   const handlePinIndefinitely = useCallback(() => {
@@ -1989,8 +2065,8 @@ try {
               <FlairSuggestionBanner
                 message="🔎 This sounds like a Lost & Found post — want to switch the flair?"
                 onSwitch={() => {
-                  easeLayout();
-                  setSelectedFlair("lost_found");
+                  // Through handleSelectFlair, so leaving Announcement unpins.
+                  handleSelectFlair("lost_found");
                   setLostFoundSuggestionDismissed(true);
                   requestAnimationFrame(() => scrollFlairIntoView("lost_found"));
                 }}
@@ -2004,8 +2080,8 @@ try {
               <FlairSuggestionBanner
                 message="🆘 This sounds like a Help / Advice post — want to switch the flair?"
                 onSwitch={() => {
-                  easeLayout();
-                  setSelectedFlair("help");
+                  // Through handleSelectFlair, so leaving Announcement unpins.
+                  handleSelectFlair("help");
                   setHelpSuggestionDismissed(true);
                   requestAnimationFrame(() => scrollFlairIntoView("help"));
                 }}
@@ -2330,120 +2406,125 @@ try {
           </Animated.View>
         </View>
 
-        <Modal
+        {/* Tag Sheet */}
+        <DragToCloseSheet
           visible={showTagModal}
-          animationType="slide"
-          transparent
-          onRequestClose={cancelTagSelection}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContainer}>
-              <View style={styles.sheetHandle} />
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>
-                  Tag People{" "}
-                  {draftTaggedUsers.length > 0 && `(${draftTaggedUsers.length})`}
-                </Text>
-                <View style={styles.tagModalActions}>
-                  <TouchableOpacity
-                    style={styles.tagConfirmButton}
-                    onPress={confirmTagSelection}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Confirm ${draftTaggedUsers.length} selected tags`}
-                  >
-                    <Text style={styles.tagConfirmText}>
-                      Confirm{draftTaggedUsers.length > 0 ? ` (${draftTaggedUsers.length})` : ""}
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity onPress={cancelTagSelection} accessibilityRole="button" accessibilityLabel="Cancel tag selection">
-                    <Ionicons name="close" size={24} color={theme.textSecondary} />
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              {students.length > 0 && (
+          onClose={cancelTagSelection}
+          handleColor={theme.textMuted}
+          backdropColor="rgba(0,0,0,0.6)"
+          closeLabel="Close tag selection"
+          sheetStyle={styles.bottomSheetContainer}
+          header={
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                Tag People{" "}
+                {draftTaggedUsers.length > 0 && `(${draftTaggedUsers.length})`}
+              </Text>
+              <View style={styles.tagModalActions}>
                 <TouchableOpacity
-                  style={styles.tagAllButton}
-                  onPress={() => {
-                    // Tag all students (except already tagged)
-                    const allTagged = students.filter(
-                      (s) => !draftTaggedUsers.find((u) => u.id === s.id),
-                    );
-                    if (allTagged.length === 0) {
-                      showInfo("Info", "Everyone is already tagged!");
-                      return;
-                    }
-                    setDraftTaggedUsers([...draftTaggedUsers, ...allTagged]);
-                  }}
+                  style={styles.tagConfirmButton}
+                  onPress={confirmTagSelection}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Confirm ${draftTaggedUsers.length} selected tags`}
                 >
-                  <Ionicons name="people-circle" size={20} color={theme.onAccent} />
-                  <Text style={styles.tagAllText}>Tag All</Text>
-                </TouchableOpacity>
-              )}
-
-              <TextInput
-                placeholder="Search students..."
-                placeholderTextColor={theme.textMuted}
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-                style={styles.searchInput}
-              />
-
-              <FlatList
-                initialNumToRender={10}
-                maxToRenderPerBatch={10}
-                windowSize={7}
-                data={filteredTagOptions}
-                keyExtractor={(item) => item.id}
-                renderItem={({ item }) => {
-                  const tagged = draftTaggedUsers.find((u) => u.id === item.id);
-                  const firstname = item.firstname || "?";
-                  const lastname = item.lastname || "?";
-                  return (
-                    <TouchableOpacity
-                      style={styles.studentItem}
-                      onPress={() => handleTagUser(item)}
-                    >
-                      <View style={styles.studentAvatar}>
-                        <Text style={styles.studentAvatarText}>
-                          {isEveryoneMentionId(item.id)
-                            ? "EV"
-                            : `${firstname.charAt(0)}${lastname.charAt(0)}`}
-                        </Text>
-                      </View>
-                      <View style={styles.studentInfo}>
-                        <View style={styles.studentNameRow}>
-                          <Text style={styles.studentName} numberOfLines={1}>
-                            {isEveryoneMentionId(item.id)
-                              ? EVERYONE_MENTION_NAME
-                              : `${firstname} ${lastname}`}
-                          </Text>
-                          {/* Alumni stay fully mentionable - this only says
-                              who you are about to reach. */}
-                          <AlumniBadge yearlvl={item.yearlvl} />
-                        </View>
-                      </View>
-                      {tagged && (
-                        <Ionicons
-                          name="checkmark-circle"
-                          size={20}
-                          color="#6f9aff"
-                        />
-                      )}
-                    </TouchableOpacity>
-                  );
-                }}
-                ListEmptyComponent={
-                  <Text style={styles.emptyText}>
-                    {searchQuery
-                      ? "No students found"
-                      : "You cannot tag yourself"}
+                  <Text style={styles.tagConfirmText}>
+                    Confirm{draftTaggedUsers.length > 0 ? ` (${draftTaggedUsers.length})` : ""}
                   </Text>
-                }
-              />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={cancelTagSelection}
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel tag selection"
+                >
+                  <Ionicons name="close" size={26} color={theme.textSecondary} />
+                </TouchableOpacity>
+              </View>
             </View>
+          }
+        >
+          <View style={styles.sheetInnerContent}>
+            {students.length > 0 && (
+              <TouchableOpacity
+                style={styles.tagAllButton}
+                onPress={() => {
+                  // Tag all students (except already tagged)
+                  const allTagged = students.filter(
+                    (s) => !draftTaggedUsers.find((u) => u.id === s.id),
+                  );
+                  if (allTagged.length === 0) {
+                    showInfo("Info", "Everyone is already tagged!");
+                    return;
+                  }
+                  setDraftTaggedUsers([...draftTaggedUsers, ...allTagged]);
+                }}
+              >
+                <Ionicons name="people-circle" size={20} color={theme.onAccent} />
+                <Text style={styles.tagAllText}>Tag All</Text>
+              </TouchableOpacity>
+            )}
+
+            <TextInput
+              placeholder="Search students..."
+              placeholderTextColor={theme.textMuted}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              style={styles.searchInput}
+            />
+
+            <FlatList
+              initialNumToRender={10}
+              maxToRenderPerBatch={10}
+              windowSize={7}
+              data={filteredTagOptions}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => {
+                const tagged = draftTaggedUsers.find((u) => u.id === item.id);
+                const firstname = item.firstname || "?";
+                const lastname = item.lastname || "?";
+                return (
+                  <TouchableOpacity
+                    style={styles.studentItem}
+                    onPress={() => handleTagUser(item)}
+                  >
+                    <View style={styles.studentAvatar}>
+                      <Text style={styles.studentAvatarText}>
+                        {isEveryoneMentionId(item.id)
+                          ? "EV"
+                          : `${firstname.charAt(0)}${lastname.charAt(0)}`}
+                      </Text>
+                    </View>
+                    <View style={styles.studentInfo}>
+                      <View style={styles.studentNameRow}>
+                        <Text style={styles.studentName} numberOfLines={1}>
+                          {isEveryoneMentionId(item.id)
+                            ? EVERYONE_MENTION_NAME
+                            : `${firstname} ${lastname}`}
+                        </Text>
+                        {/* Alumni stay fully mentionable - this only says
+                            who you are about to reach. */}
+                        <AlumniBadge yearlvl={item.yearlvl} />
+                      </View>
+                    </View>
+                    {tagged && (
+                      <Ionicons
+                        name="checkmark-circle"
+                        size={20}
+                        color="#6f9aff"
+                      />
+                    )}
+                  </TouchableOpacity>
+                );
+              }}
+              ListEmptyComponent={
+                <Text style={styles.emptyText}>
+                  {searchQuery
+                    ? "No students found"
+                    : "You cannot tag yourself"}
+                </Text>
+              }
+            />
           </View>
-        </Modal>
+        </DragToCloseSheet>
 
         {/* Link Modal */}
         <Modal
@@ -2513,105 +2594,108 @@ try {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* GIF Modal */}
-        <Modal
+        {/* GIF Sheet */}
+        <DragToCloseSheet
           visible={showGifModal}
-          animationType="slide"
-          transparent
-          onRequestClose={() => setShowGifModal(false)}
+          onClose={() => setShowGifModal(false)}
+          handleColor={theme.textMuted}
+          backdropColor="rgba(0,0,0,0.6)"
+          closeLabel="Close GIF picker"
+          sheetStyle={styles.bottomSheetContainer}
+          header={
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Choose a GIF</Text>
+              <TouchableOpacity
+                onPress={() => setShowGifModal(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close GIF picker"
+              >
+                <Ionicons name="close" size={26} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+          }
         >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContainer}>
-              <View style={styles.sheetHandle} />
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Choose a GIF</Text>
-                <TouchableOpacity onPress={() => setShowGifModal(false)}>
-                  <Ionicons name="close" size={40} color={theme.textSecondary} />
-                </TouchableOpacity>
-              </View>
+          <View style={styles.sheetInnerContent}>
+            <View style={styles.gifSearchContainer}>
+              <TextInput
+                placeholder="Search GIFs..."
+                placeholderTextColor={theme.textMuted}
+                value={gifSearchQuery}
+                onChangeText={setGifSearchQuery}
+                onSubmitEditing={() => searchGifs(gifSearchQuery)}
+                style={styles.searchInput}
+                returnKeyType="search"
+              />
+              <TouchableOpacity
+                style={styles.gifSearchButton}
+                onPress={() => searchGifs(gifSearchQuery)}
+              >
+                <Ionicons name="search" size={20} color={theme.onAccent} />
+              </TouchableOpacity>
+            </View>
 
-              <View style={styles.gifSearchContainer}>
-                <TextInput
-                  placeholder="Search GIFs..."
-                  placeholderTextColor={theme.textMuted}
-                  value={gifSearchQuery}
-                  onChangeText={setGifSearchQuery}
-                  onSubmitEditing={() => searchGifs(gifSearchQuery)}
-                  style={styles.searchInput}
-                  returnKeyType="search"
+            {loadingGifs ? (
+              <View style={styles.gifLoadingContainer}>
+                <ActivityIndicator size="large" color={theme.accent} />
+                <Text style={styles.gifLoadingText}>Searching GIFs...</Text>
+              </View>
+            ) : gifError ? (
+              <View style={styles.gifErrorContainer}>
+                <Ionicons
+                  name="cloud-offline-outline"
+                  size={64}
+                  color={theme.accent}
                 />
+                <Text style={styles.errorText}>{gifError}</Text>
                 <TouchableOpacity
-                  style={styles.gifSearchButton}
+                  style={styles.retryButton}
                   onPress={() => searchGifs(gifSearchQuery)}
                 >
-                  <Ionicons name="search" size={20} color={theme.onAccent} />
+                  <Text style={styles.retryButtonText}>Retry Search</Text>
                 </TouchableOpacity>
               </View>
+            ) : gifResults.length > 0 ? (
+              <FlatList
+                initialNumToRender={8}
+                maxToRenderPerBatch={8}
+                windowSize={5}
+                data={gifResults}
+                numColumns={2}
+                keyExtractor={(item, index) => item.id || index.toString()}
+                renderItem={({ item }) => {
+                  const images = item?.images;
+                  const gifUrl = images?.original?.url || images?.downsized_medium?.url;
+                  const thumbnailUrl = images?.fixed_width_small?.url || images?.preview_gif?.url || gifUrl;
 
-              {loadingGifs ? (
-                <View style={styles.gifLoadingContainer}>
-                  <ActivityIndicator size="large" color={theme.accent} />
-                  <Text style={styles.gifLoadingText}>Searching GIFs...</Text>
-                </View>
-              ) : gifError ? (
-                <View style={styles.gifErrorContainer}>
-                  <Ionicons
-                    name="cloud-offline-outline"
-                    size={64}
-                    color={theme.accent}
-                  />
-                  <Text style={styles.errorText}>{gifError}</Text>
-                  <TouchableOpacity
-                    style={styles.retryButton}
-                    onPress={() => searchGifs(gifSearchQuery)}
-                  >
-                    <Text style={styles.retryButtonText}>Retry Search</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : gifResults.length > 0 ? (
-               <FlatList
-  initialNumToRender={8}
-  maxToRenderPerBatch={8}
-  windowSize={5}
-  data={gifResults}
-  numColumns={2}
-  keyExtractor={(item, index) => item.id || index.toString()}
-  renderItem={({ item }) => {
-    // ✅ Updated to match Giphy API schema
-    const images = item?.images;
-    const gifUrl = images?.original?.url || images?.downsized_medium?.url;
-    const thumbnailUrl = images?.fixed_width_small?.url || images?.preview_gif?.url || gifUrl;
+                  if (!gifUrl || !thumbnailUrl) return null;
 
-    if (!gifUrl || !thumbnailUrl) return null;
-
-    return (
-      <TouchableOpacity
-        style={styles.gifItem}
-        onPress={() => handleSelectGif(gifUrl)}
-      >
-        <Image
-          source={{ uri: thumbnailUrl }}
-          style={styles.gifThumbnail}
-          contentFit="cover"
-        />
-      </TouchableOpacity>
-    );
-  }}
-  contentContainerStyle={styles.gifGrid}
-/>
-              ) : (
-                <View style={styles.gifEmptyContainer}>
-                  <Ionicons name="images-outline" size={64} color={theme.textMuted} />
-                  <Text style={styles.emptyText}>
-                    {gifSearchQuery
-                      ? "No GIFs found"
-                      : "Search for GIFs to get started"}
-                  </Text>
-                </View>
-              )}
-            </View>
+                  return (
+                    <TouchableOpacity
+                      style={styles.gifItem}
+                      onPress={() => handleSelectGif(gifUrl)}
+                    >
+                      <Image
+                        source={{ uri: thumbnailUrl }}
+                        style={styles.gifThumbnail}
+                        contentFit="cover"
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                contentContainerStyle={styles.gifGrid}
+              />
+            ) : (
+              <View style={styles.gifEmptyContainer}>
+                <Ionicons name="images-outline" size={64} color={theme.textMuted} />
+                <Text style={styles.emptyText}>
+                  {gifSearchQuery
+                    ? "No GIFs found"
+                    : "Search for GIFs to get started"}
+                </Text>
+              </View>
+            )}
           </View>
-        </Modal>
+        </DragToCloseSheet>
       </KeyboardAvoidingView>
       </View>
       <ConfirmDialog
@@ -2976,7 +3060,7 @@ const makeStyles = (c: ThemeTokens) =>
     elevation: 1,
   },
   mentionSheet: {
-    marginBottom: 16,
+    marginBottom: 14,
     maxHeight: 232,
     backgroundColor: c.surface,
     borderRadius: 16,
@@ -3221,6 +3305,18 @@ const makeStyles = (c: ThemeTokens) =>
   disabledButton: { opacity: 0.5 },
   postButtonText: { color: c.onAccent, fontSize: 16, fontWeight: "bold" },
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)" },
+  bottomSheetContainer: {
+    height: "82%",
+    maxHeight: 740,
+    backgroundColor: c.surfaceSunken,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    overflow: "hidden",
+  },
+  sheetInnerContent: {
+    flex: 1,
+    paddingBottom: 16,
+  },
   modalContainer: {
     flex: 1,
     backgroundColor: c.surfaceSunken,
@@ -3229,10 +3325,14 @@ const makeStyles = (c: ThemeTokens) =>
     paddingBottom: 24,
   },
   modalHeader: {
+    width: "100%",
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: c.border,
   },
   modalTitle: { flex: 1, color: c.textSecondary, fontSize: 18, fontWeight: "bold" },
   tagModalActions: {

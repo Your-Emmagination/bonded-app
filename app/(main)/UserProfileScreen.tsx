@@ -36,6 +36,7 @@ import AlumniBadge from "./components/AlumniBadge";
 import ConfirmDialog from "./components/ConfirmDialog";
 
 import { resolveAvatarUri } from "@/utils/avatar";
+import { hasPosition, positionLabel } from "@/utils/teacherPositions";
 import { AVATAR_SIZE_LARGE, avatarThumb } from "@/utils/cloudinaryImages";
 import { getDirectChatParams } from "@/utils/directMessages";
 import { useNetworkStatus } from "@/utils/networkUtils";
@@ -78,6 +79,8 @@ type Student = {
   lastname?: string;
   course?: string;
   yearlvl?: string;
+  /** Teachers only: Faculty, Program Chair or Dean. */
+  position?: string;
   studentID?: string;
   email?: string;
   profileImage?: string;
@@ -1365,11 +1368,20 @@ const UserProfileScreen = () => {
                     value={student.course || "—"}
                   />
                   <View style={styles.rowDivider} />
-                  <InfoRow
-                    icon="trending-up-outline"
-                    label="Year Level"
-                    value={student.yearlvl || "—"}
-                  />
+                  {/* Teachers and admins have a position where a student has a year level. */}
+                  {hasPosition(student.role) ? (
+                    <InfoRow
+                      icon="briefcase-outline"
+                      label="Position"
+                      value={positionLabel(student.role, student.position) || "—"}
+                    />
+                  ) : (
+                    <InfoRow
+                      icon="trending-up-outline"
+                      label="Year Level"
+                      value={student.yearlvl || "—"}
+                    />
+                  )}
                 </View>
               </View>
 
@@ -1622,7 +1634,9 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 14,
     paddingVertical: 16,
     borderRadius: 18,
-    backgroundColor: c.primary,
+    // chrome, not primary: in the dark themes primary is a bright red that
+    // the header's muted subtitle can't be read on (as on your own Profile).
+    backgroundColor: c.chrome,
     borderWidth: 1,
     borderColor: c.chromeBorder,
     shadowColor: c.textPrimary,
@@ -1650,7 +1664,7 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 8,
   },
   headerTitle: {
-    color: c.surface,
+    color: c.onChrome,
     fontSize: 20,
     fontWeight: "700",
     textAlign: "center",

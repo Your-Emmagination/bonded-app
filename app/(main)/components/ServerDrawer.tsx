@@ -17,11 +17,9 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
     ActivityIndicator,
-    Alert,
-    Animated,
     Dimensions,
     FlatList,
     Modal,
@@ -40,7 +38,20 @@ import {
 // KeyboardProvider (app/_layout.tsx) took over the keyboard.
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
-import { runOnJS } from "react-native-reanimated";
+import ReanimatedAnimated, {
+    cancelAnimation,
+    runOnJS,
+    useAnimatedStyle,
+    useSharedValue,
+    withSpring,
+    type SharedValue,
+} from "react-native-reanimated";
+import {
+    clamp01,
+    closingSettlesClosed,
+    drawerTranslateX,
+    settleSpring,
+} from "@/utils/communityDrawerMotion";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import ConfirmDialog from "./ConfirmDialog";
 
@@ -74,8 +85,14 @@ export type ServerMemberPreview = {
 };
 
 type ServerDrawerProps = {
+  /** Mounted: from the moment it starts opening until it has finished closing. */
   visible: boolean;
+  /** 0 = closed (Home), 1 = open. Home owns it; its swipe drags it open. */
+  openProgress: SharedValue<number>;
+  /** Asks Home to close the drawer (backdrop, Android back, the Home button). */
   onClose: () => void;
+  /** The drawer's own swipe has finished closing it: Home unmounts it. */
+  onSwipeClosed: () => void;
   onExitServerView?: () => void;
   currentUserRole?: string | null;
   servers: CommunityServer[];
@@ -789,7 +806,9 @@ const AddMemberRow = React.memo(AddMemberRowComponent);
 
 function ServerDrawerComponent({
   visible,
+  openProgress,
   onClose,
+  onSwipeClosed,
   onExitServerView,
   currentUserRole,
   servers,
@@ -819,8 +838,11 @@ function ServerDrawerComponent({
 }: ServerDrawerProps) {
   const { styles, theme } = useStyles();
   const insets = useSafeAreaInsets();
-  const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
-  const fadeAnim = useRef(new Animated.Value(0)).current;
+  // Position and backdrop follow openProgress, frame by frame.
+  const drawerStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: drawerTranslateX(openProgress.get(), DRAWER_WIDTH) }],
+  }));
+  const backdropStyle = useAnimatedStyle(() => ({ opacity: openProgress.get() }));
 
   const [createVisible, setCreateVisible] = useState(false);
   // The server whose full join-request list is showing in place of its
@@ -932,40 +954,17 @@ function ServerDrawerComponent({
     [editServerId, servers],
   );
 
+  // Fully closed (Home unmounts it only after the closing animation): the
+  // sheets opened from inside it close too.
   useEffect(() => {
-    if (visible) {
-      Animated.parallel([
-        Animated.timing(slideAnim, {
-          toValue: 0,
-          duration: 260,
-          useNativeDriver: true,
-        }),
-        Animated.timing(fadeAnim, {
-          toValue: 1,
-          duration: 220,
-          useNativeDriver: true,
-        }),
-      ]).start();
-    } else {
-      Animated.parallel([
-        Animated.timing(slideAnim, {
-          toValue: -DRAWER_WIDTH,
-          duration: 220,
-          useNativeDriver: true,
-        }),
-        Animated.timing(fadeAnim, {
-          toValue: 0,
-          duration: 180,
-          useNativeDriver: true,
-        }),
-      ]).start();
+    if (!visible) {
       setCreateVisible(false);
       setEditVisible(false);
       setThreadVisible(false);
       setMembersVisible(false);
       setDeleteReason("");
     }
-  }, [fadeAnim, slideAnim, visible]);
+  }, [visible]);
 
   const openEdit = useCallback((server: CommunityServer) => {
     if (!server.canManage) return;
@@ -1161,7 +1160,14 @@ function ServerDrawerComponent({
     if (!selectedServer || !editingChannel || !onEditChannel) return;
     const trimmed = editChannelName.trim();
     if (!trimmed) {
-      Alert.alert("Channel Name Required", "Please enter a valid channel name.");
+      // The app's own dialog; it opens over the Edit Channel sheet.
+      setConfirmDialog({
+        title: "Channel name required",
+        description: "Enter a name for this channel before saving.",
+        confirmText: "OK",
+        singleAction: true,
+        onConfirm: () => setConfirmDialog(null),
+      });
       return;
     }
     await onEditChannel(selectedServer.id, editingChannel.id, {
@@ -1196,28 +1202,55 @@ function ServerDrawerComponent({
   const canLeaveServer =
     membershipState === "joined" && currentUserRole !== "admin";
 
-  // ── Edge-swipe navigation: ServerDrawer → HomeScreen ────────────────────
-  // The drawer renders inside a Modal (its own native layer), so this needs
-  // its own gesture rather than relying on one in HomeScreen underneath.
-  // Starts near the RIGHT edge only; a horizontal left swipe reuses the
-  // same onClose() used by the backdrop tap and the "Home" button.
-  const edgeSwipeCloseGesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .hitSlop({ right: 0, width: 32 }) // Activation zone limited to the right screen edge (~32px)
-        .activeOffsetX(-20) // Requires an intentful leftward drag before the gesture activates
-        .failOffsetY([-15, 15]) // Yields to vertical scrolling (rail / channel list) immediately
-        .maxPointers(1)
-        .onEnd((event) => {
-          const isDraggedLeft = event.translationX < -60;
-          const isFlickedLeft = event.velocityX < -350;
-
-          if (isDraggedLeft || isFlickedLeft) {
-            runOnJS(onClose)();
-          }
-        }),
-    [onClose],
-  );
+  // ── Swipe back to Home: ServerDrawer → HomeScreen ───────────────────────
+  // The drawer renders inside a Modal (its own native layer), so it has its
+  // own gesture. A right-to-left swipe anywhere on it drags it closed, finger
+  // by finger; released short of the line, it springs back fully open. A tap
+  // never starts it (it needs 8 px leftward first), so Community stays open
+  // until someone actually swipes, taps Home, or presses back.
+  //
+  // Built once: Home's onSwipeClosed never changes, so the gesture is never
+  // rebuilt mid-touch.
+  const closingActive = useSharedValue(false);
+  const closingStart = useSharedValue(1);
+  const swipeCloseGesture = useMemo(() => {
+    const settle = (velocityX: number) => {
+      "worklet";
+      if (closingSettlesClosed(openProgress.get(), velocityX, DRAWER_WIDTH)) {
+        openProgress.set(withSpring(0, settleSpring(velocityX, DRAWER_WIDTH), (finished) => {
+          if (finished) runOnJS(onSwipeClosed)();
+        }));
+      } else {
+        openProgress.set(withSpring(1, settleSpring(velocityX, DRAWER_WIDTH)));
+      }
+    };
+    return Gesture.Pan()
+      .activeOffsetX(-8)
+      .failOffsetY([-12, 12])
+      .maxPointers(1)
+      .onStart(() => {
+        closingActive.set(true);
+        cancelAnimation(openProgress);
+        closingStart.set(openProgress.get());
+      })
+      .onUpdate((event) => {
+        if (!closingActive.get()) return;
+        openProgress.set(clamp01(closingStart.get() + event.translationX / DRAWER_WIDTH));
+      })
+      .onEnd((event, success) => {
+        // Only a swipe that really started settles anything.
+        if (!closingActive.get()) return;
+        closingActive.set(false);
+        settle(success ? event.velocityX : 0);
+      })
+      .onFinalize(() => {
+        // Cancelled after it started: back to where the finger left it,
+        // settled — never left halfway.
+        if (!closingActive.get()) return;
+        closingActive.set(false);
+        settle(0);
+      });
+  }, [closingActive, closingStart, onSwipeClosed, openProgress]);
 
   // ── Virtualized-list plumbing ──────────────────────────────────────────
   // Stable refs so the React.memo'd row components (RailAvatar / ChannelRow /
@@ -1514,17 +1547,12 @@ function ServerDrawerComponent({
         onRequestClose={showingJoinRequests ? closeJoinRequests : onClose}
       >
         <GestureHandlerRootView style={styles.overlay}>
-          <Animated.View style={[styles.backdrop, { opacity: fadeAnim }]}>
+          <ReanimatedAnimated.View style={[styles.backdrop, backdropStyle]}>
             <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-          </Animated.View>
+          </ReanimatedAnimated.View>
 
-          <GestureDetector gesture={edgeSwipeCloseGesture}>
-          <Animated.View
-            style={[
-              styles.drawerShell,
-              { transform: [{ translateX: slideAnim }] },
-            ]}
-          >
+          <GestureDetector gesture={swipeCloseGesture}>
+          <ReanimatedAnimated.View style={[styles.drawerShell, drawerStyle]}>
             <View style={[styles.rail, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }]}>
               <View style={styles.communityRailLabel}>
                 <Ionicons name="people-outline" size={15} color="#fffaf7" />
@@ -1719,22 +1747,17 @@ function ServerDrawerComponent({
                 </View>
               )}
             </View>
-          </Animated.View>
+          </ReanimatedAnimated.View>
           </GestureDetector>
         </GestureHandlerRootView>
       </Modal>
 
       <Modal visible={createVisible} transparent animationType="fade" onRequestClose={() => setCreateVisible(false)}>
         <KeyboardAvoidingView automaticOffset
-          style={styles.modalOverlay}
+          style={[styles.modalOverlay, { paddingBottom: Math.max(20, insets.bottom + 20), paddingTop: Math.max(20, insets.top + 20) }]}
           behavior="padding"
           keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
         >
-          <ScrollView
-            contentContainerStyle={styles.modalKeyboardContent}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Create Server</Text>
@@ -1743,6 +1766,11 @@ function ServerDrawerComponent({
               </TouchableOpacity>
             </View>
 
+            <ScrollView
+              contentContainerStyle={styles.modalScrollBody}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
             <Text style={styles.fieldLabel}>Server Name</Text>
             <TextInput
               style={styles.input}
@@ -1946,7 +1974,7 @@ function ServerDrawerComponent({
                 thumbColor={createPublic ? createAccent : theme.borderStrong}
               />
             </View>
-
+          </ScrollView>
             <View style={styles.modalActions}>
               <TouchableOpacity style={styles.secondaryButton} onPress={() => setCreateVisible(false)}>
                 <Text style={styles.secondaryButtonText}>Cancel</Text>
@@ -1960,21 +1988,15 @@ function ServerDrawerComponent({
               </TouchableOpacity>
             </View>
           </View>
-          </ScrollView>
         </KeyboardAvoidingView>
       </Modal>
 
       <Modal visible={editVisible} transparent animationType="fade" onRequestClose={() => setEditVisible(false)}>
         <KeyboardAvoidingView automaticOffset
-          style={styles.modalOverlay}
+          style={[styles.modalOverlay, { paddingBottom: Math.max(20, insets.bottom + 20), paddingTop: Math.max(20, insets.top + 20) }]}
           behavior="padding"
           keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
         >
-          <ScrollView
-            contentContainerStyle={styles.modalKeyboardContent}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Manage Server</Text>
@@ -1983,6 +2005,11 @@ function ServerDrawerComponent({
               </TouchableOpacity>
             </View>
 
+            <ScrollView
+              contentContainerStyle={styles.modalScrollBody}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
             <Text style={styles.fieldLabel}>Server Name</Text>
             <TextInput
               style={styles.input}
@@ -2211,6 +2238,7 @@ function ServerDrawerComponent({
               </View>
             )}
 
+            </ScrollView>
             <View style={styles.modalActions}>
               {currentUserRole === "admin" ? (
                 <TouchableOpacity style={styles.dangerButton} onPress={handleDeleteServer}>
@@ -2229,12 +2257,11 @@ function ServerDrawerComponent({
               </TouchableOpacity>
             </View>
           </View>
-          </ScrollView>
         </KeyboardAvoidingView>
       </Modal>
 
       <Modal visible={threadVisible} transparent animationType="fade" onRequestClose={() => setThreadVisible(false)}>
-        <View style={styles.modalOverlay}>
+        <View style={[styles.modalOverlay, { paddingBottom: Math.max(20, insets.bottom + 20), paddingTop: Math.max(20, insets.top + 20) }]}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Create Channel</Text>
@@ -2336,7 +2363,7 @@ function ServerDrawerComponent({
 
       {/* ── Edit Channel Modal ────────────────────────────────────────── */}
       <Modal visible={editChannelVisible} transparent animationType="fade" onRequestClose={() => setEditChannelVisible(false)}>
-        <View style={styles.modalOverlay}>
+        <View style={[styles.modalOverlay, { paddingBottom: Math.max(20, insets.bottom + 20), paddingTop: Math.max(20, insets.top + 20) }]}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <View>
@@ -3378,7 +3405,7 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     backgroundColor: "rgba(10,2,2,0.72)",
     justifyContent: "center",
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
   },
   modalKeyboardContent: {
     flexGrow: 1,
@@ -3388,15 +3415,22 @@ const makeStyles = (c: ThemeTokens) =>
   modalCard: {
     backgroundColor: c.surface,
     borderRadius: 22,
-    padding: 24,
+    padding: 20,
     borderWidth: 1,
     borderColor: c.borderStrong,
+    maxHeight: "86%",
+    width: "100%",
+    maxWidth: 440,
+    alignSelf: "center",
+  },
+  modalScrollBody: {
+    paddingBottom: 8,
   },
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 20,
+    marginBottom: 16,
   },
   modalTitle: {
     color: c.textPrimary,
@@ -3599,6 +3633,10 @@ const makeStyles = (c: ThemeTokens) =>
     flexDirection: "row",
     gap: 10,
     alignItems: "center",
+    marginTop: 14,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: c.border,
   },
   secondaryButton: {
     flex: 1,

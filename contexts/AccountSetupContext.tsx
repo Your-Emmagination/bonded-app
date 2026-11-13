@@ -2,6 +2,7 @@ import { auth, db } from "@/Firebase_configure";
 import { timestampMillis } from "@/utils/messengerState";
 import { endPresenceSession } from "@/utils/presence";
 import { getSetupStep, type SetupProfile } from "@/utils/profileSetup";
+import { isHeartbeatOnlyChange } from "@/utils/profileChanges";
 import { saveCachedMyProfile } from "@/utils/offlineStorage";
 import { isPushNotificationsSupported, unregisterDeviceForPushNotifications } from "@/utils/pushNotifications";
 import { updateUserDataCache } from "@/utils/rbac";
@@ -133,7 +134,16 @@ export function AccountSetupProvider({ children }: { children: ReactNode }) {
               setState({ ...initial, user, status: "error", error: "Your account profile is unavailable. Contact your school administrator." });
               return;
             }
-            publicProfile = next.data() as SetupProfile;
+            // The online-status heartbeat rewrites the profile every 30
+            // seconds. Accepting it rebuilt this provider's state, which
+            // redrew the app shell each time; only real changes go through.
+            const nextProfile = next.data() as SetupProfile;
+            const heartbeatOnly = isHeartbeatOnlyChange(
+              publicProfile as Record<string, unknown>,
+              nextProfile as Record<string, unknown>,
+            );
+            publicProfile = nextProfile;
+            if (heartbeatOnly) return;
             accept(merged());
           }, () => {
             if (current === generation) setState({ ...initial, user, status: "error", error: "Unable to check your profile. Check your connection and try again." });

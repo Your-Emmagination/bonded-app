@@ -1,7 +1,7 @@
 {
   "cli": {
     "version": ">= 16.28.0",
-    "appVersionSource": "remote"
+    "appVersionSource": "local"
   },
   "build": {
     "development": {
@@ -23,9 +23,13 @@
       }
     },
     "production": {
-      "autoIncrement": true,
+      "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_AI_WORKER_URL": "https://bonded-ai-worker.encaboemmz77.workers.dev"
+        "EXPO_PUBLIC_AI_WORKER_URL": "https://bonded-ai-worker.encaboemmz77.workers.dev",
+        "EXPO_PUBLIC_BONDED_NOTIFICATION_BACKEND_URL": "http://192.168.68.123:5000"
+      },
+      "android": {
+        "buildType": "apk"
       }
     }
   },

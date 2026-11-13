@@ -32,6 +32,9 @@ import {
 type Props = {
   uri: string;
   width: number;
+  /** Fixed carousel row height; other callers keep the existing player layout. */
+  height?: number;
+  onAspectRatio?: (ratio: number) => void;
   /**
    * X-style feed mode. When true the video autoplays MUTED while `isPlaying`
    * is true, pauses when it goes false, and a tap anywhere on it expands to
@@ -53,6 +56,12 @@ type Props = {
    * wants audio immediately). Defaults to muted.
    */
   startMuted?: boolean;
+  /**
+   * Feed mode only: a tap opens this instead of the video's own fullscreen
+   * player. A post with several photos and videos uses it to open one viewer
+   * that swipes through all of them, like Threads. The inline video pauses.
+   */
+  onOpenFullscreen?: () => void;
   /**
    * Auto-generated caption state for this video (feed posts only). When
    * `captionStatus === "ready"` and `captions` is non-empty, a CC toggle
@@ -88,11 +97,14 @@ const ifPlayerAlive = (change: () => void) => {
 export default function VideoPostMedia({
   uri,
   width,
+  height,
+  onAspectRatio,
   feedAutoplay = false,
   isPlaying = true,
   startMuted = true,
   captionStatus,
   captions,
+  onOpenFullscreen,
 }: Props) {
   const { styles, theme } = useStyles();
   const { tier, preference } = useVideoQuality();
@@ -124,6 +136,23 @@ export default function VideoPostMedia({
     // Part A.3: autoplay must start muted to be a reasonable experience.
     instance.muted = startMuted;
   });
+
+  useEffect(() => {
+    if (!onAspectRatio) return;
+    const reportSize = (size?: { width: number; height: number }) => {
+      if (size && size.width > 0 && size.height > 0) {
+        onAspectRatio(size.width / size.height);
+      }
+    };
+    reportSize(player.videoTrack?.size ?? player.availableVideoTracks[0]?.size);
+    const loaded = player.addListener("sourceLoad", ({ availableVideoTracks }) => {
+      reportSize(availableVideoTracks[0]?.size);
+    });
+    const changed = player.addListener("videoTrackChange", ({ videoTrack }) => {
+      reportSize(videoTrack?.size);
+    });
+    return () => { loaded.remove(); changed.remove(); };
+  }, [onAspectRatio, player]);
 
   // Re-apply the current mute state after any player (re)creation.
   useEffect(() => {
@@ -247,7 +276,7 @@ export default function VideoPostMedia({
   const inlineChromeVisible = feedAutoplay && !isFullscreen;
 
   return (
-    <View style={[styles.container, { width }]}>
+    <View style={[styles.container, { width }, height !== undefined && { height, marginVertical: 0 }]}>
       {showInlineVideo && (
         <VideoView
           player={player}
@@ -273,7 +302,14 @@ export default function VideoPostMedia({
           {/* Tap the video body (not a control) -> immersive fullscreen. */}
           <Pressable
             style={StyleSheet.absoluteFill}
-            onPress={openFullscreen}
+            onPress={
+              onOpenFullscreen
+                ? () => {
+                    ifPlayerAlive(() => player.pause());
+                    onOpenFullscreen();
+                  }
+                : openFullscreen
+            }
             accessibilityLabel="Open video fullscreen"
           />
 
@@ -447,12 +483,14 @@ export default function VideoPostMedia({
               return (
                 <TouchableOpacity
                   key={option.value}
-                  style={styles.menuRow}
+                  style={[styles.menuRow, selected && styles.menuRowSelected]}
                   onPress={() => pickPreference(option.value)}
                   activeOpacity={0.8}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}
                 >
                   <View style={styles.menuRowText}>
-                    <Text style={styles.menuLabel}>{option.label}</Text>
+                    <Text style={[styles.menuLabel, selected && styles.menuLabelSelected]}>{option.label}</Text>
                     <Text style={styles.menuHint}>{option.hint}</Text>
                   </View>
                   {selected && (
@@ -624,12 +662,14 @@ const makeStyles = (c: ThemeTokens) =>
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(10,2,2,0.45)",
+    backgroundColor: c.scrim,
     paddingHorizontal: 32,
   },
+  // Solid and raised, so the video behind never shows through; the text
+  // uses the theme's colours so it reads on the dark themes too.
   menuCard: {
     width: "100%",
-    backgroundColor: c.surface,
+    backgroundColor: c.surfaceRaised,
     borderRadius: 18,
     borderWidth: 1,
     borderColor: c.borderStrong,
@@ -651,12 +691,16 @@ const makeStyles = (c: ThemeTokens) =>
     paddingHorizontal: 16,
     paddingVertical: 11,
     gap: 12,
+    marginHorizontal: 6,
+    borderRadius: 12,
   },
+  menuRowSelected: { backgroundColor: c.accentSoft },
   menuRowText: { flex: 1 },
-  menuLabel: { color: "#3f1712", fontSize: 14.5, fontWeight: "700" },
-  menuHint: { color: "#8a6c62", fontSize: 12, marginTop: 2 },
+  menuLabel: { color: c.textPrimary, fontSize: 14.5, fontWeight: "700" },
+  menuLabelSelected: { color: c.primary },
+  menuHint: { color: c.textSecondary, fontSize: 12, marginTop: 2 },
   menuFooter: {
-    color: "#9b7d72",
+    color: c.textMuted,
     fontSize: 11,
     fontStyle: "italic",
     paddingHorizontal: 16,

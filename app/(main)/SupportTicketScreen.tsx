@@ -40,7 +40,7 @@ import ImageZoomViewer from "./components/ImageZoomViewer";
 import { uploadPostImage } from "@/utils/cloudinaryUpload";
 import { isAdmin as isAdminRole } from "@/utils/rbac";
 import { SIGN_IN_TICKET_SOURCE } from "@/utils/signInHelp";
-import { formatChatTimeLabel, formatClockTime, formatDayLabel, sameDay } from "@/utils/chatTime";
+import { formatChatTimeLabel, startsNewStretch } from "@/utils/chatTime";
 import { timestampMillis } from "@/utils/messengerState";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
@@ -526,7 +526,14 @@ export default function SupportTicketScreen() {
             )}
           </View>
 
-          {/* The original report reads as the first message in the thread. */}
+          {/* The original report reads as the first message in the thread.
+              Times work like DMs: a centred label where a stretch of the
+              conversation starts, not a time on every bubble. */}
+          {!!timestampMillis(ticket.createdAt) && (
+            <Text style={styles.dayLabel} accessibilityRole="header">
+              {formatChatTimeLabel(timestampMillis(ticket.createdAt), nowMs)}
+            </Text>
+          )}
           <View style={[styles.bubble, styles.bubbleUser]}>
             <Text style={styles.bubbleAuthor}>
               {staff ? ticket.userName : "You"}
@@ -544,26 +551,23 @@ export default function SupportTicketScreen() {
                 />
               </TouchableOpacity>
             )}
-            <Text style={styles.bubbleTime}>
-              {formatChatTimeLabel(timestampMillis(ticket.createdAt), nowMs)}
-            </Text>
           </View>
 
           {[...messages, ...pending].map((message, index, all) => {
-            // A day label wherever the conversation crosses into a new day,
-            // measured from the message before (or the request itself).
+            // A time label wherever a new day or a new stretch (15 quiet
+            // minutes) starts, measured from the message before (or the
+            // request itself) — the same rule as DMs.
             const ms = timestampMillis(message.createdAt);
             const previousMs =
               index === 0
                 ? timestampMillis(ticket.createdAt)
                 : timestampMillis(all[index - 1].createdAt);
-            const newDay =
-              !!ms && !!previousMs && !sameDay(new Date(ms), new Date(previousMs));
+            const showTime = !message.pending && startsNewStretch(ms, previousMs);
             return (
             <React.Fragment key={message.id}>
-            {newDay && (
+            {showTime && (
               <Text style={styles.dayLabel} accessibilityRole="header">
-                {formatDayLabel(ms, nowMs)}
+                {formatChatTimeLabel(ms, nowMs)}
               </Text>
             )}
             <View
@@ -598,6 +602,7 @@ export default function SupportTicketScreen() {
                   />
                 </TouchableOpacity>
               )}
+              {(message.failed || message.pending) && (
               <View style={styles.bubbleFooter}>
                 {message.failed ? (
                   <TouchableOpacity
@@ -608,15 +613,14 @@ export default function SupportTicketScreen() {
                     <Ionicons name="alert-circle" size={12} color={theme.danger} />
                     <Text style={styles.retryText}>Not sent · Tap to retry</Text>
                   </TouchableOpacity>
-                ) : message.pending ? (
+                ) : (
                   <>
                     <Ionicons name="time-outline" size={11} color={theme.textMuted} />
                     <Text style={styles.bubbleTime}>Sending…</Text>
                   </>
-                ) : (
-                  <Text style={styles.bubbleTime}>{formatClockTime(ms)}</Text>
                 )}
               </View>
+              )}
             </View>
             </React.Fragment>
             );
@@ -1046,8 +1050,8 @@ const makeStyles = (c: ThemeTokens) =>
   bubbleTime: { color: c.textMuted, fontSize: 10.5 },
   dayLabel: {
     alignSelf: "center",
-    marginTop: 8,
-    marginBottom: 2,
+    marginTop: 14,
+    marginBottom: 4,
     fontSize: 11.5,
     fontWeight: "700",
     color: c.textMuted,

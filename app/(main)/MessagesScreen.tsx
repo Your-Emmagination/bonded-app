@@ -578,7 +578,7 @@ export default function MessagesScreen() {
   );
 
   // Load directory users when opening "New Chat" modal. Read once, not
-  // listened to: every open app updates its profile every 30 seconds to say
+  // listened to: every open app updates its profile every minute to say
   // it's online, and a live list re-downloaded someone for each of those
   // while the picker was open.
   useEffect(() => {

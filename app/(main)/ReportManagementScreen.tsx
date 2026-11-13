@@ -28,6 +28,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { auth, db } from "../../Firebase_configure";
+import { deleteChannelMessage } from "@/utils/channelMessageDelete";
 import ConfirmDialog from "./components/ConfirmDialog";
 import { CardListSkeleton, SkeletonCard } from "./components/Skeleton";
 import {
@@ -381,7 +382,7 @@ export default function ReportManagementScreen() {
                         contentText: String(contentText),
                         contentAuthor,
                         contentAuthorId: authorId,
-                        contentExists: !!targetData,
+                        contentExists: !!targetData && targetData.deleted !== true,
                         originalModerationStatus: originalModerationStatus || undefined,
                         originalModerationReasons,
                         originalModerationModel,
@@ -544,7 +545,13 @@ export default function ReportManagementScreen() {
 
         if (targetRef) {
           const targetSnap = await getDoc(targetRef);
-          if (targetSnap.exists()) {
+          if (targetSnap.exists() && report.contentType === "message") {
+            // A channel message keeps its place, like DMs, as "Removed by a
+            // moderator" — the conversation around it still makes sense.
+            if (targetSnap.data()?.deleted !== true) {
+              await deleteChannelMessage("communityThreadMessages", targetRef.id, "moderator");
+            }
+          } else if (targetSnap.exists()) {
             await deleteDoc(targetRef);
 
             // Keep the parent comment's reply count in sync when a reply

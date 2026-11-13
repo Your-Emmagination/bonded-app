@@ -2,6 +2,7 @@ import type { User } from "firebase/auth";
 import { collection, doc, getDoc, getDocs, limit, onSnapshot, query, where } from "firebase/firestore";
 import { auth, db } from "../Firebase_configure";
 import { getCachedMyProfile, saveCachedMyProfile } from "./offlineStorage";
+import { isHeartbeatOnlyChange } from "./profileChanges";
 
 export type UserRole = "student" | "moderator" | "teacher" | "admin";
 
@@ -285,13 +286,20 @@ export function subscribeToStudentProfile(
     return () => {};
   }
 
+  // The online-status heartbeat rewrites the profile every minute;
+  // nothing built here shows it, so those writes are skipped.
+  let previous: Record<string, unknown> | undefined;
   return onSnapshot(
     doc(db, "students", documentId),
     (snapshot) => {
       if (!snapshot.exists()) {
+        previous = undefined;
         onProfile(null);
         return;
       }
+      const heartbeatOnly = isHeartbeatOnlyChange(previous, snapshot.data());
+      previous = snapshot.data();
+      if (heartbeatOnly) return;
       // Built field by field, the same way subscribeToCurrentUserProfile does,
       // rather than spreading the raw document — a students record carries
       // fields UserData does not describe.
@@ -347,13 +355,22 @@ export function subscribeToCurrentUserProfile(
     return () => {};
   }
 
+  // The online-status heartbeat rewrites this profile every minute. Each
+  // screen using useCurrentUserRole has one of these listeners, and each used
+  // to re-save the profile and notify every screen holding a copy of it on
+  // every beat. Only real changes (role, name, photo...) go through now.
+  let previous: Record<string, unknown> | undefined;
   return onSnapshot(
     doc(db, "students", docId),
     (snapshot) => {
       if (!snapshot.exists()) {
+        previous = undefined;
         onProfile(null);
         return;
       }
+      const heartbeatOnly = isHeartbeatOnlyChange(previous, snapshot.data());
+      previous = snapshot.data();
+      if (heartbeatOnly) return;
 
       const record = snapshot.data() as StudentRecord;
       const userData: UserData = {

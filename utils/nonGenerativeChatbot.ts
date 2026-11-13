@@ -1,18 +1,9 @@
-import { addDoc, collection, getDocs, query, serverTimestamp, where } from "firebase/firestore";
+import { collection, getDocs, limit as limitTo, orderBy, query, where } from "firebase/firestore";
 import { auth, db } from "../Firebase_configure";
 import { readAiMemoryEntries } from "./aiMemory";
 import { retrieveCampusKnowledge, type CampusFaqEntry } from "./campusKnowledge";
 import { CHATBOT_INTENT_MODEL } from "./chatbotIntentModel";
-import {
-    hasGeneralKnowledgeTrigger,
-    lookupGeneralKnowledge,
-} from "./generalKnowledgeApi";
-import {
-    getCachedGeneralAnswer,
-    normalizeGeneralKnowledgeKey,
-    putCachedGeneralAnswer,
-    touchCachedGeneralAnswer,
-} from "./knowledgeCache";
+import { describeUpcomingEvent, upcomingEvents, type AnswerableEvent } from "./eventAnswers";
 import { LOST_FOUND_FIRST_PERSON_PATTERN } from "./lostAndFoundDetection";
 import { getUserDataByAuthUser, isStaff, resolveUserRoleForAuthUser, type UserRole } from "./rbac";
 import { routeChatbotSource } from "./sourceRouter";
@@ -40,16 +31,6 @@ export type ChatbotIntent =
 
 type TrainedIntent = Exclude<ChatbotIntent, "unknown" | "general_knowledge">;
 type IntentScore = { intent: TrainedIntent; probability: number };
-
-type BondedEvent = {
-  title?: string;
-  name?: string;
-  description?: string;
-  date?: string;
-  startTime?: string;
-  endTime?: string;
-  location?: string;
-};
 
 type BondedProgram = {
   code?: string;
@@ -98,7 +79,7 @@ const normalizeText = (value: string) =>
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
-    .replace(/@(?:ai|bondedai)\b/g, " ")
+    .replace(/@(?:bea|ai|bondedai)\b/g, " ")
     .replace(/[^a-z0-9+\-*/().%\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -617,60 +598,31 @@ const EVENTS_INTRO_VARIANTS = [
 // year/month/day (not `new Date(dateKey)`, which reads an ISO date-only
 // string as UTC midnight and can print as the wrong day in timezones behind
 // UTC) and rendered as "September 4, 2026" per request, no weekday.
-const formatEventDate = (dateKey: string): string => {
-  const [year, month, day] = dateKey.split("-").map(Number);
-  if (!year || !month || !day) return dateKey;
-  return new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  }).format(new Date(year, month - 1, day));
-};
-
-// event.startTime is stored as a plain 24-hour "HH:mm" string. Rendered as
-// 12-hour with a lowercase am/pm, minutes only shown when non-zero, e.g.
-// "15:00" -> "3 pm", "15:30" -> "3:30 pm".
-const formatEventTime = (time: string): string => {
-  const match = time.match(/^(\d{1,2}):(\d{2})/);
-  if (!match) return time;
-  const hour24 = Number(match[1]);
-  const minute = Number(match[2]);
-  if (Number.isNaN(hour24) || Number.isNaN(minute)) return time;
-  const period = hour24 >= 12 ? "pm" : "am";
-  const hour12 = hour24 % 12 || 12;
-  const minuteText = minute === 0 ? "" : `:${String(minute).padStart(2, "0")}`;
-  return `${hour12}${minuteText} ${period}`;
-};
+/** How far back events are read, so a long event that started earlier and is still on is found. */
+const EVENTS_LOOKBACK_DAYS = 31;
 
 const answerEvents = async (): Promise<string> => {
-  const snapshot = await getDocs(collection(db, "events"));
-  const today = new Date();
-  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const since = new Date(Date.now() - EVENTS_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const sinceKey = `${since.getFullYear()}-${String(since.getMonth() + 1).padStart(2, "0")}-${String(since.getDate()).padStart(2, "0")}`;
+  const snapshot = await getDocs(
+    query(collection(db, "events"), where("date", ">=", sinceKey), orderBy("date", "asc"), limitTo(300)),
+  );
+  const nowMs = Date.now();
+  // As the calendar shows them: a main event with its program, no drafts or
+  // cancelled events, nothing that has already ended.
+  const upcoming = upcomingEvents(
+    snapshot.docs.map((item) => ({ ...(item.data() as Omit<AnswerableEvent, "id">), id: item.id })),
+    nowMs,
+    5,
+  );
 
-  const events = snapshot.docs
-    .map((item) => ({ id: item.id, ...(item.data() as BondedEvent) }))
-    .filter(
-      (event) => typeof event.date === "string" && event.date >= todayKey,
-    )
-    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-    .slice(0, 5);
-
-  if (!events.length) {
+  if (!upcoming.length) {
     return "I couldn't find any upcoming campus events in the BondED database.";
   }
 
-  const summary = events
-    .map((event) => {
-      const title = String(event.title || "Untitled event");
-      const date = formatEventDate(String(event.date || ""));
-      const startTime = event.startTime
-        ? ` at ${formatEventTime(String(event.startTime))}`
-        : "";
-      return `**${title}** on ${date}${startTime}`;
-    })
-    .join("; ");
-
-  return `${pickVariant(EVENTS_INTRO_VARIANTS)}: ${summary}.`;
+  return `${pickVariant(EVENTS_INTRO_VARIANTS)}:\n${upcoming
+    .map((item) => `• ${describeUpcomingEvent(item, nowMs)}`)
+    .join("\n")}`;
 };
 
 const escapeForRegex = (value: string) =>
@@ -1278,7 +1230,7 @@ const PERSON_LOOKUP_EXCLUDED_CANDIDATES = new Set([
  * answerPersonLookup below.
  */
 const extractPersonNameCandidate = (input: string): string | null => {
-  const cleaned = input.replace(/@(?:ai|bondedai)\b/gi, " ").replace(/\s+/g, " ").trim();
+  const cleaned = input.replace(/@(?:bea|ai|bondedai)\b/gi, " ").replace(/\s+/g, " ").trim();
 
   for (const pattern of PERSON_LOOKUP_PATTERNS) {
     const match = cleaned.match(pattern);
@@ -1313,7 +1265,10 @@ const formatSinglePersonLookupReply = (
   person: BondedStudentRecord & { fullName: string },
 ): string => `${person.fullName} is ${personProgramClause(person)}.`;
 
-const answerPersonLookup = async (input: string): Promise<string | null> => {
+const answerPersonLookup = async (
+  input: string,
+  { onlyIfFound = false }: { onlyIfFound?: boolean } = {},
+): Promise<string | null> => {
   const candidate = extractPersonNameCandidate(input);
   if (!candidate) return null;
 
@@ -1338,6 +1293,8 @@ const answerPersonLookup = async (input: string): Promise<string | null> => {
   });
 
   if (matches.length === 0) {
+    // Nobody here by that name: maybe a famous person, for the AI to answer.
+    if (onlyIfFound) return null;
     return `I couldn't find anyone named **${candidate}** in BondED. Double-check the spelling, or try their full name as it's registered.`;
   }
 
@@ -1443,50 +1400,6 @@ const answerFromAnySource = async (prompt: string): Promise<string | null> => {
 
   return null;
 };
-
-/**
- * Fire-and-forget: never awaited by the caller so it can't delay or break the
- * chatbot reply. Human-reviewed training-data feed only — nothing reads this
- * collection automatically.
- */
-const logUnansweredQuestion = (
-  prompt: string,
-  classification: { intent: ChatbotIntent; confidence: number },
-) => {
-  addDoc(collection(db, "chatbotUnansweredQuestions"), {
-    prompt,
-    intent: classification.intent,
-    confidence: classification.confidence,
-    createdAt: serverTimestamp(),
-  }).catch((error) => {
-    console.error("Failed to log unanswered chatbot question:", error);
-  });
-};
-
-// Defensive whitespace cleanup only — deliberately does NOT collapse blank
-// lines, so a multi-paragraph Wikipedia intro keeps its paragraph breaks.
-// The answer text itself is never shortened here.
-const tidyApiAnswer = (value: string) =>
-  value
-    .replace(/[ \t]+/g, " ")
-    .replace(/ *\n */g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]+([,.;:!?])/g, "$1")
-    .trim();
-
-/**
- * General-knowledge answers come verbatim from a live source (Wikipedia,
- * Wiktionary, Frankfurter, Open-Meteo). The full retrieved text is shown,
- * never truncated and never re-worded — still non-generative, nothing here
- * is composed by a model.
- *
- * No citation line is appended: the reply is just the sentences themselves.
- * The source is still recorded on the answer object and in the Firestore
- * cache (utils/knowledgeCache.ts) for provenance, it simply isn't printed
- * into the chat bubble.
- */
-const formatGeneralKnowledgeReply = (answer: string): string =>
-  tidyApiAnswer(answer);
 
 const GREETING_VARIANTS = [
   "Hello! I'm B.E.A. I can help with BondED campus information, upcoming events, academic programs, general knowledge, and date/time.",
@@ -1640,6 +1553,18 @@ const UNKNOWN_FALLBACK_VARIANTS = [
   "That one's outside what I can confidently answer. I can help with your profile, programs, events, and campus info — try rewording your question.",
 ];
 
+/**
+ * World knowledge (facts, definitions, weather, exchange rates) is the AI's
+ * job, through the Worker. When this on-phone bot is the one answering — the
+ * AI is switched off, over its free limit, or unreachable — it says so plainly
+ * rather than guessing.
+ */
+const GENERAL_UNAVAILABLE_VARIANTS = [
+  "I can't look that up right now. I can still help with BondED and campus questions — or try again in a little while.",
+  "That one needs my online brain, which isn't reachable right now. Ask me about BondED or your campus, or try again soon.",
+  "I can only answer BondED, campus, date/time and math questions at the moment. Try again in a bit for anything else.",
+];
+
 export type NonGenerativeReply = {
   reply: string;
   model: string;
@@ -1648,55 +1573,153 @@ export type NonGenerativeReply = {
 };
 
 /**
- * Below this, the source router is judged too unsure of its own answer to
- * let it be the last word. Correct BondED routings in the regression set sit
- * around 0.9-0.99; a genuine misroute like "which planet is the largest"
- * came back at 0.45, i.e. the model was close to a coin flip. See the
- * general-knowledge second chance in the `default` branch below.
+ * How sure the intent model must be before a message skips the AI. Small talk
+ * can take a low bar: nothing else scores as small talk. The date and time
+ * need a high one: "what time is the program tomorrow" scores 0.65 as "time",
+ * while real time and date questions score 0.82 and up.
  */
-const ROUTER_UNSURE_BELOW = 0.6;
+const QUICK_SMALL_TALK_MIN_CONFIDENCE = 0.5;
+const QUICK_UTILITY_MIN_CONFIDENCE = 0.8;
+/** A greeting or thanks that also asks something is a question: "hi, events?" */
+const QUICK_QUESTION_WORDS =
+  /\?|\b(who|what|when|where|why|how|which|event|events|program|class|school|teacher|dean|office|schedule)\b/i;
+/** Small talk is short; a longer "hi, …" is usually a real question. */
+const QUICK_SMALL_TALK_MAX_WORDS = 4;
+const QUICK_UTILITY_MAX_WORDS = 7;
+/** Words allowed around a sum: "what is 25 * 4?", "calculate 10% of 300". */
+const QUICK_MATH_FILLER =
+  /\b(what|whats|is|are|calculate|compute|solve|how|much|equals|equal|to|the|answer|of|please|pls|po|bea|plus|minus|times|multiplied|multiply|divided|divide|by|over|percent|percentage|x)\b/g;
 
 /**
- * The general-knowledge path: Firestore cache first (a question answered
- * before costs no API call), then the live providers, caching a fresh
- * answer fire-and-forget for whoever asks next. Live data (weather, FX) is
- * marked non-cacheable by the provider and skips the cache.
+ * Small talk, the date and time, and arithmetic, answered here on the phone:
+ * no AI call at all, so B.E.A.'s free AI allowance goes to real questions.
  *
- * Returns null when nothing could be retrieved, so callers decide whether
- * that means the unknown-question fallback or another path.
+ * Deliberately narrow. Short messages only, and only when the intent model
+ * is sure: "hi, who is our school president?" is a question, not a greeting.
+ * The date and time also need the source router to agree it's a utility
+ * question, so "when is foundation day" is never answered with today's date.
+ * A sum is answered only when the message is nothing but the sum, so
+ * "officers for 2026-2027" isn't read as a subtraction.
+ *
+ * Reads nothing and writes nothing. Null means "ask the AI".
  */
-const answerFromGeneralKnowledge = async (
-  prompt: string,
-  confidence: number,
-): Promise<NonGenerativeReply | null> => {
-  const knowledgeKey = normalizeGeneralKnowledgeKey(prompt);
+export const answerQuickLocally = (prompt: string): NonGenerativeReply | null => {
+  const text = prompt.trim();
+  if (!text) return null;
 
-  const cached = knowledgeKey ? await getCachedGeneralAnswer(knowledgeKey) : null;
-  if (cached) {
-    touchCachedGeneralAnswer(knowledgeKey);
+  const expression = extractArithmeticExpression(text);
+  if (expression) {
+    const leftover = normalizeText(text)
+      .replace(QUICK_MATH_FILLER, " ")
+      .replace(/[0-9+\-*/().%\s]/g, "");
+    const result = leftover ? null : evaluateExpression(expression);
+    if (result != null) {
+      return {
+        reply: pickTemplate(CALCULATOR_REPLY_TEMPLATES)(expression.trim(), formatNumber(result)),
+        model: MODEL_NAME,
+        intent: "calculator",
+        confidence: 1,
+      };
+    }
+  }
+
+  const words = text.split(/\s+/).length;
+  const classification = classifyIntent(text);
+  const reply = (value: string): NonGenerativeReply => ({
+    reply: value,
+    model: MODEL_NAME,
+    intent: classification.intent,
+    confidence: classification.confidence,
+  });
+
+  const smallTalk: Partial<Record<ChatbotIntent, string[]>> = {
+    greeting: GREETING_VARIANTS,
+    wellbeing: WELLBEING_VARIANTS,
+    thanks: THANKS_VARIANTS,
+    goodbye: GOODBYE_VARIANTS,
+    assistant_identity: ASSISTANT_IDENTITY_VARIANTS,
+  };
+  const variants = smallTalk[classification.intent];
+  const asksSomething =
+    ["greeting", "thanks", "goodbye"].includes(classification.intent) &&
+    QUICK_QUESTION_WORDS.test(text);
+  if (
+    variants &&
+    words <= QUICK_SMALL_TALK_MAX_WORDS &&
+    classification.confidence >= QUICK_SMALL_TALK_MIN_CONFIDENCE &&
+    !asksSomething
+  ) {
+    return reply(pickVariant(variants));
+  }
+
+  if (
+    (classification.intent === "date" || classification.intent === "time") &&
+    words <= QUICK_UTILITY_MAX_WORDS &&
+    classification.confidence >= QUICK_UTILITY_MIN_CONFIDENCE &&
+    routeChatbotSource(text).source === "utility"
+  ) {
+    const now = new Date();
+    return reply(
+      classification.intent === "date"
+        ? pickTemplate(DATE_REPLY_TEMPLATES)(formatDate(now))
+        : pickTemplate(TIME_REPLY_TEMPLATES)(formatTime(now)),
+    );
+  }
+  return null;
+};
+
+/** Words that make a question about the person asking. */
+const ABOUT_ME = /\b(my|me|i|im|i'm|am i|ako|ko|akin|aking)\b/i;
+/** Parts of a student's own record. */
+const OWN_RECORD_WORDS = /\b(student ?id|student number|id number|year level|yearlvl|year lvl)\b/i;
+const PHONE_FIRST_MAX_WORDS = 12;
+const PHONE_FIRST_MIN_CONFIDENCE = 0.5;
+
+/**
+ * BondED questions this phone answers better than the AI, so they never go
+ * to it:
+ *   - about the person asking ("what is my student ID", "what's my course",
+ *     "who am I"): read from their own profile. The AI has no way to know,
+ *     and their ID number never leaves the phone.
+ *   - "who is <someone in BondED>": the roster is here; the AI only knows
+ *     staff. Only when that person is found — otherwise it may be someone
+ *     famous, which is the AI's to answer.
+ * Returns which kind, or null for "ask the AI".
+ */
+export const phoneFirstIntent = (prompt: string): "self" | "person" | null => {
+  const text = prompt.trim();
+  if (!text || text.split(/\s+/).length > PHONE_FIRST_MAX_WORDS) return null;
+  const normalized = normalizeText(text);
+  // "ano student id ko", "my year level?": plain enough without the model.
+  if (OWN_RECORD_WORDS.test(normalized) && ABOUT_ME.test(normalized)) return "self";
+  const classification = classifyIntent(text);
+  if (classification.confidence < PHONE_FIRST_MIN_CONFIDENCE) return null;
+  if (
+    (classification.intent === "user_identity" || classification.intent === "user_profile") &&
+    ABOUT_ME.test(normalized)
+  ) {
+    return "self";
+  }
+  if (classification.intent === "directory" && extractPersonNameCandidate(text)) return "person";
+  return null;
+};
+
+/** The phone's own answer for a phoneFirstIntent question, or null to ask the AI. */
+export const answerPhoneFirst = async (prompt: string): Promise<NonGenerativeReply | null> => {
+  const kind = phoneFirstIntent(prompt);
+  if (kind === "self") return requestNonGenerativeChatbotReply(prompt);
+  if (kind === "person") {
+    const reply = await answerPersonLookup(prompt, { onlyIfFound: true }).catch(() => null);
+    if (!reply) return null;
+    const classification = classifyIntent(prompt);
     return {
-      reply: formatGeneralKnowledgeReply(cached.answer),
+      reply,
       model: MODEL_NAME,
-      intent: "general_knowledge",
-      confidence,
+      intent: classification.intent,
+      confidence: classification.confidence,
     };
   }
-
-  const apiAnswer = await lookupGeneralKnowledge(prompt).catch((error) => {
-    console.error("General-knowledge API lookup failed:", error);
-    return null;
-  });
-  if (!apiAnswer) return null;
-
-  if (apiAnswer.cacheable && knowledgeKey) {
-    putCachedGeneralAnswer(knowledgeKey, prompt, apiAnswer);
-  }
-  return {
-    reply: formatGeneralKnowledgeReply(apiAnswer.answer),
-    model: MODEL_NAME,
-    intent: "general_knowledge",
-    confidence,
-  };
+  return null;
 };
 
 export const requestNonGenerativeChatbotReply = async (
@@ -1719,30 +1742,13 @@ export const requestNonGenerativeChatbotReply = async (
   const classification = classifyIntent(prompt);
   const now = new Date();
 
-  // The source router is authoritative for everything it was trained on, so
-  // a BondED question can't be hijacked by a superficially similar public
-  // answer. The one gap is that the router is retrained periodically and
-  // lags behind capabilities added straight to generalKnowledgeApi.ts — it
-  // has no signal for "define X" phrasing, for instance — so an
-  // unmistakable currency/weather/dictionary trigger rescues that case.
-  // This can only ever ADD a question to the general branch; it never takes
-  // a campus question away from its own handler.
-  const forcedGeneral =
-    sourceRoute.source !== "general" && hasGeneralKnowledgeTrigger(prompt);
-
-  // Retrieval order: Firestore cache (a question answered before) -> the live
-  // public APIs (utils/generalKnowledgeApi.ts: Frankfurter, Open-Meteo,
-  // Wiktionary, Wikipedia) -> unknown-question fallback. A fresh API answer
-  // is cached (fire-and-forget) so the next person asking the same thing
-  // gets it instantly with no extra API call. Live-data answers (weather, FX
-  // rates) are marked non-cacheable and skip the cache.
-  if (sourceRoute.source === "general" || forcedGeneral) {
-    const answer = await answerFromGeneralKnowledge(prompt, sourceRoute.confidence);
-    if (answer) return answer;
-
-    logUnansweredQuestion(prompt, classification);
+  // The source router decides who may answer: BondED's own data, the
+  // date/time/calculator code, or — for world knowledge — nobody here. That
+  // is the AI's job through the Worker, so this bot says it can't look it
+  // up rather than guessing.
+  if (sourceRoute.source === "general") {
     return {
-      reply: pickVariant(UNKNOWN_FALLBACK_VARIANTS),
+      reply: pickVariant(GENERAL_UNAVAILABLE_VARIANTS),
       model: MODEL_NAME,
       intent: "unknown",
       confidence: sourceRoute.confidence,
@@ -1771,7 +1777,6 @@ export const requestNonGenerativeChatbotReply = async (
     // Arithmetic was already handled above. If a utility-looking request is
     // still unsupported, fail safely instead of searching unrelated knowledge.
     if (classification.intent === "unknown") {
-      logUnansweredQuestion(prompt, classification);
       return {
         reply: pickVariant(UNKNOWN_FALLBACK_VARIANTS),
         model: MODEL_NAME,
@@ -1997,8 +2002,7 @@ export const requestNonGenerativeChatbotReply = async (
 
     default: {
       // We are on the BondED branch because the router selected it, so
-      // BondED's own live sources get first refusal — a campus question is
-      // never answered from Wikipedia.
+      // BondED's own live sources answer, or nothing does.
       const bondedAnswer = await answerFromAnySource(prompt);
       if (bondedAnswer) {
         return {
@@ -2009,22 +2013,6 @@ export const requestNonGenerativeChatbotReply = async (
         };
       }
 
-      // Nothing in BondED's data answered it, and the router wasn't
-      // confident it belonged here in the first place — "which planet is
-      // the largest" lands here at 0.45. Rather than tell a student we
-      // can't help, give general knowledge the question the router was
-      // unsure about. Ordering keeps the two from conflicting: BondED data
-      // always answers first when it has anything, and a confident bonded
-      // routing never reaches this at all.
-      if (sourceRoute.confidence < ROUTER_UNSURE_BELOW) {
-        const generalAnswer = await answerFromGeneralKnowledge(
-          prompt,
-          sourceRoute.confidence,
-        );
-        if (generalAnswer) return generalAnswer;
-      }
-
-      logUnansweredQuestion(prompt, classification);
       return {
         reply: pickVariant(UNKNOWN_FALLBACK_VARIANTS),
         model: MODEL_NAME,
@@ -2043,5 +2031,5 @@ export const getNonGenerativeChatbotDiagnostics = () => ({
   intents: [...CHATBOT_INTENT_MODEL.intentModel.classes],
   vocabularySize: CHATBOT_INTENT_MODEL.intentModel.terms.length,
   crossValidationAccuracy: CHATBOT_INTENT_MODEL.crossValidationAccuracy,
-  sourceRouting: "epoch-trained MLP -> bonded | general | utility",
+  sourceRouting: "epoch-trained MLP -> bonded | utility (general is the AI's, via the Worker)",
 });

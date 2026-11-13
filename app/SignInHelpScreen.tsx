@@ -379,7 +379,9 @@ export default function SignInHelpScreen() {
 
 const makeStyles = (c: ThemeTokens) =>
   StyleSheet.create({
-    container: { flex: 1, backgroundColor: c.primary },
+    // chrome, like the Login screen: in the dark themes primary is a bright
+    // red that the muted text on this screen can't be read on.
+    container: { flex: 1, backgroundColor: c.chrome },
     flex: { flex: 1 },
     header: {
       flexDirection: "row",
@@ -387,7 +389,7 @@ const makeStyles = (c: ThemeTokens) =>
       justifyContent: "space-between",
       paddingHorizontal: 16,
       paddingVertical: 16,
-      backgroundColor: c.primary,
+      backgroundColor: c.chrome,
     },
     headerTitle: { color: c.onChrome, fontSize: 18, fontWeight: "700" },
     content: { padding: 24, paddingBottom: 32 },

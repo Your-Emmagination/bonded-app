@@ -273,6 +273,10 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
       }
     } catch (error) {
       console.error(`${labels.logPrefix} selecting photos:`, error);
+      if (isAttachmentTooLargeError(error)) {
+        showInfo("File too large", error instanceof Error ? error.message : "Choose a smaller file.");
+        return;
+      }
       showInfo("Attachment unavailable", "Could not prepare the selected photo. Please select it again.");
     }
   };
@@ -874,6 +878,7 @@ const ComposerBase: React.FC<ComposerBaseProps> = ({
                 onChangeText={handleChangeText}
                 onSelectionChange={(event) => setSelection(event.nativeEvent.selection)}
                 multiline
+                blurOnSubmit={false}
                 maxLength={MAX_CHARACTERS}
                 autoFocus={!!replyingTo}
               />
@@ -1661,7 +1666,7 @@ const makeStyles = (c: ThemeTokens) =>
     flexGrow: 1,
     justifyContent: "flex-start",
     alignItems: "center",
-    paddingHorizontal: 20,
+    paddingHorizontal: 22,
     paddingTop: Platform.OS === "android" ? 64 : 34,
     paddingBottom: 24,
   },

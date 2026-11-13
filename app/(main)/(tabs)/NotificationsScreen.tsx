@@ -22,7 +22,7 @@ import {
     where,
     writeBatch,
 } from "firebase/firestore";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     Animated,
     Modal,
@@ -802,14 +802,25 @@ const onRefresh = useCallback(() => {
     </View>
   );
 
-  const renderNotificationItem = ({ item }: { item: NotificationItem }) => {
-  const liveProfile = item.actorId ? actorProfiles[item.actorId] : undefined;
-  // Anonymous notifications must keep their stored name — the live profile
-  // would undo the anonymity.
-  const liveAvatar = item.actorIsAnonymous ? null : liveProfile?.avatar || null;
+const NotificationRow = memo(function NotificationRow({
+  item,
+  actorProfile,
+  theme,
+  styles,
+  onPress,
+  timeAgo,
+}: {
+  item: NotificationItem;
+  actorProfile?: { avatar?: string | null; name?: string };
+  theme: ThemeTokens;
+  styles: any;
+  onPress: (item: NotificationItem) => void;
+  timeAgo: string;
+}) {
+  const liveAvatar = item.actorIsAnonymous ? null : actorProfile?.avatar || null;
   const liveName = item.actorIsAnonymous
     ? formatAnonymousHandle(item.actorName)
-    : liveProfile?.name || item.actorName;
+    : actorProfile?.name || item.actorName;
   const colors = getNotificationColors(item.type);
 
   return (
@@ -820,7 +831,7 @@ const onRefresh = useCallback(() => {
         !item.read && styles.unreadItem,
         item.type === "emergency" && !item.read && styles.emergencyUnreadItem,
       ]}
-      onPress={() => handleNotificationPress(item)}
+      onPress={() => onPress(item)}
       activeOpacity={0.7}
     >
       {/* Avatar Container with Badge Overlay */}
@@ -837,7 +848,7 @@ const onRefresh = useCallback(() => {
             </Text>
           </View>
         )}
-        
+
         {/* Type Icon Badge Overlay */}
         <View style={[styles.badgeOverlay, { backgroundColor: colors.icon }]}>
           <Ionicons name={getIconName(item.type)} size={10} color={theme.onPrimary} />
@@ -859,7 +870,7 @@ const onRefresh = useCallback(() => {
           </View>
         )}
 
-        <Text style={styles.timestamp}>{getTimeAgo(item.createdAt)}</Text>
+        <Text style={styles.timestamp}>{timeAgo}</Text>
       </View>
 
       {/* Unread Status Dot */}
@@ -873,7 +884,21 @@ const onRefresh = useCallback(() => {
       )}
     </TouchableOpacity>
   );
-};
+});
+
+  const renderNotificationItem = useCallback(
+    ({ item }: { item: NotificationItem }) => (
+      <NotificationRow
+        item={item}
+        actorProfile={item.actorId ? actorProfiles[item.actorId] : undefined}
+        theme={theme}
+        styles={styles}
+        onPress={handleNotificationPress}
+        timeAgo={getTimeAgo(item.createdAt)}
+      />
+    ),
+    [actorProfiles, getTimeAgo, handleNotificationPress, styles, theme],
+  );
 
   return (
     <SafeAreaView style={styles.container}>
@@ -955,9 +980,10 @@ const onRefresh = useCallback(() => {
   // Virtualization tuning (previously using RN's defaults): notification
   // rows include an avatar image each, so a smaller render window keeps
   // scrolling smooth on long notification histories.
-  initialNumToRender={10}
-  maxToRenderPerBatch={10}
-  windowSize={8}
+  initialNumToRender={8}
+  maxToRenderPerBatch={5}
+  windowSize={5}
+  updateCellsBatchingPeriod={50}
   removeClippedSubviews={Platform.OS === "android"}
   stickySectionHeadersEnabled={true} // 👈 Keeps section header visible on scroll
   renderSectionHeader={({ section: { title } }) => (
@@ -969,6 +995,13 @@ const onRefresh = useCallback(() => {
   )}
   contentContainerStyle={styles.listContent}
   showsVerticalScrollIndicator={false}
+  // Marks the end, so the last notification reads as the last one.
+  ListFooterComponent={
+    <View style={styles.listEnd} accessibilityRole="text">
+      <Ionicons name="checkmark-done-circle-outline" size={18} color={theme.textMuted} />
+      <Text style={styles.listEndText}>You&apos;re all caught up</Text>
+    </View>
+  }
 
   refreshControl={
     <RefreshControl
@@ -1183,9 +1216,20 @@ timePillText: {
     marginTop: 8,
     textAlign: "center",
   },
+  // The tab bar (70 high) floats over the bottom of the screen, so the list
+  // ends well clear of it; with only 32 the last notification sat under it.
   listContent: {
-    paddingBottom: 32,
+    paddingBottom: 110,
   },
+  listEnd: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingTop: 18,
+    paddingBottom: 6,
+  },
+  listEndText: { color: c.textMuted, fontSize: 12.5, fontWeight: "600" },
   sectionHeader: {
     backgroundColor: c.surfaceSunken,
     paddingHorizontal: 16,

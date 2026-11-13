@@ -34,6 +34,8 @@ import {
 
 import { Image } from "expo-image";
 
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
+
 import ReanimatedAnimated, {
   useAnimatedStyle,
   useSharedValue,
@@ -287,6 +289,15 @@ const PollCard = React.memo<PollCardProps>(({
   const [showCommentsModal, setShowCommentsModal] = useState(false);
 
   const [addError, setAddError] = useState<string | null>(null);
+
+  const addOptionInputRef = useRef<TextInput>(null);
+
+  const closeAddOptionForm = () => {
+    if (addingOption) return;
+    setShowAddOptionForm(false);
+    setNewOptionText("");
+    setAddError(null);
+  };
 
   const [voterDirectory, setVoterDirectory] = useState<Record<string, UserData | null>>({});
 
@@ -1340,133 +1351,81 @@ const handleAddOption = async () => {
 
 
 
+{/* Adding an option opens a small sheet above the keyboard with the
+    cursor already in the box. Inline in the feed, the keyboard pushed the
+    card around and the box lost its focus. */}
 {poll.allowUsersToAddOption && !expired && showAddOptionForm && (
-
-  <View style={styles.addOptionFormContainer}>
-
-    <Text style={styles.addOptionLabel}>New option (max 25 characters)</Text>
-
-
-
-    <View style={styles.addOptionInputWrapper}>
-
-      <TextInput
-
-        style={styles.addOptionInput}
-
-        placeholder="Type your option here..."
-
-        placeholderTextColor="#a07b70"
-
-        value={newOptionText}
-
-        onChangeText={setNewOptionText}
-
-        maxLength={25}
-
-        editable={!addingOption}
-
-        autoFocus
-
-        returnKeyType="done"
-
-        onSubmitEditing={handleAddOption} 
-
+  <Modal
+    visible
+    transparent
+    animationType="fade"
+    onShow={() => setTimeout(() => addOptionInputRef.current?.focus(), 50)}
+    onRequestClose={closeAddOptionForm}
+  >
+    <KeyboardAvoidingView automaticOffset behavior="padding" style={styles.addOptionBackdrop}>
+      <TouchableOpacity
+        accessible={false}
+        activeOpacity={1}
+        onPress={closeAddOptionForm}
+        style={StyleSheet.absoluteFill}
       />
-
-
-
-      <View style={styles.charCounter}>
-
-        <Text style={styles.charCountText}>
-
-          {newOptionText.length} / 25
-
+      <View style={styles.addOptionSheet}>
+        <Text style={styles.addOptionSheetTitle}>Add your own option</Text>
+        <Text style={styles.addOptionSheetQuestion} numberOfLines={2}>
+          {poll.question}
         </Text>
 
+        <View style={styles.addOptionInputWrapper}>
+          <TextInput
+            ref={addOptionInputRef}
+            style={styles.addOptionInput}
+            placeholder="Type your option here..."
+            placeholderTextColor={theme.textMuted}
+            value={newOptionText}
+            onChangeText={(text) => {
+              setNewOptionText(text);
+              if (addError) setAddError(null);
+            }}
+            maxLength={25}
+            editable={!addingOption}
+            autoFocus
+            returnKeyType="done"
+            onSubmitEditing={handleAddOption}
+          />
+          <View style={styles.charCounter}>
+            <Text style={styles.charCountText}>{newOptionText.length} / 25</Text>
+          </View>
+        </View>
+
+        {addError && <Text style={styles.addOptionErrorText}>{addError}</Text>}
+
+        <View style={styles.addOptionActions}>
+          <TouchableOpacity
+            style={[styles.addOptionCancelBtn, addingOption && styles.btnDisabled]}
+            onPress={closeAddOptionForm}
+            disabled={addingOption}
+          >
+            <Text style={styles.cancelText}>Cancel</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.addOptionSubmitBtn,
+              (!newOptionText.trim() || addingOption) && styles.btnDisabled,
+            ]}
+            onPress={handleAddOption}
+            disabled={!newOptionText.trim() || addingOption}
+          >
+            {addingOption ? (
+              <ActivityIndicator size="small" color={theme.primary} />
+            ) : (
+              <Text style={styles.submitText}>Add</Text>
+            )}
+          </TouchableOpacity>
+        </View>
       </View>
-
-    </View>
-
-
-
-    {addError && (
-
-  <Text style={styles.addOptionErrorText}>
-
-    {addError}
-
-  </Text>
-
+    </KeyboardAvoidingView>
+  </Modal>
 )}
-
-
-
-    <View style={styles.addOptionActions}>
-
-      <TouchableOpacity
-
-        style={[
-
-          styles.addOptionCancelBtn,
-
-          addingOption && styles.btnDisabled,
-
-        ]}
-
-        onPress={() => {
-
-          setShowAddOptionForm(false);
-
-          setNewOptionText("");
-
-        }}
-
-        disabled={addingOption}
-
-      >
-
-        <Text style={styles.cancelText}>Cancel</Text>
-
-      </TouchableOpacity>
-
-
-
-      <TouchableOpacity
-
-        style={[
-
-          styles.addOptionSubmitBtn,
-
-          (!newOptionText.trim() || addingOption) && styles.btnDisabled,
-
-        ]}
-
-        onPress={handleAddOption}
-
-        disabled={!newOptionText.trim() || addingOption}
-
-      >
-
-        {addingOption ? (
-
-          <ActivityIndicator size="small" color={theme.primary} />
-
-        ) : (
-
-          <Text style={styles.submitText}>Add</Text>
-
-        )}
-
-      </TouchableOpacity>
-
-    </View>
-
-  </View>
-
-)}
-
-
 
 {poll.allowUsersToAddOption && !expired && !showAddOptionForm && (
 
@@ -1481,11 +1440,9 @@ const handleAddOption = async () => {
     ]}
 
     onPress={() => {
-
-      setShowAddOptionForm(true);
-
       setNewOptionText("");
-
+      setAddError(null);
+      setShowAddOptionForm(true);
     }}
 
     activeOpacity={0.75}
@@ -1834,7 +1791,7 @@ PollCard.displayName = "PollCard";
 
 
 
-export default PollCard;
+export default React.memo(PollCard);
 
 
 
@@ -2544,34 +2501,32 @@ const makeStyles = (c: ThemeTokens) =>
 
   },
 
-  addOptionFormContainer: {
 
-  backgroundColor: c.surfaceSunken,
 
-  borderRadius: 10,
 
-  padding: 12,
-
-  marginVertical: 10,
-
-  borderWidth: 1,
-
-  borderColor: c.accentSoft,
-
+addOptionBackdrop: {
+  flex: 1,
+  justifyContent: "flex-end",
+  backgroundColor: c.scrim,
 },
-
-
-
-addOptionLabel: {
-
+addOptionSheet: {
+  backgroundColor: c.surfaceRaised,
+  borderTopLeftRadius: 20,
+  borderTopRightRadius: 20,
+  paddingHorizontal: 16,
+  paddingTop: 16,
+  paddingBottom: 20,
+},
+addOptionSheetTitle: {
+  color: c.textPrimary,
+  fontSize: 16,
+  fontWeight: "800",
+},
+addOptionSheetQuestion: {
   color: c.textMuted,
-
   fontSize: 13,
-
-  fontWeight: "500",
-
-  marginBottom: 8,
-
+  marginTop: 2,
+  marginBottom: 12,
 },
 
 

@@ -2,7 +2,7 @@ import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { doc, getDoc } from "firebase/firestore";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Linking,
@@ -18,6 +18,9 @@ import { showAppToast } from "@/utils/toastEvents";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { canNavigateToTaggedUser } from "@/utils/taggedUsers";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
+import { likePost } from "@/utils/likePost";
+import { withViewerLike } from "@/utils/postLikes";
+import ImageZoomViewer from "./components/ImageZoomViewer";
 import CommentModal from "./components/CommentModal";
 import PostCard from "./components/PostCard";
 import { FeedSkeleton } from "./components/Skeleton";
@@ -62,6 +65,29 @@ export default function NotificationTargetScreen() {
   // dump the user back on the Notifications list instead of leaving them
   // here on the underlying post. See commentModalVisible below.
   const [commentModalVisible, setCommentModalVisible] = useState(false);
+  // Photos (and, in a post with several, videos) open fullscreen here too.
+  const [viewer, setViewer] = useState<{ images: string[]; index: number } | null>(null);
+  // The post's video plays muted while this screen is showing, like on Home;
+  // a tap opens it fullscreen with sound.
+  const screenFocused = useIsFocused();
+
+  // The post here was read once, so a like updates this copy straight away
+  // and is put back if saving fails. Saved the way Home saves likes.
+  const handleLike = useCallback(() => {
+    const user = auth.currentUser;
+    const post = target?.post;
+    if (!user || !post) return;
+    const liked = !(post.likedBy || []).includes(user.uid);
+    setTarget((current) =>
+      current ? { ...current, post: withViewerLike(current.post, user.uid, liked) } : current,
+    );
+    likePost(post, user, liked, (savedLiked) => {
+      setTarget((current) =>
+        current ? { ...current, post: withViewerLike(current.post, user.uid, savedLiked) } : current,
+      );
+      showAppToast({ message: "Couldn't save your like. Try again." });
+    });
+  }, [target?.post]);
 
   const entityType = single(params.entityType);
   const entityId = single(params.entityId);
@@ -225,45 +251,19 @@ export default function NotificationTargetScreen() {
           // the first tap on Send only closed the keyboard.
           keyboardShouldPersistTaps="handled"
         >
-          <View style={styles.contextBanner}>
-            <View style={styles.contextIconCircle}>
-              <Ionicons
-                name={
-                  fromLiveReplay
-                    ? "radio-outline"
-                    : target.replyId
-                      ? "return-up-back-outline"
-                      : target.commentId
-                        ? "chatbubble-outline"
-                        : "document-text-outline"
-                }
-                size={16}
-                color={theme.textSecondary}
-              />
-            </View>
-            <Text style={styles.contextBannerText}>
-              {fromLiveReplay
-                ? "The recording of a live stream"
-                : target.replyId
-                  ? "Jumped here from a reply notification"
-                  : target.commentId
-                    ? "Jumped here from a comment notification"
-                    : "Jumped here from a notification"}
-            </Text>
-          </View>
-
           <PostCard
             post={target.post}
             isLiked={target.post.likedBy?.includes(auth.currentUser?.uid || "") || false}
             isHighlighted
             currentUserId={auth.currentUser?.uid}
             currentUserRole={currentUserRole}
-            onLike={() => undefined}
+            onLike={handleLike}
             onProfileClick={openProfile}
             onTagClick={openTagProfile}
-            onImagePress={() => undefined}
+            onImagePress={(images, index) => setViewer({ images, index })}
             onFilePress={(url) => void Linking.openURL(url)}
             getTimeAgo={timeAgo}
+            videoCardVisible={screenFocused && !viewer}
           />
         </ScrollView>
       )}
@@ -279,6 +279,13 @@ export default function NotificationTargetScreen() {
           autoOpenReplyThread={Boolean(target.replyId)}
         />
       ) : null}
+      <ImageZoomViewer
+        images={viewer?.images ?? []}
+        startIndex={viewer?.index ?? 0}
+        visible={!!viewer}
+        onClose={() => setViewer(null)}
+        showActions={false}
+      />
     </SafeAreaView>
   );
 }
@@ -304,27 +311,6 @@ const makeStyles = (c: ThemeTokens) =>
   headerTitle: { flex: 1, textAlign: "center", fontSize: 18, fontWeight: "700", color: c.primary },
   headerSpacer: { width: 42 },
   content: { padding: 12, paddingBottom: 32 },
-  contextBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    backgroundColor: c.surface,
-    borderWidth: 1,
-    borderColor: c.borderStrong,
-    borderRadius: 14,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    marginBottom: 12,
-  },
-  contextIconCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: "#fce3d6",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  contextBannerText: { flex: 1, color: c.textSecondary, fontSize: 13, fontWeight: "600" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
   loadingCard: {
     alignItems: "center",

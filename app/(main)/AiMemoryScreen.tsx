@@ -60,8 +60,8 @@ const emptyDraft: DraftState = {
 export default function AiMemoryScreen() {
   const { styles, theme } = useStyles();
   const router = useRouter();
-  // Optional pre-fill coming from UnansweredQuestionsScreen's clustered
-  // suggestions — title and tags only, never content. Staff always write
+  // Optional pre-fill passed in by whatever opens this screen — title and
+  // tags only, never content. Staff always write
   // the actual answer themselves; this just saves them re-typing the
   // question pattern and starts the editor already open.
   const { prefillTitle, prefillTags } = useLocalSearchParams<{

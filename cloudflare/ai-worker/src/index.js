@@ -11,6 +11,15 @@ import {
   isPersonalEmail,
   planPrivateProfileMove,
 } from "./privateProfile.js";
+import {
+  BEA_COLLECTIONS,
+  BEA_FIELDS,
+  BEA_TOOL_DECLARATIONS,
+  DOC_ID as BEA_DOC_ID,
+  cleanText as beaCleanText,
+  runBeaTool,
+  schoolDate,
+} from "./beaTools.js";
 
 const OPENMODERATION_API_URL = "https://api.openmoderation.com/v1/moderation";
 const DEFAULT_OPENMODERATION_PROVIDER = "openai";
@@ -1090,7 +1099,7 @@ async function firestoreCount(env, collectionId, filters = []) {
 // Bounded field-projection read — ONLY the named fields, for docs matching
 // `filters`. Used for the distinct-author count where a COUNT can't help.
 // Always scoped to a single day of content, so the payload stays small.
-async function firestoreSelect(env, collectionId, fields, filters = [], max = 5000) {
+async function firestoreSelect(env, collectionId, fields, filters = [], max = 5000, { withIds = false } = {}) {
   const token = await firebaseAccessToken(env);
   const where = fsWhere(filters);
   const response = await fetch(firestoreUrl(env) + ":runQuery", {
@@ -1113,7 +1122,11 @@ async function firestoreSelect(env, collectionId, fields, filters = [], max = 50
   }
   return (Array.isArray(payload) ? payload : [])
     .filter((x) => x.document)
-    .map((x) => fsDoc(x.document));
+    .map((x) =>
+      withIds
+        ? { ...fsDoc(x.document), [BEA_DOC_ID]: String(x.document.name || "").split("/").pop() }
+        : fsDoc(x.document),
+    );
 }
 
 async function resolveTextModerationRole(env, userId) {
@@ -1327,7 +1340,20 @@ async function runApprovedPostSideEffects(env, postId, post) {
   // Native chatbot only after this worker returns approved.
 }
 
+// Mentioning B.E.A. ("@bea", or the older "@ai" / "@bondedai") is how a
+// student asks it something. The handle itself is never what gets a post
+// held, so it's taken out before the text is checked; everything else in the
+// message is checked as usual.
+const BEA_MENTION_TOKENS = /(^|\s)@(?:bea|ai|bondedai)\b/gi;
+
 function extractContentText(collectionName, content) {
+  return extractRawContentText(collectionName, content)
+    .replace(BEA_MENTION_TOKENS, "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function extractRawContentText(collectionName, content) {
   if (collectionName === "polls") {
     return [
       String(content.question || "").trim(),
@@ -2999,6 +3025,536 @@ async function handleMigratePrivateProfile(env, request, body) {
   return json({ ok: true, scanned, moved, done, next: done ? null : after });
 }
 
+// -- bea-chat : signed in, B.E.A. answers with GPT and approved tools --------
+// OpenAI's open GPT model (gpt-oss), on Groq's free tier, understands the
+// question; it never touches Firestore. When it needs
+// school data it asks for one of the tools in beaTools.js, which this Worker
+// runs and trims to allowlisted fields. The app falls back to its own
+// non-generative bot whenever this answers with an error, so B.E.A. keeps
+// working with no key set, over quota, or offline.
+//
+// Settings (Worker secrets and vars):
+//   GROQ_API_KEY      secret, required — the same key the video captions use
+//                     (`npx wrangler secret put GROQ_API_KEY`). Free, within
+//                     Groq's per-minute and per-day limits for the model.
+//   BEA_MODEL         var, optional — defaults to BEA_DEFAULT_MODEL below
+//   BEA_HOURLY_LIMIT  var, optional — questions per person per hour
+// Any Groq chat model with tool calling works.
+const BEA_DEFAULT_MODEL = "openai/gpt-oss-20b";
+// Groq speaks the same request format as OpenAI's chat API.
+const BEA_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions";
+// Bumped when the AI behind B.E.A. changes, so answers saved by the old one
+// are never given again: their cache keys no longer match.
+const BEA_CACHE_VERSION = "groq-gpt-oss-1";
+const BEA_CALL_TIMEOUT_MS = 12_000;
+const BEA_MAX_TOOL_ROUNDS = 3;
+const BEA_DEFAULT_HOURLY_LIMIT = 30;
+const BEA_HISTORY_TURNS = 10;
+const BEA_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// School answers change, so they're only kept long enough for a class asking
+// the same thing at once to share one answer.
+const BEA_SCHOOL_CACHE_TTL_MS = 10 * 60 * 1000;
+const BEA_STAFF_ROLES = new Set(["admin", "teacher", "moderator"]);
+
+// A question that sounds like it's about this school is never answered from
+// the cache: the database may have changed since.
+const BEA_SCHOOL_HINT =
+  /\b(school|campus|bonded|our|event|program|course|class|teacher|professor|instructor|officer|president|dean|office|enrol|enroll|announcement|lost|found|policy|exam|schedule|uniform|library|tuition|registrar|section|semester|we|us)\b/i;
+
+function beaSystemInstruction(nowMs) {
+  return [
+    "You are B.E.A., the assistant inside BondED, a school social app for a college in the Philippines. You talk with students and staff.",
+    `Today is ${schoolDate(nowMs)} (Philippine time).`,
+    "School facts: for anything about this school — its events, programs, offices, policies, announcements, staff, Lost & Found or officers — call a tool and answer ONLY from what the tool returns. Never guess or invent school facts, names, dates or numbers. If a tool finds nothing, say you couldn't find it in the school's database and suggest asking the school office or an admin.",
+    "Privacy: never share anyone's contact details or personal information (email, phone number, address, ID number, grades, private messages), even if asked directly. There is no tool for them; politely refuse. If someone asks about their own account (their name, student ID, program or year level), tell them it's on their Profile page in the app.",
+    "Events: say when each one is (the tool's 'when' is already in Philippine time) and whether it's happening now. A big event's 'program' lists its parts still to come; name what's on now or next rather than every part. Leave out cancelled events unless asked, and then say they were cancelled.",
+    "General questions: answer from your own knowledge, clearly and briefly. For things that change daily (news, weather, prices), say you may not have current information.",
+    "Follow-ups: use the conversation so far to understand what the person means, but look school facts up again with a tool rather than repeating an earlier reply.",
+    "Style: friendly, short and plain. Reply in the language the person used (English or Filipino). No tables; at most a few short paragraphs or a short list.",
+  ].join("\n\n");
+}
+
+/** The Groq key B.E.A. uses, or "" when none is set (never throws). */
+function beaAiKey(env) {
+  try {
+    return groqApiKey(env);
+  } catch {
+    return "";
+  }
+}
+
+async function beaAiChat(env, payload) {
+  const model = String(env.BEA_MODEL || BEA_DEFAULT_MODEL).trim();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BEA_CALL_TIMEOUT_MS);
+  try {
+    const response = await fetch(BEA_CHAT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${beaAiKey(env)}`,
+      },
+      body: JSON.stringify({ model, ...payload }),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      const error = new Error(data?.error?.message || `Groq request failed (${response.status}).`);
+      // 413 is Groq's "more tokens than this minute's free allowance".
+      error.status = response.status === 413 ? 429 : response.status;
+      throw error;
+    }
+    return { data, model };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// beaTools.js writes each tool's parameter types in capitals (OBJECT,
+// STRING); the chat API takes JSON Schema, whose types are lowercase.
+function toJsonSchema(schema) {
+  if (Array.isArray(schema)) return schema.map(toJsonSchema);
+  if (!schema || typeof schema !== "object") return schema;
+  return Object.fromEntries(
+    Object.entries(schema).map(([key, value]) => [
+      key,
+      key === "type" && typeof value === "string" ? value.toLowerCase() : toJsonSchema(value),
+    ]),
+  );
+}
+
+const BEA_OPENAI_TOOLS = BEA_TOOL_DECLARATIONS.map((declaration) => ({
+  type: "function",
+  function: {
+    name: declaration.name,
+    description: declaration.description,
+    parameters: toJsonSchema(declaration.parameters || { type: "OBJECT", properties: {} }),
+  },
+}));
+
+/** The tools' only way into Firestore: one collection, only its listed fields. */
+function beaToolDeps(env) {
+  return {
+    nowMs: Date.now(),
+    select: (key, filters, max) =>
+      // With document ids (under BEA_DOC_ID), so an event's parts can find it.
+      firestoreSelect(env, BEA_COLLECTIONS[key], BEA_FIELDS[key], filters, max, { withIds: true }),
+    log: (message) => console.warn(message),
+  };
+}
+
+/** True while this person is under their hourly allowance; counts this question. */
+async function beaWithinRateLimit(env, uid) {
+  return withinHourlyLimit(env, "beaChatUsage", uid, Number(env.BEA_HOURLY_LIMIT) || BEA_DEFAULT_HOURLY_LIMIT);
+}
+
+/** True while `uid` has used fewer than `limit` this hour (kept in `collection`); counts this one. */
+async function withinHourlyLimit(env, collection, uid, limit) {
+  const now = Date.now();
+  const usage = await readFirestoreDocSafe(env, `/${collection}/${encodeURIComponent(uid)}`);
+  const windowStartMs = Number(usage?.windowStartMs || 0);
+  const inWindow = now - windowStartMs < 60 * 60 * 1000;
+  const count = inWindow ? Number(usage?.count || 0) : 0;
+  if (count >= limit) return false;
+  await patchFirestore(env, collection, uid, {
+    windowStartMs: inWindow ? windowStartMs : now,
+    count: count + 1,
+  }).catch(() => null);
+  return true;
+}
+
+async function beaHash(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].slice(0, 20).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Cache keys for a question asked on its own (not a follow-up):
+ *   general — a general question, kept a week. Null for anything that
+ *     sounds like it's about this school.
+ *   school  — any question, kept ten minutes. Includes the asker's program,
+ *     because the events tool marks what's for "your program"; students in
+ *     the same program share it, and nobody sees another program's version.
+ */
+async function beaCacheKeys(message, course) {
+  const normalized = message.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  if (normalized.length < 4) return { general: null, school: null };
+  return {
+    general:
+      normalized.length >= 8 && !BEA_SCHOOL_HINT.test(normalized)
+        ? await beaHash(`${BEA_CACHE_VERSION}|${normalized}`)
+        : null,
+    school: await beaHash(`${BEA_CACHE_VERSION}|school|${course}|${normalized}`),
+  };
+}
+
+/**
+ * The AI answers `messages` (the conversation, without the system prompt),
+ * calling B.E.A.'s tools as it needs them (at most BEA_MAX_TOOL_ROUNDS
+ * rounds). Throws when Groq can't be reached or gives nothing back;
+ * `refused` is set when a content filter stopped the answer.
+ */
+async function runBeaChat(env, caller, deps, messages) {
+  const usedTools = [];
+  const toolResults = [];
+  const conversation = [
+    { role: "system", content: beaSystemInstruction(deps.nowMs) },
+    ...messages,
+  ];
+  for (let round = 0; round <= BEA_MAX_TOOL_ROUNDS; round += 1) {
+    const lastRound = round === BEA_MAX_TOOL_ROUNDS;
+    const { data, model } = await beaAiChat(env, {
+      messages: conversation,
+      tools: BEA_OPENAI_TOOLS,
+      // On the last round no more tools, so it has to answer.
+      tool_choice: lastRound ? "none" : "auto",
+      temperature: 0.3,
+      // gpt-oss thinks before it answers, and the thinking counts toward
+      // this budget and the free per-minute allowance. A little thinking is
+      // plenty for B.E.A.'s questions.
+      reasoning_effort: "low",
+      max_completion_tokens: 1024,
+    });
+    const choice = data?.choices?.[0];
+    const message = choice?.message || {};
+    const calls = (Array.isArray(message.tool_calls) ? message.tool_calls : []).slice(0, 4);
+
+    if (calls.length && !lastRound) {
+      // Every tool call it made gets its answer, in order.
+      conversation.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
+      for (const call of calls) {
+        const name = String(call.function?.name || "");
+        let args = {};
+        try {
+          args = JSON.parse(call.function?.arguments || "{}");
+        } catch {
+          args = {};
+        }
+        const result = await runBeaTool(name, args, caller, deps);
+        usedTools.push(name);
+        toolResults.push(result);
+        conversation.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
+      }
+      continue;
+    }
+
+    const reply = String(message.content || "").trim();
+    if (!reply) {
+      if (choice?.finish_reason === "content_filter" || message.refusal) {
+        return {
+          reply: "I can't help with that one. If something's wrong, please talk to someone you trust or the guidance office.",
+          usedTools,
+          toolResults,
+          model,
+          refused: true,
+        };
+      }
+      throw new Error("The AI returned no text.");
+    }
+    return { reply, usedTools, toolResults, model, refused: false };
+  }
+  throw new Error("Too many tool rounds.");
+}
+
+async function handleBeaChat(env, request, body) {
+  // Before anything else, so the app falls back at once while no key is set.
+  if (!body?.dryRun && !beaAiKey(env)) {
+    return json({ error: "B.E.A.'s AI isn't set up yet.", code: "not_configured" }, { status: 503 });
+  }
+
+  const authHeader = request.headers.get("Authorization") || "";
+  const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  if (!idToken) return json({ error: "Sign in to continue." }, { status: 401 });
+
+  const account = await lookupFirebaseUser(env, idToken);
+  const profile = await findProfileByAccount(env, account);
+  if (!profile) return json({ error: "Your profile could not be found." }, { status: 403 });
+  const caller = {
+    uid: String(account.localId),
+    role: normalizeAppRole(profile.role),
+    course: beaCleanText(profile.course, 120),
+  };
+  const deps = beaToolDeps(env);
+
+  // Staff can check a tool's raw answer without the AI (curl testing).
+  if (body?.dryRun) {
+    if (!BEA_STAFF_ROLES.has(caller.role)) {
+      return json({ error: "Only staff can test tools." }, { status: 403 });
+    }
+    const tool = String(body.tool || "");
+    return json({ tool, result: await runBeaTool(tool, body.args || {}, caller, deps) });
+  }
+
+  const message = beaCleanText(body?.message, 1000);
+  if (!message) return json({ error: "Ask something first." }, { status: 400 });
+  const history = (Array.isArray(body?.history) ? body.history : [])
+    .slice(-BEA_HISTORY_TURNS)
+    .map((turn) => ({
+      role: turn?.role === "user" ? "user" : "assistant",
+      text: beaCleanText(turn?.text, 1000),
+    }))
+    .filter((turn) => turn.text);
+
+  if (!(await beaWithinRateLimit(env, caller.uid))) {
+    return json(
+      { error: "You've asked a lot this hour. Try again a little later.", code: "rate_limited" },
+      { status: 429 },
+    );
+  }
+
+  // Asked on its own, a question may already have an answer: a general one
+  // from the last week, a school one from the last ten minutes.
+  const cacheKeys =
+    history.length === 0 ? await beaCacheKeys(message, caller.course) : { general: null, school: null };
+  for (const key of [cacheKeys.general, cacheKeys.school]) {
+    if (!key) continue;
+    const cached = await readFirestoreDocSafe(env, `/beaAnswerCache/${key}`);
+    if (cached?.reply && Number(cached.expiresAtMs || 0) > Date.now()) {
+      return json({ reply: cached.reply, usedTools: [], source: "cache", unanswered: false });
+    }
+  }
+
+  const messages = [
+    ...history.map((turn) => ({ role: turn.role, content: turn.text })),
+    { role: "user", content: message },
+  ];
+
+  try {
+    const { reply, usedTools, toolResults, model, refused } = await runBeaChat(env, caller, deps, messages);
+    if (refused) {
+      return json({ reply, usedTools, source: "ai", unanswered: false });
+    }
+
+    // A general answer keeps a week; one built from school data, ten
+    // minutes — and never one where a tool failed.
+    const cacheAs =
+      cacheKeys.general && usedTools.length === 0
+        ? { key: cacheKeys.general, ttl: BEA_CACHE_TTL_MS, kind: "general" }
+        : cacheKeys.school && usedTools.length > 0 && !toolResults.some((result) => result.error)
+          ? { key: cacheKeys.school, ttl: BEA_SCHOOL_CACHE_TTL_MS, kind: "school" }
+          : null;
+    if (cacheAs) {
+      await patchFirestore(env, "beaAnswerCache", cacheAs.key, {
+        reply,
+        model,
+        kind: cacheAs.kind,
+        createdAtMs: Date.now(),
+        expiresAtMs: Date.now() + cacheAs.ttl,
+      }).catch(() => null);
+    }
+
+    return json({
+      reply,
+      usedTools,
+      source: "ai",
+      model,
+      // Every tool it tried came back empty: worth a look by staff.
+      unanswered:
+        toolResults.length > 0 && toolResults.every((result) => result.found === false || result.error),
+    });
+  } catch (error) {
+    console.error("[bea] chat failed:", error?.message || error);
+    const quota = error?.status === 429;
+    return json(
+      {
+        error: quota ? "B.E.A. is busy right now." : "B.E.A. couldn't answer right now.",
+        code: quota ? "quota" : "ai_unavailable",
+      },
+      { status: quota ? 503 : 502 },
+    );
+  }
+}
+
+// ── Direct messages: photo/video check and @bea ─────────────────────────
+// DMs stay private: no message text is checked, nothing is saved, no staff
+// ever sees them. Two narrow exceptions, both asked for by the person
+// sending: a photo or video is checked before it goes (and blocked outright
+// if it breaks the rules), and a message that mentions @bea is answered by
+// B.E.A. Only that one message goes to the AI, never the conversation.
+
+const DM_MEDIA_HOURLY_LIMIT = 60;
+// The app's Cloudinary account (public: it's in every image address).
+const DM_CLOUDINARY_CLOUD = "dutkd2ih4";
+const BEA_DM_MENTION = /(^|\s)@bea\b/i;
+const BEA_DM_SENDER_ID = "ai-assistant";
+const BEA_DM_SENDER_NAME = "B.E.A.";
+/** How long after sending a message B.E.A. may still be asked to answer it. */
+const BEA_DM_MAX_AGE_MS = 10 * 60 * 1000;
+
+/** The signed-in caller of a DM endpoint, and the conversation if they're in it. */
+async function dmCaller(env, request, conversationId) {
+  const authHeader = request.headers.get("Authorization") || "";
+  const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  if (!idToken) return { error: json({ error: "Sign in to continue." }, { status: 401 }) };
+  let account;
+  try {
+    account = await lookupFirebaseUser(env, idToken);
+  } catch {
+    return { error: json({ error: "Sign in again to continue." }, { status: 401 }) };
+  }
+  const uid = String(account.localId);
+  const id = String(conversationId || "");
+  if (!/^[A-Za-z0-9_-]{3,300}$/.test(id)) {
+    return { error: json({ error: "Unknown conversation." }, { status: 400 }) };
+  }
+  const conversation = await readFirestoreDocSafe(env, `/directConversations/${encodeURIComponent(id)}`);
+  // The first photo in a new chat is checked before the chat exists; its id
+  // is the two people's ids joined, so the caller must be one of them.
+  const participants = Array.isArray(conversation?.participants)
+    ? conversation.participants.map(String)
+    : id.split("_");
+  if (!participants.includes(uid)) {
+    return { error: json({ error: "You're not in this conversation." }, { status: 403 }) };
+  }
+  return { account, uid, conversationId: id, conversation };
+}
+
+/** A Cloudinary upload of this app's, as an image or a video. */
+function dmMediaTarget(url, kind) {
+  const value = String(url || "");
+  const match = /^https:\/\/res\.cloudinary\.com\/([a-z0-9_-]+)\/(image|video)\/upload\//i.exec(value);
+  if (!match || match[1] !== DM_CLOUDINARY_CLOUD || value.length > 600) return null;
+  const type = match[2].toLowerCase();
+  if ((kind === "video") !== (type === "video")) return null;
+  return { kind: type, url: value };
+}
+
+async function handleModerateDmMedia(env, request, body) {
+  const who = await dmCaller(env, request, body?.conversationId);
+  if (who.error) return who.error;
+  const target = dmMediaTarget(body?.url, body?.kind === "video" ? "video" : "image");
+  if (!target) return json({ error: "Only photos and videos uploaded by BondED can be checked." }, { status: 400 });
+
+  // Past the allowance the photo isn't checked, like any other time the check can't run.
+  if (!(await withinHourlyLimit(env, "dmMediaCheckUsage", who.uid, DM_MEDIA_HOURLY_LIMIT))) {
+    return json({ verdict: "unchecked", reason: "rate_limited" });
+  }
+
+  const result = await moderateMedia(env, [target], "direct message");
+  if (result.status === "approved") return json({ verdict: "allowed" });
+  // moderateMedia says "pending" both when something was found and when a
+  // check couldn't run; only a finding carries categories.
+  const categories = Array.isArray(result.categories) ? result.categories : [];
+  if (categories.length === 0) return json({ verdict: "unchecked", reason: "check_failed" });
+  const labels = [...new Set(categories.map(moderationCategoryLabel).filter(Boolean))].slice(0, 4);
+  return json({ verdict: "blocked", labels, selfHarm: result.selfHarm === true });
+}
+
+async function handleBeaDmReply(env, request, body) {
+  if (!beaAiKey(env)) {
+    return json({ error: "B.E.A.'s AI isn't set up yet.", code: "not_configured" }, { status: 503 });
+  }
+  const who = await dmCaller(env, request, body?.conversationId);
+  if (who.error) return who.error;
+  if (!who.conversation) return json({ error: "Unknown conversation." }, { status: 404 });
+
+  const messageId = String(body?.messageId || "");
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(messageId)) return json({ error: "Unknown message." }, { status: 400 });
+  const messagesPath = `directConversations/${encodeURIComponent(who.conversationId)}/messages`;
+  // The question is read from the saved message, not taken from the phone,
+  // so only a real message of the caller's that mentions @bea is sent.
+  const message = await readFirestoreDocSafe(env, `/${messagesPath}/${messageId}`);
+  if (!message || String(message.senderId || "") !== who.uid || message.deleted === true) {
+    return json({ error: "Unknown message." }, { status: 404 });
+  }
+  const sentAtMs = Date.parse(String(message.createdAt || ""));
+  if (!Number.isFinite(sentAtMs) || Date.now() - sentAtMs > BEA_DM_MAX_AGE_MS) {
+    return json({ error: "That message is too old for B.E.A. to answer." }, { status: 400 });
+  }
+  const text = String(message.text || "");
+  if (!BEA_DM_MENTION.test(text)) return json({ error: "That message doesn't mention @bea." }, { status: 400 });
+  const question = beaCleanText(text.replace(/@bea\b/gi, " "), 1000);
+
+  const replyId = `bea_${messageId}`;
+  if (await readFirestoreDocSafe(env, `/${messagesPath}/${replyId}`)) {
+    return json({ ok: true, replyId, already: true });
+  }
+
+  const profile = await findProfileByAccount(env, who.account);
+  const caller = {
+    uid: who.uid,
+    role: normalizeAppRole(profile?.role),
+    course: beaCleanText(profile?.course, 120),
+  };
+  if (!(await beaWithinRateLimit(env, caller.uid))) {
+    return json(
+      { error: "You've asked B.E.A. a lot this hour. Try again a little later.", code: "rate_limited" },
+      { status: 429 },
+    );
+  }
+
+  let reply;
+  try {
+    reply = question
+      ? (await runBeaChat(env, caller, beaToolDeps(env), [{ role: "user", content: question }])).reply
+      : "Hi! Ask me something after @bea, like \"@bea when is the next event?\"";
+  } catch (error) {
+    console.error("[bea-dm] reply failed:", error?.message || error);
+    const quota = error?.status === 429;
+    return json(
+      {
+        error: quota ? "B.E.A. is busy right now." : "B.E.A. couldn't answer right now.",
+        code: quota ? "quota" : "ai_unavailable",
+      },
+      { status: quota ? 503 : 502 },
+    );
+  }
+  // A DM bubble shows plain text, so the AI's markdown is flattened.
+  reply = reply
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/^\s*[*-]\s+/gm, "• ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 2000);
+
+  const now = new Date();
+  const senderName = String(message.senderName || "");
+  try {
+    // Only if it isn't there yet: two taps can't make two replies.
+    await firestore(env, `/${messagesPath}/${replyId}?currentDocument.exists=false`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        fields: Object.fromEntries(
+          Object.entries({
+            conversationId: who.conversationId,
+            senderId: BEA_DM_SENDER_ID,
+            senderName: BEA_DM_SENDER_NAME,
+            senderAvatar: null,
+            senderRole: "assistant",
+            aiAssistant: true,
+            text: reply,
+            files: [],
+            replyTo: { id: messageId, senderName, preview: text.slice(0, 100) },
+            status: "sent",
+            seenBy: {},
+            reactions: {},
+            pinned: false,
+            createdAt: now,
+          }).map(([k, v]) => [k, toFs(v)]),
+        ),
+      }),
+    });
+  } catch {
+    return json({ ok: true, replyId, already: true });
+  }
+  await patchFirestore(env, "directConversations", who.conversationId, {
+    lastMessage: {
+      id: replyId,
+      text: reply.slice(0, 200),
+      senderId: BEA_DM_SENDER_ID,
+      senderName: BEA_DM_SENDER_NAME,
+      createdAt: now,
+      status: "sent",
+      isImage: false,
+      isFile: false,
+    },
+    updatedAt: now,
+  }).catch((error) => console.warn("[bea-dm] preview not updated:", error?.message || error));
+  return json({ ok: true, replyId });
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
@@ -3076,6 +3632,15 @@ export default {
       }
       if (body?.mode === "migrate-private-profile") {
         return await handleMigratePrivateProfile(env, request, body);
+      }
+      if (body?.mode === "bea-chat") {
+        return await handleBeaChat(env, request, body);
+      }
+      if (body?.mode === "moderate-dm-media") {
+        return await handleModerateDmMedia(env, request, body);
+      }
+      if (body?.mode === "bea-dm-reply") {
+        return await handleBeaDmReply(env, request, body);
       }
       if (body?.mode === "password-reset-confirm") {
         return await handlePasswordResetConfirm(env, request, body);
@@ -3237,10 +3802,12 @@ export default {
         );
       }
 
+      // A mode this deployment doesn't know: almost always an app newer than
+      // the deployed Worker. Run `npx wrangler deploy`.
       return json(
         {
-          error:
-            "Unsupported mode. Generative chat is disabled in this Worker; BondED uses its non-generative chatbot separately.",
+          error: "This feature isn't available on the server yet. Please try again later.",
+          code: "unsupported_mode",
         },
         { status: 400, headers: { "Access-Control-Allow-Origin": allowedOrigin } },
       );

@@ -3,7 +3,7 @@ import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { AI_ASSISTANT_NAME } from "@/utils/aiAssistant";
 import { useNetworkStatus } from "@/utils/networkUtils";
-import { requestNonGenerativeChatbotReply } from "@/utils/nonGenerativeChatbot";
+import { requestBeaReply } from "@/utils/beaChat";
 import {
     getCachedAiConversations,
     getCachedAiMessages,
@@ -52,7 +52,8 @@ import ReanimatedAnimated, {
     useSharedValue,
     withTiming,
 } from "react-native-reanimated";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useReanimatedKeyboardAnimation } from "react-native-keyboard-controller";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
 import BeaOrb from "../components/BeaOrb";
 import ConfirmDialog from "../components/ConfirmDialog";
@@ -559,11 +560,14 @@ function SuggestionsBar({
 }
 
 export default function AiChatScreen() {
+  const insets = useSafeAreaInsets();
+  const composerBottomPadding = Math.max(96, 60 + insets.bottom + 12);
   const { styles, theme } = useStyles();
   const [user, setUser] = useState<User | null>(auth.currentUser);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [inputText, setInputText] = useState("");
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const inputRef = useRef<TextInput>(null);
   // A search on Home that found nothing hands its words over, to send or
   // edit. Set during render rather than in an effect so the box is never
@@ -635,15 +639,22 @@ export default function AiChatScreen() {
   // would otherwise give every row a fresh `item` reference and force the
   // whole list to re-render.
   const messagesCacheRef = useRef<Map<string, ChatMessage>>(new Map());
-  // Composer lift while the keyboard is open. KeyboardAvoidingView was
-  // removed because its `behavior` is `undefined` on Android (no adjustment
-  // happens at all there), which is why the composer used to end up hidden
-  // behind the keyboard. Reanimated runs the lift on the UI thread, so the
-  // keyboard no longer has to wait for JavaScript work to finish.
-  const composerBottom = useSharedValue(0);
+  // The keyboard's position on every frame: height runs from 0 down to
+  // minus the keyboard's height, progress from 0 to 1. Driven by
+  // KeyboardProvider on the UI thread, so it automatically accounts for
+  // Android's soft 3-button navigation bar and edge-to-edge insets.
+  const { height: keyboardOffset, progress: keyboardProgress } =
+    useReanimatedKeyboardAnimation();
   const composerAnimatedStyle = useAnimatedStyle(() => ({
-    marginBottom: composerBottom.value,
+    marginBottom: -keyboardOffset.value,
   }));
+  const composerInnerAnimatedStyle = useAnimatedStyle(() => {
+    const p = Math.max(0, Math.min(1, keyboardProgress.value));
+    return {
+      paddingBottom:
+        composerBottomPadding + (8 - composerBottomPadding) * p,
+    };
+  });
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, setUser);
@@ -661,29 +672,16 @@ export default function AiChatScreen() {
 
     const showSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
-      (event: KeyboardEvent) => {
-        const keyboardHeight = event.endCoordinates?.height || 0;
-        // The composer already carries COMPOSER_RESTING_BOTTOM_PADDING of
-        // its own bottom padding (clearance for the tab bar when the
-        // keyboard is closed) — subtract it here so the lift doesn't stack
-        // on top of that and leave a gap above the keyboard.
-        const lift = Math.max(0, keyboardHeight - COMPOSER_RESTING_BOTTOM_PADDING);
-        composerBottom.value = withTiming(
-          lift,
-          { duration: Platform.OS === "ios" ? event.duration || 250 : 220 },
-          (finished) => {
-            if (finished) runOnJS(scrollToEndIfNearBottom)();
-          },
-        );
+      () => {
+        setKeyboardOpen(true);
+        scrollToEndIfNearBottom();
       },
     );
 
     const hideSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
-      (event: KeyboardEvent) => {
-        composerBottom.value = withTiming(0, {
-          duration: Platform.OS === "ios" ? event.duration || 250 : 180,
-        });
+      () => {
+        setKeyboardOpen(false);
       },
     );
 
@@ -691,7 +689,7 @@ export default function AiChatScreen() {
       showSub.remove();
       hideSub.remove();
     };
-  }, [composerBottom]);
+  }, []);
 
   // Tapping the B.E.A. tab while it's already open jumps to the newest
   // message — a chat reads from the bottom, so "back to the top" would land
@@ -962,6 +960,13 @@ export default function AiChatScreen() {
       requestAnimationFrame(() => {
         listRef.current?.scrollToEnd({ animated: true });
       });
+      // A long answer can finish laying out after the first scroll, which
+      // then stops short of its last lines. Scroll again once it has.
+      // (Not cancelled on the next render: the server's copy of the same
+      // message re-renders the list well within this.)
+      setTimeout(() => {
+        if (!userScrolledUpRef.current) listRef.current?.scrollToEnd({ animated: true });
+      }, 350);
     }
   }, [messages]);
 
@@ -1006,7 +1011,7 @@ export default function AiChatScreen() {
     [],
   );
 
-  // Like ChatGPT, Claude, and Gemini: follow expanding messages progressively
+  // Like other chat assistants: follow expanding messages progressively
   // down as long as the user hasn't explicitly scrolled up to read earlier history.
   const handleContentSizeChange = useCallback(() => {
     if (pendingInitialBottomScrollRef.current) {
@@ -1066,6 +1071,10 @@ export default function AiChatScreen() {
       const userId = user?.uid;
       if (!text || !userId || sending) return;
 
+      // The conversation so far, taken before this question is added, so
+      // B.E.A. can follow "what year are they serving?" after an earlier answer.
+      const history = messages.map((message) => ({ role: message.role, text: message.text }));
+
       setInputText("");
       setSuggestionsOpen(false);
       setSending(true);
@@ -1106,7 +1115,8 @@ export default function AiChatScreen() {
         // Bump updatedAt so this conversation sorts to the top of history.
         await updateDoc(conversationRef, { updatedAt: serverTimestamp() });
 
-        const result = await requestNonGenerativeChatbotReply(text);
+        // GPT (on Groq) through the Worker when it's set up; the on-phone bot otherwise.
+        const result = await requestBeaReply(text, history);
 
         await addDoc(messagesCollection, {
           text: result.reply,
@@ -1141,7 +1151,7 @@ export default function AiChatScreen() {
         setSending(false);
       }
     },
-    [sending, user?.uid, ensureActiveConversation],
+    [sending, user?.uid, ensureActiveConversation, messages],
   );
 
   const handleFeedback = useCallback(
@@ -1384,12 +1394,15 @@ export default function AiChatScreen() {
             data={messages}
             keyExtractor={(item) => item.id}
             renderItem={renderItem}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
             // Virtualization tuning, consistent with the other message/
             // comment lists in the app.
             initialNumToRender={20}
             maxToRenderPerBatch={10}
             windowSize={11}
-            removeClippedSubviews={Platform.OS === "android"}
+            // Not removeClippedSubviews: on Android it cut off the bottom of
+            // the newest answer, whose height settles after its first layout.
             contentContainerStyle={
               messages.length ? styles.listContent : styles.emptyListContent
             }
@@ -1417,7 +1430,7 @@ export default function AiChatScreen() {
         <ReanimatedAnimated.View style={composerAnimatedStyle}>
           {suggestionsOpen && <SuggestionsBar onSelect={sendMessage} />}
 
-          <View style={styles.composer}>
+          <ReanimatedAnimated.View style={[styles.composer, composerInnerAnimatedStyle]}>
           <TouchableOpacity
             onPress={() => setSuggestionsOpen((open) => !open)}
             style={[
@@ -1439,6 +1452,7 @@ export default function AiChatScreen() {
             placeholderTextColor={theme.textMuted}
             style={styles.input}
             multiline
+            blurOnSubmit={false}
             editable={!!user}
             onSubmitEditing={() => sendMessage(inputText)}
           />
@@ -1457,7 +1471,7 @@ export default function AiChatScreen() {
               />
             )}
           </TouchableOpacity>
-          </View>
+          </ReanimatedAnimated.View>
         </ReanimatedAnimated.View>
       </View>
 
@@ -1669,7 +1683,9 @@ const makeStyles = (c: ThemeTokens) =>
   listContent: {
     paddingHorizontal: 16,
     paddingTop: 12,
-    paddingBottom: 12,
+    // Room below the newest answer's time and thumbs, so they aren't
+    // pressed against the composer.
+    paddingBottom: 28,
   },
   emptyListContent: {
     flexGrow: 1,

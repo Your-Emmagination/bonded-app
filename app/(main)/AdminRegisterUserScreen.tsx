@@ -47,6 +47,7 @@ import {
   type UserRole,
 } from "@/utils/rbac";
 import { normalizeYearLevel, YEAR_LEVELS } from "@/utils/yearLevels";
+import { ADMIN_POSITION, DEFAULT_TEACHER_POSITION, normalizeTeacherPosition, TEACHER_POSITIONS } from "@/utils/teacherPositions";
 
 const ROLES: UserRole[] = ["student", "teacher", "moderator", "admin"];
 
@@ -63,6 +64,8 @@ type RegistrationInput = {
   lastname: string;
   course: string;
   yearlvl: string;
+  /** Teachers only: Faculty, Program Chair or Dean. */
+  position?: string;
   userType: UserRole;
 };
 
@@ -126,6 +129,8 @@ function parseCsv(text: string): RegistrationInput[] {
       lastname: row.lastname,
       course: row.course,
       yearlvl: row.yearlvl,
+      // Optional column; teachers without one start as Faculty.
+      position: row.position || "",
       userType: ROLES.includes(rawRole) ? rawRole : "student",
     };
   });
@@ -142,8 +147,11 @@ async function createManagedUser(input: RegistrationInput): Promise<Registration
   const firstname = input.firstname.trim();
   const lastname = input.lastname.trim();
   const course = input.course.trim();
-  const yearlvl = input.yearlvl.trim();
   const role = input.userType;
+  // Teachers and admins have a position instead of a year level.
+  const yearlvl = role === "teacher" || role === "admin" ? "" : input.yearlvl.trim();
+  const position =
+    role === "teacher" ? normalizeTeacherPosition(input.position) || DEFAULT_TEACHER_POSITION : "";
 
   if (!studentID || !firstname || !lastname) {
     throw new Error("Student ID, first name, and last name are required.");
@@ -160,7 +168,7 @@ async function createManagedUser(input: RegistrationInput): Promise<Registration
   }
 
   const email = generatedEmail(studentID, role);
-  const temporaryPassword = `${lastname}12345`;
+  const temporaryPassword = `${lastname.replace(/\s+/g, "")}12345`;
   if (temporaryPassword.length < 6) throw new Error("Last name must contain at least one character.");
 
   // A secondary Firebase app creates the new account without signing the
@@ -185,6 +193,7 @@ async function createManagedUser(input: RegistrationInput): Promise<Registration
       email,
       course: course || "",
       yearlvl: yearlvl || "",
+      ...(position ? { position } : {}),
       role,
       permissions: getPermissionsForRole(role),
       userId: createdUser.uid,
@@ -202,6 +211,7 @@ async function createManagedUser(input: RegistrationInput): Promise<Registration
       lastname,
       course,
       yearlvl,
+      position,
       email,
       temporaryPassword,
       success: true,
@@ -243,6 +253,7 @@ export default function AdminRegisterUserScreen() {
   const [course, setCourse] = useState("");
   const [selectedProgramId, setSelectedProgramId] = useState<string | null>(null);
   const [yearlvl, setYearlvl] = useState("1st Year");
+  const [position, setPosition] = useState<string>(DEFAULT_TEACHER_POSITION);
   const [loading, setLoading] = useState(false);
   const [authorized, setAuthorized] = useState<boolean | null>(null);
   const [bulkLoading, setBulkLoading] = useState(false);
@@ -295,7 +306,7 @@ export default function AdminRegisterUserScreen() {
   };
 
   const email = useMemo(() => generatedEmail(studentID, role), [studentID, role]);
-  const temporaryPassword = useMemo(() => `${lastname.trim()}12345`, [lastname]);
+  const temporaryPassword = useMemo(() => `${lastname.trim().replace(/\s+/g, "")}12345`, [lastname]);
   const fullName = useMemo(() => `${firstname.trim()} ${lastname.trim()}`.trim(), [firstname, lastname]);
 
   useEffect(() => {
@@ -350,13 +361,18 @@ export default function AdminRegisterUserScreen() {
         lastname,
         course,
         yearlvl,
+        position,
         userType: role,
       });
 
       showInfo(
         "User Registered",
         `${fullName}\n\nEmail: ${result.email}\nTemporary password: ${result.temporaryPassword}\n\nThe user should change the temporary password after signing in.`,
-        () => router.back(),
+        () => {
+          setStudentID("");
+          setFirstname("");
+          setLastname("");
+        },
         "success",
       );
     } catch (error: any) {
@@ -511,12 +527,37 @@ export default function AdminRegisterUserScreen() {
             </View>
           )}
 
-          <Text style={styles.label}>Year Level {role === "student" || role === "moderator" ? "*" : ""}</Text>
-          <TouchableOpacity style={styles.select} onPress={() => setYearPickerOpen((value) => !value)}>
-            <Text style={styles.selectText}>{yearlvl || "Select year level"}</Text>
-            <Ionicons name={yearPickerOpen ? "chevron-up" : "chevron-down"} size={20} color={theme.textSecondary} />
-          </TouchableOpacity>
-          {yearPickerOpen && <View style={styles.dropdown}>{YEAR_LEVELS.map((item) => <TouchableOpacity key={item} style={styles.dropdownItemSimple} onPress={() => { setYearlvl(item); setYearPickerOpen(false); }}><Text style={styles.dropdownName}>{item}</Text></TouchableOpacity>)}</View>}
+          {role === "teacher" ? (
+            <>
+              {/* Teachers have a position instead of a year level. */}
+              <Text style={styles.label}>Position *</Text>
+              <View style={styles.choiceRow}>
+                {TEACHER_POSITIONS.map((item) => (
+                  <TouchableOpacity key={item} style={[styles.choice, position === item && styles.choiceActive]} onPress={() => setPosition(item)}>
+                    <Text style={[styles.choiceText, position === item && styles.choiceTextActive]}>{item}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          ) : role === "admin" ? (
+            <>
+              {/* Every admin is the System Administrator; there's nothing to choose. */}
+              <Text style={styles.label}>Position</Text>
+              <View style={[styles.select, { opacity: 0.8 }]}>
+                <Text style={styles.selectText}>{ADMIN_POSITION}</Text>
+                <Ionicons name="lock-closed-outline" size={18} color={theme.textSecondary} />
+              </View>
+            </>
+          ) : (
+            <>
+              <Text style={styles.label}>Year Level {role === "student" || role === "moderator" ? "*" : ""}</Text>
+              <TouchableOpacity style={styles.select} onPress={() => setYearPickerOpen((value) => !value)}>
+                <Text style={styles.selectText}>{yearlvl || "Select year level"}</Text>
+                <Ionicons name={yearPickerOpen ? "chevron-up" : "chevron-down"} size={20} color={theme.textSecondary} />
+              </TouchableOpacity>
+              {yearPickerOpen && <View style={styles.dropdown}>{YEAR_LEVELS.map((item) => <TouchableOpacity key={item} style={styles.dropdownItemSimple} onPress={() => { setYearlvl(item); setYearPickerOpen(false); }}><Text style={styles.dropdownName}>{item}</Text></TouchableOpacity>)}</View>}
+            </>
+          )}
 
           <View style={styles.previewCard}>
             <Text style={styles.previewTitle}>Automatic account details</Text>

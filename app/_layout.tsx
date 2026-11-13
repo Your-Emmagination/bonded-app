@@ -12,8 +12,10 @@ import {
 import { AccountSetupProvider, useAccountSetup } from "@/contexts/AccountSetupContext";
 import { ThemeProvider, useTheme } from "@/contexts/ThemeContext";
 import { resolveUserRoleForAuthUser } from "@/utils/rbac";
+import { recoverPendingDirectPhoto } from "@/utils/directPhotoAttachment";
 import { Image } from "expo-image";
 import { Stack, useRouter, useSegments } from "expo-router";
+import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { useEffect, useRef } from "react";
@@ -23,6 +25,11 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { db } from "../Firebase_configure";
 import AppToast from "./(main)/components/AppToast";
 import BrandWordmark from "./(main)/components/BrandWordmark";
+
+// The phone's own splash stays up until the saved theme has been read, so
+// the loading screen after it already wears that theme. (The splash itself
+// is shown by Android before any app code runs, so it can't follow it.)
+SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 export default function RootLayout() {
   // Outermost, so every screen and every modal can read the palette — and so
@@ -49,8 +56,18 @@ function RootNavigator() {
   const segments = useSegments();
   const lastHandledNotificationId = useRef<string | null>(null);
   const appActive = useAppActive();
-  const { colors } = useTheme();
+  const { colors, ready: themeReady } = useTheme();
   usePresenceHeartbeat(user);
+
+  useEffect(() => {
+    if (themeReady) {
+      SplashScreen.hideAsync().catch(() => undefined);
+      return;
+    }
+    // Never stuck behind the splash, whatever happens to the theme read.
+    const fallback = setTimeout(() => SplashScreen.hideAsync().catch(() => undefined), 3000);
+    return () => clearTimeout(fallback);
+  }, [themeReady]);
 
   useEffect(() => {
     if (user?.uid && appActive) return subscribeToDirectMessageDelivery(user.uid);
@@ -69,6 +86,32 @@ function RootNavigator() {
       router.replace("/(main)/(tabs)/HomeScreen");
     }
   }, [router, segments, status]);
+
+  // Android may recreate the activity while its camera or gallery is open.
+  // Expo keeps the result, but the navigation stack may restart at Home.
+  useEffect(() => {
+    if (status !== "ready" || !user?.uid) return;
+    let active = true;
+    void recoverPendingDirectPhoto(user.uid)
+      .then((recovered) => {
+        if (!active || !recovered) return;
+        const { intent } = recovered;
+        router.replace({
+          pathname: "/(main)/DirectChatScreen",
+          params: {
+            conversationId: intent.conversationId,
+            recipientId: intent.recipientId,
+            recipientName: intent.recipientName,
+            recipientAvatar: intent.recipientAvatar,
+            recipientRole: intent.recipientRole,
+            recipientStudentID: intent.recipientStudentID,
+            photoRecovery: String(Date.now()),
+          },
+        });
+      })
+      .catch((error) => console.warn("[RootNavigator] Could not recover DM photo:", error));
+    return () => { active = false; };
+  }, [router, status, user?.uid]);
 
   useEffect(() => {
     lastHandledNotificationId.current = null;
@@ -221,8 +264,8 @@ function RootNavigator() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      {/* The splash is always the dark maroon, so its bar stays light
-          regardless of appearance; after that the palette decides. */}
+      {/* The loading screen sits on the theme's bar colour, which is dark in
+          every theme, so its bar stays light; after that the palette decides. */}
       <StatusBar style={isAuthChecking ? "light" : colors.statusBarStyle} />
       <Stack
         screenOptions={{
@@ -257,19 +300,20 @@ function RootNavigator() {
             {
               justifyContent: "center",
               alignItems: "center",
-              backgroundColor: "#5f0909",
+              // The user's theme, like the app bars (maroon in Light).
+              backgroundColor: colors.chrome,
               zIndex: 99999,
             },
           ]}
         >
-          {/* The mark alone now — the name is text, so it reads on maroon. */}
+          {/* The mark alone now — the name is text, so it reads on the bar colour. */}
           <Image
             source={require("../assets/images/BondEDlogo.png")}
             style={{ width: 112, height: 112 }}
             contentFit="contain"
           />
-          <BrandWordmark size={24} style={{ marginTop: 12 }} />
-          <ActivityIndicator size="small" color="#e0a53d" style={{ marginTop: 24 }} />
+          <BrandWordmark size={24} color={colors.onChrome} style={{ marginTop: 12 }} />
+          <ActivityIndicator size="small" color={colors.accent} style={{ marginTop: 24 }} />
         </View>
       )}
     </GestureHandlerRootView>

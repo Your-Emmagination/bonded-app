@@ -29,7 +29,7 @@ import {
   View,
 } from "react-native";
 import { Image } from "expo-image";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
 import { feedImage, videoThumb } from "@/utils/cloudinaryImages";
 import ImageZoomViewer from "./components/ImageZoomViewer";
@@ -207,6 +207,7 @@ const selectionKey = (item: Pick<ModerationItem, "type" | "id">) => `${item.type
 export default function ManageModerationScreen() {
   const { styles, theme } = useStyles();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(true);
   // Live, so an account that loses staff access is turned out of the queue
   // instead of keeping it open until the screen is reopened.
@@ -280,9 +281,10 @@ export default function ManageModerationScreen() {
           where("moderationPriority", "==", "critical"),
         ),
         (snapshot) => {
-          const mapped = snapshot.docs.map((docSnap) =>
-            mapDocToItem(docSnap.id, docSnap.data(), type),
-          );
+          // A message deleted while pending has nothing left to review.
+          const mapped = snapshot.docs
+            .filter((docSnap) => docSnap.data().deleted !== true)
+            .map((docSnap) => mapDocToItem(docSnap.id, docSnap.data(), type));
           setCriticalItems((previous) => ({ ...previous, [type]: mapped }));
         },
         (error) => {
@@ -311,9 +313,9 @@ export default function ManageModerationScreen() {
           limit(pageLimit[type]),
         ),
         (snapshot) => {
-          const mapped = snapshot.docs.map((docSnap) =>
-            mapDocToItem(docSnap.id, docSnap.data(), type),
-          );
+          const mapped = snapshot.docs
+            .filter((docSnap) => docSnap.data().deleted !== true)
+            .map((docSnap) => mapDocToItem(docSnap.id, docSnap.data(), type));
           setPagedItems((previous) => ({ ...previous, [type]: mapped }));
           setHasMore((previous) => ({
             ...previous,
@@ -665,7 +667,7 @@ export default function ManageModerationScreen() {
     // Drawn as the screen will be — its bar, its opening card, then cards in
     // the real card style — so nothing moves when the data arrives.
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
         <View style={styles.topBar}>
           <TouchableOpacity
             style={styles.backButton}
@@ -717,7 +719,7 @@ export default function ManageModerationScreen() {
   if (!canManage) return null;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
       <View style={styles.topBar}>
         <TouchableOpacity
           style={styles.backButton}
@@ -737,7 +739,15 @@ export default function ManageModerationScreen() {
 
       <FlatList
         style={styles.body}
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[
+          styles.content,
+          {
+            paddingBottom:
+              selectMode && selectedKeys.size > 0
+                ? Math.max(120, insets.bottom + 90)
+                : Math.max(60, insets.bottom + 30),
+          },
+        ]}
         data={visibleItems}
         keyExtractor={(item) => selectionKey(item)}
         renderItem={renderCard}
@@ -890,7 +900,7 @@ export default function ManageModerationScreen() {
       />
 
       {selectMode && selectedKeys.size > 0 && (
-        <View style={styles.bulkBar}>
+        <View style={[styles.bulkBar, { bottom: Math.max(18, insets.bottom + 12) }]}>
           <Text style={styles.bulkBarText}>
             {selectedKeys.size} selected
           </Text>

@@ -44,11 +44,12 @@ export function manualTaggedUsers(
   });
 }
 
-const mentionTokenForTaggedUser = (tag: TaggedUser) => {
-  if (tag.id === "ai-assistant") return "@ai";
-  if (tag.id === "everyone-mention") return "@everyone";
+const mentionTokensForTaggedUser = (tag: TaggedUser): string[] => {
+  // B.E.A. is "@bea" now; older posts say "@ai".
+  if (tag.id === "ai-assistant") return ["@bea", "@ai"];
+  if (tag.id === "everyone-mention") return ["@everyone"];
   const name = tag.name.trim().replace(/\s+/g, " ");
-  return name ? `@${name}` : "";
+  return name ? [`@${name}`] : [];
 };
 
 /** Splits post copy into plain and tappable inline @mention runs. */
@@ -60,10 +61,9 @@ export function splitTaggedMentions(
   const allowedIds = new Set(mentionedUserIds);
   const candidates = taggedUsers
     .filter((tag) => allowedIds.size === 0 || allowedIds.has(tag.id))
-    .map((taggedUser) => ({
-      taggedUser,
-      token: mentionTokenForTaggedUser(taggedUser),
-    }))
+    .flatMap((taggedUser) =>
+      mentionTokensForTaggedUser(taggedUser).map((token) => ({ taggedUser, token })),
+    )
     .filter((entry) => entry.token.length > 1)
     .sort((a, b) => b.token.length - a.token.length);
 

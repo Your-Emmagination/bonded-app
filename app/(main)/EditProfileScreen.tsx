@@ -14,23 +14,19 @@ import { useAccountSetup } from "@/contexts/AccountSetupContext";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import { changeAccountPassword } from "@/utils/changeAccountPassword";
 import { AVATAR_SIZE_LARGE, avatarThumb } from "@/utils/cloudinaryImages";
-import { uploadProfileImage } from "@/utils/cloudinaryUpload";
+import { pickProfilePhoto, saveProfilePhoto } from "@/utils/profilePhoto";
 import { useNetworkStatus } from "@/utils/networkUtils";
-import { saveCachedMyProfile } from "@/utils/offlineStorage";
 import { validateNewPassword } from "@/utils/passwordPolicy";
 import {
   confirmRecoveryEmailVerification,
   startRecoveryEmailVerification,
 } from "@/utils/passwordReset";
 import { profileEmail } from "@/utils/profileSetup";
-import { updateUserDataCache } from "@/utils/rbac";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
-import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { updateProfile } from "firebase/auth";
-import { doc, onSnapshot, updateDoc } from "firebase/firestore";
+import { doc, onSnapshot } from "firebase/firestore";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -138,23 +134,12 @@ export default function EditProfileScreen() {
         return;
       }
       try {
-        const permission = useCamera
-          ? await ImagePicker.requestCameraPermissionsAsync()
-          : await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (permission.status !== "granted") {
-          showInfo("Permission required", `Allow ${useCamera ? "camera" : "photo"} access.`);
+        const picked = await pickProfilePhoto(useCamera);
+        if (picked.status === "denied") {
+          showInfo("Permission required", `Allow ${picked.source === "camera" ? "camera" : "photo"} access.`);
           return;
         }
-        const result = await (useCamera
-          ? ImagePicker.launchCameraAsync
-          : ImagePicker.launchImageLibraryAsync)({
-          allowsEditing: true,
-          aspect: [1, 1],
-          quality: 0.8,
-        });
-        if (!result.canceled && result.assets?.[0]?.uri) {
-          setPendingImage(result.assets[0].uri);
-        }
+        if (picked.status === "picked") setPendingImage(picked.uri);
       } catch (error: any) {
         showInfo("Error", `Failed to update photo: ${error?.message || "Please try again."}`);
       }
@@ -173,20 +158,14 @@ export default function EditProfileScreen() {
 
     setPhotoBusy(true);
     try {
-      const url = await uploadProfileImage(pendingImage);
-      await updateDoc(doc(db, "students", docId), { profileImage: url });
-      // Some accounts keep a second profile document under the auth uid.
-      if (user.uid !== docId) {
-        updateDoc(doc(db, "students", user.uid), { profileImage: url }).catch(() => undefined);
-      }
-      updateProfile(user, { photoURL: url }).catch((error) =>
-        console.warn("Error updating auth photoURL:", error),
-      );
-      updateUserDataCache(
-        [user.uid, docId, user.email?.split("@")[0]?.trim()].filter(Boolean) as string[],
-        { profileImage: url },
-      );
-      if (student) saveCachedMyProfile(user.uid, { ...student, profileImage: url });
+      // Uploads it and saves it everywhere (utils/profilePhoto.ts), the same
+      // way the camera button on Profile does.
+      await saveProfilePhoto({
+        user,
+        docId,
+        localUri: pendingImage,
+        cachedProfile: (student as Record<string, unknown> | null) ?? null,
+      });
 
       setPendingImage(null);
       showInfo("Success", "Profile photo updated!");

@@ -47,7 +47,7 @@ import {
 // React Native's built-in one stopped lifting anything on Android once
 // KeyboardProvider (app/_layout.tsx) took over the keyboard.
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth, db } from "../../Firebase_configure";
 import ConfirmDialog from "./components/ConfirmDialog";
 import { CardListSkeleton, SkeletonCard } from "./components/Skeleton";
@@ -163,6 +163,7 @@ const FaqRow = React.memo(
 // ---------------------------------------------------------------------------
 
 export default function ManageCampusFaqScreen() {
+  const insets = useSafeAreaInsets();
   const { styles, theme } = useStyles();
   const router = useRouter();
   const [loading, setLoading] = useState(true);
@@ -788,7 +789,7 @@ export default function ManageCampusFaqScreen() {
           style={styles.editorOverlay}
         >
           <Pressable style={styles.editorBackdrop} onPress={closeEditor} />
-          <View style={styles.editorSheet}>
+          <View style={[styles.editorSheet, { paddingBottom: Math.max(24, insets.bottom + 16) }]}>
             <View style={styles.editorHandle} />
             <View style={styles.editorHeader}>
               <Text style={styles.editorTitle}>

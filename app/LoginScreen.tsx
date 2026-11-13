@@ -391,7 +391,6 @@ const handleTermsDecline = useCallback(() => {
           >
             <View style={styles.visualShell}>
               <View style={styles.topAccent} />
-              <View style={styles.bottomAccent} />
 
               <Animated.View
                 style={[
@@ -777,15 +776,6 @@ const makeStyles = (c: ThemeTokens) =>
     position: "absolute",
     top: -76,
     right: -78,
-    width: 220,
-    height: 220,
-    borderRadius: 110,
-    backgroundColor: c.chromeBorder,
-  },
-  bottomAccent: {
-    position: "absolute",
-    bottom: -90,
-    left: -92,
     width: 220,
     height: 220,
     borderRadius: 110,

@@ -13,6 +13,7 @@ import {
   uploadPostFile,
   uploadPostGif,
   uploadPostImage,
+  uploadPostVideo,
 } from "@/utils/cloudinaryUpload";
 
 export type ComposerFile = {
@@ -87,7 +88,13 @@ export function prepareComposerAttachments(
   const jobs = [
     ...files.map((file) => ({
       local: { url: file.uri, mimeType: file.mimeType, name: file.name, size: file.size },
-      send: file.mimeType.startsWith("image/") ? uploadPostImage : uploadPostFile,
+      // Photos are shrunk on the way (the type keeps GIFs whole); videos go up
+      // as videos, which Cloudinary takes up to 100 MB instead of 10.
+      send: file.mimeType.startsWith("image/")
+        ? (uri: string) => uploadPostImage(uri, file.mimeType)
+        : file.mimeType.startsWith("video/")
+          ? uploadPostVideo
+          : uploadPostFile,
     })),
     ...(gifUrl
       ? [{ local: { url: gifUrl, mimeType: "image/gif", name: "animated.gif" }, send: uploadPostGif }]

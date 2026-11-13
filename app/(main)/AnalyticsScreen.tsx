@@ -4,8 +4,6 @@
 //     written once a day by the Cloudflare Worker cron job.
 //   • anomaly briefing     -> statistical test in utils/analyticsAnomalies.ts,
 //     rendered through a fixed template (never LLM-narrated).
-//   • recommendations      -> reuses clusterUnansweredQuestions + the same
-//     AiMemoryScreen prefill hand-off UnansweredQuestionsScreen already uses.
 import { useThemeColors } from "@/contexts/ThemeContext";
 import { onSurface, type ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
@@ -14,8 +12,6 @@ import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
   getCountFromServer,
-  onSnapshot,
-  orderBy,
   query,
   where,
 } from "firebase/firestore";
@@ -49,10 +45,6 @@ import {
 import { POST_FLAIRS } from "@/utils/postFlairs";
 import { isStaff } from "@/utils/rbac";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
-import {
-  clusterUnansweredQuestions,
-  type UnansweredQuestionCluster,
-} from "@/utils/unansweredClustering";
 import ConfirmDialog from "./components/ConfirmDialog";
 import CampusReveal, { useReducedMotion } from "./components/CampusReveal";
 import { SkeletonBlock, SkeletonGroup } from "./components/Skeleton";
@@ -71,7 +63,6 @@ const SPARK_DAYS = 14;
 const WEEK_DAYS = 7;
 const MODERATION_REASON_WINDOW_DAYS = 30;
 const LINE_RANGES = [7, 30] as const;
-const MAX_RECOMMENDATIONS = 5;
 
 // keyword:weapons -> "Weapons (keyword)", self-harm/intent -> "Self-harm intent"
 function friendlyCategory(raw: string): string {
@@ -241,9 +232,6 @@ export default function AnalyticsScreen() {
   const [roleDist, setRoleDist] = useState<NamedValue[]>([]);
   const [reportDist, setReportDist] = useState<NamedValue[]>([]);
   const [lineRange, setLineRange] = useState<(typeof LINE_RANGES)[number]>(7);
-  const [unansweredClusters, setUnansweredClusters] = useState<
-    UnansweredQuestionCluster[]
-  >([]);
 
   useEffect(() => {
     // The role itself is tracked by useCurrentUserRole above; this only waits
@@ -358,31 +346,6 @@ export default function AnalyticsScreen() {
     load().finally(() => setLoading(false));
   }, [authChecked, canView, load]);
 
-  // Live unanswered-question clusters — same source and clustering the
-  // Unanswered Questions screen uses; here we just surface the top few.
-  useEffect(() => {
-    if (!authChecked || !canView) return;
-    const unsubscribe = onSnapshot(
-      query(
-        collection(db, "chatbotUnansweredQuestions"),
-        orderBy("createdAt", "desc"),
-      ),
-      (snapshot) => {
-        const questions = snapshot.docs.map((docSnap) => ({
-          id: docSnap.id,
-          prompt: String(docSnap.data().prompt || ""),
-        }));
-        setUnansweredClusters(
-          clusterUnansweredQuestions(questions)
-            .filter((cluster) => cluster.count >= 2)
-            .slice(0, MAX_RECOMMENDATIONS),
-        );
-      },
-      (error) => console.error("Unanswered questions listener failed:", error),
-    );
-    return unsubscribe;
-  }, [authChecked, canView]);
-
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     load().finally(() => setRefreshing(false));
@@ -432,22 +395,6 @@ export default function AnalyticsScreen() {
   );
   const briefingNeedsAttention = anomalyResult.status === "ok" &&
     anomalyResult.anomalies.some((anomaly) => anomaly.direction === "up");
-
-  // Same hand-off UnansweredQuestionsScreen.openAiMemorySuggestion uses:
-  // navigate to AiMemoryScreen with the cluster's title + tags pre-filled,
-  // answer left blank for staff to write.
-  const openRecommendation = useCallback(
-    (cluster: UnansweredQuestionCluster) => {
-      router.push({
-        pathname: "/(main)/AiMemoryScreen",
-        params: {
-          prefillTitle: cluster.suggestedTitle,
-          prefillTags: cluster.suggestedTags.join(", "),
-        },
-      });
-    },
-    [router],
-  );
 
   // Line chart — daily active users for the selected range (oldest→newest).
   const activeUsersLine = useMemo(() => {
@@ -700,50 +647,6 @@ export default function AnalyticsScreen() {
               />
             </View>
 
-            <View style={styles.chartCard}>
-              <Text style={styles.chartTitle}>Frequently asked, not yet answered</Text>
-              <Text style={styles.chartSubtitle}>
-                Clusters of similar chatbot questions with no AI Memory entry.
-                Tap one to start an answer.
-              </Text>
-              {unansweredClusters.length === 0 ? (
-                <View style={styles.recEmpty}>
-                  <Ionicons
-                    name="checkmark-circle-outline"
-                    size={18}
-                    color={theme.success}
-                  />
-                  <Text style={styles.recEmptyText}>
-                    Nothing pending — every common question has an answer.
-                  </Text>
-                </View>
-              ) : (
-                unansweredClusters.map((cluster) => (
-                  <TouchableOpacity
-                    key={cluster.representativePrompt}
-                    style={styles.recRow}
-                    activeOpacity={0.8}
-                    onPress={() => openRecommendation(cluster)}
-                  >
-                    <View style={styles.recCount} accessibilityLabel={`Asked ${cluster.count} times`}>
-                      <Text style={styles.recCountText}>{cluster.count}</Text>
-                    </View>
-                    <View style={styles.recBody}>
-                      <Text style={styles.recTitle} numberOfLines={2}>
-                        {cluster.suggestedTitle || cluster.representativePrompt}
-                      </Text>
-                      {cluster.suggestedTags.length > 0 && (
-                        <Text style={styles.recTags} numberOfLines={1}>
-                          {cluster.suggestedTags.join(" · ")}
-                        </Text>
-                      )}
-                    </View>
-                    <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
-                  </TouchableOpacity>
-                ))
-              )}
-            </View>
-
             <View style={styles.footerRow}>
               <Text style={styles.footerText}>
                 {lastRollup
@@ -906,36 +809,6 @@ const makeStyles = (c: ThemeTokens) =>
     lineHeight: 16,
     fontWeight: "500",
   },
-
-  recEmpty: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingVertical: 10,
-  },
-  recEmptyText: { color: c.success, fontSize: 12.5, flex: 1 },
-  recRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 11,
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: c.surfaceSunken,
-    marginTop: 8,
-  },
-  recCount: {
-    minWidth: 32,
-    height: 32,
-    borderRadius: 10,
-    paddingHorizontal: 6,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: c.accentSoft,
-  },
-  recCountText: { color: c.primary, fontSize: 12, fontWeight: "700" },
-  recBody: { flex: 1 },
-  recTitle: { color: c.textPrimary, fontSize: 13, fontWeight: "700", lineHeight: 17 },
-  recTags: { color: c.textMuted, fontSize: 11, marginTop: 3 },
 
   chartCard: {
     backgroundColor: c.surface,

@@ -3,6 +3,7 @@ import { useThemeColors } from "@/contexts/ThemeContext";
 import { emitHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
 import { subscribeToUnreadNotificationCount } from "@/utils/notifications";
 import { resolveUserRoleForAuthUser, subscribeToCurrentUserProfile } from "@/utils/rbac";
+import { tabBarHidden } from "@/utils/tabBarVisibility";
 import { emitTabScrollToTop } from "@/utils/tabScrollEvents";
 import { Ionicons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
@@ -23,8 +24,41 @@ import Reanimated, {
     withSpring,
     withTiming,
 } from "react-native-reanimated";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth } from "../../../Firebase_configure";
+
+// The bar's size. Compact: the active pill fills most of its height, as in
+// the design the team picked.
+const TAB_BAR_HEIGHT = 60;
+const TAB_PILL_HEIGHT = 44;
+
+/**
+ * The bar itself, sliding down off the screen while Home's feed is scrolled
+ * down (utils/tabBarVisibility.ts) and back up when it's scrolled up.
+ */
+function SlidingTabBar({ children, style }: { children: React.ReactNode; style: object }) {
+  const insets = useSafeAreaInsets();
+  const totalBarHeight = TAB_BAR_HEIGHT + insets.bottom;
+  // Far enough to clear the navigation bar area below it too.
+  const hiddenOffset = totalBarHeight + 8;
+  const slideStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: tabBarHidden.get() * hiddenOffset }],
+  }));
+  return (
+    <Reanimated.View
+      style={[
+        style,
+        {
+          height: totalBarHeight,
+          paddingBottom: insets.bottom + (Platform.OS === "android" ? 4 : 8),
+        },
+        slideStyle,
+      ]}
+    >
+      {children}
+    </Reanimated.View>
+  );
+}
 
 function TabItem({
   isFocused,
@@ -78,13 +112,13 @@ function TabItem({
         flex: 1,
         justifyContent: "center",
         alignItems: "center",
-        height: 70,
+        height: TAB_BAR_HEIGHT,
       }}
     >
       <Animated.View
         style={{
           width: "100%",
-          height: 50,
+          height: TAB_PILL_HEIGHT,
           borderRadius: 12,
           justifyContent: "center",
           alignItems: "center",
@@ -197,12 +231,19 @@ export default function TabLayout() {
   const visibleRoutes = isPrivileged ? privilegedRoutes : studentRoutes;
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: theme.chrome }} edges={["bottom"]}>
+    <View style={{ flex: 1, backgroundColor: theme.background }}>
       <Tabs
-        screenOptions={{ headerShown: false, tabBarStyle: { display: "none" } }}
+        screenOptions={{
+          headerShown: false,
+          tabBarStyle: { display: "none" },
+          // A tab you've left stays loaded but stops redrawing until you come
+          // back to it. The tab bar's badges live in this layout, so they
+          // keep updating.
+          freezeOnBlur: true,
+        }}
         initialRouteName="HomeScreen"
        tabBar={({ state, navigation }) => (
-  <View
+  <SlidingTabBar
     style={{
       position: "absolute",
       bottom: 0,
@@ -213,8 +254,6 @@ export default function TabLayout() {
       backgroundColor: theme.chrome,
       borderTopWidth: 1,
       borderTopColor: theme.chromeBorder,
-      height: 70,
-      paddingBottom: Platform.OS === "android" ? 5 : 15,
     }}
   >
     {visibleRoutes.map((routeInfo) => {
@@ -277,7 +316,7 @@ export default function TabLayout() {
         />
       );
     })}
-  </View>
+  </SlidingTabBar>
 )}
       >
         <Tabs.Screen name="HomeScreen" />
@@ -293,7 +332,7 @@ export default function TabLayout() {
   options={!isPrivileged ? { href: null } : {}}
 />
       </Tabs>
-    </SafeAreaView>
+    </View>
   );
 }
 

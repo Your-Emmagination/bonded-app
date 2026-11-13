@@ -15,7 +15,7 @@ import { getStudentDocIdFromAuthUser } from "@/utils/rbac";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useIsFocused, useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
     doc,
@@ -197,6 +197,14 @@ export default function BookmarksScreen() {
   const [showFilterSheet, setShowFilterSheet] = useState(false);
 
   const chunkListenersRef = useRef<(() => void)[]>([]);
+  // Videos play (muted) only while their card is on screen and this page is
+  // showing, as on Home; a tap opens them fullscreen with sound.
+  const screenFocused = useIsFocused();
+  const [visibleIds, setVisibleIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [viewabilityConfig] = useState(() => ({ itemVisiblePercentThreshold: 50, minimumViewTime: 50 }));
+  const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: { key: string }[] }) => {
+    setVisibleIds(new Set(viewableItems.map((entry) => entry.key)));
+  }, []);
   // Same in-flight guard as HomeScreen's handleLike — prevents a fast
   // double-tap from firing two like toggles for the same post.
   const likeInFlightRef = useRef<Set<string>>(new Set());
@@ -526,6 +534,7 @@ export default function BookmarksScreen() {
           onFilePress={handleFilePress}
           getTimeAgo={getTimeAgo}
           onCommentPress={(postId) => setCommentModalPostId(postId)}
+          videoCardVisible={screenFocused && !imageViewerVisible && visibleIds.has(item.id)}
         />
       );
     },
@@ -536,8 +545,11 @@ export default function BookmarksScreen() {
       handleLike,
       handleProfileClick,
       handleTagClick,
+      imageViewerVisible,
       openImageViewer,
+      screenFocused,
       user?.uid,
+      visibleIds,
     ],
   );
 
@@ -613,6 +625,8 @@ export default function BookmarksScreen() {
             data={savedPosts}
             keyExtractor={(item) => item.id}
             renderItem={renderItem}
+            onViewableItemsChanged={onViewableItemsChanged}
+            viewabilityConfig={viewabilityConfig}
             contentContainerStyle={styles.listContent}
             // Comments and replies open from inside these cards, and React Native
             // still counts this list as their parent for taps: left at "never",

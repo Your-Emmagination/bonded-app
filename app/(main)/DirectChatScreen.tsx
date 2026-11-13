@@ -27,11 +27,13 @@ import {
     togglePinDirectMessage,
     updateConversationNickname,
     updateConversationTheme,
+    updateConversationQuickEmoji,
 } from "@/utils/directMessages";
 import { getFileIconDetails } from "@/utils/fileTypeHelper";
 import { useThemeColors } from "@/contexts/ThemeContext";
-import type { ThemeTokens } from "@/utils/theme";
-import { DraftAttachment, insertEmojiInDraft, MESSAGE_MAX_LENGTH, prepareDraftAttachment, TextSelection } from "@/utils/messageComposer";
+import { chatWallpaper, type ThemeTokens } from "@/utils/theme";
+import { DraftAttachment, MESSAGE_MAX_LENGTH, prepareDraftAttachment, TextSelection } from "@/utils/messageComposer";
+import { forgetDirectPhotoIntent, rememberDirectPhotoIntent, stageDirectPhoto, takeRecoveredDirectPhoto } from "@/utils/directPhotoAttachment";
 import { replyPreviewMedia, replyPreviewText } from "@/utils/replyPreview";
 import { dismissConversationNotifications } from "@/utils/pushNotifications";
 import { getRoleColor, getRoleDisplayName, getUserDataByAuthUser, parseUserRole, subscribeToStudentProfile, type UserData } from "@/utils/rbac";
@@ -67,13 +69,13 @@ import * as Clipboard from "expo-clipboard";
 import * as Haptics from "expo-haptics";
 import { isAttachmentTooLargeError, pickUploadDocuments } from "@/utils/uploadAttachments";
 import { Image } from "expo-image";
+import { LinearGradient } from "expo-linear-gradient";
 import * as ImagePicker from "expo-image-picker";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { doc, onSnapshot, Timestamp } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
-    BackHandler,
     Dimensions,
     FlatList,
     Keyboard,
@@ -114,6 +116,10 @@ import ChatGifPicker from "./components/ChatGifPicker";
 import FileAttachmentCard from "./components/FileAttachmentCard";
 import { ChatSkeleton } from "./components/Skeleton";
 import ChatTypingIndicator from "./components/ChatTypingIndicator";
+import BeaOrb from "./components/BeaOrb";
+import MediaBlockedModal from "./components/MediaBlockedModal";
+import { checkDirectMessageMedia, mentionsBea, requestBeaDmReply } from "@/utils/directMessageChecks";
+import { AI_ASSISTANT_NAME, isAiAssistantId } from "@/utils/aiAssistant";
 import ImageZoomViewer from "./components/ImageZoomViewer";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
@@ -404,6 +410,8 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
   // `themeColor` that tints your own bubbles is separate and unaffected.
   const theme = useThemeColors();
   const styles = useMemo(() => makeStyles(theme), [theme]);
+  // B.E.A.'s replies to @bea get its orb, its name and a bubble of their own.
+  const fromBea = !isOwn && isAiAssistantId(item.senderId);
 
   const messageId = item.id;
   const swipeX = useSharedValue(0);
@@ -520,7 +528,7 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
   // caption bubble underneath, or none if there's nothing else.
   const photoMessage = images.length > 0 && bigEmojiSize === null && !item.deleted;
   const hasCaption =
-    !!item.forwarded || docs.length > 0 || !!item.text || !!item.edited || !!item.link;
+    !!item.forwarded || !!item.text || !!item.edited || !!item.link;
 
   return (
     <View>
@@ -534,7 +542,8 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
     )}
     <View style={[styles.bubbleContainer, isOwn ? styles.bubbleContainerOwn : styles.bubbleContainerOther, reactionEntries.length > 0 && styles.bubbleContainerWithReactions]}>
       {!isOwn && showAvatar && <View style={styles.incomingAvatarWrap}>
-        {recipientAvatar ? <Image source={{ uri: avatarThumb(recipientAvatar, 28) }} style={styles.incomingAvatar} />
+        {fromBea ? <BeaOrb size={28} mood="happy" />
+          : recipientAvatar ? <Image source={{ uri: avatarThumb(recipientAvatar, 28) }} style={styles.incomingAvatar} />
           : <View style={[styles.incomingAvatar, styles.chatAvatarFallback]}><Text style={styles.chatAvatarInitial}>{recipientName[0]?.toUpperCase() || "?"}</Text></View>}
       </View>}
       {revealedTimestamp && (
@@ -656,9 +665,15 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
               empty={!hasCaption}
               style={[
                 styles.photoCaption,
-                isOwn ? [styles.bubbleBoxOwn, { backgroundColor: themeColor }] : styles.bubbleBoxOther,
+                isOwn ? [styles.bubbleBoxOwn, { backgroundColor: themeColor }] : fromBea ? [styles.bubbleBoxOther, styles.beaBubble] : styles.bubbleBoxOther,
               ]}
             >
+            {fromBea && (
+              <View style={styles.beaNameRow}>
+                <Ionicons name="sparkles" size={11} color={theme.accent} />
+                <Text style={styles.beaName}>{AI_ASSISTANT_NAME}</Text>
+              </View>
+            )}
             {/* Forwarded Tag */}
             {item.forwarded && !item.deleted && (
               <View style={styles.forwardedHeaderRow}>
@@ -669,14 +684,7 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
               </View>
             )}
 
-            {/* Document attachments */}
-            {docs.map((docItem, idx) => (
-              <FileAttachmentCard
-                key={`${docItem.url}_${idx}`}
-                file={docItem}
-                onPress={() => onOpenLink(docItem.url)}
-              />
-            ))}
+
 
             {/* Message Text */}
             {item.deleted ? (
@@ -728,6 +736,20 @@ const DirectMessageBubbleComponent: React.FC<DirectMessageBubbleProps> = ({
           </Pressable>
         </ReanimatedAnimated.View>
       </GestureDetector>
+
+      {/* File attachments sit outside the bubble, like photos — no colored
+          frame around a PDF or slide deck. */}
+      {docs.length > 0 && !item.deleted && (
+        <View style={isOwn ? { alignItems: "flex-end" } : { alignItems: "flex-start" }}>
+          {docs.map((docItem, idx) => (
+            <FileAttachmentCard
+              key={`${docItem.url}_${idx}`}
+              file={docItem}
+              onPress={() => onOpenLink(docItem.url)}
+            />
+          ))}
+        </View>
+      )}
 
       {/* Reaction Badges (Messenger corner pill) */}
       {!item.deleted && reactionEntries.length > 0 && (
@@ -845,6 +867,7 @@ function DirectChatContent() {
     recipientAvatar?: string;
     recipientRole?: string;
     recipientStudentID?: string;
+    photoRecovery?: string;
   }>();
 
   const conversationId = params.conversationId || "";
@@ -901,6 +924,18 @@ function DirectChatContent() {
   const [conversationError, setConversationError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   const [draftAttachment, setDraftAttachment] = useState<DraftAttachment | null>(null);
+  useEffect(() => {
+    if (!currentUserId || !conversationId || !params.photoRecovery) return;
+    let active = true;
+    void takeRecoveredDirectPhoto(currentUserId, conversationId)
+      .then((recovered) => {
+        if (!active || !recovered) return;
+        if (recovered.attachment) setDraftAttachment(recovered.attachment);
+        if (recovered.error) showAppToast({ message: recovered.error });
+      })
+      .catch((error) => console.warn("[DirectChatScreen] Could not restore photo:", error));
+    return () => { active = false; };
+  }, [conversationId, currentUserId, params.photoRecovery]);
   const [draftLink, setDraftLink] = useState<{ url: string; title: string } | null>(null);
   const [linkComposerVisible, setLinkComposerVisible] = useState(false);
   const [linkUrl, setLinkUrl] = useState("");
@@ -908,6 +943,10 @@ function DirectChatContent() {
   const [linkError, setLinkError] = useState("");
   const [isPicking, setIsPicking] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  // A photo or video that broke the rules and was not sent.
+  const [blockedMedia, setBlockedMedia] = useState<{ kind: "image" | "video"; labels: string[]; selfHarm: boolean } | null>(null);
+  // B.E.A. is writing a reply to an @bea message.
+  const [beaThinking, setBeaThinking] = useState(false);
   const pickerInFlight = useRef(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [visibleMessageIds, setVisibleMessageIds] = useState<string[]>([]);
@@ -956,7 +995,6 @@ function DirectChatContent() {
   const selectionRef = useRef<TextSelection>({ start: 0, end: 0 });
   const [selectionOverride, setSelectionOverride] = useState<TextSelection | undefined>();
   const [composerSelection, setComposerSelection] = useState<TextSelection>({ start: 0, end: 0 });
-  const [emojiPickerVisible, setEmojiPickerVisible] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(() => Keyboard.isVisible());
   const [revealedTimestampId, setRevealedTimestampId] = useState<string | null>(null);
   const [replyingTo, setReplyingTo] = useState<DirectMessage | null>(null);
@@ -1008,6 +1046,8 @@ function DirectChatContent() {
   const [actionMenuY, setActionMenuY] = useState<number>(300);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [reactionPickerTarget, setReactionPickerTarget] = useState<DirectMessage | null>(null);
+  // Conversation details → Quick reaction: picking the chat's send-button emoji.
+  const [quickEmojiPickerOpen, setQuickEmojiPickerOpen] = useState(false);
 
   // Forward Modal State
   const [forwardTarget, setForwardTarget] = useState<DirectMessage | null>(null);
@@ -1025,33 +1065,11 @@ function DirectChatContent() {
   const deletionVersion = useRef("");
 
   useEffect(() => {
-    const show = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow", () => {
-      setKeyboardVisible(true);
-      setEmojiPickerVisible(false);
-    });
+    const show = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow", () => setKeyboardVisible(true));
     const hide = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide", () => setKeyboardVisible(false));
     return () => { show.remove(); hide.remove(); };
   }, []);
 
-  useFocusEffect(useCallback(() => {
-    const back = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (!emojiPickerVisible) return false;
-      setEmojiPickerVisible(false);
-      return true;
-    });
-    return () => back.remove();
-  }, [emojiPickerVisible]));
-
-  const toggleEmojiPicker = useCallback(() => {
-    if (emojiPickerVisible) {
-      setEmojiPickerVisible(false);
-      requestAnimationFrame(() => inputRef.current?.focus());
-    } else {
-      inputRef.current?.blur();
-      Keyboard.dismiss();
-      setEmojiPickerVisible(true);
-    }
-  }, [emojiPickerVisible]);
 
   // Recipient info
   const recipientId = useMemo(() => {
@@ -1096,6 +1114,13 @@ function DirectChatContent() {
   );
   const roleColor = getRoleColor(role || "student");
   const themeColor = conversation?.themeColor || DEFAULT_THEME_COLOR;
+  // A chosen theme colours the chat background too, like Messenger. Chats
+  // that never picked one keep the plain background.
+  const chosenThemeColor = conversation?.themeColor;
+  const wallpaper = useMemo(
+    () => (chosenThemeColor ? chatWallpaper(chosenThemeColor, theme) : null),
+    [chosenThemeColor, theme],
+  );
   const quickEmoji = conversation?.quickEmoji || "👍";
   const isMuted = (conversation?.mutedBy || []).includes(currentUserId);
   const { isTyping, onTextChanged, stopTyping } = useDirectTyping(conversationId, currentUserId, recipientId,
@@ -1106,6 +1131,37 @@ function DirectChatContent() {
     [composerSelection, composerText, mentionName],
   );
   const showDirectMention = !!activeDirectMention && !!recipientId && !composerBusy;
+  // "@", "@b", "@be" or "@bea" just before the caret also offers B.E.A.
+  const activeBeaMention = useMemo(() => {
+    if (editingMessage || composerBusy) return null;
+    const caret = Math.max(0, Math.min(composerSelection.start, composerText.length));
+    const match = composerText.slice(0, caret).match(/(^|\s)@([a-z]{0,3})$/i);
+    if (!match || typeof match.index !== "number" || !"bea".startsWith(match[2].toLowerCase())) return null;
+    return { start: match.index + match[1].length, end: caret };
+  }, [composerBusy, composerSelection.start, composerText, editingMessage]);
+  const selectBeaMention = useCallback(() => {
+    if (!activeBeaMention) return;
+    const inserted = "@bea ";
+    let suffixStart = activeBeaMention.end;
+    if (inputText[suffixStart] === " ") suffixStart += 1;
+    const nextText = inputText.slice(0, activeBeaMention.start) + inserted + inputText.slice(suffixStart);
+    const caret = activeBeaMention.start + inserted.length;
+    const selection = { start: caret, end: caret };
+    selectionRef.current = selection;
+    setComposerSelection(selection);
+    setSelectionOverride(selection);
+    setInputText(nextText);
+    onTextChanged(nextText);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [activeBeaMention, inputText, onTextChanged]);
+  const askBea = useCallback((chatId: string, messageId: string) => {
+    setBeaThinking(true);
+    void requestBeaDmReply(chatId, messageId)
+      .then((result) => {
+        if (!result.ok) showAppToast({ message: result.message });
+      })
+      .finally(() => setBeaThinking(false));
+  }, []);
   const selectDirectMention = useCallback(() => {
     if (!activeDirectMention || !mentionName) return;
     const next = insertDirectMention(composerText, composerSelection, activeDirectMention, mentionName);
@@ -1116,15 +1172,6 @@ function DirectChatContent() {
     onTextChanged(next.text);
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [activeDirectMention, composerSelection, composerText, editingMessage, mentionName, onTextChanged]);
-  const handleInsertEmoji = useCallback((emoji: string) => {
-    const next = insertEmojiInDraft(editingMessage ? editText : inputText, emoji, selectionRef.current);
-    if (!next) return;
-    selectionRef.current = next.selection;
-    setComposerSelection(next.selection);
-    if (editingMessage) setEditText(next.text); else setInputText(next.text);
-    onTextChanged(next.text);
-    setSelectionOverride(next.selection);
-  }, [inputText, editingMessage, editText, onTextChanged]);
 
   useEffect(() => {
     if (!notice) return;
@@ -1363,9 +1410,11 @@ function DirectChatContent() {
       if (!conversationId || !currentUserId || sendInFlight.current || pickerInFlight.current) return;
 
       // Direct messages are never read by moderation and never seen by staff,
-      // and that should stay true. The only thing checked here is the domain
-      // of any link: no message text is inspected, nothing is recorded, and
-      // only an outright blocked host stops the send. A phishing or adult
+      // and that should stay true. No message text is inspected and nothing
+      // is recorded. Two narrow checks remain: the domain of any link, here,
+      // and a photo or video, by the Worker after it uploads (a rule-breaking
+      // one is blocked outright; see directMessageChecks.ts). Only an
+      // outright blocked host stops the send here. A phishing or adult
       // link sent privately reaches somebody who trusts the sender, which is
       // exactly why the narrowest possible check still earns its place.
       const blockedLink = findBlockedLink(
@@ -1475,6 +1524,19 @@ function DirectChatContent() {
 
       let uploading = false;
       let restorableAttachment = attachment;
+      // Takes the bubble back down and puts the composer back exactly as the
+      // user left it (less the attachment, when that was blocked).
+      const restoreDraft = (draftAttachmentToRestore: DraftAttachment | null) => {
+        setPendingMessages((prev) => prev.filter((message) => message.id !== optimisticId));
+        if (customText === undefined) {
+          setInputText(textToSend);
+          setDraftAttachment(draftAttachmentToRestore);
+          setDraftLink(attachedLink);
+          selectionRef.current = previousSelection;
+          setSelectionOverride(previousSelection);
+        }
+        setReplyingTo(activeReplyingTo);
+      };
       try {
         const filesToSend: DirectFileAttachment[] = [];
         if (attachment) {
@@ -1488,11 +1550,27 @@ function DirectChatContent() {
             uploadToCloudinary,
             readLastUploadSize,
           );
-          filesToSend.push(uploaded);
           // The draft is already cleared, so remember the uploaded result here
           // instead — a retry after a failed send then skips the re-upload.
           restorableAttachment = { ...attachment, uploaded };
           uploading = false;
+
+          // Photos and videos from the phone are checked before they go.
+          // GIFs from the GIF picker come from the GIF service, not the phone.
+          const mediaKind = uploaded.mimeType.startsWith("video/")
+            ? "video"
+            : uploaded.mimeType.startsWith("image/") ? "image" : null;
+          if (mediaKind && attachment.source !== "gif") {
+            setIsUploading(true);
+            const check = await checkDirectMessageMedia(conversationId, uploaded.url, mediaKind);
+            if (check.verdict === "blocked") {
+              pendingSend.current = null;
+              restoreDraft(null);
+              setBlockedMedia({ kind: mediaKind, labels: check.labels, selfHarm: check.selfHarm });
+              return;
+            }
+          }
+          filesToSend.push(uploaded);
           setIsUploading(false);
         }
         const currentUserProfile =
@@ -1539,8 +1617,11 @@ function DirectChatContent() {
           messageId: pendingSend.current.id,
           emojiSize,
         });
+        const sentMessageId = pendingSend.current.id;
         pendingSend.current = null;
         backToLatest();
+        // "@bea …": B.E.A. answers this one message in the chat.
+        if (mentionsBea(textToSend)) askBea(conversationId, sentMessageId);
 
         // Scroll to bottom
         requestAnimationFrame(() => {
@@ -1548,18 +1629,9 @@ function DirectChatContent() {
         });
       } catch (err) {
         console.error("[DirectChatScreen] sendDirectMessage failed:", err);
-        // The send failed, so the optimistic bubble has to go — the draft is
-        // restored below and the user sends again.
-        setPendingMessages((prev) => prev.filter((message) => message.id !== optimisticId));
-        // Put the composer back exactly as the user left it.
-        if (customText === undefined) {
-          setInputText(textToSend);
-          setDraftAttachment(restorableAttachment);
-          setDraftLink(attachedLink);
-          selectionRef.current = previousSelection;
-          setSelectionOverride(previousSelection);
-        }
-        setReplyingTo(activeReplyingTo);
+        // The send failed, so the optimistic bubble has to go and the draft
+        // comes back for the user to send again.
+        restoreDraft(restorableAttachment);
         showAppToast({
           message: uploading
             ? "Upload failed — your draft is still here"
@@ -1572,7 +1644,7 @@ function DirectChatContent() {
       }
     },
     [conversationId, currentUserId, inputText, draftAttachment, draftLink, isOffline, replyingTo, conversation,
-      recipientId, realName, displayName, mentionName, recipientAvatar, role, recipientDetail, params.recipientStudentID, stopTyping, backToLatest],
+      recipientId, realName, displayName, mentionName, recipientAvatar, role, recipientDetail, params.recipientStudentID, stopTyping, backToLatest, askBea],
   );
 
   // Camera and gallery both stage a photo for review before Send uploads it.
@@ -1580,7 +1652,6 @@ function DirectChatContent() {
     if (sendInFlight.current || pickerInFlight.current) return;
     pickerInFlight.current = true;
     setIsPicking(true);
-    setEmojiPickerVisible(false);
     Keyboard.dismiss();
     try {
       if (source === "camera" && Platform.OS !== "web") {
@@ -1608,37 +1679,43 @@ function DirectChatContent() {
         }
       }
       const options: ImagePicker.ImagePickerOptions = { mediaTypes: ["images"], quality: 0.8 };
+      await rememberDirectPhotoIntent({
+        userId: currentUserId,
+        conversationId,
+        recipientId,
+        recipientName: realName || displayName,
+        recipientAvatar: recipientAvatar || undefined,
+        recipientRole: role || undefined,
+        recipientStudentID: recipientDetail?.studentID || params.recipientStudentID,
+        source,
+      });
       const res = source === "camera"
         ? await ImagePicker.launchCameraAsync({ ...options, cameraType: ImagePicker.CameraType.back })
         : await ImagePicker.launchImageLibraryAsync(options);
       if (res.canceled || !res.assets[0]?.uri) return;
 
-      const asset = res.assets[0];
-      setDraftAttachment({
-        uri: asset.uri,
-        name: asset.fileName || "Photo",
-        mimeType: asset.mimeType || "image/jpeg",
-        source,
-      });
+      setDraftAttachment(await stageDirectPhoto(res.assets[0], source));
     } catch (e) {
       console.warn("[DirectChatScreen] Photo picker failed:", e);
       showAppToast({
-        message: source === "camera"
-          ? "Camera unavailable — check its permission and try again"
-          : "Couldn't open photos — check the permission and try again",
+        message: e instanceof Error ? e.message : source === "camera"
+          ? "Camera unavailable. Please try again."
+          : "Couldn't open photos. Please try again.",
       });
     } finally {
+      void forgetDirectPhotoIntent().catch((error) =>
+        console.warn("[DirectChatScreen] Could not clear photo picker intent:", error));
       pickerInFlight.current = false;
       setIsPicking(false);
     }
-  }, []);
+  }, [conversationId, currentUserId, recipientId, realName, displayName, recipientAvatar, role,
+    recipientDetail, params.recipientStudentID]);
 
   // Pick Document
   const handlePickDocument = useCallback(async () => {
     if (sendInFlight.current || pickerInFlight.current) return;
     pickerInFlight.current = true;
     setIsPicking(true);
-    setEmojiPickerVisible(false);
     Keyboard.dismiss();
     try {
       const res = await pickUploadDocuments({
@@ -1689,7 +1766,6 @@ function DirectChatContent() {
         setEditingMessage(null);
         setSelectionOverride(undefined);
         setReplyingTo(msg);
-        setEmojiPickerVisible(false);
         requestAnimationFrame(() => inputRef.current?.focus());
       }
     },
@@ -1905,6 +1981,9 @@ function DirectChatContent() {
 
       {/* ==================== MESSAGES LIST ==================== */}
       <View style={{ flex: 1, minHeight: 0 }}>
+        {wallpaper && (
+          <LinearGradient colors={wallpaper} style={StyleSheet.absoluteFill} pointerEvents="none" />
+        )}
         {(messageError || conversationError) && (
           <TouchableOpacity style={{ padding: 12 }} onPress={() => setRetryCount((value) => value + 1)}>
             <Text style={{ color: theme.primary, textAlign: "center" }}>{messageError || conversationError} Tap to retry.</Text>
@@ -2066,6 +2145,12 @@ function DirectChatContent() {
         {!!historyAnchor && <Pressable onPress={backToLatest} style={styles.chatNotice} accessibilityRole="button"><Text style={{ color: themeColor, fontWeight: "600" }}>Back to latest messages ↓</Text></Pressable>}
         {!!notice && <View style={styles.chatNotice}><Text style={styles.chatNoticeText} accessibilityLiveRegion="polite">{notice}</Text></View>}
         {isTyping && <ChatTypingIndicator name={displayName} avatar={recipientAvatar} />}
+        {beaThinking && (
+          <View style={styles.beaThinkingRow} accessibilityLiveRegion="polite">
+            <BeaOrb size={26} mood="thinking" animated />
+            <Text style={styles.beaThinkingText}>{AI_ASSISTANT_NAME} is thinking…</Text>
+          </View>
+        )}
         {editingMessage && <View style={styles.replyBanner}>
           <Ionicons name="create-outline" size={20} color={themeColor} />
           <View style={{ flex: 1, paddingHorizontal: 10 }}>
@@ -2145,6 +2230,24 @@ function DirectChatContent() {
             </TouchableOpacity>
           </View>
         )}
+        {!!activeBeaMention && (
+          <TouchableOpacity
+            style={styles.directMentionSuggestion}
+            onPress={selectBeaMention}
+            activeOpacity={0.78}
+            accessibilityRole="button"
+            accessibilityLabel={`Ask ${AI_ASSISTANT_NAME}`}
+          >
+            <View style={styles.directMentionAvatar}>
+              <BeaOrb size={34} mood="idle" />
+            </View>
+            <View style={styles.directMentionCopy}>
+              <Text style={styles.directMentionName} numberOfLines={1}>{AI_ASSISTANT_NAME}</Text>
+              <Text style={styles.directMentionHint}>Ask B.E.A. — only this message is sent to it</Text>
+            </View>
+            <Text style={[styles.directMentionToken, { color: themeColor }]}>@</Text>
+          </TouchableOpacity>
+        )}
         {showDirectMention && (
           <TouchableOpacity
             style={styles.directMentionSuggestion}
@@ -2167,7 +2270,7 @@ function DirectChatContent() {
             <Text style={[styles.directMentionToken, { color: themeColor }]}>@</Text>
           </TouchableOpacity>
         )}
-        <View style={[styles.composerWrap, { paddingBottom: keyboardVisible || emojiPickerVisible ? 8 : Math.max(insets.bottom, 10) }]}>
+        <View style={[styles.composerWrap, { paddingBottom: keyboardVisible ? 8 : Math.max(insets.bottom, 10) }]}>
           <TouchableOpacity disabled={composerBusy || !!editingMessage} onPress={() => void handlePickPhoto("camera")} style={styles.composerAttachBtn}
             accessibilityRole="button" accessibilityLabel="Take a photo">
             <Ionicons name="camera-outline" size={23} color={theme.primary} />
@@ -2187,7 +2290,6 @@ function DirectChatContent() {
             disabled={composerBusy || !!editingMessage}
             onPress={() => {
               Keyboard.dismiss();
-              setEmojiPickerVisible(false);
               setLinkComposerVisible(true);
             }}
             style={styles.composerAttachBtn}
@@ -2214,21 +2316,28 @@ function DirectChatContent() {
               }}
               selection={selectionOverride}
               onSelectionChange={({ nativeEvent }) => {
-                if (!emojiPickerVisible) {
-                  selectionRef.current = nativeEvent.selection;
-                  setComposerSelection(nativeEvent.selection);
-                  setSelectionOverride(undefined);
-                }
+                selectionRef.current = nativeEvent.selection;
+                setComposerSelection(nativeEvent.selection);
+                setSelectionOverride(undefined);
               }}
-              onFocus={() => setEmojiPickerVisible(false)}
               multiline
+              blurOnSubmit={false}
               editable={!composerBusy}
               maxLength={MESSAGE_MAX_LENGTH}
             />
-            <TouchableOpacity disabled={composerBusy} onPress={toggleEmojiPicker} style={styles.composerSmileyBtn}
-              accessibilityRole="button" accessibilityLabel={emojiPickerVisible ? "Show keyboard" : "Choose emoji"}
-              accessibilityState={{ expanded: emojiPickerVisible }}>
-              <Ionicons name={emojiPickerVisible ? "keypad-outline" : "happy-outline"} size={23} color={themeColor} />
+            {/* Emoji come from the keyboard; this is the way to GIFs. */}
+            <TouchableOpacity
+              disabled={composerBusy || !!editingMessage}
+              onPress={() => {
+                stopTyping();
+                Keyboard.dismiss();
+                setGifPickerVisible(true);
+              }}
+              style={styles.composerSmileyBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Choose a GIF"
+            >
+              <Text style={[styles.composerGifLabel, { color: themeColor, borderColor: themeColor }]}>GIF</Text>
             </TouchableOpacity>
           </View>
 
@@ -2251,11 +2360,6 @@ function DirectChatContent() {
             />
           )}
         </View>
-        {emojiPickerVisible && !keyboardVisible && (
-          <ChatEmojiPicker onSelect={handleInsertEmoji} onClose={() => setEmojiPickerVisible(false)}
-            onOpenGifs={editingMessage ? undefined : () => { stopTyping(); setEmojiPickerVisible(false); setGifPickerVisible(true); }}
-            disabled={composerBusy} color={themeColor} bottomInset={insets.bottom} />
-        )}
       </View>
 
       {gifPickerVisible && <ChatGifPicker color={themeColor} onClose={() => setGifPickerVisible(false)} onSelect={(gif) => {
@@ -2416,7 +2520,6 @@ function DirectChatContent() {
                       setSelectionOverride(selectionRef.current);
                       setActionMenuTarget(null);
                       setMoreMenuOpen(false);
-                      setEmojiPickerVisible(false);
                       requestAnimationFrame(() => inputRef.current?.focus());
                     }}
                   >
@@ -2664,6 +2767,22 @@ function DirectChatContent() {
               </View>
             </View>
 
+            {/* Quick reaction, as in Messenger: what the send button sends
+                when the message box is empty. */}
+            <TouchableOpacity
+              style={styles.actionSettingRow}
+              disabled={!hasConversation}
+              onPress={() => setQuickEmojiPickerOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel={`Quick reaction: ${quickEmoji}. Change it`}
+            >
+              <View style={styles.actionSettingLeft}>
+                <Text style={styles.quickReactionPreview}>{quickEmoji}</Text>
+                <Text style={styles.actionSettingTitle}>Quick Reaction</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={theme.textMuted} />
+            </TouchableOpacity>
+
             {/* Edit Nickname */}
             <TouchableOpacity
               style={styles.actionSettingRow}
@@ -2831,6 +2950,42 @@ function DirectChatContent() {
             )}
           </ScrollView>
         </SafeAreaView>
+
+        {quickEmojiPickerOpen && (
+          <Modal
+            visible
+            transparent
+            animationType="slide"
+            onRequestClose={() => setQuickEmojiPickerOpen(false)}
+          >
+            <Pressable
+              style={styles.actionModalOverlay}
+              onPress={() => setQuickEmojiPickerOpen(false)}
+            >
+              <View
+                style={[styles.reactionPickerSheet, { paddingBottom: Math.max(insets.bottom, 12) }]}
+                onStartShouldSetResponder={() => true}
+              >
+                <Text style={styles.quickReactionSheetTitle}>Quick Reaction</Text>
+                <ChatEmojiPicker
+                  onSelect={(emoji) => {
+                    setQuickEmojiPickerOpen(false);
+                    if (emoji !== quickEmoji) {
+                      void updateConversationQuickEmoji(conversationId, emoji).catch((error) => {
+                        console.error("Quick reaction change failed:", error);
+                        setNotice("Couldn't change the quick reaction. Please try again.");
+                      });
+                    }
+                  }}
+                  onClose={() => setQuickEmojiPickerOpen(false)}
+                  disabled={false}
+                  color={themeColor}
+                  bottomInset={insets.bottom}
+                />
+              </View>
+            </Pressable>
+          </Modal>
+        )}
       </Modal>
 
       {/* ==================== EDIT NICKNAME MODAL ==================== */}
@@ -3060,6 +3215,14 @@ function DirectChatContent() {
         onClose={() => setViewerImage(null)}
       />
       <ExternalLinkDialog link={pendingLink} onClose={() => setPendingLink(null)} />
+
+      <MediaBlockedModal
+        visible={!!blockedMedia}
+        kind={blockedMedia?.kind ?? "image"}
+        labels={blockedMedia?.labels ?? []}
+        selfHarm={blockedMedia?.selfHarm ?? false}
+        onClose={() => setBlockedMedia(null)}
+      />
 
       {/* Every question and hard stop in this chat, in the app's own dialog
           rather than the phone's grey system box. */}
@@ -3620,6 +3783,15 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textPrimary,
     lineHeight: 20,
   },
+  composerGifLabel: {
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+    borderWidth: 1.5,
+    borderRadius: 6,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
   composerSmileyBtn: { width: 36, height: 44, alignItems: "center", justifyContent: "center" },
   composerSendBtn: {
     width: 38,
@@ -3686,7 +3858,12 @@ const makeStyles = (c: ThemeTokens) =>
     alignItems: "center",
     gap: 10,
   },
-  directMentionAvatar: { width: 38, height: 38, borderRadius: 19 },
+  directMentionAvatar: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
+  beaBubble: { borderWidth: 1, borderColor: c.accent },
+  beaNameRow: { flexDirection: "row", alignItems: "center", gap: 4, marginBottom: 3 },
+  beaName: { fontSize: 11.5, fontWeight: "800", color: c.accent, letterSpacing: 0.3 },
+  beaThinkingRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 14, paddingVertical: 6 },
+  beaThinkingText: { fontSize: 12.5, color: c.textMuted, fontStyle: "italic" },
   directMentionAvatarText: { color: c.primary, fontSize: 14, fontWeight: "800" },
   directMentionCopy: { flex: 1, minWidth: 0 },
   directMentionName: { color: c.textPrimary, fontSize: 13.5, fontWeight: "800" },
@@ -4092,6 +4269,14 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 15,
     fontWeight: "600",
     color: c.textPrimary,
+  },
+  quickReactionPreview: { fontSize: 20, width: 22, textAlign: "center" },
+  quickReactionSheetTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: c.textPrimary,
+    textAlign: "center",
+    paddingTop: 12,
   },
   toggleBtn: {
     backgroundColor: "rgba(143, 33, 23, 0.12)",

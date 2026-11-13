@@ -6,6 +6,7 @@ import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
+import ShapedGif from "./ShapedGif";
 import { useRouter } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -411,12 +412,12 @@ function CommentItemComponent({
 
       {gifFiles.length > 0 && (
         <View style={styles.commentGifContainer}>
-          <Image
-            source={{ uri: feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) }}
-            placeholder={gifLocalCopy ? { uri: gifLocalCopy } : undefined}
-            placeholderContentFit="cover"
-            style={styles.commentGif}
-            contentFit="cover"
+          <ShapedGif
+            uri={feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) || gifFiles[0].url}
+            placeholderUri={gifLocalCopy}
+            width="100%"
+            maxHeight={360}
+            backgroundColor={theme.surfaceSunken}
           />
         </View>
       )}
@@ -2155,7 +2156,6 @@ modalContainer: {
   seeMoreText: { color: c.accent, fontSize: 14, fontWeight: "600" },
 
   commentGifContainer: { marginTop: 10, marginHorizontal: -14, overflow: "hidden", borderRadius: 12 },
-  commentGif: { width: "100%", height: 220, backgroundColor: c.surfaceSunken },
 
   commentImageContainer: { position: "relative", marginTop: 10, marginHorizontal: -14, overflow: "hidden", borderRadius: 12 },
   commentImageFull: { width: "100%", backgroundColor: c.surfaceSunken },

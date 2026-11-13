@@ -34,8 +34,10 @@ export const EVERYONE_MENTION_STUDENT = {
   studentID: "ALL",
 };
 
-export const AI_MENTION_PATTERN = /(^|\s)@(?:ai|bondedai)\b/i;
-export const AI_MENTION_TOKEN = "@ai";
+// "@bea" is B.E.A.'s mention everywhere, as in DMs. The older "@ai" and
+// "@bondedai" still work, so posts written with them keep their answers.
+export const AI_MENTION_PATTERN = /(^|\s)@(?:bea|ai|bondedai)\b/i;
+export const AI_MENTION_TOKEN = "@bea";
 export const EVERYONE_MENTION_PATTERN = /(^|\s)@everyone\b/i;
 
 export const isAiAssistantId = (value?: string | null) => value === AI_ASSISTANT_ID;

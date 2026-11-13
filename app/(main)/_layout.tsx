@@ -19,6 +19,11 @@ export default function MainLayout() {
         options={{
           animation: "fade",
           contentStyle: { backgroundColor: theme.surfaceSunken },
+          // While a chat, post or any other screen is open on top, Home and
+          // the other tabs underneath stop redrawing. Their listeners stay
+          // connected; whatever arrived is drawn once, on the way back. In a
+          // busy server channel Home used to redraw under you on every message.
+          freezeOnBlur: true,
         }}
       />
       <Stack.Screen
@@ -89,6 +94,13 @@ export default function MainLayout() {
         options={{
           animation: "fade",
           contentStyle: { backgroundColor: theme.surfaceSunken },
+        }}
+      />
+      <Stack.Screen
+        name="PinnedPostsScreen"
+        options={{
+          animation: "slide_from_right",
+          contentStyle: { backgroundColor: theme.background },
         }}
       />
       <Stack.Screen

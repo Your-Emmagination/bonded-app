@@ -67,3 +67,17 @@ export function formatChatTimeLabel(ms: number, nowMs: number): string {
   });
   return `${day}, ${time}`;
 }
+
+/** A quiet spell this long starts a new stretch of a conversation. */
+export const CHAT_TIME_LABEL_GAP_MS = 15 * 60 * 1000;
+
+/**
+ * Whether a message sent at `ms` opens a new stretch of the conversation and
+ * gets a centred time label above it: the first message, the first of a new
+ * day, or the first after a quiet spell. `previousMs` is the message before.
+ */
+export function startsNewStretch(ms: number, previousMs: number | null | undefined): boolean {
+  if (!ms) return false;
+  if (!previousMs) return true;
+  return !sameDay(new Date(previousMs), new Date(ms)) || ms - previousMs >= CHAT_TIME_LABEL_GAP_MS;
+}

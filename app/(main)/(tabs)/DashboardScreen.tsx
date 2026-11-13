@@ -168,7 +168,7 @@ export default function DashboardScreen() {
   });
 
   // "Online Now" by the same rule as Home's Campus Presence and Messenger:
-  // heard from in the last 90 seconds, not hiding Active Status, not locked,
+  // heard from in the last 2½ minutes, not hiding Active Status, not locked,
   // and not you — so the two numbers agree. Checked once a minute while the
   // Dashboard is on screen, the way Home does it. It used to listen live to
   // every profile marked online, which re-downloaded one each time a phone
@@ -463,6 +463,8 @@ export default function DashboardScreen() {
         setModerationItems((prev) => {
           const remaining = prev.filter((item) => item.type !== type);
           const pendingItems = snapshot.docs
+            // A message deleted while pending has nothing left to review.
+            .filter((item) => item.data().deleted !== true)
             .map((item) => ({ id: item.id, ...item.data() }))
             .map((item: any) => ({
               id: item.id,
@@ -1090,14 +1092,6 @@ const handleYearLevelChange = useCallback(
                   onPress={() => router.push("/AiMemoryScreen")}
                 />
               )}
-              {canManageModeration && (
-                <ActionButton
-                  icon="help-circle-outline"
-                  label="Unanswered Questions"
-                  color="#a86fff"
-                  onPress={() => router.push("/UnansweredQuestionsScreen" as any)}
-                />
-              )}
               {userRole === "admin" && (
                 <ActionButton
                   icon="book-outline"
@@ -1582,15 +1576,6 @@ const handleYearLevelChange = useCallback(
             <Text style={styles.infoText}>
               {getRoleDescription(userRole)}
             </Text>
-          </View>
-        </View>
-
-        {/* Recent Activity Placeholder */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Recent Activity</Text>
-          <View style={styles.comingSoonCard}>
-            <Ionicons name="time-outline" size={48} color="#b88f87" />
-            <Text style={styles.comingSoonText}>Activity Feed Coming Soon</Text>
           </View>
         </View>
         </ScrollView>

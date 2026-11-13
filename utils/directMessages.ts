@@ -672,6 +672,18 @@ export async function updateConversationTheme(
 }
 
 /**
+ * Change the chat's quick reaction: the emoji the send button becomes when
+ * the message box is empty. Shared by both people, like the theme.
+ */
+export async function updateConversationQuickEmoji(
+  conversationId: string,
+  quickEmoji: string,
+): Promise<void> {
+  const convRef = doc(db, "directConversations", conversationId);
+  await updateDoc(convRef, { quickEmoji });
+}
+
+/**
  * Update a participant's nickname in the conversation.
  */
 export async function updateConversationNickname(

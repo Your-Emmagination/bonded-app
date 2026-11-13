@@ -3,19 +3,23 @@ import { useThemeColors } from "@/contexts/ThemeContext";
 import { onSurface, type ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import * as Clipboard from "expo-clipboard";
-import { useRouter } from "expo-router";
+import { useIsFocused, useRouter } from "expo-router";
 import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
   doc,
+  documentId,
   getCountFromServer,
+  getDocs,
   limit,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
+  Timestamp,
   updateDoc,
   where,
+  type Query,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -67,6 +71,16 @@ import {
 } from "@/utils/rbac";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { isAlumni, isPromotableRole, YEAR_LEVELS } from "@/utils/yearLevels";
+import {
+  ADMIN_POSITION,
+  DEFAULT_TEACHER_POSITION,
+  isAdminRole,
+  isTeacherRole,
+  positionLabel,
+  TEACHER_POSITIONS,
+} from "@/utils/teacherPositions";
+import { getPresenceState, PRESENCE_TIMEOUT_MS, type PresenceData } from "@/utils/messengerState";
+import { isHeartbeatOnlyChange } from "@/utils/profileChanges";
 
 const YEAR_LEVEL_OPTIONS = YEAR_LEVELS;
 
@@ -75,6 +89,10 @@ const YEAR_LEVEL_OPTIONS = YEAR_LEVELS;
 // PAGE_SIZE), instead of streaming the whole collection into an unvirtualized
 // list.
 const PAGE_SIZE = 40;
+/** Accounts returned per search query (names, and IDs, starting with the text). */
+const SEARCH_LIMIT = 25;
+/** How often who's online is re-checked while this screen is open. */
+const PRESENCE_CHECK_MS = 60_000;
 
 type ManagedUserFilter =
   | "all"
@@ -94,6 +112,8 @@ type ManagedUserRecord = {
   studentID?: string;
   course?: string;
   yearlvl?: string;
+  /** Teachers only: Faculty, Program Chair or Dean. */
+  position?: string;
   role?: string;
   isOnline?: boolean;
   profileImage?: string | null;
@@ -179,9 +199,39 @@ function getInitials(user: ManagedUserRecord) {
   return (user.email?.[0] || user.studentID?.[0] || "U").toUpperCase();
 }
 
+/** A students document as a row in this screen. Online status is set later, from presence. */
+function toManagedUser(id: string, data: Record<string, any>): ManagedUserRecord {
+  return {
+    id,
+    userId: data.userId ?? null,
+    firstname: data.firstname || "",
+    lastname: data.lastname || "",
+    email: data.email || "",
+    studentID: data.studentID || id,
+    course: data.course || "",
+    yearlvl: data.yearlvl || "",
+    position: data.position || "",
+    role: data.role || "student",
+    isOnline: false,
+    profileImage: data.profileImage || null,
+    promotionHold: data.promotionHold === true,
+    recoveryEmail: data.recoveryEmail || "",
+    recoveryEmailVerified: data.recoveryEmailVerified === true,
+    accountLocked: data.accountLocked === true,
+    publicPersonalData:
+      data.recoveryEmail !== undefined ||
+      data.recoveryEmailVerified !== undefined ||
+      validPersonalEmail(data.email),
+  };
+}
+
 function getMeta(user: ManagedUserRecord) {
+  const standing = positionLabel(user.role, user.position) ||
+    (isTeacherRole(user.role) ? "" : user.yearlvl);
   return (
-    [user.studentID, user.course, user.yearlvl].filter(Boolean).join(" • ") ||
+    [user.studentID, user.course, standing]
+      .filter(Boolean)
+      .join(" • ") ||
     "No profile details yet"
   );
 }
@@ -212,6 +262,7 @@ type UserRowProps = {
   onOpenProfile: (user: ManagedUserRecord) => void;
   onOpenEdit: (user: ManagedUserRecord) => void;
   onChangeYear: (user: ManagedUserRecord, year: string) => void;
+  onChangePosition: (user: ManagedUserRecord, position: string) => void;
   onChangeRole: (user: ManagedUserRecord, role: UserRole) => void;
   onTogglePromotionHold: (user: ManagedUserRecord) => void;
   /** The recovery action running on this row, if any. */
@@ -231,6 +282,7 @@ function UserRowComponent({
   onOpenProfile,
   onOpenEdit,
   onChangeYear,
+  onChangePosition,
   onChangeRole,
   onTogglePromotionHold,
   recoveryBusy,
@@ -397,6 +449,53 @@ function UserRowComponent({
 
           <View style={styles.divider} />
 
+          {isAdminRole(user.role) ? (
+          <>
+          {/* Every admin is the System Administrator: nothing to set. */}
+          <Text style={styles.controlTitle}>Position</Text>
+          <Text style={styles.controlHelp}>{ADMIN_POSITION}</Text>
+          </>
+          ) : isTeacherRole(user.role) ? (
+          <>
+          {/* Teachers have a position instead of a year level. */}
+          <Text style={styles.controlTitle}>Position</Text>
+          <Text style={styles.controlHelp}>
+            The teacher&apos;s position in the school.
+          </Text>
+          <View style={styles.optionGrid}>
+            {TEACHER_POSITIONS.map((positionOption) => {
+              const selected = user.position === positionOption;
+              return (
+                <TouchableOpacity
+                  key={`${user.id}-${positionOption}`}
+                  style={[
+                    styles.optionButton,
+                    selected && styles.optionButtonSelected,
+                  ]}
+                  onPress={() => onChangePosition(user, positionOption)}
+                  disabled={busy}
+                  activeOpacity={0.82}
+                >
+                  <Ionicons
+                    name="briefcase-outline"
+                    size={15}
+                    color={selected ? theme.onPrimary : theme.primary}
+                  />
+                  <Text
+                    style={[
+                      styles.optionText,
+                      selected && styles.optionTextSelected,
+                    ]}
+                  >
+                    {positionOption}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          </>
+          ) : (
+          <>
           <Text style={styles.controlTitle}>Year level</Text>
           <Text style={styles.controlHelp}>
             Keep the student&apos;s academic level current.
@@ -432,6 +531,8 @@ function UserRowComponent({
               );
             })}
           </View>
+          </>
+          )}
 
           {/* Only students climb the ladder, so the hold is meaningless on a
               staff account and would just be a switch that does nothing. */}
@@ -486,6 +587,16 @@ function UserRowComponent({
           <View style={styles.divider} />
 
           <Text style={styles.controlTitle}>Role access</Text>
+          {isAdminRole(user.role) ? (
+            // An admin's role can't be changed here, their own included —
+            // firestore.rules enforces the same.
+            <Text style={styles.controlHelp}>
+              {isSelf
+                ? "Administrator. You can't change your own role."
+                : "Administrator. Another admin's role can't be changed."}
+            </Text>
+          ) : (
+          <>
           <Text style={styles.controlHelp}>
             Choose the access level that matches this account.
           </Text>
@@ -520,6 +631,8 @@ function UserRowComponent({
               );
             })}
           </View>
+          </>
+          )}
 
           {busy ? (
             <View style={styles.busyRow}>
@@ -721,23 +834,37 @@ export default function ManageUsersScreen() {
   // can read; merged over the public profiles below.
   const [privateById, setPrivateById] = useState<Record<string, PrivateProfileRecord>>({});
   const [movingEmails, setMovingEmails] = useState(false);
+  const [usersLoading, setUsersLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<ManagedUserFilter>("all");
+  // Search waits for a pause in typing, then asks the database (below).
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const searching = debouncedSearch.length >= 2;
+  // Who's online, from a once-a-minute check of recent heartbeats — the same
+  // rule as Home and Dashboard, so the three agree. The isOnline flag alone
+  // stayed "on" when a phone died or lost signal.
+  const [onlineIds, setOnlineIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [presenceUsers, setPresenceUsers] = useState<ManagedUserRecord[]>([]);
+  const [presenceLoading, setPresenceLoading] = useState(true);
+  const showingOnline = filter === "online" && !searching;
+  const listSource = showingOnline ? presenceUsers : rawUsers;
   const users = useMemo(
     () =>
-      rawUsers.map((user) => {
+      listSource.map((user) => {
         const secret = privateById[user.id];
-        if (!secret) return user;
+        const isOnline = onlineIds.has(user.id);
+        if (!secret) return { ...user, isOnline };
         return {
           ...user,
+          isOnline,
           email: secret.email || user.email,
           recoveryEmail: secret.recoveryEmail ?? user.recoveryEmail,
           recoveryEmailVerified: secret.recoveryEmailVerified ?? user.recoveryEmailVerified,
         };
       }),
-    [privateById, rawUsers],
+    [listSource, onlineIds, privateById],
   );
-  const [usersLoading, setUsersLoading] = useState(true);
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<ManagedUserFilter>("all");
+  const listLoading = showingOnline ? presenceLoading : usersLoading;
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [recentlyUpdatedId, setRecentlyUpdatedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -875,51 +1002,132 @@ export default function ManageUsersScreen() {
     }
 
     setUsersLoading(true);
-    // Bounded live listener: at most `pageLimit` student docs, grown by
-    // "Load more". Ordered implicitly by document id, which every doc has, so
-    // no user is ever excluded for missing a sort field. Display order is
-    // still the client-side online/role/name sort in filteredUsers below.
-    return onSnapshot(
-      query(collection(db, "students"), limit(pageLimit)),
-      (snapshot) => {
-        setRawUsers(
-          snapshot.docs.map((item) => {
-            const data = item.data() as ManagedUserRecord;
-            return {
-              id: item.id,
-              userId: data.userId ?? null,
-              firstname: data.firstname || "",
-              lastname: data.lastname || "",
-              email: data.email || "",
-              studentID: data.studentID || item.id,
-              course: data.course || "",
-              yearlvl: data.yearlvl || "",
-              role: data.role || "student",
-              isOnline: data.isOnline === true,
-              profileImage: data.profileImage || null,
-              promotionHold: data.promotionHold === true,
-              recoveryEmail: data.recoveryEmail || "",
-              recoveryEmailVerified: data.recoveryEmailVerified === true,
-              accountLocked: data.accountLocked === true,
-              publicPersonalData:
-                data.recoveryEmail !== undefined ||
-                data.recoveryEmailVerified !== undefined ||
-                validPersonalEmail(data.email),
-            };
-          }),
-        );
-        setHasMore(snapshot.size === pageLimit);
+    // What the list shows. Search and the chips ask the database, so they
+    // cover every account rather than only the ones already loaded:
+    //   search (2+ characters) — first or last names, or IDs, starting with it
+    //   a role chip, or Alumni — those accounts, a page at a time
+    //   Online — the presence check below, not this listener
+    //   All — every account, a page at a time (by document id)
+    const students = collection(db, "students");
+    const sources: Query[] = [];
+    let paged = false;
+    if (searching) {
+      const words = debouncedSearch.toLowerCase().split(/\s+/).filter(Boolean);
+      const startsWith = (field: string, value: string) =>
+        query(students, where(field, ">=", value), where(field, "<=", `${value}\uf8ff`), limit(SEARCH_LIMIT));
+      sources.push(startsWith("firstnameLower", words[0]), startsWith("lastnameLower", words[0]));
+      if (words.length > 1) sources.push(startsWith("lastnameLower", words[words.length - 1]));
+      sources.push(
+        query(
+          students,
+          where(documentId(), ">=", debouncedSearch),
+          where(documentId(), "<=", `${debouncedSearch}\uf8ff`),
+          limit(SEARCH_LIMIT),
+        ),
+      );
+    } else if (filter === "all") {
+      sources.push(query(students, limit(pageLimit)));
+      paged = true;
+    } else if (filter === "alumni") {
+      sources.push(query(students, where("yearlvl", "==", "Graduated"), limit(pageLimit)));
+      paged = true;
+    } else if (filter !== "online") {
+      sources.push(query(students, where("role", "==", filter), limit(pageLimit)));
+      paged = true;
+    }
+
+    const results = sources.map(() => new Map<string, Record<string, any>>());
+    const settled = sources.map(() => false);
+    const publish = () => {
+      const merged = new Map<string, ManagedUserRecord>();
+      results.forEach((docs) =>
+        docs.forEach((data, id) => {
+          if (!merged.has(id)) merged.set(id, toManagedUser(id, data));
+        }),
+      );
+      setRawUsers([...merged.values()]);
+      if (settled.every(Boolean)) {
         setUsersLoading(false);
         setLoadingMore(false);
-      },
-      (error) => {
-        console.error("Error loading managed users:", error);
-        showInfo("Unable to load users", "Please try again in a moment.");
-        setUsersLoading(false);
-        setLoadingMore(false);
-      },
+      }
+    };
+    const unsubscribers = sources.map((source, index) =>
+      onSnapshot(
+        source,
+        (snapshot) => {
+          const docs = results[index];
+          // The online-status heartbeat rewrites each open app's profile every
+          // minute. Online status here comes from the presence check below, so
+          // those writes change nothing on screen and aren't redrawn.
+          const changes = snapshot.docChanges();
+          const heartbeatOnly =
+            settled[index] &&
+            changes.length > 0 &&
+            changes.every(
+              (change) =>
+                change.type === "modified" &&
+                isHeartbeatOnlyChange(docs.get(change.doc.id), change.doc.data()),
+            );
+          docs.clear();
+          snapshot.docs.forEach((item) => docs.set(item.id, item.data()));
+          settled[index] = true;
+          setHasMore(paged && snapshot.size === pageLimit);
+          if (!heartbeatOnly) publish();
+        },
+        (error) => {
+          console.error("Error loading managed users:", error);
+          settled[index] = true;
+          showInfo("Unable to load users", "Please try again in a moment.");
+          setUsersLoading(false);
+          setLoadingMore(false);
+        },
+      ),
     );
-  }, [canManage, pageLimit]);
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+  }, [canManage, debouncedSearch, filter, pageLimit, searching]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // Who's online: everyone whose app checked in within the presence window,
+  // by the same rule as Home and Dashboard. Once a minute, only while this
+  // screen is on show.
+  const screenFocused = useIsFocused();
+  useEffect(() => {
+    if (!canManage || !auth.currentUser || !screenFocused) return;
+    let cancelled = false;
+    const check = () => {
+      getDocs(
+        query(
+          collection(db, "students"),
+          where("lastSeen", ">=", Timestamp.fromMillis(Date.now() - PRESENCE_TIMEOUT_MS)),
+        ),
+      )
+        .then((snapshot) => {
+          if (cancelled) return;
+          const now = Date.now();
+          const online = snapshot.docs.filter(
+            (item) => getPresenceState(item.data() as PresenceData, now).active,
+          );
+          setOnlineIds(new Set(online.map((item) => item.id)));
+          setPresenceUsers(online.map((item) => toManagedUser(item.id, item.data())));
+          setPresenceLoading(false);
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          console.warn("[manage users] Online check failed:", error);
+          setPresenceLoading(false);
+        });
+    };
+    check();
+    const timer = setInterval(check, PRESENCE_CHECK_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [canManage, screenFocused]);
 
   // Everyone's private record. Admin only; if the rules don't allow it yet,
   // the public profiles are all there is.
@@ -1003,9 +1211,8 @@ export default function ManageUsersScreen() {
     if (!canManage || !auth.currentUser) return;
     try {
       const students = collection(db, "students");
-      const [all, online, admin, teacher, moderator, alumni] = await Promise.all([
+      const [all, admin, teacher, moderator, alumni] = await Promise.all([
         getCountFromServer(students),
-        getCountFromServer(query(students, where("isOnline", "==", true))),
         getCountFromServer(query(students, where("role", "==", "admin"))),
         getCountFromServer(query(students, where("role", "==", "teacher"))),
         getCountFromServer(query(students, where("role", "==", "moderator"))),
@@ -1021,7 +1228,8 @@ export default function ManageUsersScreen() {
       const alumniCount = alumni.data().count;
       setRoleCounts({
         all: allCount,
-        online: online.data().count,
+        // Replaced by the presence check's count below.
+        online: 0,
         admin: admin.data().count,
         teacher: teacher.data().count,
         moderator: moderator.data().count,
@@ -1050,10 +1258,13 @@ export default function ManageUsersScreen() {
     setExpandedId((current) => (current === id ? null : id));
   }, []);
 
-  const counts = roleCounts;
+  const counts = useMemo(
+    () => ({ ...roleCounts, online: onlineIds.size }),
+    [onlineIds, roleCounts],
+  );
 
   const filteredUsers = useMemo(() => {
-    const queryValue = search.trim().toLowerCase();
+    const queryValue = debouncedSearch.toLowerCase();
 
     return [...users]
       .filter((item) => {
@@ -1082,6 +1293,7 @@ export default function ManageUsersScreen() {
           item.studentID,
           item.course,
           item.yearlvl,
+          item.position,
           normalizedRole,
         ]
           .filter(Boolean)
@@ -1100,7 +1312,7 @@ export default function ManageUsersScreen() {
         if (roleDiff !== 0) return roleDiff;
         return getName(first).localeCompare(getName(second));
       });
-  }, [expandedId, filter, recentlyUpdatedId, search, users]);
+  }, [debouncedSearch, expandedId, filter, recentlyUpdatedId, users]);
 
   // Keep recently updated user in view by smoothly scrolling to their position
   useEffect(() => {
@@ -1193,6 +1405,37 @@ export default function ManageUsersScreen() {
     [canManage],
   );
 
+  const changePosition = useCallback(
+    (managedUser: ManagedUserRecord, nextPosition: string) => {
+      if (!canManage || managedUser.position === nextPosition) return;
+
+      showConfirm({
+        title: "Update Position",
+        description: `Change ${getName(managedUser)}'s position to ${nextPosition}?`,
+        confirmText: "Update",
+        cancelText: "Cancel",
+        destructive: false,
+        onConfirm: async () => {
+          try {
+            setBusyId(managedUser.id);
+            await updateDoc(doc(db, "students", managedUser.id), {
+              position: nextPosition,
+              updatedAt: serverTimestamp(),
+            });
+            setRecentlyUpdatedId(managedUser.id);
+            setExpandedId(managedUser.id);
+          } catch (error) {
+            console.error("Error updating position:", error);
+            showInfo("Error", "Failed to update position.");
+          } finally {
+            setBusyId(null);
+          }
+        },
+      });
+    },
+    [canManage],
+  );
+
   const togglePromotionHold = useCallback(
     (managedUser: ManagedUserRecord) => {
       if (!canManage) return;
@@ -1247,6 +1490,10 @@ export default function ManageUsersScreen() {
         );
         return;
       }
+      if (isAdminRole(managedUser.role)) {
+        showInfo("Action Blocked", "Another admin's role can't be changed.");
+        return;
+      }
 
       showConfirm({
         title: "Update Role",
@@ -1263,6 +1510,10 @@ export default function ManageUsersScreen() {
               updatedAt: serverTimestamp(),
               roleUpdatedAt: serverTimestamp(),
               roleUpdatedBy: auth.currentUser?.uid || null,
+              // A new teacher starts as Faculty; change it under Position.
+              ...(nextRole === "teacher" && !managedUser.position
+                ? { position: DEFAULT_TEACHER_POSITION }
+                : {}),
             });
             setRecentlyUpdatedId(managedUser.id);
             setExpandedId(managedUser.id);
@@ -1549,6 +1800,7 @@ export default function ManageUsersScreen() {
           onOpenProfile={openProfile}
           onOpenEdit={openEditProfile}
           onChangeYear={changeYearLevel}
+          onChangePosition={changePosition}
           onChangeRole={changeRole}
           onTogglePromotionHold={togglePromotionHold}
           recoveryBusy={recoveryBusy?.id === item.id ? recoveryBusy.action : null}
@@ -1559,6 +1811,7 @@ export default function ManageUsersScreen() {
     },
     [
       busyId,
+      changePosition,
       changeRole,
       changeYearLevel,
       currentStudentDocId,
@@ -1625,9 +1878,15 @@ export default function ManageUsersScreen() {
           <ManageUsersListHeader
             counts={counts}
             search={search}
-            onSearchChange={setSearch}
+            onSearchChange={(text: string) => {
+              setSearch(text);
+              setPageLimit(PAGE_SIZE);
+            }}
             filter={filter}
-            onFilterChange={setFilter}
+            onFilterChange={(next: ManagedUserFilter) => {
+              setFilter(next);
+              setPageLimit(PAGE_SIZE);
+            }}
             shownCount={filteredUsers.length}
             loadedCount={users.length}
             onRegister={() => router.push("/AdminRegisterUserScreen")}
@@ -1638,11 +1897,11 @@ export default function ManageUsersScreen() {
                 ? { count: publicEmailCount, busy: movingEmails, onPress: handleMoveEmails }
                 : null
             }
-            loading={loading || usersLoading}
+            loading={loading || listLoading}
           />
         }
         ListEmptyComponent={
-          loading || usersLoading ? (
+          loading || listLoading ? (
             <CardListSkeleton
               count={5}
               cardStyle={styles.userCard}

@@ -33,7 +33,6 @@ import {
 import { showAppToast } from "@/utils/toastEvents";
 import { canNavigateToTaggedUser, manualTaggedUsers, splitTaggedMentions } from "@/utils/taggedUsers";
 import {
-    normalizeCaptions,
     type CaptionSegment,
     type CaptionStatus,
 } from "@/utils/videoCaptions";
@@ -42,15 +41,12 @@ import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
-import { useIsFocused } from "expo-router";
 import { addDoc, arrayRemove, arrayUnion, collection, doc, getDoc, serverTimestamp, updateDoc, writeBatch } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Dimensions,
     Modal,
-    NativeScrollEvent,
-    NativeSyntheticEvent,
     ScrollView,
     StyleSheet,
     Text,
@@ -67,7 +63,7 @@ import ReanimatedAnimated, {
 import AiReplyCard from "../components/AiReplyCard";
 import CommentModal from "../components/CommentModal";
 import ExpandableText from "../components/ExpandableText";
-import VideoPostMedia from "../components/VideoPostMedia";
+import PostMediaCarousel from "./PostMediaCarousel";
 import ConfirmDialog from "./ConfirmDialog";
 import ContentActionMenu from "./ContentActionMenu";
 import ExternalLinkDialog, { prepareExternalLink } from "./ExternalLinkDialog";
@@ -144,10 +140,6 @@ const formatReplayLength = (durationMs?: number) => {
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 };
-interface VideoPlayerProps {
-  videoUrl: string;
-  isPlaying: boolean;
-}
 interface PostCardProps {
   post: Post;
   isLiked: boolean;
@@ -178,40 +170,6 @@ interface PostCardProps {
   // autoplay-when-(focused && scrolled-into-view).
   videoCardVisible?: boolean;
 }
-
-/* Feed video: autoplays muted only when the Home screen has focus AND this
-   specific card is scrolled into view — both, so leaving Home still pauses
-   everything. Without `cardVisible` it falls back to the old manual player. */
-const VideoMediaItem = ({
-  url,
-  width,
-  cardVisible,
-  captionStatus,
-  captions,
-}: {
-  url: string;
-  width: number;
-  cardVisible?: boolean;
-  captionStatus?: CaptionStatus;
-  captions?: unknown;
-}) => {
-  const isFocused = useIsFocused();
-  const feedAutoplay = cardVisible !== undefined;
-  // Firestore data is untrusted: coerce to clean, start-sorted segments once
-  // per doc update rather than on every render.
-  const safeCaptions = useMemo(() => normalizeCaptions(captions), [captions]);
-
-  return (
-    <VideoPostMedia
-      uri={url}
-      width={width}
-      feedAutoplay={feedAutoplay}
-      isPlaying={feedAutoplay ? isFocused && !!cardVisible : isFocused}
-      captionStatus={captionStatus}
-      captions={safeCaptions}
-    />
-  );
-};
 
 /**
  * Animated like / bookmark toggle. The tap runs a spring-overshoot scale
@@ -326,7 +284,6 @@ const PostCard = React.memo<PostCardProps>(({
   const [showLikesModal, setShowLikesModal] = useState(false);
   const [authorData, setAuthorData] = useState<UserData | null>(null);
   const [authorLoading, setAuthorLoading] = useState(true);
-  const [activeImageIndex, setActiveImageIndex] = useState(0);
   // PostCard can be rendered full-width in Home or inside a narrower parent
   // (for example Profile -> My Posts). Measure the real content column so
   // media never assumes the full device width and spills past its card.
@@ -397,31 +354,21 @@ const PostCard = React.memo<PostCardProps>(({
     };
   }, [authorData?.studentID, post.realUserId, post.userId]);
 
-  const imageFiles = (post.files || []).filter(
-    (f) => f.mimeType.startsWith("image/") && !f.mimeType.includes("gif"),
+  const carouselFiles = (post.files || []).filter(
+    (f) => (f.mimeType.startsWith("image/") && !f.mimeType.includes("gif")) || f.mimeType.startsWith("video/"),
   );
   const gifFiles = (post.files || []).filter((f) => f.mimeType.includes("gif"));
-  const videoFiles = (post.files || []).filter((f) => f.mimeType.startsWith("video/"));
   const nonImageFiles = (post.files || []).filter(
     (f) => !f.mimeType.startsWith("image/") && !f.mimeType.startsWith("video/"),
   );
 
-  if (post.imageUrl && !imageFiles.find((f) => f.url === post.imageUrl)) {
-    imageFiles.unshift({ url: post.imageUrl, mimeType: "image/jpeg" });
+  if (post.imageUrl && !carouselFiles.find((f) => f.url === post.imageUrl)) {
+    carouselFiles.unshift({ url: post.imageUrl, mimeType: "image/jpeg" });
   }
 
   const handleCommentAdded = () => {
     if (onCommentCountUpdate) {
       onCommentCountUpdate(post.id, (post.commentCount || 0) + 1);
-    }
-  };
-
-  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const slide = Math.round(
-      event.nativeEvent.contentOffset.x / mediaWidth
-    );
-    if (slide !== activeImageIndex && slide >= 0 && slide < imageFiles.length) {
-      setActiveImageIndex(slide);
     }
   };
 
@@ -703,77 +650,22 @@ const PostCard = React.memo<PostCardProps>(({
             </View>
           )}
 
-          {videoFiles.length > 0 && (
-            <View style={styles.mediaContainer}>
-              {videoFiles.map((video, index) => (
-                <VideoMediaItem
-                  key={`${video.url}-${index}`}
-                  url={video.url}
-                  width={mediaWidth}
-                  cardVisible={videoCardVisible}
-                  captionStatus={post.captionStatus}
-                  captions={post.captions}
-                />
-              ))}
-            </View>
-          )}
-
-          {imageFiles.length > 0 && (
-            <View style={styles.carouselContainer}>
-              <ScrollView
-                horizontal
-                pagingEnabled
-                decelerationRate="normal"
-                showsHorizontalScrollIndicator={false}
-                bounces={false}
-                overScrollMode="never"
-                onScroll={handleScroll}
-                scrollEventThrottle={16}
-                snapToAlignment="center"
-                disableIntervalMomentum={true}
-              >
-                {imageFiles.map((item, index) => (
-                  <TouchableOpacity
-                    key={`${item.url}-${index}`}
-                    activeOpacity={0.95}
-                    onPress={() => {
-                      if (onImagePress) {
-                        const urls = imageFiles.map((f) => f.url);
-                        onImagePress(urls, index, post.id);
-                      }
-                    }}
-                  >
-                    <Image
-                      recyclingKey={`${post.id}:${item.url}`}
-                      source={{ uri: feedImage(item.url, FEED_IMAGE_WIDTH) }}
-                      style={[
-                        styles.carouselImage,
-                        {
-                          width: mediaWidth,
-                          height: compact ? mediaWidth * 0.62 : mediaWidth * 1.25,
-                        },
-                      ]}
-                      contentFit="cover"
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-
-              {/* Dynamic Dot Indicators */}
-              {imageFiles.length > 1 && (
-                <View style={styles.paginationDotsContainer}>
-                  {imageFiles.map((_, index) => (
-                    <View
-                      key={index}
-                      style={[
-                        styles.dot,
-                        activeImageIndex === index ? styles.activeDot : styles.inactiveDot,
-                      ]}
-                    />
-                  ))}
-                </View>
-              )}
-            </View>
+          {carouselFiles.length > 0 && (
+            <PostMediaCarousel
+              key={`${post.id}:${carouselFiles.map((file) => file.url).join("|")}`}
+              files={carouselFiles}
+              width={mediaWidth}
+              postId={post.id}
+              compact={compact}
+              cardVisible={videoCardVisible}
+              captionStatus={post.captionStatus}
+              captions={post.captions}
+              onImagePress={onImagePress}
+              // Double-tap a photo to like, as in Threads; it never unlikes.
+              onDoubleTapLike={() => {
+                if (!isLiked) onLike(post.id, post.likedBy || []);
+              }}
+            />
           )}
 
           {nonImageFiles.length > 0 && (
@@ -2050,42 +1942,6 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textMuted,
     fontSize: 13,
   },
-  carouselContainer: {
-    marginVertical: 10,
-    overflow: "visible",
-    position: "relative",
-  },
-  carouselImage: {
-    width: DEFAULT_MEDIA_WIDTH,
-    height: DEFAULT_MEDIA_WIDTH * 1.25,
-    backgroundColor: "#efe1d6",
-    borderRadius: 18,
-  },
-  paginationDotsContainer: {
-    position: "absolute",
-    bottom: 12,
-    left: 0,
-    right: 0,
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: 6,
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  activeDot: {
-    backgroundColor: c.surfaceRaised,
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  inactiveDot: {
-    backgroundColor: "rgba(255, 255, 255, 0.5)",
-  },
-
   mediaContainer: {
     marginVertical: 10,
   },
@@ -2137,4 +1993,4 @@ const makeStyles = (c: ThemeTokens) =>
   },
 });
 
-export default PostCard;
+export default React.memo(PostCard);

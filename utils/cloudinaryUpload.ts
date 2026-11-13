@@ -3,6 +3,7 @@
 
 import * as FileSystem from "expo-file-system/legacy";
 import { Platform } from "react-native";
+import { shrinkPhotoForUpload } from "./shrinkImage";
 import { assertReadableUpload, isAttachmentUnavailableError } from "./uploadAttachments";
 import {
     AVATAR_SIZE_LARGE,
@@ -21,7 +22,15 @@ interface CloudinaryUploadOptions {
   uri: string;
   folder: UploadFolder;
   resourceType?: "image" | "raw" | "video" | "auto";
+  /** The picked file's type, when known. Lets a GIF with no ".gif" in its
+   *  address be left alone instead of shrunk to its first frame. */
+  mimeType?: string;
 }
+
+/** Photos in these folders are shrunk on the phone before they upload. */
+const SHRINK_FOLDERS: ReadonlySet<UploadFolder> = new Set(["post_images", "server_images", "profile_images"]);
+/** Still photos only; GIFs and anything unrecognised upload as they are. */
+const SHRINK_TYPES: ReadonlySet<string> = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 
 /**
  * Upload file to Cloudinary with specific folder organization
@@ -29,16 +38,19 @@ interface CloudinaryUploadOptions {
  * @returns Secure URL of uploaded file
  */
 export const uploadToCloudinary = async ({
-  uri,
+  uri: originalUri,
   folder,
   resourceType = "auto",
+  mimeType: sourceMimeType,
 }: CloudinaryUploadOptions): Promise<string> => {
   try {
     const tooLargeMessage = resourceType === "raw"
       ? "This file is too large to upload. Choose a file smaller than 9 MB."
-      : "This file is too large to upload. Choose a smaller file and try again.";
+      : resourceType === "video"
+        ? "This video is too large to upload. Videos can be up to 100 MB."
+        : "This file is too large to upload. Choose a smaller file and try again.";
     // Validate inputs
-    if (!uri) {
+    if (!originalUri) {
       throw new Error("File URI is required");
     }
 
@@ -50,6 +62,16 @@ if (!CLOUDINARY_UPLOAD_PRESET) {
   throw new Error("Cloudinary upload preset not configured.");
 }
 
+
+    // Phone photos can be 10 MB or more, over what Cloudinary's free plan
+    // takes; shrunk they are usually under 1.5 MB (see shrinkImage.ts).
+    let uri = originalUri;
+    if (resourceType === "image" && SHRINK_FOLDERS.has(folder)) {
+      const sourceType = (sourceMimeType || getMimeType(originalUri, folder)).toLowerCase();
+      if (SHRINK_TYPES.has(sourceType)) {
+        uri = await shrinkPhotoForUpload(originalUri, sourceType === "image/png");
+      }
+    }
 
     // Determine file type and name based on folder
     const fileName = generateFileName(folder, uri);
@@ -346,11 +368,12 @@ export const uploadProfileImage = async (uri: string): Promise<string> => {
  * Upload post image specifically
  * Usage: const url = await uploadPostImage(imageUri);
  */
-export const uploadPostImage = async (uri: string): Promise<string> => {
+export const uploadPostImage = async (uri: string, mimeType?: string): Promise<string> => {
   return uploadToCloudinary({
     uri,
     folder: "post_images",
     resourceType: "image",
+    mimeType,
   });
 };
 

@@ -6,6 +6,8 @@ const ATTACHMENT_UNAVAILABLE = "ATTACHMENT_UNAVAILABLE";
 const ATTACHMENT_TOO_LARGE = "ATTACHMENT_TOO_LARGE";
 /** Keep raw uploads below Cloudinary's unsigned-plan limit, including multipart overhead. */
 export const MAX_DOCUMENT_ATTACHMENT_BYTES = 9 * 1024 * 1024;
+/** Cloudinary's free plan takes videos up to 100 MB; this leaves room to spare. */
+export const MAX_VIDEO_ATTACHMENT_BYTES = 95 * 1024 * 1024;
 const attachmentUnavailable = () => Object.assign(
   new Error("The selected attachment cannot be read. Remove it and select it again."),
   { code: ATTACHMENT_UNAVAILABLE },
@@ -21,14 +23,27 @@ export function isAttachmentTooLargeError(error: unknown): boolean {
   return (error as { code?: string } | null)?.code === ATTACHMENT_TOO_LARGE;
 }
 
+const tooLarge = (message: string) => Object.assign(new Error(message), { code: ATTACHMENT_TOO_LARGE });
+
 const assertDocumentSize = (asset: DocumentPicker.DocumentPickerAsset) => {
-  const mimeType = asset.mimeType || "application/octet-stream";
-  if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) return;
-  if (typeof asset.size === "number" && asset.size > MAX_DOCUMENT_ATTACHMENT_BYTES) {
-    throw Object.assign(
-      new Error("This file is larger than 9 MB. Choose a smaller document and try again."),
-      { code: ATTACHMENT_TOO_LARGE },
-    );
+  const mimeType = (asset.mimeType || "application/octet-stream").toLowerCase();
+  if (typeof asset.size !== "number") return;
+  if (mimeType.startsWith("video/")) {
+    if (asset.size > MAX_VIDEO_ATTACHMENT_BYTES) {
+      throw tooLarge("This video is larger than 100 MB. Videos can be up to 100 MB, so choose a shorter one.");
+    }
+    return;
+  }
+  if (mimeType === "image/gif") {
+    if (asset.size > MAX_DOCUMENT_ATTACHMENT_BYTES) {
+      throw tooLarge("This GIF is larger than 9 MB. Choose a smaller GIF and try again.");
+    }
+    return;
+  }
+  // Photos are shrunk before they upload (see shrinkImage.ts), so any size is fine.
+  if (mimeType.startsWith("image/")) return;
+  if (asset.size > MAX_DOCUMENT_ATTACHMENT_BYTES) {
+    throw tooLarge("This file is larger than 9 MB. Choose a smaller document and try again.");
   }
 };
 

@@ -117,6 +117,36 @@ service cloud.firestore {
       );
     }
 
+    // Deleting a server channel message leaves a placeholder, like DMs
+    // (utils/channelMessageDelete.ts): everything it said, showed or linked
+    // is wiped, and only who wrote it and when stay. "author" is the writer
+    // deleting their own; "moderator" is staff removing someone else's.
+    // Callers decide who may do it; this checks that it's a real wipe.
+    function validMessageTombstone(before, after) {
+      return after.get('deleted', false) == true &&
+        before.get('deleted', false) != true &&
+        after.diff(before).affectedKeys().hasOnly([
+          'deleted', 'deletedBy', 'deletedAt', 'text', 'files', 'taggedUsers',
+          'mentionedUserIds', 'reactions', 'pinned', 'link', 'poll', 'pollVoters',
+          'replyTo', 'forwarded', 'isForwarded', 'forwardedFrom', 'pinnedAt',
+          'pinnedBy', 'pinnedByName', 'editedAt'
+        ]) &&
+        after.deleted == true &&
+        after.deletedAt == request.time &&
+        (
+          (after.deletedBy == 'author' && isContentOwner(before)) ||
+          (after.deletedBy == 'moderator' && isStaff())
+        ) &&
+        after.text == '' &&
+        after.files == [] &&
+        after.get('taggedUsers', []) == [] &&
+        after.get('mentionedUserIds', []) == [] &&
+        after.get('reactions', {}) == {} &&
+        after.get('pinned', false) == false &&
+        !('link' in after) && !('poll' in after) && !('pollVoters' in after) &&
+        !('replyTo' in after) && !('forwardedFrom' in after);
+    }
+
     // Staff members may review other users' moderation state, but they must
     // never approve their own flagged content and must not rewrite the
     // author's text while reviewing it. Content changes belong to the author
@@ -495,7 +525,9 @@ service cloud.firestore {
             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pollVoters']) &&
             validOwnVote(resource.data, request.resource.data)
           ) ||
-          validPollEnd(resource.data, request.resource.data)
+          validPollEnd(resource.data, request.resource.data) ||
+          // Deleting leaves a placeholder; any staff member may, as below.
+          validMessageTombstone(resource.data, request.resource.data)
         );
 
       allow delete: if signedIn() && isStaff();
@@ -658,6 +690,14 @@ service cloud.firestore {
     (!('poll' in request.resource.data) || validPollCreate(request.resource.data));
 
   allow update: if signedIn() && (
+    // Deleting: the author, or staff removing it — the same people who could
+    // already delete it outright (below). Checked first: this rule has many
+    // branches, and a delete that had to fail its way through all of them
+    // ran past Firestore's 1,000-step limit for one request.
+    (
+      validMessageTombstone(resource.data, request.resource.data) &&
+      (isContentOwner(resource.data) || isStaff())
+    ) ||
     (
       isContentOwner(resource.data) &&
       request.resource.data.userId == resource.data.userId &&
@@ -1098,12 +1138,23 @@ service cloud.firestore {
         'recoveryEmailVerified', 'recoveryEmailVerifiedAt',
         'yearlvl', 'promotionHold', 'previousYearlvl', 'promotedAt',
         'lastPromotionRunId',
+        // A teacher's position (Faculty, Program Chair, Dean) is set by an
+        // admin; nobody names themselves Dean.
+        'position',
         // Set by an admin's account recovery (through the Worker). Someone
         // signed in on a locked or signed-out account must not undo it.
         'accountLocked', 'accountLockedAt', 'sessionsRevokedAt'
       ]) && validSetupChanges()) ||
-    isAdmin()
+    (isAdmin() && !changesAdminAccess())
   );
+
+  // An admin account's role and permissions can't be changed from the app —
+  // not by another admin, and not by the admin themselves. Manage Users hides
+  // the controls; this makes it so. (The Firebase console still can.)
+  function changesAdminAccess() {
+    return resource.data.get('role', '') in ['admin', '4', 4] &&
+      request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'permissions']);
+  }
 
   // Student can delete their own profile.
   // Admin can delete any student.
@@ -1894,6 +1945,23 @@ match /userNotificationSettings/{userId} {
     match /accountRecoveryLog/{entryId} {
       allow read: if isAdmin();
       allow write: if false;
+    }
+
+    // B.E.A. with Gemini (cloudflare/ai-worker/src/index.js, mode bea-chat).
+    // appSettings/bea { geminiEnabled } turns it off without a new APK; it's
+    // edited from the Firebase console. The usage counters and the cache of
+    // general answers belong to the Worker alone.
+    match /appSettings/{settingId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /beaChatUsage/{userId} {
+      allow read, write: if false;
+    }
+
+    match /beaAnswerCache/{cacheKey} {
+      allow read, write: if false;
     }
 
     match /chatbotKnowledgeCache/{cacheKey} {

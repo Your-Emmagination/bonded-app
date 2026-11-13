@@ -2269,10 +2269,10 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 12,
     fontWeight: "800",
     letterSpacing: 1.2,
-    marginTop: 20,
-    marginBottom: 16,
+    marginTop: 22,
+    marginBottom: 14,
   },
-  daySection: { marginBottom: 16 },
+  daySection: { marginBottom: 18 },
   dayHeading: {
     color: c.textSecondary,
     fontSize: 13,
@@ -2300,9 +2300,9 @@ const makeStyles = (c: ThemeTokens) =>
   // A main event is the container for a week; a heavier edge sets it apart
   // from the sessions inside it.
   rowCardMain: { borderColor: c.border, backgroundColor: c.surfaceRaised },
-  rowIconOrb: { width: 42, height: 42, borderRadius: 14, borderWidth: 1, alignItems: "center", justifyContent: "center", marginLeft: 16 },
+  rowIconOrb: { width: 42, height: 42, borderRadius: 14, borderWidth: 1, alignItems: "center", justifyContent: "center", marginLeft: 14 },
   rowChevron: { marginRight: 13 },
-  rowBody: { flex: 1, minWidth: 0, paddingVertical: 12, paddingHorizontal: 13 },
+  rowBody: { flex: 1, minWidth: 0, paddingVertical: 15, paddingHorizontal: 13 },
   rowTopRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   rowTime: { flex: 1, color: c.textSecondary, fontSize: 12, fontWeight: "600", marginTop: 5 },
   rowStatusLine: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 7, marginTop: 6 },
@@ -2312,7 +2312,7 @@ const makeStyles = (c: ThemeTokens) =>
     color: c.textPrimary,
     fontSize: 16,
     fontWeight: "800",
-    lineHeight: 20,
+    lineHeight: 22,
   },
   rowContext: { color: c.textMuted, fontSize: 13, marginTop: 3 },
   // A cancelled event keeps its place in the list, struck through, so nobody
@@ -2322,8 +2322,8 @@ const makeStyles = (c: ThemeTokens) =>
   rowEdit: { paddingHorizontal: 13, paddingVertical: 12 },
   draftTag: { color: c.textMuted, fontSize: 12, fontWeight: "700" },
   nowPanel: {
-    marginBottom: 24,
-    padding: 24,
+    marginBottom: 26,
+    padding: 20,
     borderRadius: 24,
     backgroundColor: c.accentSoft,
     borderWidth: 1,
@@ -2338,7 +2338,7 @@ const makeStyles = (c: ThemeTokens) =>
   },
   nowHeading: {
     color: c.textPrimary,
-    fontSize: 20,
+    fontSize: 21,
     fontWeight: "800",
     letterSpacing: -0.5,
   },
@@ -2380,7 +2380,7 @@ const makeStyles = (c: ThemeTokens) =>
   nowStatDivider: { color: c.textMuted, fontSize: 13 },
   agendaHeader: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 8 },
   agendaEyebrow: { color: c.textMuted, fontSize: 10, fontWeight: "800", letterSpacing: 1.1 },
-  agendaTitle: { color: c.textPrimary, fontSize: 24, fontWeight: "800", letterSpacing: -0.6, marginTop: 4 },
+  agendaTitle: { color: c.textPrimary, fontSize: 23, fontWeight: "800", letterSpacing: -0.6, marginTop: 4 },
   agendaCount: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: c.surfaceSunken },
   agendaCountText: { color: c.textSecondary, fontSize: 12, fontWeight: "700" },
   modalPartsBox: {
@@ -2603,12 +2603,12 @@ const makeStyles = (c: ThemeTokens) =>
   },
   listContent: {
     paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 32,
+    paddingTop: 18,
+    paddingBottom: 36,
   },
   draftsSection: {
-    marginTop: 20,
-    marginBottom: 24,
+    marginTop: 18,
+    marginBottom: 26,
   },
   draftsHeader: {
     flexDirection: "row",
@@ -2826,7 +2826,7 @@ const makeStyles = (c: ThemeTokens) =>
   eventCard: {
     backgroundColor: c.surfaceRaised,
     borderRadius: 20,
-    padding: 16,
+    padding: 18,
     marginBottom: 16,
     borderLeftWidth: 3,
     borderWidth: 1,
@@ -2896,17 +2896,17 @@ const makeStyles = (c: ThemeTokens) =>
     fontWeight: "800",
     letterSpacing: 0.5,
   },
-  subEventList: { marginBottom: 16, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 14, backgroundColor: c.surfaceSunken, gap: 8 },
+  subEventList: { marginBottom: 14, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 14, backgroundColor: c.surfaceSunken, gap: 8 },
   subEventListLabel: { color: c.textMuted, fontSize: 10, fontWeight: "900", letterSpacing: 1 },
   subEventListRow: { flexDirection: "row", alignItems: "flex-start", gap: 9 },
   subEventListDot: { width: 6, height: 6, borderRadius: 3, marginTop: 7, backgroundColor: c.accent },
   subEventListText: { flex: 1, color: c.textPrimary, fontSize: 14, lineHeight: 20, fontWeight: "600" },
-  statusSupportText: { color: c.textSecondary, fontSize: 13, marginTop: -4, marginBottom: 16 },
-  descriptionBlock: { gap: 7, marginBottom: 16 },
+  statusSupportText: { color: c.textSecondary, fontSize: 13, marginTop: -4, marginBottom: 14 },
+  descriptionBlock: { gap: 7, marginBottom: 14 },
   eventDescription: {
     fontSize: 14,
     color: c.textSecondary,
-    lineHeight: 20,
+    lineHeight: 21,
   },
   eventMeta: {
     gap: 8,

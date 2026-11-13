@@ -4,7 +4,7 @@
 // answer "have we seen this before?" — the duplicate-question hint on Create
 // Post and the repeated-poll hint on Create Poll.
 //
-// Same spirit as utils/unansweredClustering.ts: no model, no network, no
+// No model, no network, no
 // inference cost. Two texts are similar when they share enough significant
 // words, which is cheap, explainable, and works offline. It will miss
 // paraphrases that share no vocabulary ("where do I pay" vs "cashier

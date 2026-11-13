@@ -17,7 +17,7 @@ import {
 // React Native's built-in one stopped lifting anything on Android once
 // KeyboardProvider (app/_layout.tsx) took over the keyboard.
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   addDoc,
   collection,
@@ -43,6 +43,7 @@ type Program = {
 };
 
 export default function AdminManageProgramsScreen() {
+  const insets = useSafeAreaInsets();
   const { styles, theme } = useStyles();
   const router = useRouter();
   const [authorized, setAuthorized] = useState<boolean | null>(null);
@@ -357,7 +358,7 @@ export default function AdminManageProgramsScreen() {
             resizing inside pop-ups. So the sheet rides up with the keyboard
             here, and scrolls if the keyboard leaves too little room. */}
         <KeyboardAvoidingView automaticOffset behavior="padding" style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
+          <View style={[styles.modalCard, { paddingBottom: Math.max(24, insets.bottom + 16) }]}>
             <View style={styles.modalHeader}>
               <View>
                 <Text style={styles.modalTitle}>{editingId ? "Edit Program" : "Add Program"}</Text>

@@ -58,6 +58,7 @@ import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
+import ShapedGif from "./ShapedGif";
 import { useRouter } from "expo-router";
 import {
     addDoc,
@@ -481,7 +482,9 @@ const ReplyBubbleComponent: React.FC<{
               </View>
             )}
 
-            {canReveal && (
+            {/* Only an anonymous reply has a name to reveal (staff only).
+                canReveal alone is also true for every named reply. */}
+            {isAnon && canReveal && (
               <TouchableOpacity
                 onPress={() => setRevealed((value) => !value)}
                 style={styles.eyeBtn}
@@ -582,17 +585,12 @@ const ReplyBubbleComponent: React.FC<{
 
           {gifFiles.length > 0 && (
             <View style={styles.gifContainer}>
-              <Image
-                source={{
-                  uri: feedImage(
-                    gifFiles[0].url,
-                    FEED_IMAGE_WIDTH,
-                  ),
-                }}
-                placeholder={gifLocalCopy ? { uri: gifLocalCopy } : undefined}
-                placeholderContentFit="cover"
-                style={styles.gifImage}
-                contentFit="cover"
+              <ShapedGif
+                uri={feedImage(gifFiles[0].url, FEED_IMAGE_WIDTH) || gifFiles[0].url}
+                placeholderUri={gifLocalCopy}
+                width={220}
+                maxHeight={280}
+                backgroundColor={theme.surfaceSunken}
               />
             </View>
           )}
@@ -3855,12 +3853,6 @@ const makeStyles = (c: ThemeTokens) =>
     marginTop: 6,
     borderRadius: 12,
     overflow: "hidden",
-  },
-
-  gifImage: {
-    width: 220,
-    height: 160,
-    backgroundColor: c.surfaceSunken,
   },
 
   imageContainer: {

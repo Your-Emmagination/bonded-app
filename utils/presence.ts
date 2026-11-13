@@ -7,6 +7,9 @@ import { auth, db } from "../Firebase_configure";
 import { getStudentDocIdFromAuthUser } from "./rbac";
 import { PRESENCE_TIMEOUT_MS, timestampMillis, type PresenceData } from "./messengerState";
 
+/** How often an open app says it's still online. */
+const PRESENCE_HEARTBEAT_MS = 60_000;
+
 const sessionId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 let offlinePublisher: (() => Promise<void>) | undefined;
 
@@ -83,7 +86,9 @@ export function usePresenceHeartbeat(user: User | null | undefined) {
         break;
       }
     })().catch((error) => console.warn("[presence] Profile lookup failed:", error));
-    const interval = setInterval(() => { if (visible() && profile.activeStatusEnabled !== false) sync(); }, 30_000);
+    // Once a minute: each beat is a database write (and a read for everyone
+    // showing this person's "Active now"), and it was twice a minute.
+    const interval = setInterval(() => { if (visible() && profile.activeStatusEnabled !== false) sync(); }, PRESENCE_HEARTBEAT_MS);
     return () => {
       stopped = true;
       clearInterval(interval);

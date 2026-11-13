@@ -686,3 +686,34 @@ export function onSurface(hex: string, tokens: ThemeTokens): string {
       .padStart(2, "0");
   return `#${hex2(rr)}${hex2(gg)}${hex2(bb)}`;
 }
+
+/**
+ * `base` moved `amount` (0–1) of the way toward `tint`. Both must be
+ * "#rrggbb"; anything else returns `base` unchanged.
+ */
+export function mixHex(base: string, tint: string, amount: number): string {
+  const parse = (hex: string) => {
+    const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
+    if (!m) return null;
+    const int = parseInt(m[1], 16);
+    return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
+  };
+  const a = parse(base);
+  const b = parse(tint);
+  if (!a || !b) return base;
+  const t = Math.min(1, Math.max(0, amount));
+  return `#${a
+    .map((v, i) => Math.round(v + (b[i] - v) * t).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+/**
+ * The background of a DM whose people picked a chat theme, like Messenger:
+ * a soft wash of the theme colour, stronger toward the newest messages.
+ * Dark themes take a little more of it, since a faint tint on near-black
+ * doesn't show. Returns [top, bottom] for a vertical gradient.
+ */
+export function chatWallpaper(themeColor: string, tokens: ThemeTokens): [string, string] {
+  const [top, bottom] = tokens.isDark ? [0.1, 0.22] : [0.05, 0.15];
+  return [mixHex(tokens.surface, themeColor, top), mixHex(tokens.surface, themeColor, bottom)];
+}

@@ -1,4 +1,5 @@
 import { AI_ASSISTANT_ID, AI_ASSISTANT_NAME, isAiAssistantId } from "@/utils/aiAssistant";
+import { isHeartbeatOnlyChange } from "@/utils/profileChanges";
 import { anonymousName, getMyAnonymousHandle } from "@/utils/anonymousHandle";
 import { getAiErrorMessage } from "@/utils/aiConfig";
 import {
@@ -58,6 +59,7 @@ import {
 } from "@/utils/offlineStorage";
 import { buildUserProfileHref } from "@/utils/profileNavigation";
 import { canReportContent, getUserDataByAuthUser, isStaff, normalizeUserRole, peekUserData } from "@/utils/rbac";
+import { deleteChannelMessage, deletedMessageLabel } from "@/utils/channelMessageDelete";
 import { replyPreviewMedia, replyPreviewText } from "@/utils/replyPreview";
 import { useRelativeTimeNow } from "@/utils/relativeTime";
 import { canNavigateToTaggedUser, manualTaggedUsers, splitTaggedMentions } from "@/utils/taggedUsers";
@@ -208,6 +210,11 @@ type ThreadMessage = {
   editedAt?: any;
   forwarded?: boolean;
   isForwarded?: boolean;
+  // Deleted: only its place is kept, shown as "Message deleted" or, when
+  // staff removed it, "Removed by a moderator" (utils/channelMessageDelete).
+  deleted?: boolean;
+  deletedBy?: "author" | "moderator";
+  deletedAt?: any;
   forwardedFrom?: {
     senderName: string;
     channelId?: string | null;
@@ -527,6 +534,9 @@ function needsTimeLabel(message: ThreadMessage, older: ThreadMessage | undefined
 
 const isSameSenderRun = (a?: ThreadMessage, b?: ThreadMessage) => {
   if (!a || !b) return false;
+  // A deleted message's placeholder has no name or avatar, so it never
+  // carries a group's for the messages around it.
+  if (a.deleted || b.deleted) return false;
   if ((a.realUserId || a.userId) !== (b.realUserId || b.userId)) return false;
   // An anonymous message and a named one from the same account read as
   // different senders in the UI, so they must not group together.
@@ -640,6 +650,91 @@ function TypingDots({ color }: { color: string }) {
     </View>
   );
 }
+
+/**
+ * "Alex is typing…" for this channel. It listens to the channel's
+ * typingIndicators docs and re-checks every 2 seconds for someone who stopped
+ * without clearing theirs. It used to do both in the screen itself, which
+ * redrew the whole channel — list, composer and all — on every typing
+ * update and every tick; now only this line redraws.
+ */
+const ChannelTypingIndicator = React.memo(function ChannelTypingIndicator({
+  channelId,
+  currentUid,
+  accent,
+}: {
+  channelId: string | null;
+  currentUid?: string;
+  accent: string;
+}) {
+  const { styles } = useStyles();
+  // Other members currently typing here (own row excluded).
+  const [typingUsers, setTypingUsers] = useState<TypingUser[]>([]);
+
+  useEffect(() => {
+    if (!channelId) return;
+    let unsub: (() => void) | undefined;
+    const task = InteractionManager.runAfterInteractions(() => {
+      unsub = onSnapshot(
+        query(collection(db, "typingIndicators"), where("channelId", "==", channelId)),
+        (snapshot) => {
+          setTypingUsers(
+            snapshot.docs
+              .map((entry) => {
+                const data = entry.data() as {
+                  userId?: string;
+                  name?: string;
+                  updatedAt?: { toMillis?: () => number } | null;
+                };
+                return {
+                  userId: data.userId,
+                  name: data.name,
+                  // A just-created doc has a null server timestamp locally;
+                  // treat it as fresh until the real value lands.
+                  updatedAtMs: data.updatedAt?.toMillis?.() ?? Date.now(),
+                };
+              })
+              .filter(
+                (entry): entry is TypingUser =>
+                  typeof entry.userId === "string" &&
+                  typeof entry.name === "string" &&
+                  entry.userId !== currentUid,
+              ),
+          );
+        },
+        (error) => console.error("Error loading typing indicators:", error),
+      );
+    });
+    return () => {
+      task.cancel();
+      if (unsub) unsub();
+    };
+  }, [channelId, currentUid]);
+
+  // Re-check every couple of seconds while someone is typing, so a stale doc
+  // (crashed / backgrounded client) drops off after TYPING_STALE_MS even with
+  // no new snapshot. Idle otherwise.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (typingUsers.length === 0) return;
+    const id = setInterval(() => setNowMs(Date.now()), 2000);
+    return () => clearInterval(id);
+  }, [typingUsers.length]);
+
+  const names = typingUsers
+    .filter((entry) => nowMs - entry.updatedAtMs < TYPING_STALE_MS)
+    .map((entry) => entry.name);
+  if (names.length === 0) return null;
+
+  return (
+    <View style={styles.typingIndicator}>
+      <TypingDots color={accent} />
+      <Text style={styles.typingIndicatorText} numberOfLines={1}>
+        {typingSentence(names)}
+      </Text>
+    </View>
+  );
+});
 
 /**
  * Under a bubble: "Sending…" while it sends, or its exact time once tapped.
@@ -800,7 +895,6 @@ function MessageBubbleComponent({
     !!item.text ||
     !!item.editedAt ||
     !!aiThinking ||
-    docs.length > 0 ||
     !!item.link ||
     manualTags.length > 0;
   // Reactions still holding at least one user — empty arrays are left behind
@@ -877,6 +971,32 @@ function MessageBubbleComponent({
   const replyHintStyle = useAnimatedStyle(() => ({
     opacity: Math.min(swipeX.value / SWIPE_REPLY_DISTANCE, 1),
   }));
+
+  // Deleted: its place stays, like DMs, with nothing of what it said and
+  // nothing to react to, reply to or open.
+  if (item.deleted) {
+    return (
+      <View>
+        {!!timeLabel && (
+          <Text style={styles.timeLabel} accessibilityRole="header">
+            {timeLabel}
+          </Text>
+        )}
+        <View
+          style={[
+            styles.messageRow,
+            isOwnMessage ? styles.messageRowOwn : styles.messageRowOther,
+          ]}
+        >
+          {!isOwnMessage && <View style={[styles.avatarWrap, styles.avatarSpacer]} />}
+          <View style={styles.deletedBubble}>
+            <Ionicons name="ban-outline" size={13} color={theme.textMuted} />
+            <Text style={styles.deletedText}>{deletedMessageLabel(item.deletedBy)}</Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View>
@@ -1138,15 +1258,7 @@ function MessageBubbleComponent({
             </View>
           ) : null}
 
-          {docs.map((file) => (
-            <FileAttachmentCard
-              key={file.url}
-              file={file}
-              onPress={() => Linking.openURL(file.url).catch(() => null)}
-              onLongPress={() => onLongPress(item.id)}
-              disabled={sending}
-            />
-          ))}
+
 
           {item.link && (
             <TouchableOpacity
@@ -1229,8 +1341,24 @@ function MessageBubbleComponent({
         </Pressable>
         )}
 
+        {/* File attachments sit outside the bubble, like photos. A doc-only
+            message still lets the sender long-press on the card itself. */}
+        {docs.length > 0 && (
+          <View style={[isOwnMessage ? { alignItems: "flex-end" } : { alignItems: "flex-start" }]}>
+            {docs.map((file) => (
+              <FileAttachmentCard
+                key={file.url}
+                file={file}
+                onPress={() => Linking.openURL(file.url).catch(() => null)}
+                onLongPress={() => onLongPress(item.id)}
+                disabled={sending}
+              />
+            ))}
+          </View>
+        )}
+
         {/* A picture on its own still says who sent it. */}
-        {!bubbleHasContent && showName && photoFiles.length > 0 && (
+        {!bubbleHasContent && showName && docs.length === 0 && photoFiles.length > 0 && (
           <Text style={[styles.messageAuthor, styles.photoAuthor]}>
             {item.isAnonymous
               ? anonymousName(item, { isYou: isOwnMessage && isStaffViewer })
@@ -1601,9 +1729,6 @@ export default function ServerChannelScreen() {
   const lastReadWrittenMsRef = useRef(0);
   const pendingReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Feature 6: other members currently typing here (own row excluded, stale
-  // docs filtered client-side).
-  const [typingUsers, setTypingUsers] = useState<TypingUser[]>([]);
   // true once we've written the "start" doc for the current typing burst.
   const typingActiveRef = useRef(false);
   // When we last wrote/refreshed our typing doc, so keystrokes only refresh it
@@ -1740,12 +1865,19 @@ export default function ServerChannelScreen() {
     // Real-time listener on student document so role changes (e.g. assigned moderator) update live
     const emailPrefix = user.email?.split("@")[0]?.trim();
     const docIds = Array.from(new Set([emailPrefix, user.uid].filter(Boolean) as string[]));
-    const unsubs = docIds.map((docId) =>
-      onSnapshot(
+    const unsubs = docIds.map((docId) => {
+      // The online-status heartbeat rewrites this profile every minute. The
+      // channel shows none of it, and redrawing the whole screen for it was
+      // wasted work; only real changes (role, name, photo...) get through.
+      let previous: Record<string, unknown> | undefined;
+      return onSnapshot(
         doc(db, "students", docId),
         (snap) => {
           if (snap.exists()) {
             const data = snap.data();
+            const heartbeatOnly = isHeartbeatOnlyChange(previous, data);
+            previous = data;
+            if (heartbeatOnly) return;
             const liveRole = normalizeUserRole(data.role);
             const incomingImg = data.profileImage || data.profilePic;
             setCurrentUserProfile((prev: any) => ({
@@ -1759,8 +1891,8 @@ export default function ServerChannelScreen() {
           }
         },
         (err) => console.warn("Live user profile listener warning:", err),
-      ),
-    );
+      );
+    });
 
     return () => {
       unsubs.forEach((u) => u());
@@ -2227,70 +2359,6 @@ export default function ServerChannelScreen() {
     };
   }, [resolvedChannelId, user?.uid]);
 
-  // Feature 6: subscribe to everyone's typingIndicators doc for this channel.
-  // Own row is dropped here; staleness is filtered at render time.
-  useEffect(() => {
-    if (!resolvedChannelId) return;
-    const currentUid = user?.uid;
-    let unsub: (() => void) | undefined;
-    const task = InteractionManager.runAfterInteractions(() => {
-      unsub = onSnapshot(
-        query(
-          collection(db, "typingIndicators"),
-          where("channelId", "==", resolvedChannelId),
-        ),
-        (snapshot) => {
-          setTypingUsers(
-            snapshot.docs
-              .map((entry) => {
-                const data = entry.data() as {
-                  userId?: string;
-                  name?: string;
-                  updatedAt?: { toMillis?: () => number } | null;
-                };
-                return {
-                  userId: data.userId,
-                  name: data.name,
-                  // A just-created doc has a null server timestamp locally; treat
-                  // it as fresh until the real value lands.
-                  updatedAtMs: data.updatedAt?.toMillis?.() ?? Date.now(),
-                };
-              })
-              .filter(
-                (entry): entry is TypingUser =>
-                  typeof entry.userId === "string" &&
-                  typeof entry.name === "string" &&
-                  entry.userId !== currentUid,
-              ),
-          );
-        },
-        (error) => console.error("Error loading typing indicators:", error),
-      );
-    });
-    return () => {
-      task.cancel();
-      if (unsub) unsub();
-    };
-  }, [resolvedChannelId, user?.uid]);
-
-  // Re-render every couple of seconds while someone is typing so a stale doc
-  // (crashed / backgrounded client) drops off after TYPING_STALE_MS even with
-  // no new snapshot. Idle otherwise.
-  const [typingNowMs, setTypingNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    if (typingUsers.length === 0) return;
-    const id = setInterval(() => setTypingNowMs(Date.now()), 2000);
-    return () => clearInterval(id);
-  }, [typingUsers.length]);
-
-  const typingNames = useMemo(
-    () =>
-      typingUsers
-        .filter((entry) => typingNowMs - entry.updatedAtMs < TYPING_STALE_MS)
-        .map((entry) => entry.name),
-    [typingUsers, typingNowMs],
-  );
-
   // Feature 5: record how far this member has read, debounced to one write per
   // READ_WRITE_MIN_INTERVAL_MS per visit. Skips entirely when already caught
   // up. A trailing timer covers the "kept scrolling during the cooldown" case
@@ -2560,7 +2628,7 @@ export default function ServerChannelScreen() {
   // The message the long-press menu currently targets — used by the reaction
   // picker card for the pin / edit / delete actions.
   const reactionTargetMessage = useMemo(
-    () => messages.find((entry) => entry.id === reactionTargetId),
+    () => messages.find((entry) => entry.id === reactionTargetId && !entry.deleted),
     [messages, reactionTargetId],
   );
   const reactionTargetIsOwn =
@@ -2568,14 +2636,19 @@ export default function ServerChannelScreen() {
     (reactionTargetMessage.realUserId || reactionTargetMessage.userId) === user?.uid;
   const canDeleteReactionTarget =
     !!reactionTargetMessage &&
+    !reactionTargetMessage.deleted &&
     (reactionTargetIsOwn ||
-      (isStaff(currentUserProfile?.role) &&
-        normalizeUserRole(reactionTargetMessage.role) === "student" &&
-        reactionTargetMessage.aiAssistant !== true));
+      (reactionTargetMessage.aiAssistant !== true &&
+        ((isStaff(currentUserProfile?.role) &&
+          normalizeUserRole(reactionTargetMessage.role) === "student") ||
+          // Admins can remove anyone's message but another admin's.
+          (normalizeUserRole(currentUserProfile?.role) === "admin" &&
+            normalizeUserRole(reactionTargetMessage.role) !== "admin"))));
 
   // Authors can edit/delete their own message. Admins, moderators and teachers
   // can also delete student-authored channel messages (including replies) as
-  // a moderation action. Delete stays a hard delete, matching other content.
+  // a moderation action, and admins teachers' and moderators' too. Deleting
+  // leaves a "Message deleted" / "Removed by a moderator" placeholder.
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
@@ -2625,18 +2698,18 @@ export default function ServerChannelScreen() {
     const contentLabel = message.replyTo ? "reply" : "message";
     const authorName = message.isAnonymous
       ? anonymousName(message)
-      : message.username || "this student";
+      : message.username || "this person";
     showConfirm({
       title: `Delete ${contentLabel}?`,
       description: isOwn
-        ? `This removes your ${contentLabel} for everyone in the channel. This can't be undone.`
-        : `This removes ${authorName}'s ${contentLabel} for everyone in the channel. This can't be undone.`,
+        ? `Everyone in the channel will see "Message deleted" in its place. This can't be undone.`
+        : `${authorName}'s ${contentLabel} will be removed for everyone, and "Removed by a moderator" shown in its place. This can't be undone.`,
       confirmText: "Delete",
       cancelText: "Cancel",
       destructive: true,
       onConfirm: async () => {
         try {
-          await deleteDoc(doc(db, messageCollection, message.id));
+          await deleteChannelMessage(messageCollection, message.id, isOwn ? "author" : "moderator");
           setReplyingTo((current) => (current?.id === message.id ? null : current));
         } catch (error) {
           console.error("Failed to delete message:", error);
@@ -3796,6 +3869,8 @@ export default function ServerChannelScreen() {
             data={displayedMessages}
             keyExtractor={(item) => item.id}
             renderItem={renderMessageItem}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
             // Same virtualization approach as HomeScreen's feed: message
             // bubbles can include images/attachments, so keep the render
             // window modest rather than RN's default (~21 screens) and let
@@ -3886,16 +3961,13 @@ export default function ServerChannelScreen() {
             </TouchableOpacity>
           )}
 
-          {typingNames.length > 0 && (
-            // Feature 6: small animated "X is typing…" line, between the last
-            // message and the composer, Messenger-style.
-            <View style={styles.typingIndicator}>
-              <TypingDots color={resolvedServerAccent} />
-              <Text style={styles.typingIndicatorText} numberOfLines={1}>
-                {typingSentence(typingNames)}
-              </Text>
-            </View>
-          )}
+          {/* Feature 6: small animated "X is typing…" line, between the last
+              message and the composer, Messenger-style. */}
+          <ChannelTypingIndicator
+            channelId={resolvedChannelId}
+            currentUid={user?.uid}
+            accent={resolvedServerAccent}
+          />
 
           {currentUserProfile && !staffChannelBlocked && (
             canPostInChannel ? (
@@ -5301,6 +5373,18 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 10.5,
     fontWeight: "700",
   },
+  // A deleted message's placeholder (see utils/channelMessageDelete).
+  deletedBubble: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  deletedText: { color: c.textMuted, fontSize: 13.5, fontStyle: "italic" },
   // One compact pill (not a wrapping row), so it can't stretch the bubble.
   // The time above a new stretch of messages, as in DMs.
   timeLabel: {

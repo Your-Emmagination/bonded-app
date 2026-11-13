@@ -1,8 +1,14 @@
 // components/ImageZoomViewer.tsx
+//
+// Fullscreen photos — and videos: a post with several photos and videos
+// opens here with all of them, and you swipe from one to the next (see
+// PostMediaCarousel). A video page plays with sound while it's the one
+// showing, with the phone's own controls.
 import { FULLSCREEN_IMAGE_WIDTH, fullscreenImage } from "@/utils/cloudinaryImages";
 import { Ionicons } from "@expo/vector-icons";
 import * as FileSystem from "expo-file-system/legacy";
 import * as MediaLibrary from "expo-media-library/legacy";
+import { useVideoPlayer, VideoView } from "expo-video";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
@@ -25,6 +31,42 @@ import {
 } from "react-native-gesture-handler";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+
+/** A video rather than a photo: every upload is a Cloudinary /video/upload/ address. */
+const isVideoUrl = (url: string) =>
+  /\/video\/upload\//i.test(url) || /\.(mp4|mov|m4v|webm|3gp)(?:[?#]|$)/i.test(url);
+
+/** One video page: plays with sound only while it's the page showing. */
+const VideoPage: React.FC<{ uri: string; width: number; height: number; active: boolean }> = ({
+  uri,
+  width,
+  height,
+  active,
+}) => {
+  const player = useVideoPlayer(uri, (created) => {
+    created.loop = false;
+    created.muted = false;
+  });
+  useEffect(() => {
+    try {
+      if (active) player.play();
+      else player.pause();
+    } catch {
+      // The player is already released (the viewer is closing).
+    }
+  }, [active, player]);
+  return (
+    <View style={[styles.videoPage, { width, height }]}>
+      <VideoView
+        player={player}
+        style={{ width, height: height * 0.78 }}
+        contentFit="contain"
+        nativeControls
+        fullscreenOptions={{ enable: false }}
+      />
+    </View>
+  );
+};
 
 // Save the ORIGINAL image (not the Cloudinary-resized preview) to the device
 // gallery: request add-only permission, stream it to the cache, hand the
@@ -362,7 +404,8 @@ const ImageZoomViewer: React.FC<Props> = ({
     >
       {Platform.OS === "android" && <StatusBar hidden />}
       <GestureHandlerRootView style={styles.overlay}>
-        {/* Top Header - Save + Close */}
+        {/* Top Header - Save + Close. Save is for photos. */}
+        {!isVideoUrl(images[currentIndex] || "") && (
         <TouchableOpacity
           style={styles.saveBtn}
           onPress={handleSave}
@@ -381,6 +424,7 @@ const ImageZoomViewer: React.FC<Props> = ({
             color="#FFFFFF"
           />
         </TouchableOpacity>
+        )}
         <TouchableOpacity style={styles.closeBtn} onPress={onClose} activeOpacity={0.8}>
           <Ionicons name="close" size={26} color="#FFFFFF" />
         </TouchableOpacity>
@@ -431,14 +475,18 @@ const ImageZoomViewer: React.FC<Props> = ({
               })}
               onViewableItemsChanged={onViewableItemsChanged}
               viewabilityConfig={viewabilityConfig}
-              renderItem={({ item }) => (
-                <ZoomPage
-                  uri={item}
-                  width={width}
-                  height={height}
-                  onZoomChange={setIsZoomed}
-                />
-              )}
+              renderItem={({ item, index }) =>
+                isVideoUrl(item) ? (
+                  <VideoPage uri={item} width={width} height={height} active={index === currentIndex} />
+                ) : (
+                  <ZoomPage
+                    uri={item}
+                    width={width}
+                    height={height}
+                    onZoomChange={setIsZoomed}
+                  />
+                )
+              }
             />
           </Animated.View>
         </PanGestureHandler>
@@ -497,6 +545,7 @@ const ImageZoomViewer: React.FC<Props> = ({
 };
 
 const styles = StyleSheet.create({
+  videoPage: { alignItems: "center", justifyContent: "center" },
   flex: {
     flex: 1,
   },

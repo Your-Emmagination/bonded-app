@@ -3,7 +3,12 @@ import { useThemeColors } from "@/contexts/ThemeContext";
 import type { ThemeTokens } from "@/utils/theme";
 import { useAccountSetup } from "@/contexts/AccountSetupContext";
 import { profileEmail } from "@/utils/profileSetup";
+import { hasPosition, positionLabel } from "@/utils/teacherPositions";
 import { endPresenceSession } from "@/utils/presence";
+import { isHeartbeatOnlyChange } from "@/utils/profileChanges";
+import { pickProfilePhoto, saveProfilePhoto } from "@/utils/profilePhoto";
+import { showAppToast } from "@/utils/toastEvents";
+import PhotoSourceSheet from "../components/PhotoSourceSheet";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import {
@@ -77,6 +82,8 @@ type Student = {
   lastname?: string;
   course?: string;
   yearlvl?: string;
+  /** Teachers only: Faculty, Program Chair or Dean. */
+  position?: string;
   studentID?: string;
   email?: string;
   profileImage?: string;
@@ -250,6 +257,58 @@ const ProfileScreen = () => {
     () => profileImage ?? student?.profileImage,
     [profileImage, student?.profileImage],
   );
+
+  // The camera button on your photo: take a new one or choose one, cropped
+  // square, then it uploads and saves straight away (utils/profilePhoto.ts).
+  const [photoSheetOpen, setPhotoSheetOpen] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const changePhoto = useCallback(
+    (useCamera: boolean) => {
+      setPhotoSheetOpen(false);
+      const account = auth.currentUser;
+      const docId = student?.studentID || accountProfileId || account?.email?.split("@")[0];
+      if (!account || !docId) return;
+      if (isOffline) {
+        showInfo("Offline", "Connect to the internet to change your profile photo.");
+        return;
+      }
+      // Let the sheet close before the camera or gallery opens over it.
+      setTimeout(async () => {
+        try {
+          const picked = await pickProfilePhoto(useCamera);
+          if (picked.status === "denied") {
+            showInfo(
+              "Permission required",
+              `Allow ${picked.source === "camera" ? "camera" : "photo"} access to change your profile photo.`,
+            );
+            return;
+          }
+          if (picked.status !== "picked") return;
+          const previous = profileImage;
+          setProfileImage(picked.uri);
+          setPhotoBusy(true);
+          try {
+            const url = await saveProfilePhoto({
+              user: account,
+              docId,
+              localUri: picked.uri,
+              cachedProfile: student as Record<string, unknown> | null,
+            });
+            setProfileImage(url);
+            showAppToast({ message: "Profile photo updated" });
+          } catch (error: any) {
+            setProfileImage(previous);
+            showInfo("Couldn't update your photo", error?.message || "Please try again.");
+          } finally {
+            setPhotoBusy(false);
+          }
+        } catch (error: any) {
+          showInfo("Couldn't open the camera or gallery", error?.message || "Please try again.");
+        }
+      }, 250);
+    },
+    [accountProfileId, isOffline, profileImage, student],
+  );
   const fullName = useMemo(
     () =>
       `${student?.firstname ?? ""} ${student?.lastname ?? ""}`.trim() ||
@@ -416,10 +475,17 @@ const ProfileScreen = () => {
           }
         });
 
+        // The online-status heartbeat rewrites this profile every minute.
+        // Only real changes redraw the screen — isOnline still does, so the
+        // Online dot stays right.
+        let previousProfile: Record<string, unknown> | undefined;
         unsubscribeProfile = onSnapshot(
           doc(db, "students", studentID),
           (docSnapshot) => {
             if (docSnapshot.exists()) {
+              const heartbeatOnly = isHeartbeatOnlyChange(previousProfile, docSnapshot.data());
+              previousProfile = docSnapshot.data();
+              if (heartbeatOnly) return;
               const data = docSnapshot.data() as Student;
               setStudent(data);
               saveCachedMyProfile(currentUser.uid, data);
@@ -877,8 +943,10 @@ const ProfileScreen = () => {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
           initialNumToRender={4}
-          maxToRenderPerBatch={4}
-          windowSize={7}
+          maxToRenderPerBatch={5}
+          windowSize={5}
+          updateCellsBatchingPeriod={50}
+          removeClippedSubviews={Platform.OS === "android"}
           ListHeaderComponent={
             <>
               {/* Profile Header Card */}
@@ -896,9 +964,22 @@ const ProfileScreen = () => {
                       <Ionicons name="person" size={48} color={theme.accent} />
                     </View>
                   )}
-                  <View style={styles.editBadge}>
+                  {photoBusy && (
+                    <View style={styles.photoBusy} pointerEvents="none">
+                      <ActivityIndicator color="#fff" />
+                    </View>
+                  )}
+                  <TouchableOpacity
+                    style={styles.editBadge}
+                    onPress={() => setPhotoSheetOpen(true)}
+                    disabled={photoBusy}
+                    hitSlop={10}
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Change profile photo"
+                  >
                     <Ionicons name="camera" size={14} color={theme.onAccent} />
-                  </View>
+                  </TouchableOpacity>
                   <View
                     style={[
                       styles.statusBadge,
@@ -967,13 +1048,24 @@ const ProfileScreen = () => {
           isLocked={true}
         />
         <View style={styles.rowDivider} />
-        {/* Locked: Year level auto-increments or managed by admin */}
-        <CardItemRow
-          icon="trending-up-outline"
-          label="Year Level"
-          value={student?.yearlvl ?? "—"}
-          isLocked={true}
-        />
+        {/* Locked: a student's year level auto-increments or is managed by
+            an admin; a teacher's position is set by an admin, and an admin's
+            is always System Administrator. */}
+        {hasPosition(student?.role) ? (
+          <CardItemRow
+            icon="briefcase-outline"
+            label="Position"
+            value={positionLabel(student?.role, student?.position) || "—"}
+            isLocked={true}
+          />
+        ) : (
+          <CardItemRow
+            icon="trending-up-outline"
+            label="Year Level"
+            value={student?.yearlvl ?? "—"}
+            isLocked={true}
+          />
+        )}
         <View style={styles.rowDivider} />
         <CardItemRow
           icon="card-outline"
@@ -1188,6 +1280,12 @@ const ProfileScreen = () => {
       )}
 
       {/* Image Viewer for My Posts */}
+      <PhotoSourceSheet
+        visible={photoSheetOpen}
+        onSelect={changePhoto}
+        onClose={() => setPhotoSheetOpen(false)}
+      />
+
       <ImageZoomViewer
         images={postImages}
         startIndex={postImageIndex}
@@ -1441,6 +1539,17 @@ const makeStyles = (c: ThemeTokens) =>
     backgroundColor: c.border,
     justifyContent: "center",
     alignItems: "center",
+  },
+  photoBusy: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    borderRadius: 999,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    alignItems: "center",
+    justifyContent: "center",
   },
   editBadge: {
     position: "absolute",

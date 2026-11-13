@@ -32,21 +32,36 @@ export type DraftAttachment = {
  * without uploading the same attachment again. */
 export async function prepareDraftAttachment(
   attachment: DraftAttachment,
-  upload: (options: { uri: string; folder: "post_images" | "post_files"; resourceType: "image" | "raw" }) => Promise<string>,
+  upload: (options: {
+    uri: string;
+    folder: "post_images" | "post_files" | "post_videos";
+    resourceType: "image" | "raw" | "video";
+    mimeType?: string;
+  }) => Promise<string>,
   /** Optional: reports the uploaded image's pixel size so the bubble can be
    *  shaped to it rather than cropping it into a fixed box. */
   measure?: (url: string) => { width: number | null; height: number | null } | null,
 ) {
   if (attachment.uploaded) return attachment.uploaded;
   const image = attachment.mimeType.startsWith("image/");
-  const url = await upload({ uri: attachment.uri, folder: image ? "post_images" : "post_files", resourceType: image ? "image" : "raw" });
+  // A video sent as a file used to go up as a plain file, which Cloudinary
+  // caps at 10 MB; as a video it can be up to 100 MB.
+  const video = attachment.mimeType.startsWith("video/");
+  const url = await upload({
+    uri: attachment.uri,
+    folder: image ? "post_images" : video ? "post_videos" : "post_files",
+    resourceType: image ? "image" : video ? "video" : "raw",
+    mimeType: attachment.mimeType,
+  });
   if (!url) throw new Error("The attachment could not be uploaded.");
   const size = image && measure ? measure(url) : null;
   return {
     url,
     name: attachment.name,
     mimeType: attachment.mimeType,
-    size: attachment.size,
+    // Firestore rejects undefined values inside an attachment map. Camera and
+    // gallery photos often have no reported byte size, so omit this field.
+    ...(typeof attachment.size === "number" ? { size: attachment.size } : {}),
     width: size?.width ?? null,
     height: size?.height ?? null,
   };

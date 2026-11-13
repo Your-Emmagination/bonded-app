@@ -28,10 +28,13 @@ import {
 import { subscribeHomeFeedScrollToTop } from "@/utils/homeFeedEvents";
 import { getPresenceState, PRESENCE_TIMEOUT_MS, type PresenceData } from "@/utils/messengerState";
 import { useAppActive } from "@/utils/presence";
+import { isHeartbeatOnlyChange } from "@/utils/profileChanges";
 import { matchesEventAudience } from "@/utils/eventAudience";
 import { useCurrentUserRole } from "@/utils/useCurrentUserRole";
 import { useNetworkStatus } from "@/utils/networkUtils";
 import { showAppToast } from "@/utils/toastEvents";
+import { pinContent, urgentPins, usePinnedContent, useUnseenPinCount } from "@/utils/pinnedPosts";
+import { addPollOption, submitPollVote } from "@/utils/pollVoting";
 import {
   createNotification,
   createServerRemovalNotification,
@@ -97,6 +100,7 @@ import {
   FlatList,
   Linking,
   Modal,
+  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -110,14 +114,24 @@ import {
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Reanimated, {
   Easing,
+  cancelAnimation,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
+  withSpring,
   withTiming,
 } from "react-native-reanimated";
+import {
+  DRAWER_SPRING,
+  clamp01,
+  openSwipeDecision,
+  openingSettlesOpen,
+  settleSpring,
+} from "@/utils/communityDrawerMotion";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { auth, db } from "../../../Firebase_configure";
-import AnnouncementCarousel, { AnnouncementItem } from "../components/AnnouncementCarousel";
+import PinDurationSheet from "../components/PinDurationSheet";
+import PinnedBar from "../components/PinnedBar";
 import BeaOrb from "../components/BeaOrb";
 import CommentModal from "../components/CommentModal";
 import ConfirmDialog, { type ConfirmDialogVariant } from "../components/ConfirmDialog";
@@ -126,6 +140,8 @@ import HomeSearchProvider, {
   HomeSearchPanel,
   type SearchResult,
 } from "../components/HomeSearchOverlay";
+import { hideTabBar, showTabBar } from "@/utils/tabBarVisibility";
+import HorizontalSwipeRegion, { homeHorizontalTouch } from "../components/HorizontalSwipeRegion";
 import ImageZoomViewer from "../components/ImageZoomViewer";
 import PollCard from "../components/PollCard";
 import PostCard from "../components/PostCard";
@@ -134,7 +150,7 @@ import ServerDrawer, {
   ServerMemberPreview,
 } from "../components/ServerDrawer";
 import { FeedSkeleton } from "../components/Skeleton";
-import LiveCard from "../components/LiveCard";
+import HomeLiveSection from "../components/HomeLiveSection";
 import { useThemeColors } from "@/contexts/ThemeContext";
 import { type LiveStream } from "@/utils/liveStreams";
 import { useActiveLiveStreams } from "@/utils/useActiveLiveStreams";
@@ -148,6 +164,8 @@ import {
 import type { ThemeTokens } from "@/utils/theme";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
+// Within this far of the top, Home's feed always shows the tab bar.
+const TAB_BAR_KEEP_OFFSET = 80;
 // Width of one card in the horizontal "Trending this week" scroller.
 const TRENDING_CARD_WIDTH = Math.min(320, Math.round(SCREEN_WIDTH * 0.82));
 const SELECTED_SERVER_KEY = "bonded.selectedCommunityServer";
@@ -494,28 +512,13 @@ export const isPostPinActive = (
   return expiresMs > 0 ? nowMs < expiresMs : true;
 };
 
+// Newest first. Pinned posts and polls used to be stacked here above
+// everything else; they now live in Important Announcements (the Pinned bar
+// and page) and keep their place by date in the feed, tagged "Pinned".
 const sortFeedItems = (items: FeedItem[]) => {
-  const nowMs = Date.now();
   return [...items].sort(
-    (first, second) => {
-      // Pinned posts and pinned polls share the top of the feed.
-      const firstPinned =
-        (first.type === "post" || first.type === "poll") && isPostPinActive(first, nowMs)
-          ? getTimestampValue(first.pinnedAt)
-          : 0;
-      const secondPinned =
-        (second.type === "post" || second.type === "poll") && isPostPinActive(second, nowMs)
-          ? getTimestampValue(second.pinnedAt)
-          : 0;
-
-      if (firstPinned || secondPinned) {
-        if (!firstPinned) return 1;
-        if (!secondPinned) return -1;
-        if (secondPinned !== firstPinned) return secondPinned - firstPinned;
-      }
-
-      return getTimestampValue(second.createdAt) - getTimestampValue(first.createdAt);
-    },
+    (first, second) =>
+      getTimestampValue(second.createdAt) - getTimestampValue(first.createdAt),
   );
 };
 
@@ -680,8 +683,8 @@ function toPresenceRecord(id: string, data: Record<string, any>): PresenceRecord
 /**
  * Names and photos for search, mentions and the server drawer, read once.
  * Every open app writes its "online" heartbeat to these same profiles every
- * 30 seconds, so listening to them live re-downloaded a profile — and
- * redrew all of Home — for every person online, twice a minute. Who's
+ * minute, so listening to them live re-downloaded a profile — and redrew
+ * all of Home — for every person online, every minute. Who's
  * online comes from Campus Presence's own, much smaller queries instead.
  */
 async function fetchSearchableStudents(): Promise<SearchableStudent[]> {
@@ -995,7 +998,7 @@ const HomeScreen = () => {
     string | null
   >(null);
   const [onlineUsersModalVisible, setOnlineUsersModalVisible] = useState(false);
-  // Campus Presence. Closed: who was seen in the last 90 seconds, checked
+  // Campus Presence. Closed: who was seen in the last 2½ minutes, checked
   // once a minute for the count. Open: everyone seen in the last day, live.
   const [onlineNowRecords, setOnlineNowRecords] = useState<PresenceRecord[]>([]);
   const [panelPresence, setPanelPresence] = useState<PresenceRecord[] | null>(null);
@@ -1149,6 +1152,7 @@ const HomeScreen = () => {
 
     communityThreadMessages.forEach((message) => {
       if (!message.serverId || !message.channelId) return;
+      if ((message as { deleted?: boolean }).deleted) return;
       if (message.userId && user?.uid && message.userId === user.uid) return;
 
       const createdAtMs = getTimestampValue(message.createdAt);
@@ -1241,11 +1245,19 @@ const selectedChannel = useMemo(() => {
     return channels[0] || null;
   }, [selectedChannelId, selectedServer, selectedServerChannels]);
 
-  // ── Edge-swipe navigation: HomeScreen → ServerDrawer ────────────────────
-  // Swiping in from the left edge opens the same ServerDrawer panel as the
-  // header menu button — reuses the identical "pick a default server if
-  // none selected yet" logic so behavior is consistent everywhere.
-  const openServerDrawer = useCallback(() => {
+  // ── Home ↔ Community ────────────────────────────────────────────────────
+  // One value moves the Community drawer: drawerProgress, 0 = Home, 1 = open
+  // (utils/communityDrawerMotion.ts). A swipe to the right anywhere on Home
+  // drags it open under the finger; the menu button springs it open; the
+  // drawer's own swipe, its Home button, Android back and the backdrop close
+  // it. It stays mounted until a close has finished animating.
+  const drawerProgress = useSharedValue(0);
+  // From the moment the drawer mounts until it has finished closing. Home's
+  // swipe is off for all of it: opening, open, and closing.
+  const drawerShown = useSharedValue(false);
+
+  /** Mounts the drawer, on the server it should open to. */
+  const showServerDrawer = useCallback(() => {
     if (!selectedServerId) {
       const nextServer =
         communityServers.find((server) => server.membershipState === "joined") ||
@@ -1255,46 +1267,131 @@ const selectedChannel = useMemo(() => {
         setSelectedServerId(nextServer.id);
       }
     }
+    drawerShown.set(true);
     setServerDrawerVisible(true);
-  }, [communityServers, selectedServerId]);
+  }, [communityServers, drawerShown, selectedServerId]);
+
+  /** Unmounts it — only ever once it is fully closed. */
+  const hideServerDrawer = useCallback(() => {
+    drawerShown.set(false);
+    setServerDrawerVisible(false);
+  }, [drawerShown]);
+
+  /** The menu button (and search's): springs it open. */
+  const openServerDrawer = useCallback(() => {
+    showServerDrawer();
+    drawerProgress.set(withSpring(1, DRAWER_SPRING));
+  }, [drawerProgress, showServerDrawer]);
+
+  /** Backdrop, Android back, the drawer's Home button: springs it closed. */
+  const closeServerDrawer = useCallback(() => {
+    drawerProgress.set(withSpring(0, DRAWER_SPRING, (finished) => {
+      if (finished) runOnJS(hideServerDrawer)();
+    }));
+  }, [drawerProgress, hideServerDrawer]);
+
+  /** Leaving Home for a channel: gone at once, as before. */
+  const dismissServerDrawerNow = useCallback(() => {
+    cancelAnimation(drawerProgress);
+    drawerProgress.set(0);
+    hideServerDrawer();
+  }, [drawerProgress, hideServerDrawer]);
 
   // communityServers is live Firestore data and gets a new array reference
-  // on nearly every snapshot update, which would otherwise force
-  // openServerDrawer — and therefore panGesture below — to be rebuilt
-  // constantly. Rebuilding the Pan gesture while a touch is in progress
-  // makes RNGH detach and reattach the native recognizer mid-swipe, which
-  // is a real source of dropped frames / stutter. Routing through a ref
-  // lets the gesture object stay 100% stable for the component's lifetime
-  // while still always calling the latest openServerDrawer.
-  const openServerDrawerRef = useRef(openServerDrawer);
+  // on nearly every snapshot update, which would otherwise rebuild
+  // showServerDrawer — and with it the gesture below. Rebuilding a gesture
+  // while a touch is in progress makes RNGH detach and reattach the native
+  // recognizer mid-swipe. Routing through a ref keeps the gesture stable for
+  // the screen's whole lifetime while always calling the latest version.
+  const showServerDrawerRef = useRef(showServerDrawer);
   useEffect(() => {
-    openServerDrawerRef.current = openServerDrawer;
-  }, [openServerDrawer]);
-  const triggerOpenServerDrawer = useCallback(() => {
-    openServerDrawerRef.current();
+    showServerDrawerRef.current = showServerDrawer;
+  }, [showServerDrawer]);
+  const triggerShowServerDrawer = useCallback(() => {
+    showServerDrawerRef.current();
   }, []);
 
-  // Constructed exactly once — never recreated on re-render, so the native
-  // gesture recognizer is registered a single time for the screen's whole
-  // lifetime and can't be interrupted mid-touch.
-  const panGesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .hitSlop({ left: 0, width: 32 }) // Activation zone limited to the left screen edge (~32px)
-        .activeOffsetX(20) // Requires an intentful rightward drag before the gesture activates
-        .failOffsetY([-15, 15]) // Yields to vertical scrolling immediately
-        .maxPointers(1)
-        .onEnd((event) => {
-          const isDraggedRight = event.translationX > 60;
-          const isFlickedRight = event.velocityX > 350;
-
-          if (isDraggedRight || isFlickedRight) {
-            runOnJS(triggerOpenServerDrawer)();
-          }
-        }),
-    [],
-    // eslint-disable-line react-hooks/exhaustive-deps -- intentionally empty: gesture must stay stable, see comment above
-  );
+  // Home → Community. Manual activation: it decides from the finger itself,
+  // so a tap, a leftward drag, vertical scrolling, or a touch that started in
+  // horizontal content (HorizontalSwipeRegion) never opens anything.
+  const openingActive = useSharedValue(false);
+  const touchStartX = useSharedValue(0);
+  const touchStartY = useSharedValue(0);
+  const openSwipeGesture = useMemo(() => {
+    const travelWidth = SCREEN_WIDTH;
+    const settle = (velocityX: number) => {
+      "worklet";
+      if (openingSettlesOpen(drawerProgress.get(), velocityX, travelWidth)) {
+        drawerProgress.set(withSpring(1, settleSpring(velocityX, travelWidth)));
+      } else {
+        drawerProgress.set(withSpring(0, settleSpring(velocityX, travelWidth), (finished) => {
+          if (finished) runOnJS(hideServerDrawer)();
+        }));
+      }
+    };
+    return Gesture.Pan()
+      .manualActivation(true)
+      .maxPointers(1)
+      .onTouchesDown((event, manager) => {
+        const touch = event.changedTouches[0];
+        // Community is already opening, open or closing.
+        if (!touch || drawerShown.get() || drawerProgress.get() > 0) {
+          manager.fail();
+          return;
+        }
+        touchStartX.set(touch.absoluteX);
+        touchStartY.set(touch.absoluteY);
+      })
+      .onTouchesMove((event, manager) => {
+        if (openingActive.get()) return;
+        // This touch belongs to a carousel, Trending or the filters.
+        if (homeHorizontalTouch.get()) {
+          manager.fail();
+          return;
+        }
+        const touch = event.allTouches[0];
+        if (!touch) return;
+        const decision = openSwipeDecision(
+          touch.absoluteX - touchStartX.get(),
+          touch.absoluteY - touchStartY.get(),
+        );
+        if (decision === "fail") manager.fail();
+        else if (decision === "activate") manager.activate();
+      })
+      .onTouchesUp((_event, manager) => {
+        // Lifted before it became a swipe: a tap, nothing to open.
+        if (!openingActive.get()) manager.fail();
+      })
+      .onStart(() => {
+        openingActive.set(true);
+        drawerShown.set(true);
+        cancelAnimation(drawerProgress);
+        runOnJS(triggerShowServerDrawer)();
+      })
+      .onUpdate((event) => {
+        if (!openingActive.get()) return;
+        drawerProgress.set(clamp01(event.translationX / travelWidth));
+      })
+      .onEnd((event, success) => {
+        // Only a swipe that really started settles anything.
+        if (!openingActive.get()) return;
+        openingActive.set(false);
+        settle(success ? event.velocityX : 0);
+      })
+      .onFinalize(() => {
+        if (!openingActive.get()) return;
+        openingActive.set(false);
+        settle(0);
+      });
+  }, [
+    drawerProgress,
+    drawerShown,
+    hideServerDrawer,
+    openingActive,
+    touchStartX,
+    touchStartY,
+    triggerShowServerDrawer,
+  ]);
 
   const visibleFeedItems = useMemo(
     () =>
@@ -1365,27 +1462,18 @@ const selectedChannel = useMemo(() => {
     [stagedPolls, stagedPosts],
   );
 
-  const activeAnnouncements = useMemo(() => {
-    const nowMs = Date.now();
-    return feedItems
-      .filter((item): item is PostFeedItem => {
-        if (item.type !== "post") return false;
-        if (!isGlobalFeedItem(item)) return false;
-        const status = String(item.moderationStatus ?? "approved").toLowerCase();
-        if (status !== "approved") return false;
-        const isAnnouncement = normalizePostFlair(item.flair) === "announcement";
-        const isPinned = isPostPinActive(item, nowMs);
-        return isAnnouncement && isPinned;
-      })
-      .sort((a, b) => {
-        const aExpires = getTimestampValue(a.pinExpiresAt || a.targetDate);
-        const bExpires = getTimestampValue(b.pinExpiresAt || b.targetDate);
-        if (aExpires && bExpires) return aExpires - bExpires;
-        if (aExpires) return -1;
-        if (bExpires) return 1;
-        return getTimestampValue(b.createdAt) - getTimestampValue(a.createdAt);
-      });
-  }, [feedItems]);
+  // ── Pinned: Important Announcements (utils/pinnedPosts.ts). Its own small
+  // query, so every pin is there however far the feed has loaded.
+  const { items: pinnedItems } = usePinnedContent(!!user?.uid);
+  const pinnedIds = useMemo(
+    () => pinnedItems.map((item) => `${item.kind}:${item.id}`),
+    [pinnedItems],
+  );
+  const unseenPinCount = useUnseenPinCount(user?.uid, pinnedIds);
+  const urgentPinned = useMemo(() => urgentPins(pinnedItems), [pinnedItems]);
+  const openPinned = useCallback(() => {
+    router.push("/(main)/PinnedPostsScreen" as any);
+  }, [router]);
 
   const selectedServerJoinRequests = useMemo(
     () =>
@@ -1728,16 +1816,13 @@ const selectedChannel = useMemo(() => {
     });
   }, [selectedServer, selectedServerChannels]);
 
-  const exitServerView = useCallback(() => {
-    setServerDrawerVisible(false);
-  }, []);
-
   useFocusEffect(
     useCallback(() => {
+      // Back from a channel: Community opens again where it was.
       if (consumeServerDrawerReopenRequest()) {
-        setServerDrawerVisible(true);
+        openServerDrawer();
       }
-    }, []),
+    }, [openServerDrawer]),
   );
 
   useEffect(() => {
@@ -1863,12 +1948,19 @@ const selectedChannel = useMemo(() => {
     // Real-time listener on student document so role changes and profile photo update live
     const emailPrefix = user.email?.split("@")[0]?.trim();
     const docIds = Array.from(new Set([emailPrefix, user.uid].filter(Boolean) as string[]));
-    const unsubs = docIds.map((docId) =>
-      onSnapshot(
+    const unsubs = docIds.map((docId) => {
+      // The online-status heartbeat rewrites this profile every minute.
+      // Home shows none of it, and redrawing the whole screen for it twice a
+      // beat was a stutter while scrolling; only real changes get through.
+      let previous: Record<string, unknown> | undefined;
+      return onSnapshot(
         doc(db, "students", docId),
         (snap) => {
           if (snap.exists()) {
             const data = snap.data();
+            const heartbeatOnly = isHeartbeatOnlyChange(previous, data);
+            previous = data;
+            if (heartbeatOnly) return;
             const incomingImg = data.profileImage || data.profilePic;
             setCurrentUserProfile((prev: any) => ({
               ...(prev || {}),
@@ -1881,8 +1973,8 @@ const selectedChannel = useMemo(() => {
           }
         },
         (err) => console.warn("Live user profile listener warning in HomeScreen:", err),
-      ),
-    );
+      );
+    });
 
     const unsubscribeCache = subscribeToUserDataUpdates((updatedId, updatedData) => {
       if (updatedId === user.uid) {
@@ -1916,7 +2008,7 @@ const selectedChannel = useMemo(() => {
   }, [isOffline, user]);
 
   // The header's online count, while the panel is closed: one small query a
-  // minute for whoever checked in during the last 90 seconds, and only while
+  // minute for whoever checked in during the last 2½ minutes, and only while
   // Home is on screen with the app open.
   const presenceFocused = useIsFocused();
   const presenceAppActive = useAppActive();
@@ -3037,85 +3129,38 @@ const selectedChannel = useMemo(() => {
         return;
       }
 
-      const pollRef = doc(db, "polls", pollId);
       const poll = feedItemsRef.current.find(
         (item): item is PollFeedItem =>
           item.id === pollId && item.type === "poll",
       );
       if (!poll) return;
 
-      const userVotes = poll.options
-        .map((opt, idx) => (opt.voters?.includes(user.uid) ? idx : -1))
-        .filter((idx) => idx !== -1);
-
-      const expired = isPollExpired(poll.expiresAt);
-      if (expired) return;
-      if (!poll.allowMultiple && userVotes.length > 0) return;
-      if (userVotes.includes(optionIndex)) return;
-      if (poll.allowMultiple && userVotes.length >= poll.maxSelections) return;
-
+      // Shared with the Pinned page (utils/pollVoting.ts): a closed poll, a
+      // second answer in a one-answer poll and the like are simply ignored.
       try {
-        const updatedOptions: PollOption[] = poll.options.map((opt, idx) => {
-          const voters = Array.isArray(opt.voters) ? [...opt.voters] : [];
-          if (idx === optionIndex && !voters.includes(user.uid)) {
-            voters.push(user.uid);
-          }
-          return { ...opt, voters, votes: voters.length };
-        });
-
-        const totalVotes = updatedOptions.reduce(
-          (s, o) => s + (o.votes || 0),
-          0,
-        );
-        await updateDoc(pollRef, { options: updatedOptions, totalVotes });
+        await submitPollVote(pollId, poll, user.uid, optionIndex);
       } catch (error) {
         console.error("Error voting on poll:", error);
         showInfo("Error", "Failed to vote. Please try again.");
       }
     },
-    [isOffline, isPollExpired, user],
+    [isOffline, user],
   );
 
   const addOptionToPoll = useCallback(
     async (pollId: string, text: string) => {
       try {
-        if (!text.trim()) {
-          showInfo("Error", "Option cannot be empty.");
-          return;
-        }
-
-        const pollRef = doc(db, "polls", pollId);
-        const pollSnap = await getDoc(pollRef);
-
-        if (!pollSnap.exists()) {
-          showInfo("Error", "Poll not found.");
-          return;
-        }
-
-        const poll = pollSnap.data() as Poll;
-        if (isPollExpired(poll.expiresAt)) {
-          showInfo("Error", "This poll has already expired.");
-          return;
-        }
-
-        const newOption: PollOption = {
-          text: text.trim(),
-          votes: 0,
-          voters: [],
-        };
-        const updatedOptions = [...poll.options, newOption];
-        const totalVotes = updatedOptions.reduce(
-          (sum, opt) => sum + (opt.votes || 0),
-          0,
-        );
-        await updateDoc(pollRef, { options: updatedOptions, totalVotes });
-        showInfo("Success", "Option added! You can vote for it manually.", undefined, "success");
+        const result = await addPollOption(pollId, text);
+        if (result === "empty") showInfo("Error", "Option cannot be empty.");
+        else if (result === "missing") showInfo("Error", "Poll not found.");
+        else if (result === "closed") showInfo("Error", "This poll has already expired.");
+        else showInfo("Success", "Option added! You can vote for it manually.", undefined, "success");
       } catch (error) {
         console.error("Error adding option:", error);
         showInfo("Error", "Failed to add option. Please try again.");
       }
     },
-    [isPollExpired],
+    [],
   );
 
   // ── FAB
@@ -3211,11 +3256,22 @@ const selectedChannel = useMemo(() => {
       ]).start();
     }
 
+    // The bottom tab bar: slides down while the feed is scrolled down (once
+    // past the top few posts), back up the moment it's scrolled up or back
+    // at the top. Only Home does this.
+    if (currentOffsetY <= TAB_BAR_KEEP_OFFSET || delta < -5) showTabBar();
+    else if (delta > 5) hideTabBar();
+
     // Drives the pill: inside FEED_TOP_MERGE_OFFSET the reader is looking at
     // the newest posts, so arrivals can merge without disturbing anything.
     isNearFeedTopRef.current = currentOffsetY <= FEED_TOP_MERGE_OFFSET;
     scrollY.current = currentOffsetY;
   };
+
+  // Leaving Home (another tab, a pushed screen): the bar is always back.
+  useFocusEffect(
+    useCallback(() => () => showTabBar(), []),
+  );
 
   const openSearchExperience = useCallback(() => {
     setSearchExpanded(true);
@@ -3225,10 +3281,6 @@ const selectedChannel = useMemo(() => {
   // whenever search closes.
   const closeSearchExperience = useCallback(() => {
     setSearchExpanded(false);
-  }, []);
-
-  const closeServerDrawer = useCallback(() => {
-    setServerDrawerVisible(false);
   }, []);
 
   const handleSelectServer = useCallback((serverId: string) => {
@@ -3257,7 +3309,7 @@ const handleSelectChannel = useCallback(
         return;
       }
 
-      setServerDrawerVisible(false);
+      dismissServerDrawerNow();
 
       router.push({
         pathname: "/ServerChannelScreen",
@@ -3270,7 +3322,7 @@ const handleSelectChannel = useCallback(
         },
       });
     },
-    [communityServers, router, selectedServerId]
+    [communityServers, dismissServerDrawerNow, router, selectedServerId]
   );
 
   // ── Create server (admin only — guard also in ServerDrawer via canCreateServer)
@@ -3641,10 +3693,55 @@ const handleSelectChannel = useCallback(
     ],
   );
 
+  // Staff pinning from a card's ⋯ menu pick when the pin ends first (or no
+  // end); applyPin saves it once they have.
+  const [pinTarget, setPinTarget] = useState<{ kind: "post" | "poll"; id: string } | null>(null);
+  const closePinSheet = useCallback(() => setPinTarget(null), []);
+  const applyPin = useCallback(
+    async (endsAtDate: Date | null) => {
+      const target = pinTarget;
+      setPinTarget(null);
+      if (!target || !user?.uid) return;
+      const endsAt = endsAtDate ? Timestamp.fromDate(endsAtDate) : null;
+      const previous = feedItemsRef.current.find(
+        (item) => item.type === target.kind && item.id === target.id,
+      );
+      const matches = (item: FeedItem) => item.type === target.kind && item.id === target.id;
+      setFeedItems((current) =>
+        current.map((item) =>
+          matches(item)
+            ? ({
+                ...item,
+                pinnedAt: { toMillis: () => Date.now() },
+                pinnedBy: user.uid,
+                pinExpiresAt: endsAt,
+                ...(target.kind === "post" ? { targetDate: endsAt, targetDateLabel: null } : {}),
+              } as FeedItem)
+            : item,
+        ),
+      );
+      try {
+        await pinContent(target.kind, target.id, user.uid, endsAtDate);
+        showAppToast({ message: "Pinned to Important Announcements" });
+      } catch (error) {
+        console.error("Error pinning:", error);
+        if (previous) {
+          setFeedItems((current) => current.map((item) => (matches(item) ? previous : item)));
+        }
+        showInfo("Error", "Failed to pin it. Please try again.");
+      }
+    },
+    [pinTarget, user?.uid],
+  );
+
   const handleTogglePinnedPost = useCallback(
     async (postId: string, shouldPin: boolean) => {
       if (!user?.uid) return;
       if (!["admin", "teacher", "moderator"].includes(currentUserRole || "")) {
+        return;
+      }
+      if (shouldPin) {
+        setPinTarget({ kind: "post", id: postId });
         return;
       }
 
@@ -3715,6 +3812,10 @@ const handleSelectChannel = useCallback(
       if (!["admin", "teacher", "moderator"].includes(currentUserRole || "")) {
         return;
       }
+      if (shouldPin) {
+        setPinTarget({ kind: "poll", id: pollId });
+        return;
+      }
 
       const existingPoll = feedItemsRef.current.find(
         (item): item is PollFeedItem => item.type === "poll" && item.id === pollId,
@@ -3743,7 +3844,7 @@ const handleSelectChannel = useCallback(
           pinnedBy: shouldPin ? user.uid : null,
           ...(!shouldPin ? { pinExpiresAt: null } : {}),
         });
-        showAppToast({ message: shouldPin ? "Poll pinned to the top of the feed" : "Poll unpinned" });
+        showAppToast({ message: "Unpinned. It stays in the feed." });
       } catch (error) {
         console.error("Error updating pinned poll:", error);
         setFeedItems((currentItems) =>
@@ -3912,12 +4013,12 @@ const handleSelectChannel = useCallback(
           }
 
           if (selectedServerId === serverId) {
-            exitServerView();
+            closeServerDrawer();
           }
         },
       });
     },
-    [currentUserRole, exitServerView, isOffline, selectedServerId, user?.uid],
+    [closeServerDrawer, currentUserRole, isOffline, selectedServerId, user?.uid],
   );
 
   // ── Adding and removing members ──────────────────────────────────────────
@@ -4437,7 +4538,7 @@ const handleSelectChannel = useCallback(
   );
 
   // Online means what Messenger means by it: a phone that checked in within
-  // the last 90 seconds, from someone who hasn't turned Active Status off.
+  // the last 2½ minutes, from someone who hasn't turned Active Status off.
   // The list is only people seen in the last day, not the whole campus.
   // Left out: you, locked accounts, and anyone with Active Status off —
   // listing them under "active in the last 24 hours" would say what they
@@ -4720,32 +4821,12 @@ const handleSelectChannel = useCallback(
     ],
   );
 
-  const handleAnnouncementCardPress = useCallback(
-    (announcement: AnnouncementItem) => {
-      const targetIndex = visibleFeedItems.findIndex(
-        (item) => item.type === "post" && item.id === announcement.id,
-      );
-      if (targetIndex >= 0 && feedListRef.current) {
-        try {
-          feedListRef.current.scrollToIndex({
-            index: targetIndex,
-            animated: true,
-            viewPosition: 0.1,
-          });
-        } catch {
-          feedListRef.current.scrollToOffset({ offset: 350, animated: true });
-        }
-      }
-    },
-    [visibleFeedItems],
-  );
-
   // Whoever is broadcasting right now. Live sits above everything else in
   // the header because it is the only thing on this screen that stops being
   // true while you look at it.
   // Only lives whose host is still there; one left behind by a crashed app
-  // drops out on its own.
   const activeStreams = useActiveLiveStreams();
+  const [liveSheetVisible, setLiveSheetVisible] = useState(false);
 
   const openLiveStream = useCallback(
     (stream: LiveStream) => {
@@ -4812,12 +4893,12 @@ const handleSelectChannel = useCallback(
         onPress: () => router.push("/EventCalendarScreen"),
       });
     }
-    if (activeAnnouncements.length > 0) {
+    if (pinnedItems.length > 0) {
       items.push({
         id: "announcements",
         emoji: "📢",
-        label: countOf(activeAnnouncements.length, "announcement", "announcements"),
-        onPress: () => handleAnnouncementCardPress(activeAnnouncements[0]),
+        label: countOf(pinnedItems.length, "important announcement", "important announcements"),
+        onPress: openPinned,
       });
     }
     if (totalUnreadMessages > 0) {
@@ -4833,16 +4914,22 @@ const handleSelectChannel = useCallback(
         id: "live",
         emoji: "",
         label: `${activeStreams.length} live now`,
-        onPress: () => openLiveStream(activeStreams[0]),
+        onPress: () => {
+          if (activeStreams.length === 1) {
+            openLiveStream(activeStreams[0]);
+          } else {
+            setLiveSheetVisible(true);
+          }
+        },
       });
     }
     return items;
   }, [
-    activeAnnouncements,
     activeStreams,
     eventCounts,
-    handleAnnouncementCardPress,
     openLiveStream,
+    openPinned,
+    pinnedItems.length,
     router,
     totalUnreadMessages,
   ]);
@@ -4993,18 +5080,21 @@ const handleSelectChannel = useCallback(
         )}
       </Animated.View>
 
-      {activeStreams.length > 0 && (
-        <View style={styles.liveSection}>
-          {activeStreams.map((stream) => (
-            <LiveCard key={stream.id} stream={stream} onPress={openLiveStream} />
-          ))}
-        </View>
-      )}
+      <HomeLiveSection
+        streams={activeStreams}
+        onOpenStream={openLiveStream}
+        isSheetOpen={liveSheetVisible}
+        onOpenSheet={() => setLiveSheetVisible(true)}
+        onCloseSheet={() => setLiveSheetVisible(false)}
+      />
 
-      {activeAnnouncements.length > 0 && (
-        <AnnouncementCarousel
-          announcements={activeAnnouncements}
-          onPressAnnouncement={handleAnnouncementCardPress}
+      {pinnedItems.length > 0 && (
+        <PinnedBar
+          count={pinnedItems.length}
+          urgentCount={urgentPinned.length}
+          soonestEndsAtMs={urgentPinned[0]?.endsAtMs ?? null}
+          hasUnseen={unseenPinCount > 0}
+          onPress={openPinned}
         />
       )}
 
@@ -5014,22 +5104,25 @@ const handleSelectChannel = useCallback(
             <Ionicons name="flame" size={16} color="#a61f1f" />
             <Text style={styles.trendingTitle}>Trending this week</Text>
           </View>
-          <FlatList
-            horizontal
-            data={trendingPosts}
-            keyExtractor={(item) => `trending-${item.id}`}
-            renderItem={renderTrendingPost}
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.trendingListContent}
-            snapToInterval={TRENDING_CARD_WIDTH + 12}
-            snapToAlignment="start"
-            disableIntervalMomentum={true}
-            decelerationRate="fast"
-          />
+          <HorizontalSwipeRegion>
+            <FlatList
+              horizontal
+              data={trendingPosts}
+              keyExtractor={(item) => `trending-${item.id}`}
+              renderItem={renderTrendingPost}
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.trendingListContent}
+              snapToInterval={TRENDING_CARD_WIDTH + 12}
+              snapToAlignment="start"
+              disableIntervalMomentum={true}
+              decelerationRate="fast"
+            />
+          </HorizontalSwipeRegion>
         </View>
       )}
 
       <View style={styles.flairFilterSection}>
+        <HorizontalSwipeRegion>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -5095,8 +5188,10 @@ const handleSelectChannel = useCallback(
             );
           })}
         </ScrollView>
+        </HorizontalSwipeRegion>
 
         {selectedFlairFilter === "lost_found" && (
+          <HorizontalSwipeRegion>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -5136,25 +5231,29 @@ const handleSelectChannel = useCallback(
               },
             )}
           </ScrollView>
+          </HorizontalSwipeRegion>
         )}
       </View>
       </>
     );
   }, [
-    activeAnnouncements,
     activeStreams,
     openLiveStream,
+    openPinned,
+    pinnedItems.length,
     styles,
     theme,
+    unseenPinCount,
+    urgentPinned,
     briefHidden,
     briefItems,
     currentUserProfile?.lastname,
-    handleAnnouncementCardPress,
     handleFlairFilterPress,
     handleWelcomeOrbPress,
     hideBrief,
     homeFocused,
     isOffline,
+    liveSheetVisible,
     lostFoundFilter,
     onlineUsersCount,
     renderTrendingPost,
@@ -5168,6 +5267,11 @@ const handleSelectChannel = useCallback(
   // and flair chips every time anything on Home re-rendered. Now it only
   // rebuilds when one of renderFeedHeader's own inputs changes.
   const feedHeader = useMemo(() => renderFeedHeader(), [renderFeedHeader]);
+
+  const canPin = useMemo(
+    () => ["admin", "teacher", "moderator"].includes(currentUserRole || ""),
+    [currentUserRole],
+  );
 
   const renderFeedItem = useCallback(
     ({ item }: { item: FeedItem }) => {
@@ -5187,7 +5291,7 @@ const handleSelectChannel = useCallback(
             onLike={handleLike}
             onDelete={handleDeletePost}
             onEdit={handleEditPost}
-            canPin={["admin", "teacher", "moderator"].includes(currentUserRole || "")}
+            canPin={canPin}
             onTogglePin={handleTogglePinnedPost}
             onProfileClick={handlePostCardProfileClick}
             onTagClick={handlePostCardTagClick}
@@ -5290,7 +5394,7 @@ const renderEmptyState = () => {
   // ─────────────────────────────────────────────────────────────────────────
 
 return (
-    <GestureDetector gesture={panGesture}>
+    <GestureDetector gesture={openSwipeGesture}>
       <SafeAreaView style={styles.container}>
       <HomeSearchProvider
         expanded={searchExpanded}
@@ -5317,14 +5421,14 @@ return (
               </TouchableOpacity>
               {/* Search the feed — people, posts and polls in view. */}
               <TouchableOpacity
-                style={styles.calendarButton}
-                activeOpacity={0.82}
+                style={styles.headerSearchButton}
+                activeOpacity={0.7}
                 onPress={openSearchExperience}
                 accessibilityLabel="Search"
+                hitSlop={6}
               >
-                {/* A plain, bold magnifier in the header colour on the gold
-                    circle — read at a glance, like the other header buttons. */}
-                <Ionicons name="search" size={21} color={theme.chrome} />
+                {/* Just the magnifying glass, in gold, on the header itself. */}
+                <Ionicons name="search" size={25} color={theme.accent} />
               </TouchableOpacity>
             </View>
 
@@ -5402,17 +5506,18 @@ return (
             // loadMoreFeed already guards against overlapping requests.
             onEndReachedThreshold={1.5}
             scrollEventThrottle={16}
-            // Facebook-style scrolling: once a post is rendered it stays
-            // mounted, so scrolling back up never re-mounts a PostCard (which
-            // would re-fetch the author, reload images, and recreate video
-            // players — the "loading" flash on scroll-up). removeClippedSubviews
-            // is off for the same reason, and the window is wide enough that
-            // rows just outside the viewport are already rendered, not blank.
-            initialNumToRender={8}
-            maxToRenderPerBatch={10}
-            windowSize={21}
+            // Posts stay drawn about 5 screens above and below where you are,
+            // so scrolling back a little never re-mounts a PostCard (which
+            // would reload its images and recreate its video player — the
+            // "loading" flash on scroll-up). It was 10 screens each way, which
+            // kept ~40 posts with their images and players in memory on a long
+            // scroll and made low-end phones choppier the deeper you went.
+            // removeClippedSubviews stays off so drawn rows are never blank.
+            initialNumToRender={6}
+            maxToRenderPerBatch={5}
+            windowSize={5}
             updateCellsBatchingPeriod={50}
-            removeClippedSubviews={false}
+            removeClippedSubviews={Platform.OS === "android"}
             contentContainerStyle={
               visibleFeedItems.length === 0
                 ? styles.emptyListContent
@@ -5601,12 +5706,14 @@ return (
 
       <ServerDrawer
         visible={serverDrawerVisible}
+        openProgress={drawerProgress}
         onClose={closeServerDrawer}
+        onSwipeClosed={hideServerDrawer}
         currentUserRole={currentUserRole}
         servers={communityServers}
         selectedServerId={selectedServer?.id}
         selectedChannelId={selectedChannel?.id}
-        onExitServerView={exitServerView}
+        onExitServerView={closeServerDrawer}
         canCreateServer={currentUserRole === "admin"}
         onSelectServer={handleSelectServer}
         onSelectChannel={handleSelectChannel}
@@ -5754,6 +5861,16 @@ return (
           initialCommentId={notificationModalCommentId}
           initialReplyId={notificationModalReplyId}
           autoOpenReplyThread={notificationModalOpenReply}
+        />
+      )}
+
+      {/* Mounted per pin, so each one starts from the default end. */}
+      {pinTarget && (
+        <PinDurationSheet
+          visible
+          kind={pinTarget.kind}
+          onPin={(endsAt) => void applyPin(endsAt)}
+          onClose={closePinSheet}
         />
       )}
 
@@ -6329,6 +6446,12 @@ const makeStyles = (c: ThemeTokens) =>
     fontSize: 14,
     fontWeight: "600",
   },
+  headerSearchButton: {
+    width: 42,
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   calendarButton: {
     width: 46,
     height: 46,
@@ -6476,7 +6599,7 @@ emptyStateText: {
   fabMenuContainer: {
     position: "absolute",
     right: 20,
-    gap: 16,
+    gap: 14,
     zIndex: 99,
   },
   menuItemContainer: {
@@ -6484,7 +6607,7 @@ emptyStateText: {
   },
   menuItem: {
     backgroundColor: c.chrome,
-    paddingVertical: 16,
+    paddingVertical: 13,
     paddingHorizontal: 20,
     borderRadius: 30,
     flexDirection: "row",

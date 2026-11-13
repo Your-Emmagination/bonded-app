@@ -18,9 +18,11 @@ assert.equal(getPresenceState({ presenceSessions: {
   browser: { isOnline: true, lastSeen: stamp(now - 30_000) },
 } }, now).active, true, "An inactive device must not hide another active device");
 assert.equal(getPresenceState({ presenceSessions: {
-  phone: { isOnline: true, lastSeen: stamp(now - 120_000) },
-  browser: { isOnline: true, lastSeen: stamp(now - 180_000) },
-} }, now).label, "Offline · 2 minutes ago");
+  phone: { isOnline: true, lastSeen: stamp(now - 180_000) },
+  browser: { isOnline: true, lastSeen: stamp(now - 240_000) },
+} }, now).label, "Offline · 3 minutes ago");
+// The heartbeat is once a minute; one late beat must not flicker to offline.
+assert.equal(getPresenceState({ isOnline: true, lastSeen: stamp(now - 120_000) }, now).label, "Active");
 assert.equal(receiptCoversMessage(stamp(now), null), false);
 assert.equal(receiptCoversMessage(stamp(now - 1_000), stamp(now)), false, "An older receipt must not cover a new message");
 assert.equal(receiptCoversMessage(stamp(now), stamp(now)), true);
@@ -115,4 +117,4 @@ assert.deepEqual(splitTaggedMentions("Manual @Bob Reyes!", taggedPeople), [
   { text: "@Bob Reyes", taggedUser: taggedPeople[0] },
   { text: "!" },
 ], "Legacy posts still recognize inline names");
-console.log("Messenger state: 75 regression assertions passed.");
+console.log("Messenger state: 76 regression assertions passed.");
